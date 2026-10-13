@@ -525,3 +525,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bus, and the staging root, starts its scheduler, and shares it with the
   `/rest` surface, so `/rest/stream` of a track the server has not stored is
   answered by the same pipeline that runs the server's acquisition workers.
+- The provider id of a credited artist, read the same way by every layer that
+  needs it: `hearthsound_core::providers::credit_provider_id` returns a credit's
+  first identifier outside the canonical namespaces, `artistId` of a catalog
+  track or album is built from it, and materialization records it as the
+  credited artist's `p:<slug>` alias in the same transaction as the rows, so a
+  later `x_<slug>_r_<id>` resolves to the stored artist.

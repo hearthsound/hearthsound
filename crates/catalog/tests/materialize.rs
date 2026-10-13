@@ -73,8 +73,8 @@ async fn a_track_is_materialized_with_its_row_and_its_aliases() {
         "a namespace that is not canonical is not recorded"
     );
 
-    // The credited artist is stored with the origin of a catalog row, and the
-    // MusicBrainz artist id of the credit is aliased to it.
+    // The credited artist is stored with the origin of a catalog row, and both
+    // the MusicBrainz artist id and the provider id of the credit alias it.
     let artists = track_artist_ids(&env.database, track.uuid()).await;
     assert_eq!(artists.len(), 1);
     let artist_id = uuid::Uuid::from_slice(&artists[0]).unwrap();
@@ -92,7 +92,48 @@ async fn a_track_is_materialized_with_its_row_and_its_aliases() {
         .await,
         Some(artists[0].clone())
     );
+    assert_eq!(
+        alias_target(
+            &env.database,
+            "p:hello",
+            EntityKind::Artist,
+            "hello-artist-1"
+        )
+        .await,
+        Some(artists[0].clone()),
+        "the provider id of the credit resolves to the stored artist"
+    );
     assert_eq!(count_rows(&env.database, "tracks").await, 1);
+}
+
+#[tokio::test]
+async fn a_credited_artist_resolves_through_its_provider_id() {
+    let env = hello_env(json!({})).await;
+    let service = env.service();
+    let track = service
+        .materialize_track(&catalog_id("hello", EntityKind::Track, "hello-track-1"))
+        .await
+        .unwrap();
+    let credited = track_artist_ids(&env.database, track.uuid()).await;
+    let credited = hearthsound_core::EntityId::from_uuid(
+        IdPrefix::Artist,
+        uuid::Uuid::from_slice(&credited[0]).unwrap(),
+    );
+
+    let resolved = service
+        .materialize_artist(&catalog_id("hello", EntityKind::Artist, "hello-artist-1"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resolved, credited,
+        "the artist id of a credit names the row the track credits"
+    );
+    assert_eq!(
+        count_rows(&env.database, "artists").await,
+        1,
+        "resolving the credited artist does not store a second row"
+    );
 }
 
 #[tokio::test]
@@ -106,7 +147,10 @@ async fn materializing_an_entity_twice_returns_one_row() {
 
     assert_eq!(first, second);
     assert_eq!(count_rows(&env.database, "tracks").await, 1);
-    assert_eq!(count_rows(&env.database, "external_ids").await, 3);
+    // The track's provider id and MusicBrainz recording id, the credited
+    // artist's MusicBrainz artist id and provider id: one alias each, written
+    // once.
+    assert_eq!(count_rows(&env.database, "external_ids").await, 4);
     assert!(
         service.provider_aliases(first).await.unwrap().len() == 1,
         "the provider alias is recorded once"

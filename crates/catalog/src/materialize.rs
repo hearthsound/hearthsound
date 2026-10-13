@@ -14,7 +14,9 @@
 //!    are written with origin `catalog` and availability `remote`, and the
 //!    provider id plus every canonical identifier the entity carries (ISRC,
 //!    UPC, MusicBrainz ids) is recorded as an alias in the same transaction, so
-//!    two providers that know the same recording agree on one row;
+//!    two providers that know the same recording agree on one row. The provider
+//!    id each credited artist carries is recorded the same way, so the artist a
+//!    credit names resolves to its stored row;
 //! 3. a recording that is already stored under a different alias - a scanned
 //!    file whose ISRC matches, or a row another instance materialized - is
 //!    reused rather than duplicated.
@@ -35,7 +37,8 @@
 //! than to an error.
 
 use hearthsound_core::providers::{
-    ArtistCredit as ProviderCredit, CatalogAlbum, CatalogArtist, CatalogTrack, ExternalId,
+    ArtistCredit as ProviderCredit, CANONICAL_NAMESPACES, CatalogAlbum, CatalogArtist,
+    CatalogTrack, ExternalId, credit_provider_id,
 };
 use hearthsound_core::{Availability, CatalogId, EntityId, EntityKind, Slug};
 use hearthsound_db::Database;
@@ -48,37 +51,10 @@ use crate::dedupe::normalize_isrc;
 use crate::error::CatalogError;
 use crate::service::{CatalogService, require_kind};
 
-/// The namespace of an International Standard Recording Code.
-pub(crate) const ISRC: &str = "isrc";
-
-/// The namespace of a Universal Product Code.
-pub(crate) const UPC: &str = "upc";
-
-/// The namespace of a MusicBrainz recording id.
-pub(crate) const MB_RECORDING: &str = "mb-recording";
-
-/// The namespace of a MusicBrainz release id.
-pub(crate) const MB_RELEASE: &str = "mb-release";
-
-/// The namespace of a MusicBrainz release-group id.
-pub(crate) const MB_RELEASE_GROUP: &str = "mb-release-group";
-
-/// The namespace of a MusicBrainz artist id.
-pub(crate) const MB_ARTIST: &str = "mb-artist";
-
-/// The namespaces a materialized entity records from the identifiers its
-/// provider returned.
-///
-/// Everything else a provider attaches (`hello`, `http-catalog`) is that
-/// provider's own bookkeeping and means nothing to the rest of the server.
-const CANONICAL_NAMESPACES: [&str; 6] = [
-    ISRC,
-    UPC,
-    MB_RECORDING,
-    MB_RELEASE,
-    MB_RELEASE_GROUP,
-    MB_ARTIST,
-];
+/// The canonical identifier namespaces, re-exported for the rest of the crate.
+pub(crate) use hearthsound_core::providers::{
+    ISRC, MB_ARTIST, MB_RECORDING, MB_RELEASE, MB_RELEASE_GROUP, UPC,
+};
 
 /// A provider id that names a stored entity.
 ///
@@ -444,7 +420,7 @@ async fn store_album(
         album.upc.as_deref(),
     )
     .await?;
-    record_credit_aliases(conn, &album.artists).await?;
+    record_credit_aliases(conn, slug, &album.artists).await?;
 
     let mut tracks_stored = Vec::with_capacity(album.tracks.len());
     for track in &album.tracks {
@@ -496,7 +472,7 @@ async fn store_track(
             None,
         )
         .await?;
-        record_credit_aliases(conn, &track.artists).await?;
+        record_credit_aliases(conn, slug, &track.artists).await?;
         return Ok(stored);
     }
 
@@ -535,7 +511,7 @@ async fn store_track(
         None,
     )
     .await?;
-    record_credit_aliases(conn, &track.artists).await?;
+    record_credit_aliases(conn, slug, &track.artists).await?;
     Ok(stored)
 }
 
@@ -647,15 +623,20 @@ async fn record_aliases(
     Ok(())
 }
 
-/// Records the MusicBrainz artist ids of a credit list as aliases.
+/// Records the artist identifiers of a credit list as aliases.
 ///
 /// The credited artists are upserted by the same transaction that writes the
-/// track or the album, so the row each credit names is read back by its
-/// MusicBrainz id.
+/// track or the album, so the row each credit names is read back by the
+/// MusicBrainz artist id when the credit carries one and otherwise by the name
+/// the upsert deduplicated on. Two aliases are recorded per credit: `mb-artist`
+/// for the canonical id, so another provider that knows the same artist resolves
+/// to one row, and `p:<slug>` for the provider id, so the artist the credit
+/// names resolves to the stored row the same way the track or the album does.
 ///
 /// # Parameters
 ///
 /// - `conn`: the transaction to read and write on.
+/// - `slug`: the instance that issued the credits.
 /// - `credits`: the credits the provider returned.
 ///
 /// # Errors
@@ -663,17 +644,66 @@ async fn record_aliases(
 /// Returns [`CatalogError::Database`] when a statement fails.
 async fn record_credit_aliases(
     conn: &mut SqliteConnection,
+    slug: &Slug,
     credits: &[ProviderCredit],
 ) -> Result<(), CatalogError> {
+    let namespace = aliases::provider_namespace(slug);
     for credit in credits {
-        let Some(mbid) = canonical_id(&credit.ids, MB_ARTIST) else {
+        let mbid = canonical_id(&credit.ids, MB_ARTIST);
+        let provider_id = credit_provider_id(credit);
+        if mbid.is_none() && provider_id.is_none() {
+            continue;
+        }
+        let Some(artist) = stored_credited_artist(conn, credit, mbid).await? else {
             continue;
         };
-        if let Some(artist) = artists::find_artist_by_mb_id(conn, mbid).await? {
-            insert_alias(conn, MB_ARTIST, EntityKind::Artist, mbid, artist.id).await?;
+        if let Some(mbid) = mbid {
+            insert_alias(conn, MB_ARTIST, EntityKind::Artist, mbid, artist).await?;
+        }
+        if let Some(provider_id) = provider_id {
+            insert_alias(
+                conn,
+                &namespace,
+                EntityKind::Artist,
+                &provider_id.value,
+                artist,
+            )
+            .await?;
         }
     }
     Ok(())
+}
+
+/// Reads the stored artist one credit names.
+///
+/// The artist was upserted by the same transaction, and [`artists::upsert_artist`]
+/// deduplicates by MusicBrainz artist id when there is one and otherwise by
+/// case-insensitive name, so the same rule finds the row here.
+///
+/// # Parameters
+///
+/// - `conn`: the transaction to read on.
+/// - `credit`: the credit the provider returned.
+/// - `mbid`: the credit's MusicBrainz artist id, when it carries one.
+///
+/// # Returns
+///
+/// The stored artist, or `None` when the transaction stored none under the
+/// credit's identity.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::Database`] when the query fails.
+async fn stored_credited_artist(
+    conn: &mut SqliteConnection,
+    credit: &ProviderCredit,
+    mbid: Option<&str>,
+) -> Result<Option<EntityId>, CatalogError> {
+    let found = match mbid {
+        Some(mbid) => artists::find_artist_by_mb_id(conn, mbid).await?,
+        None => artists::find_artist_by_name(conn, &credit.name).await?,
+    };
+    Ok(found.map(|artist| artist.id))
 }
 
 /// Reads the tracks of a stored album.

@@ -6,8 +6,10 @@
 //!
 //! Its entities carry canonical identifiers (`mb-recording`, `mb-release`,
 //! `mb-artist`), which is what identity resolution and materialization record
-//! in `external_ids`. Both are optional in the sense that a configured
-//! identifier is reported and an unconfigured one is not.
+//! in `external_ids`, and its artist credits carry the artist's own id under
+//! the `hello` namespace, which is what names the instance to resolve a
+//! credited artist against. The identifiers are optional in the sense that a
+//! configured one is reported and an unconfigured one is not.
 //!
 //! The configuration is:
 //!
@@ -53,12 +55,23 @@ fn default_greeting() -> String {
     "Hello".to_string()
 }
 
-/// Builds the identifier pair naming the MusicBrainz artist of the fixture.
+/// Builds the identifier pairs naming the artist of the fixture.
+///
+/// The MusicBrainz id is the artist's identity; the `hello` pair is this
+/// plugin's own id for the same artist, which is what a credit of a track or an
+/// album carries so the server resolves the credited artist against this
+/// instance.
 fn artist_ids() -> Vec<IdPair> {
-    vec![IdPair {
-        namespace: "mb-artist".to_string(),
-        value: "hello-artist-1".to_string(),
-    }]
+    vec![
+        IdPair {
+            namespace: "mb-artist".to_string(),
+            value: "hello-artist-1".to_string(),
+        },
+        IdPair {
+            namespace: "hello".to_string(),
+            value: "hello-artist-1".to_string(),
+        },
+    ]
 }
 
 /// Builds the cover images the fixture reports.

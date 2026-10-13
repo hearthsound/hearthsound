@@ -33,13 +33,95 @@ pub struct ExternalId {
 /// An artist credit on a track or album.
 ///
 /// The credit carries the display name plus any external identifiers known for
-/// that artist.
+/// that artist. A credit a catalog provider issues also carries the provider's
+/// own id for the artist, under a namespace that is not canonical, which is
+/// what [`credit_provider_id`] returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtistCredit {
     /// The display name of the credited artist.
     pub name: String,
     /// External identifiers for the credited artist.
     pub ids: Vec<ExternalId>,
+}
+
+/// The namespace of an International Standard Recording Code.
+pub const ISRC: &str = "isrc";
+
+/// The namespace of a Universal Product Code.
+pub const UPC: &str = "upc";
+
+/// The namespace of a MusicBrainz recording id.
+pub const MB_RECORDING: &str = "mb-recording";
+
+/// The namespace of a MusicBrainz release id.
+pub const MB_RELEASE: &str = "mb-release";
+
+/// The namespace of a MusicBrainz release-group id.
+pub const MB_RELEASE_GROUP: &str = "mb-release-group";
+
+/// The namespace of a MusicBrainz artist id.
+pub const MB_ARTIST: &str = "mb-artist";
+
+/// The identifier namespaces whose meaning every layer of the server shares.
+///
+/// An identifier in one of these namespaces names the same thing whoever issued
+/// it, so it is recorded as an alias that resolves across providers. Every other
+/// namespace belongs to the provider that issued it, and its value is meaningful
+/// only to the instance that provider is configured as.
+pub const CANONICAL_NAMESPACES: [&str; 6] = [
+    ISRC,
+    UPC,
+    MB_RECORDING,
+    MB_RELEASE,
+    MB_RELEASE_GROUP,
+    MB_ARTIST,
+];
+
+/// Returns the provider id a credit carries for its artist.
+///
+/// A catalog provider puts its own id for a credited artist in the credit's
+/// identifier list, under a namespace that is not one of the
+/// [`CANONICAL_NAMESPACES`]; the first such identifier is what the issuing
+/// instance resolves the artist by. A credit that carries only canonical
+/// identifiers describes the artist's identity but not an entity the provider
+/// can be asked for, so this returns `None` for it.
+///
+/// # Parameters
+///
+/// - `credit`: the artist credit.
+///
+/// # Returns
+///
+/// The first non-canonical identifier with a value, or `None` when the credit
+/// carries none.
+///
+/// # Example
+///
+/// ```
+/// use hearthsound_core::providers::{ArtistCredit, ExternalId, credit_provider_id};
+///
+/// let credit = ArtistCredit {
+///     name: "Daft Punk".to_owned(),
+///     ids: vec![
+///         ExternalId {
+///             namespace: "mb-artist".to_owned(),
+///             value: "056e4f3e-d505-4dad-8ec1-d04f521cbb56".to_owned(),
+///         },
+///         ExternalId {
+///             namespace: "deezer".to_owned(),
+///             value: "27".to_owned(),
+///         },
+///     ],
+/// };
+///
+/// let id = credit_provider_id(&credit).expect("the credit carries a provider id");
+/// assert_eq!((id.namespace.as_str(), id.value.as_str()), ("deezer", "27"));
+/// ```
+pub fn credit_provider_id(credit: &ArtistCredit) -> Option<&ExternalId> {
+    credit
+        .ids
+        .iter()
+        .find(|id| !id.value.is_empty() && !CANONICAL_NAMESPACES.contains(&id.namespace.as_str()))
 }
 
 /// An image associated with an entity.
@@ -343,9 +425,8 @@ pub struct RecordingMatch {
 /// Track and release metadata enrichment.
 ///
 /// Identity resolution goes through this layer: the core passes what it knows
-/// and receives canonical identifiers whose namespaces (`isrc`, `mb-recording`,
-/// `mb-release`, `mb-release-group`, `mb-artist`) are recorded in
-/// `external_ids`.
+/// and receives canonical identifiers, whose namespaces are the
+/// [`CANONICAL_NAMESPACES`] recorded in `external_ids`.
 #[async_trait]
 pub trait MetadataProvider: ProviderLifecycle {
     /// Resolves a recording hint to the recordings the provider knows.
@@ -711,4 +792,75 @@ pub trait AcquisitionProvider: ProviderLifecycle {
     /// - `download_token`: the token returned by
     ///   [`AcquisitionProvider::start_download`].
     async fn cancel_download(&self, context: &AcquisitionContext, download_token: &str);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a credit carrying the given identifiers.
+    ///
+    /// # Parameters
+    ///
+    /// - `ids`: the namespace and value of each identifier, in credit order.
+    fn credit(ids: &[(&str, &str)]) -> ArtistCredit {
+        ArtistCredit {
+            name: "Energy 52".to_owned(),
+            ids: ids
+                .iter()
+                .map(|(namespace, value)| ExternalId {
+                    namespace: (*namespace).to_owned(),
+                    value: (*value).to_owned(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn the_canonical_namespaces_are_the_ones_identity_resolution_shares() {
+        assert_eq!(
+            CANONICAL_NAMESPACES,
+            [
+                "isrc",
+                "upc",
+                "mb-recording",
+                "mb-release",
+                "mb-release-group",
+                "mb-artist"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_credits_provider_id_is_its_first_non_canonical_identifier() {
+        let credit = credit(&[
+            (MB_ARTIST, "artist-1"),
+            ("deezer", "27"),
+            ("http-catalog", "27"),
+        ]);
+
+        let id = credit_provider_id(&credit).unwrap();
+
+        assert_eq!(id.namespace, "deezer");
+        assert_eq!(id.value, "27");
+    }
+
+    #[test]
+    fn a_credit_of_canonical_identifiers_only_has_no_provider_id() {
+        assert!(credit_provider_id(&credit(&[(MB_ARTIST, "artist-1")])).is_none());
+        assert!(credit_provider_id(&credit(&[(ISRC, "USQX91300105")])).is_none());
+        assert!(credit_provider_id(&credit(&[])).is_none());
+    }
+
+    #[test]
+    fn an_empty_identifier_is_not_a_provider_id() {
+        assert!(credit_provider_id(&credit(&[("deezer", "")])).is_none());
+
+        let credit = credit(&[("deezer", ""), ("hello", "artist-1")]);
+
+        assert_eq!(
+            credit_provider_id(&credit).unwrap().value.as_str(),
+            "artist-1"
+        );
+    }
 }
