@@ -110,3 +110,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sample rate, bit depth, and channel count with ffmpeg, tags them with lofty
   including multi-valued artists and an embedded generated cover, and exposes
   them through a builder that writes into a directory or a temporary directory.
+- The `hearthsound-media` crate with file probing: container, codec, losslessly
+  encoded or not, bitrate, sample rate, bit depth, channel count, duration, the
+  full tag set, and whether the file carries embedded art, plus embedded picture
+  extraction and a full-decode verification that uses symphonia and falls back
+  to an ffmpeg decode for the codecs symphonia lacks.
