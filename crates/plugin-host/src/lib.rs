@@ -20,6 +20,7 @@
 #![deny(unsafe_code)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 
+mod acquisition;
 pub mod archive;
 mod bindings;
 mod catalog;
@@ -32,6 +33,7 @@ mod instance;
 pub mod kv;
 pub mod log;
 pub mod manifest;
+mod metadata;
 mod pool;
 mod state;
 mod validate;

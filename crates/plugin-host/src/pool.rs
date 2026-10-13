@@ -6,6 +6,10 @@
 //! guest answered. A trap or a timeout discards the store, because a store that
 //! trapped may be in an unknown state, and enough traps inside a window disable
 //! the instance entirely.
+//!
+//! A pool is generic over the [`World`] it drives, so the catalog, metadata and
+//! acquisition adapters share this one implementation while each still gets its
+//! own world handle back from the store.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -19,7 +23,10 @@ use tokio::sync::Semaphore;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
-use crate::bindings::{CatalogProvider, CatalogProviderPre};
+use crate::bindings::{
+    AcquisitionProvider, AcquisitionProviderPre, CatalogProvider, CatalogProviderPre,
+    MetadataProvider, MetadataProviderPre,
+};
 use crate::files::FileAccess;
 use crate::http::HttpClient;
 use crate::kv::KvStore;
@@ -35,6 +42,96 @@ const TRAP_WINDOW: Duration = Duration::from_secs(600);
 /// A guest call borrowed from one leased store.
 pub(crate) type CallFuture<'a, T, E> =
     Pin<Box<dyn Future<Output = wasmtime::Result<Result<T, E>>> + Send + 'a>>;
+
+/// A provider world the host can drive.
+///
+/// Implementing this for a generated world struct is what lets [`StorePool`]
+/// instantiate and hand back that world's handle without knowing which world it
+/// is.
+pub(crate) trait World: Send + Sync + 'static {
+    /// The prepared instance type of the world.
+    type Pre: Send + Sync + 'static;
+
+    /// The world handle an instantiated store returns.
+    type Instance: Send + Sync + 'static;
+
+    /// Prepares `component` for instantiation against this world.
+    ///
+    /// # Errors
+    ///
+    /// Returns a wasmtime error when the component does not export this world.
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error>;
+
+    /// Instantiates the world inside `store`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a wasmtime error when instantiation traps.
+    fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> impl Future<Output = Result<Self::Instance, wasmtime::Error>> + Send;
+}
+
+impl World for CatalogProvider {
+    type Pre = CatalogProviderPre<InstanceState>;
+    type Instance = CatalogProvider;
+
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error> {
+        CatalogProviderPre::new(linker.instantiate_pre(component)?)
+    }
+
+    async fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> Result<Self::Instance, wasmtime::Error> {
+        pre.instantiate_async(store).await
+    }
+}
+
+impl World for MetadataProvider {
+    type Pre = MetadataProviderPre<InstanceState>;
+    type Instance = MetadataProvider;
+
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error> {
+        MetadataProviderPre::new(linker.instantiate_pre(component)?)
+    }
+
+    async fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> Result<Self::Instance, wasmtime::Error> {
+        pre.instantiate_async(store).await
+    }
+}
+
+impl World for AcquisitionProvider {
+    type Pre = AcquisitionProviderPre<InstanceState>;
+    type Instance = AcquisitionProvider;
+
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error> {
+        AcquisitionProviderPre::new(linker.instantiate_pre(component)?)
+    }
+
+    async fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> Result<Self::Instance, wasmtime::Error> {
+        pre.instantiate_async(store).await
+    }
+}
 
 /// The result of one attempt, before trap accounting.
 enum Attempt<T, E> {
@@ -71,16 +168,16 @@ pub(crate) struct PoolConfig {
 }
 
 /// The pool of stores for one plugin instance.
-pub(crate) struct StorePool {
-    inner: Arc<PoolInner>,
+pub(crate) struct StorePool<W: World> {
+    inner: Arc<PoolInner<W>>,
 }
 
 /// The shared state of a pool.
-struct PoolInner {
+struct PoolInner<W: World> {
     engine: Engine,
-    pre: CatalogProviderPre<InstanceState>,
+    pre: W::Pre,
     permits: Semaphore,
-    idle: Mutex<Vec<Slot>>,
+    idle: Mutex<Vec<Slot<W>>>,
     traps: TrapWindow,
     call_timeout: Duration,
     plugin: String,
@@ -94,9 +191,9 @@ struct PoolInner {
 }
 
 /// One instantiated store and its world handle.
-type Slot = (Store<InstanceState>, CatalogProvider);
+type Slot<W> = (Store<InstanceState>, <W as World>::Instance);
 
-impl StorePool {
+impl<W: World> StorePool<W> {
     /// Builds a pool for one instance.
     ///
     /// # Parameters
@@ -115,9 +212,8 @@ impl StorePool {
         linker: &Linker<InstanceState>,
         component: &Component,
         config: PoolConfig,
-    ) -> Result<StorePool, wasmtime::Error> {
-        let pre = linker.instantiate_pre(component)?;
-        let pre = CatalogProviderPre::new(pre)?;
+    ) -> Result<StorePool<W>, wasmtime::Error> {
+        let pre = W::prepare(linker, component)?;
 
         Ok(StorePool {
             inner: Arc::new(PoolInner {
@@ -158,10 +254,7 @@ impl StorePool {
     /// disabled, and [`ProviderError::Internal`] on a trap or timeout.
     pub(crate) async fn call<T, E, F>(&self, call: F) -> Result<Result<T, E>, ProviderError>
     where
-        F: for<'a> FnOnce(
-            &'a mut Store<InstanceState>,
-            &'a CatalogProvider,
-        ) -> CallFuture<'a, T, E>,
+        F: for<'a> FnOnce(&'a mut Store<InstanceState>, &'a W::Instance) -> CallFuture<'a, T, E>,
     {
         let inner = &self.inner;
         if inner.traps.is_disabled() {
@@ -206,7 +299,7 @@ impl StorePool {
     }
 
     /// Takes an idle store or instantiates a new one.
-    async fn take_or_instantiate(&self) -> Result<Slot, wasmtime::Error> {
+    async fn take_or_instantiate(&self) -> Result<Slot<W>, wasmtime::Error> {
         if let Some(slot) = lock(&self.inner.idle).pop() {
             return Ok(slot);
         }
@@ -214,7 +307,7 @@ impl StorePool {
     }
 
     /// Instantiates a fresh store for the component.
-    async fn instantiate(&self) -> Result<Slot, wasmtime::Error> {
+    async fn instantiate(&self) -> Result<Slot<W>, wasmtime::Error> {
         let inner = &self.inner;
         let mut store = Store::new(
             &inner.engine,
@@ -232,14 +325,14 @@ impl StorePool {
         store.set_epoch_deadline(1);
         store.epoch_deadline_async_yield_and_update(1);
 
-        let instance = inner.pre.instantiate_async(&mut store).await?;
+        let instance = W::instantiate(&inner.pre, &mut store).await?;
         Ok((store, instance))
     }
 }
 
-impl PoolInner {
+impl<W: World> PoolInner<W> {
     /// Returns a store to the idle list.
-    fn return_idle(&self, store: Store<InstanceState>, instance: CatalogProvider) {
+    fn return_idle(&self, store: Store<InstanceState>, instance: W::Instance) {
         lock(&self.idle).push((store, instance));
     }
 

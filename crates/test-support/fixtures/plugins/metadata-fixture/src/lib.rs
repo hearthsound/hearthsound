@@ -25,6 +25,7 @@ struct MetadataFixture;
 
 /// Server-scoped configuration of the plugin.
 #[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Config {
     /// The recordings the plugin knows.
     #[serde(default)]
@@ -33,6 +34,7 @@ struct Config {
 
 /// One recording and the releases it appears on.
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Recording {
     /// The recording title.
     title: String,
@@ -54,6 +56,7 @@ struct Recording {
 
 /// One release a recording appears on.
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Release {
     /// The release's MusicBrainz id.
     mbid: String,

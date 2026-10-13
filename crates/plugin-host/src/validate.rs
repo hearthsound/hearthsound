@@ -30,6 +30,12 @@ const WASI_PACKAGES: [&str; 6] = [
 /// The interface a catalog plugin must export for the host to drive it.
 pub const LIFECYCLE_INTERFACE: &str = "hearthsound:plugin/lifecycle@0.1.0";
 
+/// The layers the host can drive today.
+///
+/// Every other layer's manifest validates but its component is refused, because
+/// the host has no adapter to call it through.
+pub const HOSTED_LAYERS: [Layer; 3] = [Layer::Catalog, Layer::Metadata, Layer::Acquisition];
+
 /// Validates a compiled component against the host's rules.
 ///
 /// # Parameters
@@ -97,14 +103,10 @@ pub fn validate(component: &Component, manifest: &Manifest) -> Result<(), Instal
         }
     }
 
-    if manifest.provides() != [Layer::Catalog] {
-        let layer = manifest
-            .provides()
-            .iter()
-            .copied()
-            .find(|layer| *layer != Layer::Catalog)
-            .unwrap_or(Layer::Catalog);
-        return Err(InstallError::UnsupportedCapability(layer));
+    for layer in manifest.provides() {
+        if !HOSTED_LAYERS.contains(layer) {
+            return Err(InstallError::UnsupportedCapability(*layer));
+        }
     }
 
     Ok(())

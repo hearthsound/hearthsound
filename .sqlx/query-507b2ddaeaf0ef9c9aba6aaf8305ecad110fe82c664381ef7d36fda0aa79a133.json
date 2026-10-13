@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO provider_instances\n           (id, plugin_id, slug, display_name, enabled, created_at, updated_at)\n         VALUES (?, ?, ?, ?, 1, 0, 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "507b2ddaeaf0ef9c9aba6aaf8305ecad110fe82c664381ef7d36fda0aa79a133"
+}

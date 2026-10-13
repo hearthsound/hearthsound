@@ -54,7 +54,44 @@ pub(crate) mod catalog {
     });
 }
 
+/// The metadata provider world.
+pub(crate) mod metadata {
+    wasmtime::component::bindgen!({
+        path: "../../wit",
+        world: "hearthsound:plugin/metadata-provider",
+        imports: { default: async | trappable },
+        exports: { default: async },
+        with: {
+            "hearthsound:plugin/types@0.1.0": crate::bindings::imports::hearthsound::plugin::types,
+            "hearthsound:plugin/host-log@0.1.0": crate::bindings::imports::hearthsound::plugin::host_log,
+            "hearthsound:plugin/host-http@0.1.0": crate::bindings::imports::hearthsound::plugin::host_http,
+            "hearthsound:plugin/host-kv@0.1.0": crate::bindings::imports::hearthsound::plugin::host_kv,
+            "hearthsound:plugin/host-config@0.1.0": crate::bindings::imports::hearthsound::plugin::host_config,
+        },
+    });
+}
+
+/// The acquisition provider world.
+pub(crate) mod acquisition {
+    wasmtime::component::bindgen!({
+        path: "../../wit",
+        world: "hearthsound:plugin/acquisition-provider",
+        imports: { default: async | trappable },
+        exports: { default: async },
+        with: {
+            "hearthsound:plugin/types@0.1.0": crate::bindings::imports::hearthsound::plugin::types,
+            "hearthsound:plugin/host-log@0.1.0": crate::bindings::imports::hearthsound::plugin::host_log,
+            "hearthsound:plugin/host-http@0.1.0": crate::bindings::imports::hearthsound::plugin::host_http,
+            "hearthsound:plugin/host-kv@0.1.0": crate::bindings::imports::hearthsound::plugin::host_kv,
+            "hearthsound:plugin/host-config@0.1.0": crate::bindings::imports::hearthsound::plugin::host_config,
+            "hearthsound:plugin/host-files@0.1.0": crate::bindings::imports::hearthsound::plugin::host_files,
+        },
+    });
+}
+
+pub(crate) use acquisition::{AcquisitionProvider, AcquisitionProviderPre};
 pub(crate) use catalog::{CatalogProvider, CatalogProviderPre};
+pub(crate) use metadata::{MetadataProvider, MetadataProviderPre};
 
 /// The `hearthsound:plugin` interface tree of the host import layer.
 pub(crate) use imports::hearthsound;

@@ -1,10 +1,11 @@
-//! Errors of the plugin host.
+//! Errors of the plugin host, and the conversion from a guest's error.
 
 use std::path::PathBuf;
 
 use hearthsound_config::ConfigError;
-use hearthsound_core::Layer;
+use hearthsound_core::{Layer, ProviderError, Slug};
 
+use crate::bindings::hearthsound::plugin::types::ProviderError as WitProviderError;
 use crate::manifest::ManifestError;
 
 /// An error from installing or loading a plugin.
@@ -90,4 +91,49 @@ pub enum HostError {
     /// A setting could not be read.
     #[error(transparent)]
     Settings(#[from] ConfigError),
+}
+
+/// Converts a guest's error into the core error.
+///
+/// Every provider world reports the same error variant, so every adapter maps it
+/// here. The core error carries no message, so the plugin's own text is logged
+/// with the plugin id and instance slug rather than being dropped silently.
+///
+/// # Parameters
+///
+/// - `plugin`: the plugin id, used as the log field.
+/// - `slug`: the instance slug, used as the log field.
+/// - `error`: the error the guest returned.
+pub(crate) fn map_provider_error(
+    plugin: &str,
+    slug: &Slug,
+    error: WitProviderError,
+) -> ProviderError {
+    let (kind, message, mapped) = match error {
+        WitProviderError::NotFound => return ProviderError::NotFound,
+        WitProviderError::RateLimited(millis) => {
+            return ProviderError::RateLimited {
+                retry_after_ms: u64::from(millis),
+            };
+        }
+        WitProviderError::Unauthorized(message) => {
+            ("unauthorized", message, ProviderError::Unauthorized)
+        }
+        WitProviderError::InvalidConfig(message) => {
+            ("invalid-config", message, ProviderError::InvalidConfig)
+        }
+        WitProviderError::Unavailable(message) => {
+            ("unavailable", message, ProviderError::Unavailable)
+        }
+        WitProviderError::Internal(message) => ("internal", message, ProviderError::Internal),
+    };
+    tracing::debug!(
+        target: "hearthsound::plugin",
+        plugin = %plugin,
+        instance = %slug,
+        kind,
+        message,
+        "plugin reported an error"
+    );
+    mapped
 }

@@ -11,13 +11,15 @@ use hearthsound_core::providers::{
 };
 use hearthsound_core::{EntityKind, ProviderError, Slug};
 
+use crate::bindings;
 use crate::bindings::exports::hearthsound::plugin::catalog::{SearchQuery, SearchResults};
 use crate::bindings::hearthsound::plugin::types as wit;
+use crate::error::map_provider_error;
 use crate::pool::StorePool;
 
 /// A catalog provider backed by one plugin instance.
 pub(crate) struct WasmCatalogProvider {
-    pool: StorePool,
+    pool: StorePool<bindings::CatalogProvider>,
     plugin: String,
     slug: Slug,
 }
@@ -30,42 +32,17 @@ impl WasmCatalogProvider {
     /// - `pool`: the instance's store pool.
     /// - `plugin`: the plugin id, used in log fields.
     /// - `slug`: the instance slug.
-    pub(crate) fn new(pool: StorePool, plugin: String, slug: Slug) -> WasmCatalogProvider {
+    pub(crate) fn new(
+        pool: StorePool<bindings::CatalogProvider>,
+        plugin: String,
+        slug: Slug,
+    ) -> WasmCatalogProvider {
         WasmCatalogProvider { pool, plugin, slug }
     }
 
     /// Maps a guest error to the core error, logging the guest's message.
-    ///
-    /// The core error carries no message, so the plugin's own text is logged
-    /// here rather than being dropped silently.
     fn map_error(&self, error: wit::ProviderError) -> ProviderError {
-        let (kind, message, mapped) = match error {
-            wit::ProviderError::NotFound => return ProviderError::NotFound,
-            wit::ProviderError::RateLimited(millis) => {
-                return ProviderError::RateLimited {
-                    retry_after_ms: u64::from(millis),
-                };
-            }
-            wit::ProviderError::Unauthorized(message) => {
-                ("unauthorized", message, ProviderError::Unauthorized)
-            }
-            wit::ProviderError::InvalidConfig(message) => {
-                ("invalid-config", message, ProviderError::InvalidConfig)
-            }
-            wit::ProviderError::Unavailable(message) => {
-                ("unavailable", message, ProviderError::Unavailable)
-            }
-            wit::ProviderError::Internal(message) => ("internal", message, ProviderError::Internal),
-        };
-        tracing::debug!(
-            target: "hearthsound::plugin",
-            plugin = %self.plugin,
-            instance = %self.slug,
-            kind,
-            message,
-            "plugin reported an error"
-        );
-        mapped
+        map_provider_error(&self.plugin, &self.slug, error)
     }
 }
 
@@ -283,7 +260,7 @@ fn to_core_results(results: SearchResults) -> CatalogResults {
 }
 
 /// Converts a plugin track into a core track.
-fn to_core_track(track: wit::Track) -> CatalogTrack {
+pub(crate) fn to_core_track(track: wit::Track) -> CatalogTrack {
     CatalogTrack {
         id: track.id,
         title: track.title,
@@ -310,7 +287,7 @@ fn to_core_album_ref(album: wit::AlbumRef) -> CatalogAlbumRef {
 }
 
 /// Converts a plugin album into a core album.
-fn to_core_album(album: wit::Album) -> CatalogAlbum {
+pub(crate) fn to_core_album(album: wit::Album) -> CatalogAlbum {
     CatalogAlbum {
         id: album.id,
         title: album.title,
@@ -336,15 +313,23 @@ fn to_core_artist(artist: wit::Artist) -> CatalogArtist {
 }
 
 /// Converts a plugin artist credit into a core artist credit.
-fn to_core_credit(credit: wit::ArtistCredit) -> ArtistCredit {
+pub(crate) fn to_core_credit(credit: wit::ArtistCredit) -> ArtistCredit {
     ArtistCredit {
         name: credit.name,
         ids: credit.ids.into_iter().map(to_core_id).collect(),
     }
 }
 
+/// Converts a core external identifier into the plugin's identifier pair.
+pub(crate) fn to_wit_id(id: &ExternalId) -> wit::IdPair {
+    wit::IdPair {
+        namespace: id.namespace.clone(),
+        value: id.value.clone(),
+    }
+}
+
 /// Converts a plugin identifier pair into a core external identifier.
-fn to_core_id(id: wit::IdPair) -> ExternalId {
+pub(crate) fn to_core_id(id: wit::IdPair) -> ExternalId {
     ExternalId {
         namespace: id.namespace,
         value: id.value,

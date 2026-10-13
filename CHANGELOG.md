@@ -157,3 +157,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recordings from a configured table and the acquisition fixture simulates a
   downloader through `host-kv` and `host-files`, with scenarios for empty
   searches, download failures, stalled progress and unknown tokens.
+- Metadata and acquisition plugins callable through the `MetadataProvider` and
+  `AcquisitionProvider` traits, with host bindings for every provider world
+  sharing one linker and one instance state, one store pool generic over the
+  world it drives, and each acquisition call carrying its job's staging root.

@@ -11,15 +11,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hearthsound_config::SettingsStore;
-use hearthsound_core::providers::CatalogProvider;
+use hearthsound_core::Layer;
+use hearthsound_core::providers::{AcquisitionProvider, CatalogProvider, MetadataProvider};
 use hearthsound_db::Database;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use wasmtime::Engine;
 use wasmtime::component::{Component, HasSelf, Linker};
 
+use crate::acquisition::WasmAcquisitionProvider;
 use crate::archive::PluginArchive;
-use crate::bindings::{CatalogProviderPre, imports};
+use crate::bindings::{
+    self, AcquisitionProviderPre, CatalogProviderPre, MetadataProviderPre, imports,
+};
 use crate::catalog::WasmCatalogProvider;
 use crate::engine::PluginEngine;
 use crate::error::{HostError, InstallError};
@@ -29,7 +33,8 @@ use crate::instance::InstanceConfig;
 use crate::kv::KvStore;
 use crate::log::LogSink;
 use crate::manifest::{Manifest, ManifestError, SUPPORTED_API};
-use crate::pool::{PoolConfig, StorePool};
+use crate::metadata::WasmMetadataProvider;
+use crate::pool::{self, PoolConfig, StorePool};
 use crate::state::InstanceState;
 use crate::validate;
 
@@ -195,7 +200,7 @@ impl PluginHost {
     /// # Parameters
     ///
     /// - `plugin`: the installed plugin to drive.
-    /// - `instance`: the instance's slug and server-scoped configuration.
+    /// - `instance`: the instance's configuration.
     ///
     /// # Returns
     ///
@@ -204,12 +209,96 @@ impl PluginHost {
     /// # Errors
     ///
     /// Returns [`HostError::Incompatible`] when the component cannot be prepared
-    /// for instantiation against this host.
+    /// for instantiation against this host, and [`HostError::Http`] when the
+    /// instance's HTTP client cannot be built.
     pub fn catalog_provider(
         &self,
         plugin: &InstalledPlugin,
         instance: InstanceConfig,
     ) -> Result<Arc<dyn CatalogProvider>, HostError> {
+        let pool = self.store_pool::<bindings::CatalogProvider>(plugin, &instance)?;
+        Ok(Arc::new(WasmCatalogProvider::new(
+            pool,
+            plugin.manifest().id.clone(),
+            instance.slug,
+        )))
+    }
+
+    /// Wraps an installed plugin as a metadata provider.
+    ///
+    /// # Parameters
+    ///
+    /// - `plugin`: the installed plugin to drive.
+    /// - `instance`: the instance's configuration.
+    ///
+    /// # Returns
+    ///
+    /// The provider, as the core trait object the rest of the server uses.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`PluginHost::catalog_provider`].
+    pub fn metadata_provider(
+        &self,
+        plugin: &InstalledPlugin,
+        instance: InstanceConfig,
+    ) -> Result<Arc<dyn MetadataProvider>, HostError> {
+        let pool = self.store_pool::<bindings::MetadataProvider>(plugin, &instance)?;
+        Ok(Arc::new(WasmMetadataProvider::new(
+            pool,
+            plugin.manifest().id.clone(),
+            instance.slug,
+        )))
+    }
+
+    /// Wraps an installed plugin as an acquisition provider.
+    ///
+    /// # Parameters
+    ///
+    /// - `plugin`: the installed plugin to drive.
+    /// - `instance`: the instance's configuration.
+    ///
+    /// # Returns
+    ///
+    /// The provider, as the core trait object the rest of the server uses.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`PluginHost::catalog_provider`].
+    pub fn acquisition_provider(
+        &self,
+        plugin: &InstalledPlugin,
+        instance: InstanceConfig,
+    ) -> Result<Arc<dyn AcquisitionProvider>, HostError> {
+        let pool = self.store_pool::<bindings::AcquisitionProvider>(plugin, &instance)?;
+        Ok(Arc::new(WasmAcquisitionProvider::new(
+            pool,
+            plugin.manifest().id.clone(),
+            instance.slug,
+        )))
+    }
+
+    /// Builds the store pool of one instance for one provider world.
+    ///
+    /// Every world shares this setup, so an instance's log sink, HTTP client,
+    /// key-value store and file grant are built the same way no matter which
+    /// layer drives it.
+    ///
+    /// # Parameters
+    ///
+    /// - `plugin`: the installed plugin to drive.
+    /// - `instance`: the instance's configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError::Http`] when the instance's HTTP client cannot be
+    /// built and [`HostError::Incompatible`] when the component cannot be
+    /// prepared for the world.
+    fn store_pool<W: pool::World>(
+        &self,
+        plugin: &InstalledPlugin,
+        instance: &InstanceConfig,
+    ) -> Result<StorePool<W>, HostError> {
         let manifest = plugin.manifest();
         let log = Arc::new(LogSink::new(manifest.id.clone(), instance.slug.clone()));
 
@@ -224,18 +313,18 @@ impl PluginHost {
             .map_err(|error| HostError::Http(error.to_string()))?,
         );
 
-        let files = Arc::new(FileAccess::new(
-            &instance.host_config,
-            instance.permissions.files.as_ref(),
-        ));
-
         let kv = Arc::new(KvStore::from_permission(
             self.database.writer().clone(),
             instance.id,
             instance.permissions.kv.as_ref(),
         ));
 
-        let pool = StorePool::new(
+        let files = Arc::new(FileAccess::new(
+            &instance.host_config,
+            instance.permissions.files.as_ref(),
+        ));
+
+        StorePool::new(
             self.engine.engine(),
             &self.linker,
             plugin.component(),
@@ -252,13 +341,7 @@ impl PluginHost {
                 call_timeout_ms: manifest.resources.call_timeout_ms,
             },
         )
-        .map_err(|error| HostError::Incompatible(format!("{error:#}")))?;
-
-        Ok(Arc::new(WasmCatalogProvider::new(
-            pool,
-            manifest.id.clone(),
-            instance.slug,
-        )))
+        .map_err(|error| HostError::Incompatible(format!("{error:#}")))
     }
 }
 
@@ -289,7 +372,7 @@ fn install_blocking(
 
     let component = Component::new(engine, archive.wasm()).map_err(InstallError::Compile)?;
     validate::validate(&component, &manifest)?;
-    ensure_instantiable(linker, &component)?;
+    ensure_instantiable(linker, &component, &manifest)?;
 
     let staging = plugins_dir.join(format!(".staging-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&staging).map_err(|source| InstallError::Io {
@@ -376,7 +459,7 @@ fn load_blocking(
 
     let component = load_component(engine, &dir.join("plugin.cwasm"), &dir.join("plugin.wasm"))?;
     validate::validate(&component, &manifest)?;
-    ensure_instantiable(linker, &component)?;
+    ensure_instantiable(linker, &component, &manifest)?;
 
     let sha256 = std::fs::read(dir.join("plugin.wasm"))
         .map(|bytes| {
@@ -397,16 +480,32 @@ fn load_blocking(
 /// Checks that the host can instantiate the component.
 ///
 /// This is the strongest validation available without running the guest: the
-/// linker resolves every import and the world's types must match exactly.
+/// linker resolves every import and each world's types must match exactly. Every
+/// layer the manifest provides must be instantiable.
 fn ensure_instantiable(
     linker: &Linker<InstanceState>,
     component: &Component,
+    manifest: &Manifest,
 ) -> Result<(), InstallError> {
-    let pre = linker
-        .instantiate_pre(component)
-        .map_err(|error| InstallError::Incompatible(format!("{error:#}")))?;
-    CatalogProviderPre::new(pre)
-        .map_err(|error| InstallError::Incompatible(format!("{error:#}")))?;
+    for layer in manifest.provides() {
+        let pre = linker
+            .instantiate_pre(component)
+            .map_err(|error| InstallError::Incompatible(format!("{error:#}")))?;
+        let incompatible =
+            |error: wasmtime::Error| InstallError::Incompatible(format!("{error:#}"));
+        match layer {
+            Layer::Catalog => {
+                CatalogProviderPre::new(pre).map_err(incompatible)?;
+            }
+            Layer::Metadata => {
+                MetadataProviderPre::new(pre).map_err(incompatible)?;
+            }
+            Layer::Acquisition => {
+                AcquisitionProviderPre::new(pre).map_err(incompatible)?;
+            }
+            other => return Err(InstallError::UnsupportedCapability(*other)),
+        }
+    }
     Ok(())
 }
 
