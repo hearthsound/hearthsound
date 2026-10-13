@@ -171,3 +171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bundled-plugins.lock`, pinning the released first-party plugin archives, and
   the `xtask fetch-plugins` command that downloads each pinned archive and
   verifies its SHA-256 before writing it.
+- Multi-stage `Dockerfile` for the server image: the binary built with the
+  pinned toolchain against the offline query data, then a `debian:trixie-slim`
+  runtime image carrying ffmpeg, ca-certificates, curl, the fetched plugin
+  archives, and a non-root `hearthsound` user with `/data` and `/storage`.

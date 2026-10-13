@@ -1,0 +1,8 @@
+# The image build reads the workspace manifests, the crate sources, the
+# committed sqlx offline data, and `bundled-plugins.lock`. Everything else is
+# either a build artifact or belongs to a local development run.
+.git
+.github
+target
+dev
+*.md
