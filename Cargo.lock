@@ -1647,6 +1647,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "hearthsound-catalog"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "hearthsound-config",
+ "hearthsound-core",
+ "hearthsound-db",
+ "hearthsound-plugin-host",
+ "hearthsound-test-support",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "hearthsound-config"
 version = "0.1.0-alpha.0"
 dependencies = [

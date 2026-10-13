@@ -1,0 +1,29 @@
+[package]
+name = "hearthsound-catalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+hearthsound-config = { path = "../config" }
+hearthsound-core = { path = "../core" }
+hearthsound-db = { path = "../db" }
+hearthsound-plugin-host = { path = "../plugin-host" }
+sqlx.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+hearthsound-test-support = { path = "../test-support" }
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+wiremock.workspace = true

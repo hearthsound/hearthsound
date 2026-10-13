@@ -5,6 +5,7 @@ members = [
     "crates/activity",
     "crates/api-subsonic",
     "crates/auth",
+    "crates/catalog",
     "crates/config",
     "crates/core",
     "crates/db",

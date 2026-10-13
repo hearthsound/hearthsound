@@ -326,3 +326,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or an environment variable overrides with the reason it cannot take a stored
   value, and `settings unset <key>` removes the stored value and reports what the
   key falls back to.
+- The `hearthsound-catalog` crate with the catalog service: lookup by catalog id
+  routed to the instance that issued it, artist albums and top tracks, ISRC
+  lookup, and search that asks the primary catalog instance under
+  `search.catalog.timeout_ms`, falls back to a later instance only when it errors
+  or times out, never merges two instances' results, caps results at
+  `search.catalog.max_results`, and returns nothing when
+  `search.catalog.enabled` is false. Every result carries its
+  `x_<slug>_<kind>_<payload>` id, and provider failures map to typed not-found,
+  unavailable, rate-limited (with the retry delay), unauthorized, invalid
+  configuration, and internal errors.
