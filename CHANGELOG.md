@@ -567,3 +567,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   crate's repository. The command opens the database directly rather than talking
   to a server, so the running server's `reconcile` is what stops the worker and
   returns the track to catalog-only availability.
+- Materializing a catalog track links the track to its album in the same
+  transaction. The album reference a provider returns either resolves to the
+  album row an earlier materialization stored, through the album's `p:<slug>`
+  alias, or creates the row from the reference with its title, its credits as
+  album artists with their provider-id aliases and its year, with origin
+  `catalog`, so a track streamed from a search result is stored with an album
+  artist, an album title and a release year. A later materialization of the
+  album itself reports that row instead of creating a second one. Imported
+  tracks therefore carry the album, albumartist and date tags and are named
+  `<album artist>/<album> (<year>)/<track> - <title>.<ext>` instead of landing
+  beside the storage root with only a title.

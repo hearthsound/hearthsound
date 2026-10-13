@@ -512,6 +512,8 @@ pub struct StoredTrackRow {
     pub album_id: Option<Vec<u8>>,
     /// The track title.
     pub title: String,
+    /// The track number within its disc.
+    pub track_number: Option<i64>,
     /// Where the row comes from.
     pub origin: String,
     /// The track's availability.
@@ -534,13 +536,14 @@ pub async fn stored_track(database: &Database, id: uuid::Uuid) -> Option<StoredT
         (
             Option<Vec<u8>>,
             String,
+            Option<i64>,
             String,
             String,
             Option<String>,
             Option<String>,
         ),
     >(
-        "SELECT album_id, title, origin, availability, isrc, mb_recording_id \
+        "SELECT album_id, title, track_number, origin, availability, isrc, mb_recording_id \
          FROM tracks WHERE id = ?",
     )
     .bind(id.as_bytes().as_slice())
@@ -548,15 +551,60 @@ pub async fn stored_track(database: &Database, id: uuid::Uuid) -> Option<StoredT
     .await
     .unwrap()
     .map(
-        |(album_id, title, origin, availability, isrc, mb_recording_id)| StoredTrackRow {
-            album_id,
-            title,
-            origin,
-            availability,
-            isrc,
-            mb_recording_id,
+        |(album_id, title, track_number, origin, availability, isrc, mb_recording_id)| {
+            StoredTrackRow {
+                album_id,
+                title,
+                track_number,
+                origin,
+                availability,
+                isrc,
+                mb_recording_id,
+            }
         },
     )
+}
+
+/// Reads the album artist, the title and the year of one stored album.
+///
+/// These are the three album values the import naming template renders from.
+///
+/// # Parameters
+///
+/// - `database`: the database to read.
+/// - `id`: the album's raw primary key.
+///
+/// # Returns
+///
+/// The album's title, display artist and year, or `None` when no such row
+/// exists.
+pub async fn stored_album_fields(
+    database: &Database,
+    id: uuid::Uuid,
+) -> Option<(String, Option<String>, Option<i64>)> {
+    sqlx::query_as::<_, (String, Option<String>, Option<i64>)>(
+        "SELECT title, display_artist, year FROM albums WHERE id = ?",
+    )
+    .bind(id.as_bytes().as_slice())
+    .fetch_optional(database.readers())
+    .await
+    .unwrap()
+}
+
+/// Reads the artist ids one stored album credits, in credit order.
+///
+/// # Parameters
+///
+/// - `database`: the database to read.
+/// - `album_id`: the album's raw primary key.
+pub async fn album_artist_ids(database: &Database, album_id: uuid::Uuid) -> Vec<Vec<u8>> {
+    sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT artist_id FROM album_artists WHERE album_id = ? ORDER BY position",
+    )
+    .bind(album_id.as_bytes().as_slice())
+    .fetch_all(database.readers())
+    .await
+    .unwrap()
 }
 
 /// Reads the origin and the MusicBrainz columns of one stored album.

@@ -19,7 +19,17 @@
 //!    credit names resolves to its stored row;
 //! 3. a recording that is already stored under a different alias - a scanned
 //!    file whose ISRC matches, or a row another instance materialized - is
-//!    reused rather than duplicated.
+//!    reused rather than duplicated;
+//! 4. a track that is materialized on its own - which is what streaming a
+//!    search result does - is linked to the album it belongs to in the same
+//!    transaction. The track carries an album reference, not a stored album, so
+//!    the reference's provider id either resolves to an album another
+//!    materialization already stored or creates the row from the reference. An
+//!    album created that way holds what a reference carries (title, credits,
+//!    year); a later materialization of the album itself finds it under its
+//!    alias and reuses it. Without this the track row has no album and an
+//!    import writes no album artist, album or date tag and names the file after
+//!    the bare title.
 //!
 //! The library crate owns `artists`, `albums` and `tracks`, so the rows are
 //! written through its transaction-level functions and never with this crate's
@@ -37,8 +47,8 @@
 //! than to an error.
 
 use hearthsound_core::providers::{
-    ArtistCredit as ProviderCredit, CANONICAL_NAMESPACES, CatalogAlbum, CatalogArtist,
-    CatalogTrack, ExternalId, credit_provider_id,
+    ArtistCredit as ProviderCredit, CANONICAL_NAMESPACES, CatalogAlbum, CatalogAlbumRef,
+    CatalogArtist, CatalogTrack, ExternalId, credit_provider_id,
 };
 use hearthsound_core::{Availability, CatalogId, EntityId, EntityKind, Slug};
 use hearthsound_db::Database;
@@ -94,6 +104,15 @@ impl CatalogService {
     /// then through the stored `tracks.isrc` column, which is what a scanned
     /// file has.
     ///
+    /// The track is linked to its album in the same transaction, so a track
+    /// streamed from a search result is stored with an album artist, an album
+    /// title and a year - what the import naming template and the written tags
+    /// read. The track's album reference names the album's provider id; the
+    /// album row is reused when that id already has a `p:<slug>` alias and is
+    /// otherwise created from the reference (see [`store_album_ref`]). No album
+    /// is created when the recording is reused, because the row that already
+    /// exists keeps the album it has.
+    ///
     /// # Parameters
     ///
     /// - `id`: the catalog id of a track.
@@ -117,7 +136,8 @@ impl CatalogService {
         let slug = id.slug().clone();
 
         let mut tx = self.database().writer().begin().await?;
-        let stored = store_track(&mut tx, &slug, &track.track, None).await?;
+        let album = track.track.album.as_ref().map(TrackAlbum::Reference);
+        let stored = store_track(&mut tx, &slug, &track.track, album).await?;
         tx.commit().await?;
         Ok(stored)
     }
@@ -424,9 +444,82 @@ async fn store_album(
 
     let mut tracks_stored = Vec::with_capacity(album.tracks.len());
     for track in &album.tracks {
-        tracks_stored.push(store_track(conn, slug, track, Some(stored)).await?);
+        tracks_stored.push(store_track(conn, slug, track, Some(TrackAlbum::Stored(stored))).await?);
     }
     Ok((stored, tracks_stored))
+}
+
+/// The album a materialized track is linked to.
+///
+/// A track fetched from a provider carries an album reference, not a stored
+/// album; the reference is resolved into a row only when the track row is
+/// created, so a recording that is reused does not leave an album behind that
+/// nothing points at. A track materialized as part of its album already knows
+/// the stored album, so it is linked to it directly.
+#[derive(Debug, Clone, Copy)]
+enum TrackAlbum<'a> {
+    /// The album row is already stored.
+    Stored(EntityId),
+    /// The album is known only by the reference the provider returned.
+    Reference(&'a CatalogAlbumRef),
+}
+
+/// Stores the album a materialized track belongs to.
+///
+/// A track fetched on its own carries an album reference: the album's provider
+/// id, its title, its credits and a year, without the tracklist, the release
+/// date, the UPC or the genres. When another materialization already stored the
+/// album, the row its `p:<slug>` alias names is reused; otherwise the row is
+/// created from the reference with origin `catalog`, the credits are stored as
+/// the album's artists (with their provider-id aliases, the same way a track's
+/// credits are), and the reference's provider id is recorded as the album's
+/// `p:<slug>` alias.
+///
+/// The row is deliberately built from the reference and not from a second
+/// provider call: the title, the credits and the year are everything the import
+/// naming template and the written tags read, so resolving the album of a
+/// streamed track spends no catalog quota of its own. A reference carries
+/// neither the release date, nor the UPC, nor the genres, nor the tracklist, so
+/// a row created here holds none of them. The alias recorded either way keeps
+/// the album's provider id resolving, and [`CatalogService::materialize_album`]
+/// reports this row and the tracks linked to it instead of asking the instance
+/// again and creating a second one.
+///
+/// # Parameters
+///
+/// - `conn`: the transaction to write on.
+/// - `slug`: the instance that issued the track.
+/// - `album`: the album reference the track carries.
+///
+/// # Returns
+///
+/// The stored album row.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::Database`] or [`CatalogError::Library`] when a row
+/// cannot be written.
+async fn store_album_ref(
+    conn: &mut SqliteConnection,
+    slug: &Slug,
+    album: &CatalogAlbumRef,
+) -> Result<EntityId, CatalogError> {
+    let namespace = aliases::provider_namespace(slug);
+    if let Some(stored) =
+        aliases::entity_by_alias_conn(conn, &namespace, EntityKind::Album, &album.id).await?
+    {
+        return Ok(stored);
+    }
+
+    let credits = credits(&album.artists);
+    let mut input = AlbumInput::new(album.title.as_str(), Origin::Catalog);
+    input.display_artist = display_artist(&album.artists);
+    input.year = album.year.map(i64::from);
+
+    let stored = albums::upsert_album(conn, &input, &credits).await?;
+    let stored = claim_alias(conn, &namespace, EntityKind::Album, &album.id, stored).await?;
+    record_credit_aliases(conn, slug, &album.artists).await?;
+    Ok(stored)
 }
 
 /// Stores one catalog track in an open transaction.
@@ -436,8 +529,7 @@ async fn store_album(
 /// - `conn`: the transaction to write on.
 /// - `slug`: the instance that issued the track.
 /// - `track`: the track the provider returned.
-/// - `album_id`: the stored album the track belongs to, when the caller knows
-///   one.
+/// - `album`: the album the track belongs to, when the caller knows one.
 ///
 /// # Returns
 ///
@@ -451,7 +543,7 @@ async fn store_track(
     conn: &mut SqliteConnection,
     slug: &Slug,
     track: &CatalogTrack,
-    album_id: Option<EntityId>,
+    album: Option<TrackAlbum<'_>>,
 ) -> Result<EntityId, CatalogError> {
     let namespace = aliases::provider_namespace(slug);
     if let Some(stored) =
@@ -475,6 +567,17 @@ async fn store_track(
         record_credit_aliases(conn, slug, &track.artists).await?;
         return Ok(stored);
     }
+
+    // The album is resolved here, after the reuse checks: a recording that is
+    // already stored keeps the album it has, so a track fetched on its own does
+    // not leave behind an album row that nothing points at.
+    let album_id = match album {
+        Some(TrackAlbum::Stored(album)) => Some(album),
+        Some(TrackAlbum::Reference(reference)) => {
+            Some(store_album_ref(conn, slug, reference).await?)
+        }
+        None => None,
+    };
 
     let credits = credits(&track.artists);
     let mut input = TrackInput::new(track.title.as_str(), Origin::Catalog, Availability::Remote);

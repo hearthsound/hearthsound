@@ -12,10 +12,12 @@
 mod common;
 
 use common::{
-    Env, HELLO_CATALOG_ID, alias_target, catalog_id, count_rows, insert_local_track, stored_album,
-    stored_artist, stored_track, track_artist_ids, write_alias,
+    Env, HELLO_CATALOG_ID, album_artist_ids, alias_target, catalog_id, count_rows,
+    insert_local_track, stored_album, stored_album_fields, stored_artist, stored_track,
+    track_artist_ids, write_alias,
 };
 use hearthsound_core::{EntityKind, IdPrefix, Layer};
+use hearthsound_library::naming::{NamingContext, NamingTemplate};
 use hearthsound_test_support::HELLO_CATALOG;
 use serde_json::{Value, json};
 
@@ -148,9 +150,9 @@ async fn materializing_an_entity_twice_returns_one_row() {
     assert_eq!(first, second);
     assert_eq!(count_rows(&env.database, "tracks").await, 1);
     // The track's provider id and MusicBrainz recording id, the credited
-    // artist's MusicBrainz artist id and provider id: one alias each, written
-    // once.
-    assert_eq!(count_rows(&env.database, "external_ids").await, 4);
+    // artist's MusicBrainz artist id and provider id, and the album's provider
+    // id: one alias each, written once.
+    assert_eq!(count_rows(&env.database, "external_ids").await, 5);
     assert!(
         service.provider_aliases(first).await.unwrap().len() == 1,
         "the provider alias is recorded once"
@@ -208,6 +210,182 @@ async fn a_track_whose_isrc_is_already_stored_is_reused() {
         alias_target(&env.database, "isrc", EntityKind::Track, "USRC17607839").await,
         Some(key),
         "the ISRC the two entities share is recorded"
+    );
+    assert_eq!(
+        count_rows(&env.database, "albums").await,
+        0,
+        "a reused recording keeps the album it has; nothing is created for it"
+    );
+}
+
+#[tokio::test]
+async fn materializing_a_track_links_its_album_with_its_artist_and_year() {
+    let env = hello_env(json!({})).await;
+    let service = env.service();
+
+    let track = service
+        .materialize_track(&catalog_id("hello", EntityKind::Track, "hello-track-1"))
+        .await
+        .unwrap();
+
+    let row = stored_track(&env.database, track.uuid()).await.unwrap();
+    let album = row.album_id.expect("the track is linked to its album");
+    let album_id = uuid::Uuid::from_slice(&album).unwrap();
+
+    assert_eq!(
+        stored_album_fields(&env.database, album_id).await,
+        Some((
+            "Hello Album".to_owned(),
+            Some("Hello Artist".to_owned()),
+            Some(2026)
+        )),
+        "the row is built from the album reference the track carries"
+    );
+    assert_eq!(
+        stored_album(&env.database, album_id).await,
+        Some(("catalog".to_owned(), None, None, None)),
+        "a reference carries no release id, release group id or UPC"
+    );
+    assert_eq!(
+        alias_target(&env.database, "p:hello", EntityKind::Album, "hello-album-1").await,
+        Some(album.clone()),
+        "the album's provider id resolves to the row the track links"
+    );
+
+    let artists = album_artist_ids(&env.database, album_id).await;
+    assert_eq!(artists.len(), 1, "the album's credit list is stored");
+    let artist_id = uuid::Uuid::from_slice(&artists[0]).unwrap();
+    assert_eq!(
+        stored_artist(&env.database, artist_id).await,
+        Some(("catalog".to_owned(), Some("hello-artist-1".to_owned())))
+    );
+    assert_eq!(
+        alias_target(
+            &env.database,
+            "p:hello",
+            EntityKind::Artist,
+            "hello-artist-1"
+        )
+        .await,
+        Some(artists[0].clone()),
+        "the album artist's provider id resolves to the stored artist"
+    );
+    assert_eq!(count_rows(&env.database, "albums").await, 1);
+    assert_eq!(
+        count_rows(&env.database, "artists").await,
+        1,
+        "the album artist is the artist the track credits"
+    );
+}
+
+#[tokio::test]
+async fn a_second_track_of_the_same_album_reuses_its_row() {
+    let env = hello_env(json!({})).await;
+    let service = env.service();
+
+    let first = service
+        .materialize_track(&catalog_id("hello", EntityKind::Track, "hello-track-1"))
+        .await
+        .unwrap();
+    let second = service
+        .materialize_track(&catalog_id("hello", EntityKind::Track, "hello-track-2"))
+        .await
+        .unwrap();
+
+    let first_album = stored_track(&env.database, first.uuid())
+        .await
+        .unwrap()
+        .album_id;
+    let second_album = stored_track(&env.database, second.uuid())
+        .await
+        .unwrap()
+        .album_id;
+
+    assert!(first_album.is_some(), "the first track is linked");
+    assert_eq!(
+        first_album, second_album,
+        "both tracks of one album are linked to the same row"
+    );
+    assert_eq!(count_rows(&env.database, "albums").await, 1);
+    assert_eq!(count_rows(&env.database, "artists").await, 1);
+    assert_eq!(
+        alias_target(&env.database, "p:hello", EntityKind::Album, "hello-album-1").await,
+        first_album,
+        "the album keeps resolving through its provider id"
+    );
+}
+
+#[tokio::test]
+async fn materializing_the_album_reuses_the_row_a_track_created() {
+    let env = hello_env(json!({})).await;
+    let service = env.service();
+
+    let track = service
+        .materialize_track(&catalog_id("hello", EntityKind::Track, "hello-track-1"))
+        .await
+        .unwrap();
+    let album = stored_track(&env.database, track.uuid())
+        .await
+        .unwrap()
+        .album_id
+        .expect("the track is linked to its album");
+
+    let materialized = service
+        .materialize_album(&catalog_id("hello", EntityKind::Album, "hello-album-1"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        materialized.album.uuid().as_bytes().to_vec(),
+        album,
+        "the album row the track created is the one reported"
+    );
+    assert_eq!(
+        materialized.tracks,
+        vec![track],
+        "the tracks linked to the album are reported"
+    );
+    assert_eq!(count_rows(&env.database, "albums").await, 1);
+    assert_eq!(count_rows(&env.database, "tracks").await, 1);
+    assert_eq!(
+        alias_target(&env.database, "p:hello", EntityKind::Album, "hello-album-1").await,
+        Some(album)
+    );
+}
+
+#[tokio::test]
+async fn a_materialized_track_renders_the_import_naming_template() {
+    let env = hello_env(json!({})).await;
+    let service = env.service();
+
+    let track = service
+        .materialize_track(&catalog_id("hello", EntityKind::Track, "hello-track-1"))
+        .await
+        .unwrap();
+    let row = stored_track(&env.database, track.uuid()).await.unwrap();
+    let album = row.album_id.expect("the track is linked to its album");
+    let (title, album_artist, year) =
+        stored_album_fields(&env.database, uuid::Uuid::from_slice(&album).unwrap())
+            .await
+            .unwrap();
+
+    let template = NamingTemplate::from_settings(&env.settings.current()).unwrap();
+    let context = NamingContext {
+        album_artist: album_artist.as_deref(),
+        album: Some(title.as_str()),
+        year,
+        track_number: row
+            .track_number
+            .and_then(|number| u32::try_from(number).ok()),
+        title: Some(row.title.as_str()),
+        extension: Some("flac"),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        template.render(&context).unwrap(),
+        std::path::Path::new("Hello Artist/Hello Album (2026)/01 - Hello, world.flac"),
+        "an acquired catalog track lands under its album artist, album and year"
     );
 }
 
