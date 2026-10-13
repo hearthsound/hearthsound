@@ -11,10 +11,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
 axum.workspace = true
 bytes.workspace = true
 data-encoding.workspace = true
 futures-util.workspace = true
+hearthsound-acquire = { path = "../acquire" }
 hearthsound-activity = { path = "../activity" }
 hearthsound-auth = { path = "../auth" }
 hearthsound-catalog = { path = "../catalog" }
@@ -28,7 +30,7 @@ httpdate.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 time = { workspace = true, features = ["formatting"] }
-tokio = { workspace = true, features = ["fs", "rt"] }
+tokio = { workspace = true, features = ["fs", "rt", "sync", "time"] }
 tower-http = { workspace = true, features = ["fs"] }
 tracing.workspace = true
 uuid.workspace = true

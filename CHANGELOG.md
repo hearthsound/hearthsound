@@ -508,3 +508,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `media_file_id`; `track.availability`, `acquisition.updated` and
   `library.changed` are published after it commits, and the acquisition's
   progress carries the final managed path only then.
+- The pending-stream path of `/rest/stream`: a request for a track the server
+  has not stored resolves an `x_` catalog id through the catalog layer, checks
+  the requester's acquire permission, and asks the acquisition layer for the
+  track at priority `play`. `stream.pending.mode` then decides the answer: `pad`
+  starts a pending PCM stream in the requested (or configured) format and feeds
+  silence until a task watching the acquisition switches in the imported file,
+  ending one second after a failure; `hold` sends nothing until the file is
+  ready, answers `404` when the acquisition fails, and answers `503` with
+  `Retry-After` when `stream.pending.max_wait_secs` elapses first; `fail`
+  answers `503` with `Retry-After` at once while the acquisition continues. A
+  `format=raw` request under `pad` behaves as `hold`, and a cooling-down or
+  denied track is answered `404` or `403` without starting anything.

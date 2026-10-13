@@ -1655,10 +1655,12 @@ dependencies = [
 name = "hearthsound-api-subsonic"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "async-trait",
  "axum",
  "bytes",
  "data-encoding",
  "futures-util",
+ "hearthsound-acquire",
  "hearthsound-activity",
  "hearthsound-auth",
  "hearthsound-catalog",

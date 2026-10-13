@@ -20,7 +20,7 @@ use hearthsound_media::FfmpegRunner;
 
 use crate::auth::TrustedProxies;
 use crate::response::SubsonicError;
-use crate::stream::StreamService;
+use crate::stream::{PendingSource, StreamService};
 
 /// The services every `/rest` endpoint shares.
 ///
@@ -77,7 +77,8 @@ impl SubsonicState {
     ///
     /// The state, which trusts no proxy until
     /// [`with_trusted_proxies`](SubsonicState::with_trusted_proxies) says
-    /// otherwise.
+    /// otherwise and has no acquisition layer until
+    /// [`with_pending_source`](SubsonicState::with_pending_source) adds one.
     pub fn new(
         database: Arc<Database>,
         settings: Settings,
@@ -90,9 +91,12 @@ impl SubsonicState {
         let user_settings = UserSettings::new(&database, settings.registry().clone());
         let stream = StreamService::new(
             Arc::clone(&database),
+            settings.clone(),
+            Arc::clone(&catalog),
             roots,
             Arc::clone(&ffmpeg),
             activity.sessions().clone(),
+            None,
         );
         SubsonicState {
             inner: Arc::new(Inner {
@@ -132,6 +136,33 @@ impl SubsonicState {
                 ffmpeg: Arc::clone(&self.inner.ffmpeg),
                 authenticator: Arc::clone(&self.inner.authenticator),
                 trusted_proxies: Arc::new(trusted_proxies),
+            }),
+        }
+    }
+
+    /// Sets the acquisition layer pending streams are answered from.
+    ///
+    /// # Parameters
+    ///
+    /// - `pending`: the acquisition layer, which must be the same orchestrator
+    ///   the composition root started, so a stream's request and the server's
+    ///   worker slots are one pipeline.
+    ///
+    /// # Returns
+    ///
+    /// The state, sharing everything else with the state it was called on.
+    pub fn with_pending_source(self, pending: Arc<dyn PendingSource>) -> SubsonicState {
+        SubsonicState {
+            inner: Arc::new(Inner {
+                database: Arc::clone(&self.inner.database),
+                settings: self.inner.settings.clone(),
+                user_settings: self.inner.user_settings.clone(),
+                catalog: Arc::clone(&self.inner.catalog),
+                activity: Arc::clone(&self.inner.activity),
+                stream: self.inner.stream.clone().with_pending_source(pending),
+                ffmpeg: Arc::clone(&self.inner.ffmpeg),
+                authenticator: Arc::clone(&self.inner.authenticator),
+                trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
             }),
         }
     }

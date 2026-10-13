@@ -15,7 +15,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use axum::response::Response as HttpResponse;
 use hearthsound_activity::ActivityService;
-use hearthsound_api_subsonic::SubsonicState;
+use hearthsound_api_subsonic::{PendingSource, SubsonicState};
 use hearthsound_auth::{ApiKeys, AppPasswords, Authenticator, NewUser, Users};
 use hearthsound_catalog::CatalogService;
 use hearthsound_config::secret::SecretBox;
@@ -71,6 +71,8 @@ pub struct Fixture {
     pub state: SubsonicState,
     /// The managed storage roots the state resolves stored files against.
     pub roots: StorageRoots,
+    /// The ffmpeg runner the state transcodes and pads through.
+    ffmpeg: Arc<FfmpegRunner>,
     /// The artwork cache directory catalog cover art is written to.
     artwork: PathBuf,
     /// The plugin host a fixture plugin is installed into.
@@ -84,8 +86,29 @@ pub struct Fixture {
 }
 
 impl Fixture {
-    /// Builds the fixture.
+    /// Builds the fixture without an acquisition layer.
     pub async fn new() -> Fixture {
+        Fixture::build(None).await
+    }
+
+    /// Builds a fixture whose stream service answers pending tracks with the
+    /// given acquisition source.
+    ///
+    /// # Parameters
+    ///
+    /// - `pending`: the acquisition layer behind `/rest/stream` for a track the
+    ///   server has not stored.
+    pub async fn with_pending(pending: Arc<dyn PendingSource>) -> Fixture {
+        Fixture::build(Some(pending)).await
+    }
+
+    /// Builds the fixture.
+    ///
+    /// # Parameters
+    ///
+    /// - `pending`: the acquisition layer the shared state is built with, or
+    ///   `None` for the `404` behavior of a process without one.
+    async fn build(pending: Option<Arc<dyn PendingSource>>) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let database = Arc::new(
             Database::open(&dir.path().join("hearthsound.db"))
@@ -154,9 +177,13 @@ impl Fixture {
             authenticator,
             catalog,
             activity,
-            ffmpeg,
+            Arc::clone(&ffmpeg),
             roots.clone(),
         );
+        let state = match pending {
+            Some(pending) => state.with_pending_source(pending),
+            None => state,
+        };
 
         Fixture {
             _dir: dir,
@@ -167,6 +194,7 @@ impl Fixture {
             app_password,
             state,
             roots,
+            ffmpeg,
             artwork,
             host,
             repository,
@@ -219,6 +247,14 @@ impl Fixture {
         &self.roots
     }
 
+    /// Returns the ffmpeg runner the state transcodes and pads through.
+    ///
+    /// A test reads its in-flight count to assert that a request started (or
+    /// did not start) an encoder.
+    pub fn ffmpeg(&self) -> &Arc<FfmpegRunner> {
+        &self.ffmpeg
+    }
+
     /// Returns the managed library root a `library` file resolves against.
     ///
     /// The directory exists from [`Fixture::new`], so a test can write a file
@@ -236,6 +272,18 @@ impl Fixture {
     /// Returns the `/rest` router under test.
     pub fn app(&self) -> Router {
         hearthsound_api_subsonic::router(self.state.clone())
+    }
+
+    /// Returns the `/rest` router with a different acquisition layer.
+    ///
+    /// A test that needs the acquisition layer to write to the fixture's own
+    /// database builds the source after the fixture and installs it here.
+    ///
+    /// # Parameters
+    ///
+    /// - `pending`: the acquisition layer behind `/rest/stream`.
+    pub fn app_with(&self, pending: Arc<dyn PendingSource>) -> Router {
+        hearthsound_api_subsonic::router(self.state.clone().with_pending_source(pending))
     }
 
     /// Creates a directory inside the fixture's temporary directory.

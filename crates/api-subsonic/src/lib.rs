@@ -160,5 +160,7 @@ pub use response::{
 };
 pub use routes::{register, router, routes};
 pub use state::SubsonicState;
-pub use stream::{StreamError, StreamFormat, StreamRequest, StreamService};
+pub use stream::{
+    PendingOutcome, PendingSource, StreamError, StreamFormat, StreamRequest, StreamService,
+};
 pub use value::{Array, Object, Value};

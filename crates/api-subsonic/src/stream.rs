@@ -26,6 +26,31 @@
 //! and the encoded bytes as they are produced, chunked unless
 //! `estimateContentLength` asked for a length.
 //!
+//! # Pending streams
+//!
+//! A request for a track the server has not stored yet - an unmaterialized
+//! catalog id, or a stored track without a file - is not answered with an error
+//! while the track can still be acquired. The service resolves the target, asks
+//! the acquisition layer for it through [`PendingSource`], and answers
+//! according to `stream.pending.mode`:
+//!
+//! - `pad`, the default, starts a pending PCM stream and answers `200` at once;
+//!   it pads with silence until a task watching the acquisition's progress
+//!   switches in the imported file, and ends one second after a failure. A
+//!   `format=raw` request cannot carry silence as a valid file and behaves as
+//!   `hold` instead;
+//! - `hold` sends nothing until the file is ready or `stream.hold.timeout_secs`
+//!   elapses, then serves the file normally;
+//! - `fail` answers `503` with `Retry-After` at once and lets the acquisition
+//!   continue in the background.
+//!
+//! A pending stream registers a session whose audio-delivered flag the pending
+//! stream's own control handle answers, so silence padding alone is never
+//! recorded as a play. A failure only becomes a status code while the headers
+//! are still unsent: `pad` and `fail` answer before any acquisition outcome is
+//! known, while `hold` answers `404` when the acquisition fails and `503` when
+//! its wait elapses.
+//!
 //! # A stream is a session
 //!
 //! Serving bytes registers a stream session in the activity service's
@@ -43,25 +68,37 @@
 //! A stream never answers a Subsonic envelope (invariant 6 of the repository
 //! rules): a client that treats any 200 body as audio would play an error
 //! document as noise. [`StreamError`] therefore carries the HTTP status to
-//! answer with - `404` for an id that names no track, `404` for a track the
-//! server has no file for yet, and `500` for a file or a database the server
-//! could not read.
+//! answer with - `404` for an id that names no track and for a track that is
+//! not and cannot be stored, `403` for a requester who may not acquire the
+//! track, `503` with a `Retry-After` while an acquisition is still running, and
+//! `500` for a file or a database the server could not read.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use futures_util::{TryStream, TryStreamExt};
+use hearthsound_acquire::AcquireError;
+use hearthsound_acquire::orchestrator::{
+    AcquireOutcome, AcquireRequest, AcquisitionHandle, AcquisitionOrchestrator, AcquisitionProgress,
+};
 use hearthsound_activity::{AudioDelivered, StreamSessions};
-use hearthsound_core::{ClientId, EntityId, IdPrefix};
+use hearthsound_catalog::{CatalogError, CatalogService};
+use hearthsound_config::settings::Settings;
+use hearthsound_config::{SettingKey, SettingType, SettingsStore, keys};
+use hearthsound_core::{ClientId, EntityId, IdPrefix, Priority};
 use hearthsound_db::Database;
 use hearthsound_library::query::{self, PreferredFile};
 use hearthsound_library::{LibraryError, MediaFile, StorageRoots, tracks};
-use hearthsound_media::{FfmpegRunner, TranscodeFormat, TranscodeRequest, estimate_content_length};
+use hearthsound_media::{
+    FfmpegRunner, PendingControl, PendingRequest, TranscodeFormat, TranscodeRequest,
+    estimate_content_length,
+};
 use tower_http::services::ServeFile;
 use uuid::Uuid;
 
@@ -95,6 +132,12 @@ pub struct StreamRequest {
     /// Whether `estimateContentLength` asked for an estimated `Content-Length`
     /// on a transcode rather than no length at all.
     pub estimate_content_length: bool,
+    /// Whether the requester may acquire a track the server has not stored.
+    ///
+    /// The endpoint passes the principal's `can_acquire` permission, because a
+    /// pending stream starts an acquisition on the requester's behalf; the
+    /// service answers `403` rather than searching for a user who may not.
+    pub can_acquire: bool,
 }
 
 /// What the `format` parameter asked for.
@@ -120,10 +163,23 @@ pub enum StreamFormat {
 /// HTTP status [`StreamError::status`] returns.
 #[derive(Debug, thiserror::Error)]
 pub enum StreamError {
-    /// The `id` is malformed, names something that is not a track, or names a
-    /// track the server does not know.
+    /// The `id` is malformed, names something that is not a track, names a
+    /// track the server does not know, or names a track that is cooling down
+    /// after a failed acquisition and cannot be started again yet.
     #[error("the requested id does not name a stored track")]
     NotFound,
+    /// The requester may not acquire the track this stream would need.
+    #[error("the requester may not acquire a track the server has not stored")]
+    Forbidden,
+    /// The track is still being acquired and the wait elapsed without a file.
+    ///
+    /// The response carries a `Retry-After` header, because the acquisition
+    /// continues and a client that waits may get the file on its next try.
+    #[error("the track is still being acquired")]
+    Unavailable {
+        /// How many seconds the client should wait before retrying.
+        retry_after_secs: u64,
+    },
     /// The library could not be read.
     #[error(transparent)]
     Library(#[from] LibraryError),
@@ -140,13 +196,17 @@ impl StreamError {
     ///
     /// # Returns
     ///
-    /// `404` for an id that names no track and for a file that is gone, and
-    /// `500` for everything else: neither case is a Subsonic envelope, and a
+    /// `404` for an id that names no track, a track the server has no file for,
+    /// and a track that is cooling down; `403` for a requester who may not
+    /// acquire; `503` for an acquisition that is still running without a file;
+    /// and `500` for everything else. Neither case is a Subsonic envelope, and a
     /// client must be able to tell "there is no such track" from "the server
     /// just failed".
     pub fn status(&self) -> StatusCode {
         match self {
             StreamError::NotFound => StatusCode::NOT_FOUND,
+            StreamError::Forbidden => StatusCode::FORBIDDEN,
+            StreamError::Unavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             StreamError::File(source) if source.kind() == std::io::ErrorKind::NotFound => {
                 StatusCode::NOT_FOUND
             }
@@ -154,6 +214,26 @@ impl StreamError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         }
+    }
+
+    /// Builds the response an endpoint answers with.
+    ///
+    /// The response has no body beyond the status line, and carries the headers
+    /// a status alone cannot express: [`StreamError::Unavailable`] adds a
+    /// `Retry-After`, which tells a client when the still-running acquisition
+    /// may have produced the file.
+    ///
+    /// # Returns
+    ///
+    /// The empty response for this failure's [`status`](StreamError::status).
+    pub fn response(&self) -> Response {
+        let mut response = self.status().into_response();
+        if let StreamError::Unavailable { retry_after_secs } = self
+            && let Ok(value) = HeaderValue::from_str(&retry_after_secs.to_string())
+        {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+        response
     }
 }
 
@@ -169,30 +249,60 @@ impl StreamError {
 /// use std::sync::Arc;
 ///
 /// use hearthsound_activity::StreamSessions;
+/// use hearthsound_catalog::CatalogService;
+/// use hearthsound_config::settings::Settings;
 /// use hearthsound_db::Database;
 /// use hearthsound_library::StorageRoots;
 /// use hearthsound_media::FfmpegRunner;
 ///
-/// # async fn example(database: Arc<Database>, ffmpeg: Arc<FfmpegRunner>) {
+/// # async fn example(
+/// #     database: Arc<Database>,
+/// #     settings: Settings,
+/// #     catalog: Arc<CatalogService>,
+/// #     ffmpeg: Arc<FfmpegRunner>,
+/// # ) {
 /// let service = hearthsound_api_subsonic::StreamService::new(
 ///     database,
+///     settings,
+///     catalog,
 ///     StorageRoots::new(Path::new("/srv/library"), Path::new("/srv/cache")),
 ///     ffmpeg,
 ///     StreamSessions::new(),
+///     None,
 /// );
 /// # let _ = service;
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StreamService {
     /// The open database the file lookup and the access record use.
     database: Arc<Database>,
+    /// The settings service the pending-stream mode and its tunables are read
+    /// from, once per pending request.
+    settings: Settings,
+    /// The catalog layer an unmaterialized `x_` id is resolved through.
+    catalog: Arc<CatalogService>,
     /// The managed storage roots a file's path resolves against.
     roots: StorageRoots,
-    /// The ffmpeg runner a transcode runs through.
+    /// The ffmpeg runner a transcode and a pending stream run through.
     ffmpeg: Arc<FfmpegRunner>,
     /// The stream sessions an active stream is registered in.
     sessions: StreamSessions,
+    /// The acquisition layer a track without a file is requested from, when the
+    /// composition root has one.
+    pending: Option<Arc<dyn PendingSource>>,
+}
+
+impl std::fmt::Debug for StreamService {
+    /// Writes the fields a debug reader needs, without the trait object.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamService")
+            .field("database", &self.database)
+            .field("roots", &self.roots)
+            .field("sessions", &self.sessions)
+            .field("pending", &self.pending.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl StreamService {
@@ -202,6 +312,10 @@ impl StreamService {
     ///
     /// - `database`: the open database, for the preferred-file lookup and the
     ///   last-access record.
+    /// - `settings`: the settings service, read for `stream.pending.*` and
+    ///   `stream.hold.*` when a request reaches a track without a file.
+    /// - `catalog`: the catalog layer, which resolves an unmaterialized `x_` id
+    ///   to the track row an acquisition is requested for.
     /// - `roots`: the managed storage roots a `library` or `cache` file
     ///   resolves against; a file inside a library folder resolves against the
     ///   folder's own path.
@@ -211,17 +325,26 @@ impl StreamService {
     ///   registry the activity service reads, or the "no song audio delivered"
     ///   guard cannot see this stream. The composition root takes it from
     ///   [`ActivityService::sessions`](hearthsound_activity::ActivityService::sessions).
+    /// - `pending`: the acquisition layer a pending request is answered from,
+    ///   or `None` when the composition root runs without one, in which case a
+    ///   track without a file is answered `404` as before.
     pub fn new(
         database: Arc<Database>,
+        settings: Settings,
+        catalog: Arc<CatalogService>,
         roots: StorageRoots,
         ffmpeg: Arc<FfmpegRunner>,
         sessions: StreamSessions,
+        pending: Option<Arc<dyn PendingSource>>,
     ) -> StreamService {
         StreamService {
             database,
+            settings,
+            catalog,
             roots,
             ffmpeg,
             sessions,
+            pending,
         }
     }
 
@@ -231,6 +354,21 @@ impl StreamService {
     /// them, which is how a stored relative path becomes an absolute one.
     pub fn roots(&self) -> &StorageRoots {
         &self.roots
+    }
+
+    /// Sets the acquisition layer pending requests are answered from.
+    ///
+    /// # Parameters
+    ///
+    /// - `pending`: the acquisition layer, which the composition root builds
+    ///   after the state, or `None` to answer a track without a file `404`.
+    ///
+    /// # Returns
+    ///
+    /// The service, sharing everything else with the service it was called on.
+    pub fn with_pending_source(mut self, pending: Arc<dyn PendingSource>) -> StreamService {
+        self.pending = Some(pending);
+        self
     }
 
     /// Serves one request and returns the response to write.
@@ -248,9 +386,10 @@ impl StreamService {
     /// # Errors
     ///
     /// Returns [`StreamError::NotFound`] for an id that names no stored track
-    /// and for a track the server has no file for yet, and a server-side error
-    /// when the library or the file cannot be read. The caller answers with
-    /// [`StreamError::status`], never with a Subsonic envelope.
+    /// and for a track that cannot be acquired, [`StreamError::Forbidden`] for
+    /// a requester who may not acquire, and a server-side error when the
+    /// library, the file, or the acquisition layer cannot be read. The caller
+    /// answers with [`StreamError::status`], never with a Subsonic envelope.
     pub async fn serve(&self, request: &StreamRequest) -> Result<Response, StreamError> {
         let track = match ClientId::parse(&request.id) {
             Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::Track => id,
@@ -273,8 +412,36 @@ impl StreamService {
             }
         };
 
-        // The lookup connection is released before the file is served, so a
-        // long stream never holds a reader connection.
+        match self.stored(request, track).await? {
+            Some(response) => Ok(response),
+            None => self.pending(request).await,
+        }
+    }
+
+    /// Serves the track's stored file when it has one.
+    ///
+    /// The lookup connection is released before the file is served, so a long
+    /// stream never holds a reader connection.
+    ///
+    /// # Parameters
+    ///
+    /// - `request`: the request being served.
+    /// - `track`: the stored track to look a file up for.
+    ///
+    /// # Returns
+    ///
+    /// `Some(response)` when the track has a preferred file, `None` when the
+    /// track is stored but has no file yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamError::NotFound`] when no track has that id, and a
+    /// server-side error when the library or the file cannot be read.
+    async fn stored(
+        &self,
+        request: &StreamRequest,
+        track: EntityId,
+    ) -> Result<Option<Response>, StreamError> {
         let (file, known) = {
             let mut connection = self
                 .database
@@ -292,13 +459,16 @@ impl StreamService {
         };
 
         match file {
-            Some(file) => match delivery(request, &file.media_file) {
-                Delivery::File => self.serve_file(request, track, &file).await,
-                Delivery::Transcode(plan) => {
-                    self.serve_transcode(request, track, &file, &plan).await
-                }
-            },
-            None if known => self.pending(request).await,
+            Some(file) => {
+                let response = match delivery(request, &file.media_file) {
+                    Delivery::File => self.serve_file(request, track, &file).await?,
+                    Delivery::Transcode(plan) => {
+                        self.serve_transcode(request, track, &file, &plan).await?
+                    }
+                };
+                Ok(Some(response))
+            }
+            None if known => Ok(None),
             None => {
                 tracing::debug!(track = %track, "a stream request named an unknown track");
                 Err(StreamError::NotFound)
@@ -308,24 +478,19 @@ impl StreamService {
 
     /// Answers a request for a track the server has no file to serve yet.
     ///
-    /// This is the extension point for the pending-stream modes. A track whose
-    /// file does not exist yet - a catalog track, an acquisition that is still
-    /// running, an item that is only available from a provider - is not served
-    /// like the file above; the design grows a second path here:
+    /// The target is resolved first - an unmaterialized `x_` id through the
+    /// catalog layer, a stored track as it is - and requested from the
+    /// acquisition layer at priority [`Priority::Play`]. What the acquisition
+    /// answers decides the response:
     ///
-    /// - the pending mode comes from `stream.pending.mode`, whose `pad` mode
-    ///   holds the connection open and feeds the client a silence burst and
-    ///   then the file's own audio on the PCM bus, `hold` mode sends nothing
-    ///   until the file is ready, and `fail` mode answers `503` with a
-    ///   `Retry-After` header;
-    /// - `hearthsound_media::PendingStream` and `PendingRequest` are what that
-    ///   path drives, and the session registered for it reports
-    ///   [`AudioDelivered::probe`] over its `PendingControl`, so silence alone
-    ///   is not counted as delivering the song.
-    ///
-    /// Until that path lands, every request that reaches this function is
-    /// answered as HTTP 404, which a client shows as "not found" instead of
-    /// playing an error document.
+    /// - an available track is served by [`StreamService::stored`], so a
+    ///   request that raced an import still gets its bytes;
+    /// - a cooling-down track is `404`: its last acquisition failed and no new
+    ///   search may start until the cooldown elapses, so the request starts
+    ///   nothing;
+    /// - a denied request is `403`;
+    /// - a started or joined acquisition is answered by
+    ///   [`StreamService::serve_pending`].
     ///
     /// # Parameters
     ///
@@ -333,13 +498,310 @@ impl StreamService {
     ///
     /// # Errors
     ///
-    /// Always returns [`StreamError::NotFound`] until the pending path exists.
+    /// Returns [`StreamError::NotFound`] when there is no acquisition layer,
+    /// when the id names no track, and when the track cannot be acquired now,
+    /// and [`StreamError::Forbidden`] when the requester may not acquire.
     async fn pending(&self, request: &StreamRequest) -> Result<Response, StreamError> {
-        tracing::debug!(
-            id = %request.id,
-            "no stored file to serve for the requested track"
+        let Some(source) = &self.pending else {
+            tracing::debug!(
+                id = %request.id,
+                "no stored file to serve for the requested track and no acquisition layer"
+            );
+            return Err(StreamError::NotFound);
+        };
+
+        let track = self.resolve_target(&request.id).await?;
+        if !request.can_acquire {
+            tracing::debug!(
+                track = %track,
+                user = %request.user_id,
+                "refused a pending stream for a user who may not acquire"
+            );
+            return Err(StreamError::Forbidden);
+        }
+
+        let outcome = source
+            .request(
+                track,
+                Priority::Play,
+                Some(request.user_id),
+                request.can_acquire,
+            )
+            .await
+            .map_err(internal)?;
+
+        match outcome {
+            PendingOutcome::Available => match self.stored(request, track).await? {
+                Some(response) => Ok(response),
+                None => {
+                    tracing::debug!(track = %track, "an available track still has no file to serve");
+                    Err(StreamError::NotFound)
+                }
+            },
+            PendingOutcome::CoolingDown => {
+                tracing::debug!(
+                    track = %track,
+                    "refused a pending stream while the track cools down"
+                );
+                Err(StreamError::NotFound)
+            }
+            PendingOutcome::Denied => {
+                tracing::debug!(track = %track, "the acquisition layer denied a pending stream");
+                Err(StreamError::Forbidden)
+            }
+            PendingOutcome::Pending(handle) => self.serve_pending(request, track, handle).await,
+        }
+    }
+
+    /// Resolves a pending request's id to the track row to acquire.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the request's `id` parameter.
+    ///
+    /// # Returns
+    ///
+    /// The materialized track: the id itself for a stored track, and the row the
+    /// catalog layer stores for an `x_` id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamError::NotFound`] for an id that names no track, an `x_`
+    /// id whose instance knows no such entity, and an id that names an album,
+    /// artist, or playlist instead, and a server-side error when the catalog
+    /// lookup itself could not complete.
+    async fn resolve_target(&self, id: &str) -> Result<EntityId, StreamError> {
+        match ClientId::parse(id) {
+            Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::Track => Ok(id),
+            Ok(ClientId::Catalog(id)) => {
+                self.catalog.materialize_track(&id).await.map_err(|error| {
+                    if matches!(error, CatalogError::NotFound) {
+                        tracing::debug!(
+                            id = %id,
+                            "a stream request named a catalog entity its instance does not know"
+                        );
+                        StreamError::NotFound
+                    } else {
+                        internal(error)
+                    }
+                })
+            }
+            Ok(ClientId::Entity(id)) => {
+                tracing::debug!(
+                    id = %id,
+                    "a stream request named a stored entity that is not a track"
+                );
+                Err(StreamError::NotFound)
+            }
+            Err(error) => {
+                tracing::debug!(id = %id, %error, "a stream request named a malformed id");
+                Err(StreamError::NotFound)
+            }
+        }
+    }
+
+    /// Answers a request whose acquisition was started or joined.
+    ///
+    /// The mode comes from `stream.pending.mode`; a `format=raw` request under
+    /// `pad` behaves as `hold`, because silence is not a valid stored file and a
+    /// client that plays it as one would hear noise.
+    ///
+    /// # Parameters
+    ///
+    /// - `request`: the request being answered.
+    /// - `track`: the track being acquired.
+    /// - `handle`: the started or joined acquisition to watch.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the mode's path: [`StreamError::Unavailable`] for a
+    /// `fail` mode answer, and whatever [`StreamService::serve_padded`] and
+    /// [`StreamService::serve_held`] return.
+    async fn serve_pending(
+        &self,
+        request: &StreamRequest,
+        track: EntityId,
+        handle: AcquisitionHandle,
+    ) -> Result<Response, StreamError> {
+        let settings = self.settings.current();
+        let mode = PendingMode::of(&setting_or(
+            &settings,
+            keys::STREAM_PENDING_MODE,
+            "pad".to_owned(),
+        ));
+        if mode == PendingMode::Pad && request.format == StreamFormat::Raw {
+            return self.serve_held(request, track, handle).await;
+        }
+        match mode {
+            PendingMode::Pad => self.serve_padded(request, track, handle).await,
+            PendingMode::Hold => self.serve_held(request, track, handle).await,
+            PendingMode::Fail => {
+                tracing::debug!(
+                    track = %track,
+                    "answered a pending stream with 503 while its acquisition runs"
+                );
+                Err(StreamError::Unavailable {
+                    retry_after_secs: RETRY_AFTER_SECS,
+                })
+            }
+        }
+    }
+
+    /// Serves a pending stream as silence followed by the file's own audio.
+    ///
+    /// The encoder is started at once and its output is written as it arrives,
+    /// so the client hears silence while the acquisition runs. A task watching
+    /// the acquisition's progress switches the encoder's input to the imported
+    /// file when it completes, and ends the stream one second after a failure.
+    /// The session registered for the stream answers "audio delivered" from the
+    /// pending control, so silence alone is never recorded as a play.
+    ///
+    /// # Parameters
+    ///
+    /// - `request`: the request being answered; its format, when it names one,
+    ///   is the format the encoder produces.
+    /// - `track`: the track being acquired, for the stream session.
+    /// - `handle`: the acquisition to watch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a server-side error when the encoder cannot be started.
+    async fn serve_padded(
+        &self,
+        request: &StreamRequest,
+        track: EntityId,
+        handle: AcquisitionHandle,
+    ) -> Result<Response, StreamError> {
+        let settings = self.settings.current();
+        let format = match request.format {
+            StreamFormat::Transcode(format) => format,
+            _ => pending_format(&settings),
+        };
+        let pending_request = PendingRequest::new(
+            format,
+            pending_bitrate(&settings),
+            pending_max_wait(&settings),
         );
-        Err(StreamError::NotFound)
+        let pending = self
+            .ffmpeg
+            .pending_stream(&pending_request)
+            .await
+            .map_err(internal)?;
+        let (body, control) = pending.into_parts();
+
+        let flag = control.clone();
+        self.sessions.register(
+            request.user_id,
+            track.uuid(),
+            request.client.as_deref(),
+            AudioDelivered::probe(move || flag.audio_delivered()),
+        );
+
+        tokio::spawn(watch_acquisition(handle, control));
+
+        let mut response = Response::new(Body::from_stream(body));
+        *response.status_mut() = StatusCode::OK;
+        let headers = response.headers_mut();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(format.content_type()),
+        );
+        headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("none"));
+        Ok(response)
+    }
+
+    /// Waits for a pending acquisition's file and serves it.
+    ///
+    /// Nothing is sent until the file is ready, so no headers are written while
+    /// the acquisition runs and a failure, a cooldown, or an elapsed wait can
+    /// still be answered as a status code. The wait is bounded twice: the first
+    /// `stream.hold.timeout_secs` ends the "hold" and starts waiting up to
+    /// `stream.pending.max_wait_secs` in total, after which the request is
+    /// answered `503` with `Retry-After` because the acquisition continues.
+    ///
+    /// # Parameters
+    ///
+    /// - `request`: the request being answered; a completed acquisition is
+    ///   served exactly as a stored track would be, raw or transcoded.
+    /// - `track`: the track being acquired.
+    /// - `handle`: the acquisition to watch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamError::NotFound`] when the acquisition ended without a
+    /// file, and [`StreamError::Unavailable`] when the wait elapsed first.
+    async fn serve_held(
+        &self,
+        request: &StreamRequest,
+        track: EntityId,
+        handle: AcquisitionHandle,
+    ) -> Result<Response, StreamError> {
+        let settings = self.settings.current();
+        let hold = hold_timeout(&settings);
+        let max_wait = pending_max_wait(&settings);
+
+        if let Ok(outcome) = tokio::time::timeout(hold, handle.clone().wait()).await {
+            return self.serve_held_outcome(request, track, outcome).await;
+        }
+        let remaining = max_wait.saturating_sub(hold);
+        match tokio::time::timeout(remaining, handle.wait()).await {
+            Ok(outcome) => self.serve_held_outcome(request, track, outcome).await,
+            Err(_) => {
+                tracing::debug!(
+                    track = %track,
+                    waited = ?max_wait,
+                    "a held stream waited out its acquisition"
+                );
+                Err(StreamError::Unavailable {
+                    retry_after_secs: RETRY_AFTER_SECS,
+                })
+            }
+        }
+    }
+
+    /// Serves the file of a watched acquisition that just ended.
+    ///
+    /// # Parameters
+    ///
+    /// - `request`: the request being answered.
+    /// - `track`: the track that was acquired.
+    /// - `outcome`: the acquisition's terminal snapshot, or its error when the
+    ///   progress channel closed, which means the server is stopping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamError::NotFound`] when the acquisition failed, was
+    /// cancelled, or completed without a servable file.
+    async fn serve_held_outcome(
+        &self,
+        request: &StreamRequest,
+        track: EntityId,
+        outcome: Result<AcquisitionProgress, AcquireError>,
+    ) -> Result<Response, StreamError> {
+        match outcome {
+            Ok(progress) if progress.succeeded() => match self.stored(request, track).await? {
+                Some(response) => Ok(response),
+                None => {
+                    tracing::warn!(
+                        track = %track,
+                        "an acquisition completed but the track has no file to serve"
+                    );
+                    Err(StreamError::NotFound)
+                }
+            },
+            Ok(progress) => {
+                tracing::debug!(
+                    acquisition = %progress.acquisition_id,
+                    state = progress.state.as_str(),
+                    "a held stream's acquisition ended without a file"
+                );
+                Err(StreamError::NotFound)
+            }
+            Err(error) => {
+                tracing::debug!(%error, "a held stream lost its acquisition");
+                Err(StreamError::NotFound)
+            }
+        }
     }
 
     /// Serves the track's preferred file.
@@ -527,6 +989,269 @@ impl StreamService {
             }
         });
     }
+}
+
+/// The acquisition layer a pending stream asks for a track it has not stored.
+///
+/// [`StreamService`] depends on this narrow seam rather than on the acquisition
+/// orchestrator directly, so its pending-stream logic is testable with a source
+/// that reports a scripted progress snapshot while production wires
+/// [`AcquisitionOrchestrator`], whose implementation is below.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::sync::Arc;
+///
+/// use hearthsound_acquire::orchestrator::AcquisitionOrchestrator;
+/// use hearthsound_api_subsonic::PendingSource;
+///
+/// # fn example(orchestrator: Arc<AcquisitionOrchestrator>) {
+/// let source: Arc<dyn PendingSource> = orchestrator;
+/// # let _ = source;
+/// # }
+/// ```
+#[async_trait]
+pub trait PendingSource: Send + Sync {
+    /// Asks the acquisition layer for one track.
+    ///
+    /// # Parameters
+    ///
+    /// - `track`: the materialized track to acquire.
+    /// - `priority`: how urgent the acquisition is; a stream asks at
+    ///   [`Priority::Play`].
+    /// - `requested_by`: the user whose request created the acquisition.
+    /// - `can_acquire`: whether that user may acquire at all.
+    ///
+    /// # Returns
+    ///
+    /// What admission decided: the track is available, an acquisition to watch,
+    /// a cooldown, or a denial.
+    ///
+    /// # Errors
+    ///
+    /// Returns the acquisition layer's error when admission itself failed.
+    async fn request(
+        &self,
+        track: EntityId,
+        priority: Priority,
+        requested_by: Option<Uuid>,
+        can_acquire: bool,
+    ) -> Result<PendingOutcome, AcquireError>;
+}
+
+/// What the acquisition layer decided about a pending track.
+#[derive(Debug)]
+pub enum PendingOutcome {
+    /// The track already has a file, so the stream service serves it.
+    Available,
+    /// An acquisition was started or joined, and can be watched to its end.
+    Pending(AcquisitionHandle),
+    /// The track failed recently and cannot be retried until its cooldown ends.
+    CoolingDown,
+    /// The requester may not acquire.
+    Denied,
+}
+
+#[async_trait]
+impl PendingSource for AcquisitionOrchestrator {
+    /// Admits or joins a `play` acquisition for a stream request.
+    async fn request(
+        &self,
+        track: EntityId,
+        priority: Priority,
+        requested_by: Option<Uuid>,
+        can_acquire: bool,
+    ) -> Result<PendingOutcome, AcquireError> {
+        let outcome = AcquisitionOrchestrator::request(
+            self,
+            AcquireRequest::new(track, priority, "stream")
+                .with_requested_by(requested_by)
+                .with_can_acquire(can_acquire),
+        )
+        .await?;
+        Ok(match outcome {
+            AcquireOutcome::AlreadyAvailable { .. } => PendingOutcome::Available,
+            AcquireOutcome::Joined(handle) | AcquireOutcome::Started(handle) => {
+                PendingOutcome::Pending(handle)
+            }
+            AcquireOutcome::CoolingDown { .. } => PendingOutcome::CoolingDown,
+            AcquireOutcome::Denied { .. } => PendingOutcome::Denied,
+        })
+    }
+}
+
+/// How long a client is told to wait after a `503`.
+const RETRY_AFTER_SECS: u64 = 10;
+
+/// The pending-stream mode `stream.pending.mode` selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingMode {
+    /// Pad with silence until the file is ready.
+    Pad,
+    /// Send nothing until the file is ready, then serve it normally.
+    Hold,
+    /// Answer `503` with `Retry-After` at once.
+    Fail,
+}
+
+impl PendingMode {
+    /// Reads a `stream.pending.mode` literal.
+    ///
+    /// # Parameters
+    ///
+    /// - `value`: the setting's current value.
+    ///
+    /// # Returns
+    ///
+    /// The named mode, or [`PendingMode::Pad`] for an absent or unknown literal,
+    /// which is the documented default.
+    fn of(value: &str) -> PendingMode {
+        match value {
+            "hold" => PendingMode::Hold,
+            "fail" => PendingMode::Fail,
+            _ => PendingMode::Pad,
+        }
+    }
+}
+
+/// Watches a pending acquisition and steers the PCM bus with its outcome.
+///
+/// # Parameters
+///
+/// - `handle`: the acquisition to wait for.
+/// - `control`: the pending stream's control handle, whose `ready` switches the
+///   encoder to the file and whose `fail` ends the stream one second later.
+async fn watch_acquisition(handle: AcquisitionHandle, control: PendingControl) {
+    match handle.wait().await {
+        Ok(progress) if progress.succeeded() => match progress.file {
+            Some(file) => {
+                if let Err(error) = control.ready(file).await {
+                    tracing::debug!(%error, "the pending stream ended before its file was ready");
+                }
+            }
+            None => {
+                tracing::warn!(
+                    acquisition = %progress.acquisition_id,
+                    "a completed acquisition reported no file"
+                );
+                report_pending_failure(&control).await;
+            }
+        },
+        Ok(progress) => {
+            tracing::debug!(
+                acquisition = %progress.acquisition_id,
+                state = progress.state.as_str(),
+                "a pending stream's acquisition ended without a file"
+            );
+            report_pending_failure(&control).await;
+        }
+        Err(error) => {
+            tracing::debug!(%error, "a pending stream lost its acquisition");
+            report_pending_failure(&control).await;
+        }
+    }
+}
+
+/// Ends a pending stream one second after its acquisition failed.
+///
+/// # Parameters
+///
+/// - `control`: the pending stream's control handle.
+async fn report_pending_failure(control: &PendingControl) {
+    if let Err(error) = control.fail().await {
+        tracing::debug!(%error, "the pending stream ended before its failure was reported");
+    }
+}
+
+/// Reads a setting a pending request needs, falling back to its default.
+///
+/// A settings read that fails is logged and stays with the built-in default: a
+/// stream should not fail because a tunable is temporarily unreadable.
+///
+/// # Parameters
+///
+/// - `store`: the settings snapshot the value is read from.
+/// - `key`: the setting to read.
+/// - `fallback`: the value to use when the read fails.
+///
+/// # Returns
+///
+/// The stored value, or `fallback`.
+fn setting_or<T>(store: &SettingsStore, key: SettingKey<T>, fallback: T) -> T
+where
+    T: SettingType + Clone,
+{
+    match store.get(key) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(
+                key = key.name(),
+                %error,
+                "could not read a pending-stream setting; using its default"
+            );
+            fallback
+        }
+    }
+}
+
+/// Returns the format a pending stream encodes in when the request names none.
+///
+/// # Parameters
+///
+/// - `store`: the settings snapshot to read `stream.pending.format` from.
+///
+/// # Returns
+///
+/// The configured format, or mp3 for an unparsable value, which is the
+/// documented default.
+fn pending_format(store: &SettingsStore) -> TranscodeFormat {
+    let name = setting_or(store, keys::STREAM_PENDING_FORMAT, "mp3".to_owned());
+    name.parse::<TranscodeFormat>()
+        .unwrap_or(TranscodeFormat::Mp3)
+}
+
+/// Returns the bitrate a pending stream encodes at, in kbit/s.
+///
+/// # Parameters
+///
+/// - `store`: the settings snapshot to read `stream.pending.bitrate_kbps` from.
+///
+/// # Returns
+///
+/// The configured bitrate, or 320 for a negative one.
+fn pending_bitrate(store: &SettingsStore) -> u32 {
+    let kbps = setting_or(store, keys::STREAM_PENDING_BITRATE_KBPS, 320);
+    u32::try_from(kbps).unwrap_or(320)
+}
+
+/// Returns how long a pending stream may play before it ends without a file.
+///
+/// # Parameters
+///
+/// - `store`: the settings snapshot to read `stream.pending.max_wait_secs` from.
+///
+/// # Returns
+///
+/// The configured wait, or 180 seconds for a negative one.
+fn pending_max_wait(store: &SettingsStore) -> Duration {
+    let secs = setting_or(store, keys::STREAM_PENDING_MAX_WAIT_SECS, 180);
+    Duration::from_secs(u64::try_from(secs).unwrap_or(180))
+}
+
+/// Returns how long `hold` sends nothing before it starts waiting for a file in
+/// the `503` window.
+///
+/// # Parameters
+///
+/// - `store`: the settings snapshot to read `stream.hold.timeout_secs` from.
+///
+/// # Returns
+///
+/// The configured timeout, or 60 seconds for a negative one.
+fn hold_timeout(store: &SettingsStore) -> Duration {
+    let secs = setting_or(store, keys::STREAM_HOLD_TIMEOUT_SECS, 60);
+    Duration::from_secs(u64::try_from(secs).unwrap_or(60))
 }
 
 /// Wraps an encoded stream so that its first chunk marks the stream as audibly

@@ -67,6 +67,7 @@ pub async fn stream(call: BinaryCall) -> Response {
         max_bitrate_kbps,
         offset,
         estimate_content_length: flag(&call, "estimateContentLength"),
+        can_acquire: call.principal().can_acquire,
     };
     match call.state().stream().serve(&request).await {
         Ok(response) => response,
@@ -77,7 +78,7 @@ pub async fn stream(call: BinaryCall) -> Response {
             } else {
                 tracing::debug!(id, %error, "refused a stream");
             }
-            status.into_response()
+            error.response()
         }
     }
 }
