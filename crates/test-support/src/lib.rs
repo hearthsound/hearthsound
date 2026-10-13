@@ -1,9 +1,13 @@
 //! Helpers for integration tests in this workspace.
 //!
-//! The only job of this crate is to locate the workspace root and the fixture
-//! plugins built by `cargo xtask fixtures`, so integration tests do not have to
-//! repeat that path arithmetic.
+//! The crate locates the workspace root and the fixture plugins built by
+//! `cargo xtask fixtures`, so integration tests do not have to repeat that path
+//! arithmetic, and it synthesizes audio files with tags and cover art at test
+//! time through the [`audio`] module, so the repository never contains
+//! copyrighted audio.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+pub mod audio;
 
 use std::path::PathBuf;
 

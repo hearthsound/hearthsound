@@ -105,3 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted only when `subsonic.allow_account_password` enables it, the typed
   Subsonic error codes 10, 40, 41, 42, 43, and 44, the app-password help URL,
   and a login rate limit keyed by address and username.
+- Generated audio fixtures: the test-support crate synthesizes FLAC, MP3 (CBR and
+  VBR), Ogg Vorbis, Opus, M4A AAC, WAV, and WavPack files of a chosen duration,
+  sample rate, bit depth, and channel count with ffmpeg, tags them with lofty
+  including multi-valued artists and an embedded generated cover, and exposes
+  them through a builder that writes into a directory or a temporary directory.
