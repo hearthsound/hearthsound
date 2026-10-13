@@ -14,3 +14,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the shared provider error, and provider instance slugs.
 - Catalog provider records and the lifecycle and catalog provider traits.
 - Settings registry with environment, config file, and default precedence.
+- SQLite database layer with a writer pool, a reader pool, and pre-migration
+  backups.
