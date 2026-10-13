@@ -1507,6 +1507,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hearthsound-activity"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "hearthsound-core",
+ "hearthsound-db",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "hearthsound-auth"
 version = "0.1.0-alpha.0"
 dependencies = [

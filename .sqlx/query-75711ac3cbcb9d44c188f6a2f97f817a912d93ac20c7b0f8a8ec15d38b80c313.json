@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT user_id, track_id, client, started_at, listened_ms, audio_delivered, scrobbled\n         FROM plays WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "name": "track_id",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "track_id"
+          }
+        }
+      },
+      {
+        "name": "client",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "client"
+          }
+        }
+      },
+      {
+        "name": "started_at",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "started_at"
+          }
+        }
+      },
+      {
+        "name": "listened_ms",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "listened_ms"
+          }
+        }
+      },
+      {
+        "name": "audio_delivered",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "audio_delivered"
+          }
+        }
+      },
+      {
+        "name": "scrobbled",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "scrobbled"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "75711ac3cbcb9d44c188f6a2f97f817a912d93ac20c7b0f8a8ec15d38b80c313"
+}

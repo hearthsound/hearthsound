@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO plays (\n                 id, user_id, track_id, client, started_at, listened_ms, audio_delivered\n             ) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "68bc6d2e71c3de87e4e4361a8354bf24041f097cecf6887e28900ebb21dfc6fc"
+}

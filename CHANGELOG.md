@@ -161,3 +161,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `AcquisitionProvider` traits, with host bindings for every provider world
   sharing one linker and one instance state, one store pool generic over the
   world it drives, and each acquisition call carrying its job's staging root.
+- The `hearthsound-activity` crate: play recording in the `plays` table and a
+  scrobble entry point that discards a now-playing report and records a
+  submission unless the latest stream session for that user and track delivered
+  no song audio. A bounded in-memory stream-session registry keeps the latest
+  session per user and track, taking its answer either from a flag a raw file
+  stream sets as it writes bytes or from a probe such as the pending PCM bus's
+  audio-delivered handle.
