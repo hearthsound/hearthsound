@@ -11,9 +11,11 @@
 //! `/rest/<name>` and `/rest/<name>.view`.
 
 mod browse;
+mod scrobble;
 mod search;
 mod system;
 
 pub use browse::{get_album, get_album_list_2, get_artist, get_artists, get_song};
+pub use scrobble::scrobble;
 pub use search::search3;
 pub use system::{get_license, get_music_folders, get_open_subsonic_extensions, ping, token_info};

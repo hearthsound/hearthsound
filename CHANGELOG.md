@@ -371,3 +371,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   album carrying its `x_`-id songs and an artist its `x_`-id albums. An id the
   catalog does not have, or one of another kind, is Subsonic error 70, and an
   instance that cannot answer is a generic error naming it.
+- `scrobble` on the Subsonic surface: each `id` is recorded as a play through
+  the activity service, honoring its "no song audio delivered" guard, while a
+  `submission=false` now-playing report is accepted and discarded. Only a
+  stored track is recorded; an `x_` catalog id is accepted and discarded.
