@@ -533,3 +533,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   later `x_<slug>_r_<id>` resolves to the stored artist.
 - Bundled Deezer catalog plugin 0.1.1, whose artist credits carry the Deezer
   artist ids that catalog artist links resolve through.
+- Acquisition cancellation and the end of a failed one: every failure reason
+  takes one terminal path that writes the exact `failure_reason` literal with
+  the backend's `error_detail`, marks the track `unavailable` until
+  `acquisition.unavailable_cooldown_hours` elapses, cancels the download the
+  acquisition still has in flight, removes its staging directory, and tells the
+  waiters and the event bus, while a `force` request ignores the cooldown and
+  starts a fresh search. `cancel` ends an acquisition as `cancelled` the same
+  way, returning a track without a file to catalog-only availability and freeing
+  the slots it held, and `reconcile` notices a row another process such as the
+  CLI wrote - the server calls it after `PRAGMA data_version` changes - by
+  waking the worker that is still serving that acquisition and undoing its
+  side effects. `list` renders the ledger for an administrative view with the
+  track's title and artist, the instance, the percentage and the failure reason,
+  filtered by state or by whether the acquisition still holds work.

@@ -13,7 +13,9 @@
 //! fails through
 //! [`AcquisitionOrchestrator::fail_acquisition`](crate::orchestrator::AcquisitionOrchestrator::fail_acquisition),
 //! which puts the track into cooldown, so a track nobody can find does not make
-//! every client retry hit the backends again.
+//! every client retry hit the backends again. A search that is still running
+//! when the acquisition is cancelled is cancelled on the backend instead and
+//! ends the stage without a failure.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +30,7 @@ use hearthsound_core::{
 };
 use hearthsound_library::Track;
 use hearthsound_plugin_host::RegistryInstance;
+use tokio::sync::Notify;
 use tokio::time::Instant;
 
 use crate::error::AcquireError;
@@ -55,6 +58,9 @@ pub(crate) enum SearchOutcome {
     },
     /// Nothing could be tried and the acquisition was failed.
     Failed(FailureReason),
+    /// The acquisition was cancelled while the search ran, so the backend
+    /// searches were abandoned and the ledger row already says `cancelled`.
+    Cancelled,
 }
 
 impl AcquisitionOrchestrator {
@@ -155,15 +161,25 @@ impl AcquisitionOrchestrator {
             instances: Vec::new(),
             slots: Vec::new(),
             backend_failed: false,
+            cancelled: false,
+            stop: self.stop_signal(row.id),
         };
         for instance in self.registry().layers(Layer::Acquisition) {
             run.run_instance(&instance).await;
+            if run.cancelled {
+                break;
+            }
             // A user is waiting: a usable candidate from one instance is
             // enough, and the rest of the layer is not worth the wait. Bulk
             // work searches every instance to maximize the choice of quality.
             if run.selection.class.is_interactive() && run.has_usable_candidate() {
                 break;
             }
+        }
+
+        if run.cancelled {
+            tracing::info!(acquisition = %row.id, "abandoned the search of a cancelled acquisition");
+            return Ok(SearchOutcome::Cancelled);
         }
 
         let plan = run.plan();
@@ -252,6 +268,10 @@ struct LayerSearch<'a> {
     slots: Vec<CandidateSlot>,
     /// Whether an instance could not be searched at all.
     backend_failed: bool,
+    /// Whether the acquisition was cancelled, which ends the run.
+    cancelled: bool,
+    /// Wakes the run when the acquisition is cancelled.
+    stop: Arc<Notify>,
 }
 
 impl LayerSearch<'_> {
@@ -276,6 +296,9 @@ impl LayerSearch<'_> {
     ///
     /// - `instance`: the instance to search.
     async fn run_instance(&mut self, instance: &Arc<RegistryInstance>) {
+        if self.cancelled {
+            return;
+        }
         let Some(provider) = instance.acquisition().cloned() else {
             return;
         };
@@ -357,6 +380,7 @@ impl LayerSearch<'_> {
             }
         };
 
+        let stop = Arc::clone(&self.stop);
         loop {
             match provider.poll_search(&self.context, &token).await {
                 Ok(SearchState::Running(candidates)) => {
@@ -400,7 +424,16 @@ impl LayerSearch<'_> {
                 provider.cancel_search(&self.context, &token).await;
                 return Ok(());
             }
-            tokio::time::sleep(SEARCH_POLL_INTERVAL).await;
+            tokio::select! {
+                () = tokio::time::sleep(SEARCH_POLL_INTERVAL) => {}
+                () = stop.notified() => {
+                    // The acquisition was cancelled: the search is no longer
+                    // wanted, and the backend should hear about it.
+                    provider.cancel_search(&self.context, &token).await;
+                    self.cancelled = true;
+                    return Ok(());
+                }
+            }
         }
     }
 

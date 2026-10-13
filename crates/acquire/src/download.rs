@@ -11,7 +11,10 @@
 //! `acquisition.stall_timeout_secs` counts as stalled, and one that sits queued
 //! for longer than `acquisition.queue_timeout_secs.interactive` or
 //! `.background` is abandoned. Both cancel the download and move to the next
-//! candidate, and the acquisition fails only when every candidate is spent.
+//! candidate, and the acquisition fails only when every candidate is spent. A
+//! third wake-up ends the attempt differently: the acquisition being cancelled,
+//! here or in another process, cancels the download and abandons the attempt
+//! without trying anything else.
 //!
 //! A backend that reports `complete` may not have flushed the file yet, so the
 //! completion rule waits for each reported file's size to hold across two checks
@@ -67,6 +70,9 @@ pub(crate) enum DownloadOutcome {
     RestartSearch,
     /// The acquisition was failed, or is otherwise finished.
     Stopped,
+    /// The acquisition was cancelled, here or in another process, so its
+    /// download was cancelled too and the ledger row already says `cancelled`.
+    Cancelled,
 }
 
 /// One file a completed download produced, resolved to an absolute path.
@@ -93,6 +99,8 @@ enum CandidateAttempt {
     },
     /// A `play` request took this attempt's download slot.
     Preempted,
+    /// The acquisition was cancelled, so the attempt was abandoned.
+    Cancelled,
     /// The attempt failed; the acquisition may try the next candidate.
     Failed {
         /// Why the attempt failed.
@@ -425,6 +433,11 @@ impl AcquisitionOrchestrator {
                 CandidateAttempt::Failed { reason, detail } => {
                     failure = Some((reason, detail));
                 }
+                CandidateAttempt::Cancelled => {
+                    // The acquisition was cancelled while this candidate was
+                    // downloading; the row already says so.
+                    return Ok(DownloadOutcome::Cancelled);
+                }
                 CandidateAttempt::LostToken => {
                     self.repository()
                         .transition(
@@ -564,7 +577,43 @@ impl AcquisitionOrchestrator {
         };
         self.record_download(row.id, instance, &attempt.candidate, &token)
             .await?;
+        self.watch_download(row, instance, provider, &token, limits, preempted)
+            .await
+    }
 
+    /// Polls a running download until it ends.
+    ///
+    /// The token is polled every `limits.poll_interval` until the backend
+    /// reports the transfer complete, a failure, or a state the limits reject. A
+    /// `play` request that needs the download's slot wakes the task through
+    /// `preempted` and the attempt is abandoned so the slot is free at once; a
+    /// cancellation - from [`AcquisitionOrchestrator::cancel`] or from
+    /// [`AcquisitionOrchestrator::reconcile`] noticing another process's write -
+    /// wakes it the same way and abandons the attempt as cancelled.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the acquisition's ledger row.
+    /// - `instance`: the instance serving the download.
+    /// - `provider`: the instance's acquisition provider.
+    /// - `token`: the download token the backend issued.
+    /// - `limits`: how long the attempt may take and how often it is polled.
+    /// - `preempted`: the notifier a `play` request wakes to take the slot.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger error when a progress snapshot cannot be written.
+    async fn watch_download(
+        &self,
+        row: &AcquisitionRow,
+        instance: &RegistryInstance,
+        provider: &dyn AcquisitionProvider,
+        token: &str,
+        limits: AttemptLimits,
+        preempted: &Notify,
+    ) -> Result<CandidateAttempt, AcquireError> {
+        let context = AcquisitionContext::new(self.staging_dir(row.id));
+        let stop = self.stop_signal(row.id);
         let mut last_bytes = 0_u64;
         let mut last_progress = Instant::now();
         let mut queued_since: Option<Instant> = None;
@@ -572,12 +621,21 @@ impl AcquisitionOrchestrator {
             tokio::select! {
                 () = tokio::time::sleep(limits.poll_interval) => {}
                 () = preempted.notified() => {
-                    provider.cancel_download(&context, &token).await;
+                    provider.cancel_download(&context, token).await;
                     return Ok(CandidateAttempt::Preempted);
+                }
+                () = stop.notified() => {
+                    provider.cancel_download(&context, token).await;
+                    tracing::info!(
+                        acquisition = %row.id,
+                        instance = instance.slug().as_str(),
+                        "abandoned the download of a cancelled acquisition"
+                    );
+                    return Ok(CandidateAttempt::Cancelled);
                 }
             }
 
-            let state = match provider.poll_download(&context, &token).await {
+            let state = match provider.poll_download(&context, token).await {
                 Ok(state) => state,
                 Err(ProviderError::NotFound) => {
                     tracing::warn!(
@@ -593,7 +651,7 @@ impl AcquisitionOrchestrator {
                         %error,
                         "polling a download failed"
                     );
-                    provider.cancel_download(&context, &token).await;
+                    provider.cancel_download(&context, token).await;
                     return Ok(CandidateAttempt::Failed {
                         reason: FailureReason::BackendUnavailable,
                         detail: Some(error.to_string()),
@@ -611,7 +669,7 @@ impl AcquisitionOrchestrator {
                             position = ?position,
                             "a download sat queued for too long"
                         );
-                        provider.cancel_download(&context, &token).await;
+                        provider.cancel_download(&context, token).await;
                         return Ok(CandidateAttempt::Failed {
                             reason: FailureReason::Timeout,
                             detail: Some("the transfer stayed queued".to_owned()),
@@ -637,7 +695,7 @@ impl AcquisitionOrchestrator {
                             bytes = progress.bytes,
                             "a download stopped making progress"
                         );
-                        provider.cancel_download(&context, &token).await;
+                        provider.cancel_download(&context, token).await;
                         return Ok(CandidateAttempt::Failed {
                             reason: FailureReason::Timeout,
                             detail: Some("the transfer stalled".to_owned()),
@@ -645,7 +703,10 @@ impl AcquisitionOrchestrator {
                     }
                 }
                 DownloadState::Complete(files) => {
-                    return Ok(CandidateAttempt::Downloaded { token, files });
+                    return Ok(CandidateAttempt::Downloaded {
+                        token: token.to_owned(),
+                        files,
+                    });
                 }
                 DownloadState::Failed(detail) => {
                     tracing::warn!(

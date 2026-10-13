@@ -9,12 +9,13 @@
 
 mod common;
 
-use common::{Env, drain, has_acquisition_event, has_availability_event};
+use common::{Env, InstanceLimits, config, drain, has_acquisition_event, has_availability_event};
 use hearthsound_acquire::orchestrator::{
     AcquireOutcome, AcquireRequest, AcquisitionProgress, AlbumAcquireRequest,
 };
 use hearthsound_core::events::ServerEvent;
-use hearthsound_core::{AcquisitionState, Availability, Priority};
+use hearthsound_core::{AcquisitionState, Availability, FailureReason, Priority};
+use serde_json::json;
 
 #[tokio::test]
 async fn admits_one_acquisition_per_track_and_raises_its_priority() {
@@ -356,6 +357,100 @@ async fn waiters_observe_the_acquisition_at_every_attach_point() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn a_failed_acquisition_cools_the_track_down_for_the_configured_window() {
+    let env = Env::new(
+        config(json!([]), "no-candidates", 0, "staging", ".flac"),
+        InstanceLimits::default(),
+        &[("HEARTHSOUND__ACQUISITION__UNAVAILABLE_COOLDOWN_HOURS", "1")],
+    )
+    .await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    let started = env
+        .orchestrator
+        .request(AcquireRequest::new(track, Priority::Play, "user request"))
+        .await
+        .unwrap();
+    let id = started.acquisition_id().unwrap();
+
+    env.start();
+    let row = env.wait_for_terminal(id).await;
+    assert_eq!(row.state, AcquisitionState::Failed);
+    assert_eq!(row.failure_reason, Some(FailureReason::NoCandidates));
+
+    // The failure marked the track unavailable for the cooldown, and left no
+    // staging directory behind.
+    let stored = env.track(track).await;
+    assert_eq!(stored.availability, Availability::Unavailable);
+    let until = stored
+        .unavailable_until
+        .expect("the cooldown end is stored");
+    assert!(
+        until > now_millis() && until <= now_millis() + 3_600_000,
+        "the cooldown end is inside the configured hour: {until}"
+    );
+    assert!(!env.orchestrator.staging_dir(id).exists());
+
+    // A replay inside the window starts no new search.
+    let refused = env
+        .orchestrator
+        .request(AcquireRequest::new(track, Priority::Play, "user replay"))
+        .await
+        .unwrap();
+    match refused {
+        AcquireOutcome::CoolingDown {
+            track_id,
+            unavailable_until,
+        } => {
+            assert_eq!(track_id, track);
+            assert_eq!(unavailable_until, until);
+        }
+        other => panic!("a cooling track must be refused, got {other:?}"),
+    }
+    assert_eq!(env.searches_started(common::INSTANCE).await, 1);
+    assert_eq!(env.acquisitions_for(track).await, 1);
+
+    // A forced retry ignores the cooldown and searches again.
+    let forced = env
+        .orchestrator
+        .request(AcquireRequest::new(track, Priority::Play, "admin retry").forced())
+        .await
+        .unwrap();
+    assert!(
+        matches!(forced, AcquireOutcome::Started(_)),
+        "a forced request ignores the cooldown, got {forced:?}"
+    );
+    env.wait_for_terminal(forced.acquisition_id().unwrap())
+        .await;
+    assert_eq!(env.searches_started(common::INSTANCE).await, 2);
+}
+
+#[tokio::test]
+async fn allows_a_new_search_after_the_cooldown_elapsed() {
+    let env = Env::normal(&[]).await;
+    let track = env
+        .add_track(
+            "Hello Song",
+            "Hello Artist",
+            Availability::Unavailable,
+            Some(now_millis() - 1),
+        )
+        .await;
+
+    let outcome = env
+        .orchestrator
+        .request(AcquireRequest::new(track, Priority::Play, "user request"))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, AcquireOutcome::Started(_)),
+        "a cooldown that elapsed no longer stops a search, got {outcome:?}"
+    );
+    let stored = env.track(track).await;
+    assert_eq!(stored.availability, Availability::Acquiring);
+    assert_eq!(stored.unavailable_until, None);
 }
 
 /// Returns the current time in unix milliseconds.

@@ -36,21 +36,24 @@ use hearthsound_catalog::CatalogService;
 use hearthsound_config::keys;
 use hearthsound_config::settings::Settings;
 use hearthsound_core::events::{AcquisitionUpdated, EventBus, ServerEvent, TrackAvailability};
+use hearthsound_core::providers::AcquisitionContext;
 use hearthsound_core::{
     AcquisitionState, Availability, EntityId, FailureReason, Granularity, IdPrefix, Priority,
     QualityTier, new_uuid_v7,
 };
 use hearthsound_db::Database;
-use hearthsound_library::LibraryRepository;
-use hearthsound_library::StorageRoots;
+use hearthsound_library::{LibraryRepository, StorageRoots, media_files, tracks};
 use hearthsound_media::FfmpegRunner;
-use hearthsound_plugin_host::ProviderRegistry;
+use hearthsound_plugin_host::{ProviderRegistry, RegistryInstance};
+use sqlx::SqliteConnection;
 use tokio::sync::{Notify, watch};
 use uuid::Uuid;
 
 use crate::download::DownloadOutcome;
 use crate::error::AcquireError;
-use crate::repo::{self, AcquisitionRepository, AcquisitionRow, NewAcquisition};
+use crate::repo::{
+    self, AcquisitionRepository, AcquisitionRow, AcquisitionSummary, ListFilter, NewAcquisition,
+};
 use crate::search::SearchOutcome;
 
 /// How often the scheduler looks for work it was not woken for.
@@ -506,6 +509,16 @@ struct Inner {
     storage_roots: StorageRoots,
     /// One channel per acquisition anyone is watching.
     waiters: Mutex<HashMap<Uuid, watch::Sender<AcquisitionProgress>>>,
+    /// The acquisitions this process still has side effects for, and the signal
+    /// that wakes a worker when another process ends one of them.
+    ///
+    /// A row is added when the acquisition is admitted, or when a starting
+    /// process resumes it, and removed when its task ends and its staging
+    /// directory is gone. That makes the map exactly the set of acquisitions
+    /// whose cancellation this process has to notice:
+    /// [`AcquisitionOrchestrator::reconcile`] walks it after another connection
+    /// writes the ledger.
+    in_flight: Mutex<HashMap<Uuid, Arc<Notify>>>,
     /// How many worker slots are in use.
     running: AtomicUsize,
     /// The per-instance search budgets the search stage respects.
@@ -560,6 +573,7 @@ impl AcquisitionOrchestrator {
                 staging_root: storage.staging_root,
                 storage_roots: storage.roots,
                 waiters: Mutex::new(HashMap::new()),
+                in_flight: Mutex::new(HashMap::new()),
                 running: AtomicUsize::new(0),
                 search_budgets: crate::budget::InstanceBudgets::new(),
                 download_budgets: crate::budget::DownloadBudgets::new(),
@@ -742,6 +756,7 @@ impl AcquisitionOrchestrator {
                 active.state,
                 active.failure_reason,
             );
+            self.stop_signal(active.id);
             return Ok(AcquireOutcome::Joined(handle));
         }
 
@@ -791,6 +806,7 @@ impl AcquisitionOrchestrator {
             AcquisitionState::Queued,
             None,
         );
+        self.stop_signal(id);
         self.announce(&progress);
         self.publish_availability(track.id, Availability::Acquiring, None);
         self.notify_work();
@@ -947,6 +963,7 @@ impl AcquisitionOrchestrator {
                 continue;
             }
             tracing::debug!(acquisition = %row.id, priority = row.priority.as_str(), "claimed an acquisition");
+            self.stop_signal(row.id);
             self.notify_work();
             let orchestrator = self.clone();
             tokio::spawn(async move {
@@ -970,6 +987,45 @@ impl AcquisitionOrchestrator {
     async fn advance(&self, id: Uuid) {
         if let Err(error) = self.run_pipeline(id).await {
             tracing::warn!(acquisition = %id, %error, "advancing an acquisition failed");
+        }
+        self.finish_task(id).await;
+    }
+
+    /// Cleans up after one pipeline task ended.
+    ///
+    /// A task that fails, completes or cancels its acquisition has already
+    /// undone admission's side effects, so this only forgets the row. A task
+    /// that stops because another process cancelled the acquisition has written
+    /// nothing, so the cancellation's cleanup happens here, which is what makes
+    /// an external cancel remove the staging directory and free the track even
+    /// when the worker noticed it late.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the acquisition whose task ended.
+    async fn finish_task(&self, id: Uuid) {
+        match self.inner.repository.get(id).await {
+            Ok(Some(row)) if row.state == AcquisitionState::Cancelled => {
+                if let Err(error) = self.finish_cancelled(&row, None).await {
+                    tracing::warn!(
+                        acquisition = %id,
+                        %error,
+                        "cleaning up a cancelled acquisition failed"
+                    );
+                }
+            }
+            Ok(Some(row)) if row.state.is_terminal() => self.forget(id),
+            // The row is still active, which means the pipeline stopped on an
+            // error the stages could not handle. It stays tracked so a
+            // cancellation can still reach it, and a later start resumes it.
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    acquisition = %id,
+                    %error,
+                    "reading an acquisition after its task ended failed"
+                );
+            }
         }
     }
 
@@ -1005,6 +1061,10 @@ impl AcquisitionOrchestrator {
             if row.state == AcquisitionState::Searching {
                 match self.search(&row).await? {
                     SearchOutcome::Failed(_reason) => return Ok(()),
+                    // The acquisition was cancelled while the search ran. The
+                    // row already says so; the task ends and the cleanup
+                    // happens in `finish_task`.
+                    SearchOutcome::Cancelled => return Ok(()),
                     // The search selected the candidates to try and logged
                     // them. The best one names the instance and the ETA a client
                     // sees while the download starts.
@@ -1021,7 +1081,9 @@ impl AcquisitionOrchestrator {
                         self.announce(&progress);
 
                         match self.download(row.id, &instances, &plan).await? {
-                            DownloadOutcome::Ready | DownloadOutcome::Stopped => return Ok(()),
+                            DownloadOutcome::Ready
+                            | DownloadOutcome::Stopped
+                            | DownloadOutcome::Cancelled => return Ok(()),
                             DownloadOutcome::RestartSearch => {
                                 // The backend lost the token. The download stage
                                 // moved the acquisition back to `searching`, so
@@ -1039,18 +1101,27 @@ impl AcquisitionOrchestrator {
 
     /// Fails an acquisition and puts its track into cooldown.
     ///
-    /// The failure, the track's new availability and the cooldown end are
-    /// written in one transaction, so a client can never see a failed
-    /// acquisition whose track is still `acquiring`, and both events are
-    /// published afterwards. The cooldown is
-    /// `acquisition.unavailable_cooldown_hours`, which stops a track nobody has
-    /// can find from making every client retry hit the backends again.
+    /// This is the one terminal path every failure reason takes, whether it came
+    /// out of the search, the download or the verification stage: the row is
+    /// marked `failed` with the reason and the backend's own detail, the track
+    /// becomes `unavailable` until the cooldown elapses, the backend call the
+    /// acquisition still has in flight is cancelled, the staging directory is
+    /// removed so no partial download is left behind, and the waiters and the
+    /// bus are told. The cooldown is
+    /// `acquisition.unavailable_cooldown_hours`, which stops a track nobody can
+    /// find from making every client retry hit the backends again.
     ///
     /// # Parameters
     ///
     /// - `id`: the acquisition to fail.
     /// - `reason`: why it failed, one of the fixed [`FailureReason`] literals.
     /// - `detail`: the backend's own message, when the failure has one.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the acquisition was failed, and also when it had already
+    /// ended, because a cancellation racing the failure must not turn into an
+    /// error.
     ///
     /// # Errors
     ///
@@ -1067,12 +1138,25 @@ impl AcquisitionOrchestrator {
         let Some(row) = self.inner.repository.get(id).await? else {
             return Err(AcquireError::UnknownAcquisition(id));
         };
+        if row.state.is_terminal() {
+            tracing::debug!(
+                acquisition = %id,
+                state = row.state.as_str(),
+                "an acquisition that already ended was not failed again"
+            );
+            self.forget(id);
+            return Ok(());
+        }
         let cooldown_hours = self
             .inner
             .settings
             .current()
             .get(keys::ACQUISITION_UNAVAILABLE_COOLDOWN_HOURS)?;
         let unavailable_until = crate::now_millis() + cooldown_hours.max(0) * 3_600_000;
+
+        // The backend is stopped before the row is written, so a failed
+        // acquisition cannot keep a download alive in the background.
+        self.cancel_backend(&row).await;
 
         let mut tx = self.inner.database.writer().begin().await?;
         repo::fail(&mut tx, id, reason, detail).await?;
@@ -1094,6 +1178,8 @@ impl AcquisitionOrchestrator {
         if let Some(track_id) = row.track_id {
             self.publish_availability(track_id, Availability::Unavailable, None);
         }
+        self.remove_staging(id).await;
+        self.forget(id);
         tracing::info!(
             acquisition = %id,
             track = ?row.track_id,
@@ -1102,6 +1188,304 @@ impl AcquisitionOrchestrator {
             "failed an acquisition"
         );
         Ok(())
+    }
+
+    /// Cancels an acquisition.
+    ///
+    /// Cancellation ends the acquisition without retrying it: the state becomes
+    /// `cancelled`, the backend call it holds is cancelled, its staging
+    /// directory is removed, its worker slot is given back when the pipeline
+    /// task ends, the track goes back to catalog-only availability unless it
+    /// already has a file, and the waiters and the bus are told. Nothing is
+    /// written to the track's cooldown, because a cancellation is not a failure
+    /// the retry policy should remember.
+    ///
+    /// # Parameters
+    ///
+    /// - `acquisition_id`: the acquisition to cancel.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the acquisition is cancelled, and also when it had already
+    /// ended, so cancelling twice is not an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::UnknownAcquisition`] when no acquisition has that
+    /// id, and the database or filesystem error that stopped the cleanup.
+    pub async fn cancel(&self, acquisition_id: Uuid) -> Result<(), AcquireError> {
+        let Some(row) = self.inner.repository.get(acquisition_id).await? else {
+            return Err(AcquireError::UnknownAcquisition(acquisition_id));
+        };
+        if row.state.is_terminal() {
+            tracing::debug!(
+                acquisition = %acquisition_id,
+                state = row.state.as_str(),
+                "an acquisition that already ended was not cancelled again"
+            );
+            self.forget(acquisition_id);
+            return Ok(());
+        }
+        self.finish_cancelled(&row, Some("cancelled")).await
+    }
+
+    /// Brings this process in line with the ledger another process wrote.
+    ///
+    /// The CLI writes the database directly instead of talking to the server,
+    /// so a cancellation it records has to be noticed here: every acquisition
+    /// this process still holds side effects for is looked up in the ledger and,
+    /// when the row is now `cancelled`, its worker is woken and its side effects
+    /// are undone. A row another connection ended some other way is dropped from
+    /// the tracked set, because there is nothing left to do for it.
+    ///
+    /// The composition root calls this after `PRAGMA data_version` changes,
+    /// which is how the server notices a write it did not make.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the tracked acquisitions agree with the ledger.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error of a read that failed; a row this process
+    /// cannot read stops the sweep, because it may be a cancellation that must
+    /// be undone.
+    pub async fn reconcile(&self) -> Result<(), AcquireError> {
+        let tracked: Vec<Uuid> = lock(&self.inner.in_flight).keys().copied().collect();
+        for id in tracked {
+            let Some(row) = self.inner.repository.get(id).await? else {
+                self.forget(id);
+                continue;
+            };
+            if row.state == AcquisitionState::Cancelled {
+                self.finish_cancelled(&row, None).await?;
+            } else if row.state.is_terminal() {
+                self.forget(id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Lists acquisitions for the administrative view.
+    ///
+    /// # Parameters
+    ///
+    /// - `filter`: which rows to return and how many.
+    ///
+    /// # Returns
+    ///
+    /// The matching rows, newest first, each with the title and artist of its
+    /// track.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::Database`] when the read fails.
+    pub async fn list(&self, filter: &ListFilter) -> Result<Vec<AcquisitionSummary>, AcquireError> {
+        self.inner.repository.list(filter).await
+    }
+
+    /// Ends an acquisition as cancelled and undoes what admission did for it.
+    ///
+    /// This is the one place a cancellation is applied, whether it came from
+    /// [`AcquisitionOrchestrator::cancel`] or from a row another process wrote.
+    /// Every step is idempotent, so the caller that noticed the cancellation and
+    /// the worker task that was polling the acquisition may both run it: the
+    /// ledger row is only written when it is not terminal yet, the track is only
+    /// returned to `remote` while it is still `acquiring` and has no file, and a
+    /// staging directory that is already gone is not an error.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the acquisition's ledger row.
+    /// - `message`: why it was cancelled, when the caller knows.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database or filesystem error that stopped the cleanup.
+    async fn finish_cancelled(
+        &self,
+        row: &AcquisitionRow,
+        message: Option<&str>,
+    ) -> Result<(), AcquireError> {
+        let id = row.id;
+        // Stop the backend first: a worker may still be polling the token, and a
+        // backend that is still transferring would otherwise keep writing into a
+        // staging directory this call is about to remove.
+        self.cancel_backend(row).await;
+        self.stop_signal(id).notify_one();
+
+        let mut restored = false;
+        let mut tx = self.inner.database.writer().begin().await?;
+        if !row.state.is_terminal() {
+            repo::cancel(&mut tx, id, message).await?;
+        }
+        if let Some(track_id) = row.track_id {
+            restored = self.restore_track(&mut tx, track_id).await?;
+        }
+        tx.commit().await?;
+
+        let mut progress = self.progress_of_row(row, row.priority);
+        progress.state = AcquisitionState::Cancelled;
+        progress.failure_reason = Some(FailureReason::Cancelled);
+        self.announce(&progress);
+        if restored && let Some(track_id) = row.track_id {
+            self.publish_availability(track_id, Availability::Remote, None);
+        }
+        self.remove_staging(id).await;
+        self.forget(id);
+        tracing::info!(
+            acquisition = %id,
+            track = ?row.track_id,
+            "cancelled an acquisition"
+        );
+        Ok(())
+    }
+
+    /// Returns a cancelled acquisition's track to catalog-only availability.
+    ///
+    /// A track an acquisition marked `acquiring` goes back to `remote`, which is
+    /// what lets it be acquired again after the caller's mind changed. A track
+    /// that already has a file keeps the availability that file gives it: the
+    /// cancelled acquisition did not produce one, but another one may have.
+    ///
+    /// # Parameters
+    ///
+    /// - `conn`: the transaction or connection to write on.
+    /// - `track_id`: the track to restore.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the availability was changed, so the caller knows whether to
+    /// publish an event.
+    ///
+    /// # Errors
+    ///
+    /// Returns the library error of a failed read or write.
+    async fn restore_track(
+        &self,
+        conn: &mut SqliteConnection,
+        track_id: EntityId,
+    ) -> Result<bool, AcquireError> {
+        let Some(track) = tracks::get_track(&mut *conn, track_id).await? else {
+            return Ok(false);
+        };
+        if track.availability != Availability::Acquiring {
+            return Ok(false);
+        }
+        if media_files::preferred_media_file(&mut *conn, track_id)
+            .await?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        tracks::set_track_availability(&mut *conn, track_id, Availability::Remote, None).await?;
+        Ok(true)
+    }
+
+    /// Cancels the backend call an acquisition has in flight, when it has one.
+    ///
+    /// The ledger only stores a download token, so a token in the row names a
+    /// download to cancel; a search is cancelled by the stage that started it.
+    /// A backend that no longer knows the token answers with an error, which is
+    /// ignored: what matters is that the backend stops working for this
+    /// acquisition.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the acquisition whose backend call to cancel.
+    async fn cancel_backend(&self, row: &AcquisitionRow) {
+        let Some(token) = row.plugin_token.as_deref() else {
+            return;
+        };
+        let Some(instance) = row.instance_id.and_then(|id| self.instance_by_id(id)) else {
+            return;
+        };
+        let Some(provider) = instance.acquisition() else {
+            return;
+        };
+        let context = AcquisitionContext::new(self.staging_dir(row.id));
+        provider.cancel_download(&context, token).await;
+        tracing::debug!(
+            acquisition = %row.id,
+            instance = instance.slug().as_str(),
+            "cancelled the acquisition's backend download"
+        );
+    }
+
+    /// Removes an acquisition's staging directory.
+    ///
+    /// The staging directory is the only place a download and an import write
+    /// before a file reaches managed storage, so removing it is what makes an
+    /// acquisition that ends without a file leave none behind. A directory that
+    /// is already gone is not an error.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the acquisition whose directory to remove.
+    async fn remove_staging(&self, id: Uuid) {
+        let staging = self.staging_dir(id);
+        if let Err(error) = tokio::fs::remove_dir_all(&staging).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                path = %staging.display(),
+                %error,
+                "an acquisition's staging directory could not be removed"
+            );
+        }
+    }
+
+    /// Returns the acquisition-layer instance with `id`.
+    ///
+    /// A ledger row names its instance by id and the registry is keyed by slug,
+    /// so the layer is walked. Only the acquisition layer can serve an
+    /// acquisition, which keeps the walk to the handful of instances that
+    /// actually download.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the instance id a ledger row names.
+    ///
+    /// # Returns
+    ///
+    /// The instance, or `None` when the registry no longer serves it.
+    fn instance_by_id(&self, id: Uuid) -> Option<Arc<RegistryInstance>> {
+        self.inner
+            .registry
+            .layers(hearthsound_core::Layer::Acquisition)
+            .into_iter()
+            .find(|instance| instance.id() == id)
+    }
+
+    /// Returns the signal that wakes the worker of an acquisition.
+    ///
+    /// The entry is created on first use and removed by
+    /// [`AcquisitionOrchestrator::forget`], so the map holds exactly the
+    /// acquisitions this process has side effects for.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the acquisition whose signal is wanted.
+    ///
+    /// # Returns
+    ///
+    /// The signal, created empty when this is its first use.
+    pub(crate) fn stop_signal(&self, id: Uuid) -> Arc<Notify> {
+        let mut in_flight = lock(&self.inner.in_flight);
+        Arc::clone(
+            in_flight
+                .entry(id)
+                .or_insert_with(|| Arc::new(Notify::new())),
+        )
+    }
+
+    /// Forgets an acquisition this process no longer has side effects for.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the acquisition to forget.
+    fn forget(&self, id: Uuid) {
+        lock(&self.inner.in_flight).remove(&id);
     }
 
     /// Attaches a waiter to an acquisition and returns its handle.

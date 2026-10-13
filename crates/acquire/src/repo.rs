@@ -358,6 +358,41 @@ pub async fn next_queued(
     row.map(AcquisitionDbRow::decode).transpose()
 }
 
+/// Reads every acquisition that still holds work, oldest first.
+///
+/// The rows are exactly the ones in [`ACTIVE_STATES`]. A process that starts
+/// resumes the acquisitions this returns, so the order matters: oldest first is
+/// the order the queue would have served them in, and it keeps the resumed jobs
+/// of one track in the order they were admitted.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+///
+/// # Returns
+///
+/// Every non-terminal acquisition, oldest first.
+///
+/// # Errors
+///
+/// Returns [`AcquireError::Database`] when the read fails and
+/// [`AcquireError::UnknownLiteral`] when a stored literal is not a known one.
+pub async fn active(conn: &mut SqliteConnection) -> Result<Vec<AcquisitionRow>, AcquireError> {
+    let rows = sqlx::query_as!(
+        AcquisitionDbRow,
+        "SELECT id, track_id, album_id, granularity, priority, reason, state, requested_by, \
+                instance_id, candidate, plugin_token, progress, attempts, failure_reason, \
+                error_detail, media_file_id, created_at, updated_at \
+         FROM acquisitions \
+         WHERE state IN ('queued', 'resolving', 'searching', 'downloading', 'verifying', \
+                         'importing') \
+         ORDER BY created_at, rowid",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.into_iter().map(AcquisitionDbRow::decode).collect()
+}
+
 /// Returns an acquisition's current state.
 ///
 /// # Parameters
@@ -510,6 +545,91 @@ pub async fn complete(
     .execute(&mut *conn)
     .await?;
     write_log(conn, id, AcquisitionState::Completed, message).await
+}
+
+/// Ends an acquisition as `cancelled` and logs it.
+///
+/// The cancellation is written as the same kind of terminal row a failure
+/// writes: the state, the `failure_reason` literal the design's failure table
+/// gives cancellations, the optional detail and the log entry. The caller is
+/// what undoes the acquisition's side effects, because only it knows the staging
+/// directory and the backend call that are still live.
+///
+/// The architecture's state diagram only lets an acquisition be cancelled from
+/// the states that hold backend work - `searching`, `downloading`, `verifying`
+/// and `importing` - so a row that has not reached one of them is moved through
+/// the states that lead to `searching` first. Every cancellation therefore ends
+/// in `cancelled` rather than being refused because the job was still queued or
+/// resolving.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `id`: the acquisition to cancel.
+/// - `message`: why it was cancelled, when the caller knows.
+///
+/// # Returns
+///
+/// `true` when the row was cancelled, `false` when it had already ended and
+/// nothing was written.
+///
+/// # Errors
+///
+/// Returns [`AcquireError::UnknownAcquisition`] when no row has that id and
+/// [`AcquireError::Database`] when a statement fails.
+pub async fn cancel(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    message: Option<&str>,
+) -> Result<bool, AcquireError> {
+    let mut from = state(conn, id).await?;
+    if from.is_terminal() {
+        return Ok(false);
+    }
+    // Cancellation is only defined from the states that hold backend work, so a
+    // row that has not reached one of them walks to `searching` first.
+    if from == AcquisitionState::Queued {
+        transition(
+            conn,
+            id,
+            AcquisitionState::Resolving,
+            Some("cancelling the acquisition"),
+        )
+        .await?;
+        from = AcquisitionState::Resolving;
+    }
+    if from == AcquisitionState::Resolving {
+        transition(
+            conn,
+            id,
+            AcquisitionState::Searching,
+            Some("cancelling the acquisition"),
+        )
+        .await?;
+        from = AcquisitionState::Searching;
+    }
+    debug_assert!(
+        from.can_transition_to(AcquisitionState::Cancelled),
+        "every remaining active state may be cancelled"
+    );
+    sqlx::query!(
+        "UPDATE acquisitions SET state = 'cancelled', failure_reason = ?, error_detail = ?, \
+                                updated_at = ? WHERE id = ?",
+        FailureReason::Cancelled.as_str(),
+        message,
+        crate::now_millis(),
+        uuid_key(id),
+    )
+    .execute(&mut *conn)
+    .await?;
+    write_log(
+        conn,
+        id,
+        AcquisitionState::Cancelled,
+        message.or(Some("cancelled")),
+    )
+    .await?;
+    Ok(true)
 }
 
 /// Raises an acquisition's priority.
@@ -744,6 +864,178 @@ pub async fn log(conn: &mut SqliteConnection, id: Uuid) -> Result<Vec<LogEntry>,
         .collect()
 }
 
+/// How [`list`] selects the rows it returns.
+///
+/// The administrative listing reads the ledger for a person rather than for the
+/// pipeline, so it is filtered by state and by whether the acquisition still
+/// holds work, and it is capped.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_acquire::repo::ListFilter;
+/// use hearthsound_core::AcquisitionState;
+///
+/// let filter = ListFilter {
+///     state: Some(AcquisitionState::Failed),
+///     active: false,
+///     limit: Some(20),
+/// };
+/// assert_eq!(filter.state, Some(AcquisitionState::Failed));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListFilter {
+    /// Only rows in this state, when one is set.
+    pub state: Option<AcquisitionState>,
+    /// Only rows that still hold work, when set.
+    ///
+    /// Ignored when [`ListFilter::state`] is set: an explicit state is narrower
+    /// than "active".
+    pub active: bool,
+    /// At most this many rows, when set.
+    pub limit: Option<u32>,
+}
+
+/// One acquisition as an administrative listing shows it.
+///
+/// The row carries what a person needs to recognize the job - its client id, its
+/// state, its priority and the track it targets - plus the display fields the
+/// ledger does not hold itself: the track's title and artist, and the slug of the
+/// instance serving it. The percentage is the one the last progress snapshot
+/// allows, which is the same number the event stream carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcquisitionSummary {
+    /// The acquisition's primary key.
+    pub id: Uuid,
+    /// The acquisition's client id, `ac_...`.
+    pub client_id: String,
+    /// The acquisition's state.
+    pub state: AcquisitionState,
+    /// The acquisition's priority.
+    pub priority: Priority,
+    /// The track the acquisition is for, when it is track-granular.
+    pub track_id: Option<EntityId>,
+    /// The track's title, when the track still exists.
+    pub track_title: Option<String>,
+    /// The track's display artist, when the track knows one.
+    pub track_artist: Option<String>,
+    /// The slug of the instance serving the acquisition, when one is named and
+    /// the registry still knows it.
+    pub instance: Option<String>,
+    /// The download progress as a whole percentage, when the last progress
+    /// snapshot allows one.
+    pub percent: Option<u8>,
+    /// Why the acquisition failed, when it failed or was cancelled.
+    pub failure_reason: Option<FailureReason>,
+    /// When the row was created, in unix milliseconds.
+    pub created_at: i64,
+    /// When the row was last written, in unix milliseconds.
+    pub updated_at: i64,
+}
+
+/// The stored form of one listed acquisition.
+#[derive(sqlx::FromRow)]
+struct ListDbRow {
+    id: Vec<u8>,
+    track_id: Option<Vec<u8>>,
+    priority: String,
+    state: String,
+    progress: Option<String>,
+    failure_reason: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+    track_title: Option<String>,
+    track_artist: Option<String>,
+    instance_slug: Option<String>,
+}
+
+impl ListDbRow {
+    /// Converts a stored row into a summary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::CorruptId`] when an id column is not 16 bytes and
+    /// [`AcquireError::UnknownLiteral`] when a literal column holds a value
+    /// outside its enum.
+    fn decode(self) -> Result<AcquisitionSummary, AcquireError> {
+        let id = uuid_of(&self.id)?;
+        Ok(AcquisitionSummary {
+            id,
+            client_id: EntityId::from_uuid(IdPrefix::Acquisition, id).to_string(),
+            state: decode_literal("state", &self.state)?,
+            priority: decode_literal("priority", &self.priority)?,
+            track_id: self
+                .track_id
+                .as_deref()
+                .map(|bytes| entity(IdPrefix::Track, bytes))
+                .transpose()?,
+            track_title: self.track_title,
+            track_artist: self.track_artist,
+            instance: self.instance_slug,
+            percent: crate::download::stored_progress(self.progress.as_deref())
+                .and_then(|stored| stored.percent()),
+            failure_reason: self
+                .failure_reason
+                .as_deref()
+                .map(|value| decode_literal("failure reason", value))
+                .transpose()?,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        })
+    }
+}
+
+/// Lists acquisitions, newest first, with the display fields of their track.
+///
+/// The track's title and artist are joined in, as is the slug of the instance
+/// serving the acquisition, so a caller that only prints the listing does not
+/// have to look either up. A row whose track or instance has been deleted keeps
+/// its place with the missing field left `None`.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `filter`: which rows to return and how many.
+///
+/// # Returns
+///
+/// The matching rows, newest first.
+///
+/// # Errors
+///
+/// Returns [`AcquireError::Database`] when the read fails and
+/// [`AcquireError::UnknownLiteral`] when a stored literal is not a known one.
+pub async fn list(
+    conn: &mut SqliteConnection,
+    filter: &ListFilter,
+) -> Result<Vec<AcquisitionSummary>, AcquireError> {
+    let state = filter.state.map(AcquisitionState::as_str);
+    let active = i64::from(filter.active);
+    let limit = i64::from(filter.limit.unwrap_or(u32::MAX));
+    let rows = sqlx::query_as!(
+        ListDbRow,
+        "SELECT a.id, a.track_id, a.priority, a.state, a.progress, a.failure_reason, \
+                a.created_at, a.updated_at, \
+                t.title AS track_title, t.display_artist AS track_artist, \
+                i.slug AS instance_slug \
+         FROM acquisitions a \
+         LEFT JOIN tracks t ON t.id = a.track_id \
+         LEFT JOIN provider_instances i ON i.id = a.instance_id \
+         WHERE (? IS NULL OR a.state = ?) \
+           AND (? = 0 OR a.state IN ('queued', 'resolving', 'searching', 'downloading', \
+                                     'verifying', 'importing')) \
+         ORDER BY a.created_at DESC, a.rowid DESC \
+         LIMIT ?",
+        state,
+        state,
+        active,
+        limit,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.into_iter().map(ListDbRow::decode).collect()
+}
+
 /// The pool-level view of the acquisition ledger.
 ///
 /// Each method wraps the matching free function in its own transaction, which
@@ -814,6 +1106,43 @@ impl AcquisitionRepository {
     pub async fn log(&self, id: Uuid) -> Result<Vec<LogEntry>, AcquireError> {
         let mut conn = self.readers.acquire().await?;
         log(&mut conn, id).await
+    }
+
+    /// Reads every acquisition that still holds work, in its own read
+    /// transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::Database`] when the read fails.
+    pub async fn active(&self) -> Result<Vec<AcquisitionRow>, AcquireError> {
+        let mut conn = self.readers.acquire().await?;
+        active(&mut conn).await
+    }
+
+    /// Lists acquisitions, in its own read transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::Database`] when the read fails.
+    pub async fn list(&self, filter: &ListFilter) -> Result<Vec<AcquisitionSummary>, AcquireError> {
+        let mut conn = self.readers.acquire().await?;
+        list(&mut conn, filter).await
+    }
+
+    /// Cancels an acquisition in its own transaction.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the row was cancelled, `false` when it had already ended.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::UnknownAcquisition`] when no row has that id.
+    pub async fn cancel(&self, id: Uuid, message: Option<&str>) -> Result<bool, AcquireError> {
+        let mut tx = self.writer.begin().await?;
+        let cancelled = cancel(&mut tx, id, message).await?;
+        tx.commit().await?;
+        Ok(cancelled)
     }
 
     /// Moves an acquisition to `to` in its own transaction.

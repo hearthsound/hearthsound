@@ -113,6 +113,15 @@ impl Env {
         Env::build(server_config, limits, env, "move", false).await
     }
 
+    /// Returns the temporary directory the database and the storage live in.
+    ///
+    /// A test that needs a second connection - the one a CLI command would
+    /// open - builds its own [`Database`](hearthsound_db::Database) from
+    /// `<directory>/hearthsound.db`.
+    pub fn directory(&self) -> PathBuf {
+        self.dir.path().to_path_buf()
+    }
+
     /// Builds an environment whose import root has a non-default mode.
     ///
     /// # Parameters
