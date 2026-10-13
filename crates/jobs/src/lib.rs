@@ -50,7 +50,11 @@ mod clock;
 mod error;
 mod kind;
 mod queue;
+mod runner;
+mod shutdown;
 
 pub use error::JobsError;
 pub use kind::JobKind;
 pub use queue::{FailureOutcome, Job, JobQueue, JobState, NewJob, QueueOptions, RetryPolicy};
+pub use runner::{JobError, JobHandler, JobRunner, JobRunnerOptions};
+pub use shutdown::Shutdown;
