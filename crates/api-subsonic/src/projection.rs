@@ -25,7 +25,7 @@
 //!   the media file row rather than from the query projection, because only the
 //!   row carries the bit depth, the sample rate, and the channel count.
 
-use hearthsound_catalog::{CatalogAlbumRefResult, CatalogArtistResult};
+use hearthsound_catalog::{CatalogAlbumRefResult, CatalogAlbumResult, CatalogArtistResult};
 use hearthsound_core::providers::{ArtistCredit, CatalogTrack};
 use hearthsound_core::{CatalogId, EntityKind, Slug};
 use hearthsound_library::query::ArtistSummary;
@@ -790,6 +790,73 @@ pub(crate) fn catalog_album_ref(result: &CatalogAlbumRefResult, title_suffix: &s
         .set("explicitStatus", "")
 }
 
+/// Builds one catalog `AlbumID3` member from a full album lookup.
+///
+/// # Parameters
+///
+/// - `result`: the album the provider returned, with its catalog id.
+/// - `title_suffix`: the suffix appended to the title.
+///
+/// # Returns
+///
+/// The album, without its `song` children; the endpoint that returns songs adds
+/// them with [`catalog_child`].
+pub(crate) fn catalog_album(result: &CatalogAlbumResult, title_suffix: &str) -> Object {
+    let id = &result.id;
+    let slug = id.slug();
+    let album = &result.album;
+    let genres: Vec<String> = album.genres.clone();
+    let duration_secs = album
+        .tracks
+        .iter()
+        .filter_map(|track| track.duration_ms)
+        .map(i64::from)
+        .sum::<i64>()
+        / 1_000;
+
+    Object::new()
+        .set("id", id.to_string())
+        .set("name", format!("{}{title_suffix}", album.title))
+        .set("artist", display_credits(&album.artists))
+        .set("year", release_year(album.release_date.as_deref()))
+        .set("coverArt", cover_art(id, !album.images.is_empty()))
+        .set("duration", duration_secs)
+        .set("playCount", 0)
+        .set("genre", genres.first().cloned().unwrap_or_default())
+        .set("created", "")
+        .set(
+            "artistId",
+            album
+                .artists
+                .first()
+                .and_then(|credit| artist_id(slug, credit))
+                .map(|artist| artist.to_string())
+                .unwrap_or_default(),
+        )
+        .set("songCount", album.tracks.len() as i64)
+        .set("played", "")
+        .set("musicBrainzId", music_brainz_id(&album.ids))
+        .set(
+            "genres",
+            Array::named("genre", genres.iter().map(|name| genre(name))),
+        )
+        .set(
+            "artists",
+            Array::named(
+                "artist",
+                album.artists.iter().map(|credit| credit_ref(slug, credit)),
+            ),
+        )
+        .set("displayArtist", display_credits(&album.artists))
+        .set(
+            "releaseTypes",
+            Array::named("releaseType", album.album_type.iter().cloned()),
+        )
+        .set("moods", Array::named("mood", std::iter::empty::<String>()))
+        .set("sortName", "")
+        .set("explicitStatus", "")
+}
+
 /// Builds one catalog `ArtistID3` member.
 ///
 /// # Parameters
@@ -874,6 +941,23 @@ fn cover_art(id: &CatalogId, has_image: bool) -> String {
     } else {
         String::new()
     }
+}
+
+/// Returns the year a release date names.
+///
+/// # Parameters
+///
+/// - `release_date`: the provider's ISO 8601 date or date-time.
+///
+/// # Returns
+///
+/// The first four characters parsed as a year, or zero when the value does not
+/// begin with one.
+fn release_year(release_date: Option<&str>) -> i64 {
+    release_date
+        .and_then(|date| date.get(..4))
+        .and_then(|year| year.parse::<i64>().ok())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

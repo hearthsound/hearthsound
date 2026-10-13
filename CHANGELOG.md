@@ -365,3 +365,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   state carries the catalog layer and the activity service, and
   `hearthsound-library` gains a scope-filtered track listing for the empty
   query.
+- Browsing a catalog entity by its `x_` id through `getSong`, `getAlbum`, and
+  `getArtist`: the entity is answered from the catalog layer without storing
+  anything, projected with the same catalog rules as a `search3` result, with an
+  album carrying its `x_`-id songs and an artist its `x_`-id albums. An id the
+  catalog does not have, or one of another kind, is Subsonic error 70, and an
+  instance that cannot answer is a generic error naming it.

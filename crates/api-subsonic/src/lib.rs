@@ -87,11 +87,13 @@
 //! `1` is the requesting user's personal library and of `2` the server-wide
 //! view, and a request without one reads the user's `subsonic.default_scope`.
 //!
-//! `search3` is the one endpoint that also answers for entities the server has
-//! not stored: a catalog provider's match is projected with an `x_` id, so the
-//! client can stream, save, or acquire it later. The catalog layer is a
-//! dependency of this crate for exactly that reason, and it never makes a
-//! search fail: a catalog instance that is down leaves the local results.
+//! `search3`, `getSong`, `getAlbum`, and `getArtist` also answer for entities
+//! the server has not stored: a catalog provider's entity is projected with an
+//! `x_` id, so the client can stream, save, or acquire it later. The catalog
+//! layer is a dependency of this crate for exactly that reason, and it never
+//! makes a search fail: a catalog instance that is down leaves the local
+//! results, while a single-entity catalog lookup answers with the provider's
+//! failure.
 //!
 //! Every other path under `/rest/`, including the endpoint families this server
 //! never implements (podcast, internet radio, share, video, and chat), answers

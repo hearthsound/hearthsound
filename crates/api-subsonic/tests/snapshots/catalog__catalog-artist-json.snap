@@ -1,0 +1,5 @@
+---
+source: crates/api-subsonic/tests/catalog.rs
+expression: "&json.body"
+---
+{"subsonic-response":{"status":"ok","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.0-alpha.0","openSubsonic":true,"artist":{"id":"x_hello_r_d1jprv3f5ngq4x39edt2tc8","name":"Hello Artist","albumCount":1,"musicBrainzId":"","sortName":"","album":[{"id":"x_hello_a_d1jprv3f5ngprrkndmpk2","name":"Hello Album","artist":"Hello Artist","year":2026,"coverArt":"","duration":0,"playCount":0,"genre":"","created":"","artistId":"","songCount":0,"played":"","musicBrainzId":"","genres":[],"artists":[{"id":"","name":"Hello Artist"}],"displayArtist":"Hello Artist","releaseTypes":[],"moods":[],"sortName":"","explicitStatus":""}]}}}

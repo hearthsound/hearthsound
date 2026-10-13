@@ -1,0 +1,5 @@
+---
+source: crates/api-subsonic/tests/catalog.rs
+expression: "&xml.body"
+---
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="hearthsound" serverVersion="0.1.0-alpha.0" openSubsonic="true"><song id="x_hello_t_d1jprv3f5nt74rb3dcpk2" parent="x_hello_a_d1jprv3f5ngprrkndmpk2" isDir="false" title="Hello, world" album="Hello Album" artist="Hello Artist" track="1" year="2026" genre="" coverArt="x_hello_t_d1jprv3f5nt74rb3dcpk2" size="0" contentType="audio/mpeg" suffix="mp3" duration="180" bitRate="0" bitDepth="0" samplingRate="0" channelCount="0" path="catalog/hello/hello-track-1" playCount="0" played="" discNumber="1" created="" albumId="x_hello_a_d1jprv3f5ngprrkndmpk2" artistId="" type="music" mediaType="song" isVideo="false" bpm="0" comment="" sortName="" musicBrainzId="" displayArtist="Hello Artist" displayAlbumArtist="Hello Artist" displayComposer="" explicitStatus="clean"><artist id="" name="Hello Artist"/><albumArtist id="" name="Hello Artist"/><replayGain trackGain="0" albumGain="0" trackPeak="0" albumPeak="0" baseGain="0"/></song></subsonic-response>

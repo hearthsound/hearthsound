@@ -11,8 +11,12 @@
 //!
 //! The module also names the artists a catalog entity credits: a provider
 //! record carries an artist's identifiers as external ids, and the first one is
-//! what the issuing instance resolves.
+//! what the issuing instance resolves. And it maps a [`CatalogError`] onto the
+//! failure envelope: an entity that does not exist is a Subsonic not-found,
+//! while anything else is a failure the client cannot act on and is reported as
+//! a generic error carrying the provider's message for an operator.
 
+use hearthsound_catalog::CatalogError;
 use hearthsound_config::SettingsStore;
 use hearthsound_config::keys;
 use hearthsound_core::providers::ArtistCredit;
@@ -20,7 +24,7 @@ use hearthsound_core::{CatalogId, EntityKind, Slug};
 use hearthsound_library::query::content_type_for;
 
 use crate::browse;
-use crate::response::SubsonicError;
+use crate::response::{SubsonicError, codes};
 
 /// The container a catalog entity is projected with before it is acquired.
 ///
@@ -77,6 +81,31 @@ pub(crate) fn title_suffix(snapshot: &SettingsStore) -> Result<String, SubsonicE
     snapshot
         .get(keys::SUBSONIC_CATALOG_TITLE_SUFFIX)
         .map_err(|error| browse::failure("subsonic.catalog_title_suffix", &error))
+}
+
+/// Maps a catalog failure onto the failure envelope.
+///
+/// # Parameters
+///
+/// - `error`: the failure a catalog call returned.
+///
+/// # Returns
+///
+/// Subsonic error 70 when the entity does not exist, and a generic error
+/// carrying the provider's message otherwise, because neither an unreachable
+/// instance nor a rejected credential is something a client can act on, while
+/// an operator reading the log wants to know which instance failed.
+pub(crate) fn failure(error: &CatalogError) -> SubsonicError {
+    match error {
+        CatalogError::NotFound => SubsonicError::not_found(),
+        other => {
+            tracing::warn!(error = %other, "a catalog call failed");
+            SubsonicError::new(
+                codes::GENERIC,
+                format!("The catalog could not answer: {other}"),
+            )
+        }
+    }
 }
 
 /// Builds the catalog id of the artist one credit names.

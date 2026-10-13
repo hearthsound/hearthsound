@@ -6,10 +6,11 @@
 //! [`crate::projection`], so the five responses share one scope rule and one
 //! set of members.
 
-use hearthsound_core::{ClientId, EntityId, IdPrefix};
+use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, IdPrefix};
 use hearthsound_library::query::AlbumSort;
 
 use crate::auth::Call;
+use crate::catalog;
 use crate::response::{Encoded, Response, SubsonicError, codes};
 use crate::value::{Array, Object};
 use crate::{browse, projection, scope};
@@ -19,6 +20,9 @@ const DEFAULT_ALBUM_SIZE: i64 = 10;
 
 /// The largest number of albums `getAlbumList2` returns.
 const MAX_ALBUM_SIZE: i64 = 500;
+
+/// The largest number of albums a catalog artist lookup lists.
+const MAX_CATALOG_ALBUMS: u32 = 500;
 
 /// The message an unsupported album list type is answered with.
 const UNSUPPORTED_LIST_TYPE: &str = "Unsupported album list type.";
@@ -69,15 +73,17 @@ pub async fn get_artists(call: Call) -> Encoded {
 /// # Errors
 ///
 /// Answers Subsonic error 10 when `id` is missing, error 70 when it is
-/// malformed, names another kind of entity, is a catalog id, or is not in
-/// scope, and a generic error when a read fails.
+/// malformed, names another kind of entity, or is not in scope, error 70 when a
+/// catalog id names an entity the catalog does not have, and a generic error
+/// when a read fails or the catalog instance cannot answer.
 pub async fn get_artist(call: Call) -> Encoded {
     let scope = match scope::resolve(&call).await {
         Ok(scope) => scope,
         Err(error) => return call.encode(Response::failed(error)),
     };
-    let artist_id = match entity_id(&call, IdPrefix::Artist) {
-        Ok(id) => id,
+    let artist_id = match requested(&call, IdPrefix::Artist) {
+        Ok(Requested::Entity(id)) => id,
+        Ok(Requested::Catalog(id)) => return catalog_artist(&call, id).await,
         Err(error) => return call.encode(Response::failed(error)),
     };
     let database = call.state().database();
@@ -124,15 +130,17 @@ pub async fn get_artist(call: Call) -> Encoded {
 /// # Errors
 ///
 /// Answers Subsonic error 10 when `id` is missing, error 70 when it is
-/// malformed, names another kind of entity, is a catalog id, or is not in
-/// scope, and a generic error when a read fails.
+/// malformed, names another kind of entity, or is not in scope, error 70 when a
+/// catalog id names an entity the catalog does not have, and a generic error
+/// when a read fails or the catalog instance cannot answer.
 pub async fn get_album(call: Call) -> Encoded {
     let scope = match scope::resolve(&call).await {
         Ok(scope) => scope,
         Err(error) => return call.encode(Response::failed(error)),
     };
-    let album_id = match entity_id(&call, IdPrefix::Album) {
-        Ok(id) => id,
+    let album_id = match requested(&call, IdPrefix::Album) {
+        Ok(Requested::Entity(id)) => id,
+        Ok(Requested::Catalog(id)) => return catalog_album(&call, id).await,
         Err(error) => return call.encode(Response::failed(error)),
     };
     let loaded = match browse::album(call.state().database(), scope, album_id).await {
@@ -172,15 +180,17 @@ pub async fn get_album(call: Call) -> Encoded {
 /// # Errors
 ///
 /// Answers Subsonic error 10 when `id` is missing, error 70 when it is
-/// malformed, names another kind of entity, is a catalog id, or is not in
-/// scope, and a generic error when a read fails.
+/// malformed, names another kind of entity, or is not in scope, error 70 when a
+/// catalog id names an entity the catalog does not have, and a generic error
+/// when a read fails or the catalog instance cannot answer.
 pub async fn get_song(call: Call) -> Encoded {
     let scope = match scope::resolve(&call).await {
         Ok(scope) => scope,
         Err(error) => return call.encode(Response::failed(error)),
     };
-    let track_id = match entity_id(&call, IdPrefix::Track) {
-        Ok(id) => id,
+    let track_id = match requested(&call, IdPrefix::Track) {
+        Ok(Requested::Entity(id)) => id,
+        Ok(Requested::Catalog(id)) => return catalog_song(&call, id).await,
         Err(error) => return call.encode(Response::failed(error)),
     };
     let loaded = match browse::track(call.state().database(), scope, track_id).await {
@@ -276,7 +286,16 @@ pub async fn get_album_list_2(call: Call) -> Encoded {
     call.encode(Response::ok().member("albumList2", Object::new().set("album", Array::new(albums))))
 }
 
-/// Reads the `id` parameter as an entity id of `expected` kind.
+/// The id a browse request named.
+#[derive(Debug, Clone)]
+enum Requested {
+    /// A stored entity, which the local scope queries answer.
+    Entity(EntityId),
+    /// An unmaterialized catalog entity, which the catalog layer answers.
+    Catalog(CatalogId),
+}
+
+/// Reads the `id` parameter as a stored or catalog entity of `expected` kind.
 ///
 /// # Parameters
 ///
@@ -285,19 +304,18 @@ pub async fn get_album_list_2(call: Call) -> Encoded {
 ///
 /// # Returns
 ///
-/// The entity id.
+/// The stored entity id or the catalog id the request named.
 ///
 /// # Errors
 ///
 /// Returns Subsonic error 10 when `id` is absent, and error 70 when it is
-/// malformed, names a record of another kind, or is an unmaterialized `x_`
-/// catalog id, which this milestone cannot project.
-fn entity_id(call: &Call, expected: IdPrefix) -> Result<EntityId, SubsonicError> {
+/// malformed or names a record of another kind.
+fn requested(call: &Call, expected: IdPrefix) -> Result<Requested, SubsonicError> {
     let Some(value) = call.get("id") else {
         return Err(SubsonicError::missing_parameter("id"));
     };
     match ClientId::parse(value) {
-        Ok(ClientId::Entity(id)) if id.kind() == expected => Ok(id),
+        Ok(ClientId::Entity(id)) if id.kind() == expected => Ok(Requested::Entity(id)),
         Ok(ClientId::Entity(id)) => {
             tracing::debug!(
                 id = %id,
@@ -306,8 +324,15 @@ fn entity_id(call: &Call, expected: IdPrefix) -> Result<EntityId, SubsonicError>
             );
             Err(SubsonicError::not_found())
         }
+        Ok(ClientId::Catalog(id)) if expected.entity_kind() == Some(id.kind()) => {
+            Ok(Requested::Catalog(id))
+        }
         Ok(ClientId::Catalog(id)) => {
-            tracing::debug!(id = %id, "a browse request named a catalog entity");
+            tracing::debug!(
+                id = %id,
+                expected = expected.as_str(),
+                "a browse request named a catalog entity of another kind"
+            );
             Err(SubsonicError::not_found())
         }
         Err(error) => {
@@ -315,6 +340,140 @@ fn entity_id(call: &Call, expected: IdPrefix) -> Result<EntityId, SubsonicError>
             Err(SubsonicError::not_found())
         }
     }
+}
+
+/// Answers `getSong` for an unmaterialized catalog id.
+///
+/// The track is looked up through the instance that issued the id and
+/// projected with the same rules a `search3` catalog result uses; nothing is
+/// stored, so a stream of the id is what acquires it.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, whose state holds the catalog layer.
+/// - `id`: the catalog id of the track.
+///
+/// # Returns
+///
+/// A successful envelope carrying `song` (a catalog Child), or a failed
+/// envelope.
+///
+/// # Errors
+///
+/// Answers Subsonic error 70 when the catalog does not have the track, and a
+/// generic error when the issuing instance cannot answer.
+async fn catalog_song(call: &Call, id: CatalogId) -> Encoded {
+    let snapshot = call.state().settings_snapshot();
+    let format = match catalog::pending_format(&snapshot) {
+        Ok(format) => format,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let suffix = match catalog::title_suffix(&snapshot) {
+        Ok(suffix) => suffix,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let track = match call.state().catalog().track(&id).await {
+        Ok(track) => track,
+        Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
+    };
+    let song = projection::catalog_child(
+        &track.id,
+        &track.track,
+        &format.suffix,
+        &format.content_type,
+        &suffix,
+    );
+    call.encode(Response::ok().member("song", song))
+}
+
+/// Answers `getAlbum` for an unmaterialized catalog id.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, whose state holds the catalog layer.
+/// - `id`: the catalog id of the album.
+///
+/// # Returns
+///
+/// A successful envelope carrying `album` (a catalog AlbumID3 with its `song`
+/// children), or a failed envelope.
+///
+/// # Errors
+///
+/// Answers Subsonic error 70 when the catalog does not have the album, and a
+/// generic error when the issuing instance cannot answer.
+async fn catalog_album(call: &Call, id: CatalogId) -> Encoded {
+    let snapshot = call.state().settings_snapshot();
+    let format = match catalog::pending_format(&snapshot) {
+        Ok(format) => format,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let suffix = match catalog::title_suffix(&snapshot) {
+        Ok(suffix) => suffix,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let album = match call.state().catalog().album(&id).await {
+        Ok(album) => album,
+        Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
+    };
+    let songs = album.album.tracks.iter().filter_map(|track| {
+        let track_id =
+            CatalogId::new(album.id.slug().clone(), EntityKind::Track, track.id.clone()).ok()?;
+        Some(projection::catalog_child(
+            &track_id,
+            track,
+            &format.suffix,
+            &format.content_type,
+            &suffix,
+        ))
+    });
+    let album = projection::catalog_album(&album, &suffix).set("song", Array::new(songs));
+    call.encode(Response::ok().member("album", album))
+}
+
+/// Answers `getArtist` for an unmaterialized catalog id.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, whose state holds the catalog layer.
+/// - `id`: the catalog id of the artist.
+///
+/// # Returns
+///
+/// A successful envelope carrying `artist` (a catalog ArtistID3 with its
+/// `album` children), or a failed envelope.
+///
+/// # Errors
+///
+/// Answers Subsonic error 70 when the catalog does not have the artist, and a
+/// generic error when the issuing instance cannot answer. An instance that has
+/// the artist but cannot list their albums is answered with no albums, because
+/// the artist lookup itself succeeded.
+async fn catalog_artist(call: &Call, id: CatalogId) -> Encoded {
+    let snapshot = call.state().settings_snapshot();
+    let suffix = match catalog::title_suffix(&snapshot) {
+        Ok(suffix) => suffix,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let catalog = call.state().catalog();
+    let artist = match catalog.artist(&id).await {
+        Ok(artist) => artist,
+        Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
+    };
+    let albums = match catalog.artist_albums(&id, MAX_CATALOG_ALBUMS, 0).await {
+        Ok(albums) => albums,
+        Err(error) => {
+            tracing::debug!(error = %error, "could not list a catalog artist's albums");
+            Vec::new()
+        }
+    };
+    let albums: Vec<Object> = albums
+        .iter()
+        .map(|album| projection::catalog_album_ref(album, &suffix))
+        .collect();
+    let artist = projection::catalog_artist(&artist, albums.len() as i64, &suffix)
+        .set("album", Array::new(albums));
+    call.encode(Response::ok().member("artist", artist))
 }
 
 /// Reads a numeric parameter, defaulting when it is absent or empty.
