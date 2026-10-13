@@ -54,8 +54,8 @@ pub enum Command {
     Providers(ProvidersArgs),
     /// Assign provider instances to the layers they take part in.
     Layers(LayersArgs),
-    // The acquisition commands (`acquisitions list` and `acquisitions cancel`)
-    // are registered here once the acquisition orchestrator exists.
+    /// List acquisitions and cancel them.
+    Acquisitions(AcquisitionsArgs),
 }
 
 /// The arguments of `scan`.
@@ -282,4 +282,46 @@ pub struct SetSettingArgs {
     /// a number, a string, or a comma-separated list of strings.
     #[arg(value_name = "VALUE")]
     pub value: String,
+}
+
+/// The arguments of `acquisitions`.
+#[derive(Debug, Args)]
+pub struct AcquisitionsArgs {
+    /// The acquisition command to run.
+    #[command(subcommand)]
+    pub command: AcquisitionsCommand,
+}
+
+/// Every command under `acquisitions`.
+#[derive(Debug, Subcommand)]
+pub enum AcquisitionsCommand {
+    /// List acquisitions, newest first.
+    List(AcquisitionsListArgs),
+    /// Cancel one acquisition.
+    Cancel(AcquisitionsCancelArgs),
+}
+
+/// The arguments of `acquisitions list`.
+#[derive(Debug, Args)]
+pub struct AcquisitionsListArgs {
+    /// Only list acquisitions in this state.
+    ///
+    /// The value is one of `queued`, `resolving`, `searching`, `downloading`,
+    /// `verifying`, `importing`, `completed`, `failed` and `cancelled`.
+    #[arg(long, value_name = "STATE")]
+    pub state: Option<String>,
+    /// List the acquisitions that have already ended as well.
+    ///
+    /// Without it, only the acquisitions that still hold work are shown. A
+    /// `--state` filter selects that state whether or not this is given.
+    #[arg(long)]
+    pub all: bool,
+}
+
+/// The arguments of `acquisitions cancel`.
+#[derive(Debug, Args)]
+pub struct AcquisitionsCancelArgs {
+    /// The acquisition's client id, `ac_...`.
+    #[arg(value_name = "AC_ID")]
+    pub acquisition: String,
 }

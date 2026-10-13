@@ -66,5 +66,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Plugins(args) => commands::plugins::run(config, &env, args).await,
         Command::Providers(args) => commands::providers::run(config, &env, args).await,
         Command::Layers(args) => commands::layers::run(config, &env, args).await,
+        Command::Acquisitions(args) => commands::acquisitions::run(config, &env, args).await,
     }
 }

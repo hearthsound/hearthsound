@@ -1595,6 +1595,7 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hearthsound-acquire",
  "hearthsound-auth",
  "hearthsound-config",
  "hearthsound-core",
@@ -1606,6 +1607,7 @@ dependencies = [
  "rpassword",
  "serde_json",
  "tempfile",
+ "time",
  "tokio",
  "tracing",
  "tracing-subscriber",

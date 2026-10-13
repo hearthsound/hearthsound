@@ -313,6 +313,19 @@ async fn lists_acquisitions_with_their_track_and_instance() {
         .unwrap();
     assert!(failed.is_empty(), "a state filter excludes the row");
 
+    // A state filter is narrower than the active filter, so the two are never
+    // combined.
+    let queued = env
+        .orchestrator
+        .list(&ListFilter {
+            state: Some(AcquisitionState::Queued),
+            active: true,
+            ..ListFilter::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(queued.len(), 1);
+
     let none = env
         .orchestrator
         .list(&ListFilter {

@@ -1010,7 +1010,10 @@ pub async fn list(
     filter: &ListFilter,
 ) -> Result<Vec<AcquisitionSummary>, AcquireError> {
     let state = filter.state.map(AcquisitionState::as_str);
-    let active = i64::from(filter.active);
+    // An explicit state is narrower than "only the acquisitions that still hold
+    // work", so the two filters are never combined: `--state failed` lists the
+    // failed ones even though they have ended.
+    let active = i64::from(filter.active && filter.state.is_none());
     let limit = i64::from(filter.limit.unwrap_or(u32::MAX));
     let rows = sqlx::query_as!(
         ListDbRow,

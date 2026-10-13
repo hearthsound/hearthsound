@@ -672,3 +672,174 @@ fn settings_set_is_visible_to_a_later_server_start() {
     assert!(listed.contains("= hold"), "{listed}");
     assert!(listed.contains("from the database"), "{listed}");
 }
+
+/// `acquisitions list` and `acquisitions cancel` read and write the ledger.
+///
+/// The cancellation only touches the acquisition row: the running server's
+/// `reconcile` is what stops the worker and puts the track back, so the track's
+/// availability is deliberately left `acquiring` here.
+#[tokio::test(flavor = "multi_thread")]
+async fn acquisitions_lists_and_cancels_an_acquisition() {
+    let sandbox = Sandbox::new("");
+    succeeded(&sandbox.run(&["migrate"]));
+    let data = sandbox.data();
+
+    let empty = succeeded(&sandbox.run(&["acquisitions", "list"]));
+    assert_eq!(empty.trim(), "no acquisitions");
+
+    // The track and the acquisition the server would have written: the track is
+    // `acquiring` and the job is queued at `play`.
+    let database = hearthsound_db::Database::open(&data.join("hearthsound.db"))
+        .await
+        .unwrap();
+    let library = hearthsound_library::LibraryRepository::new(&database);
+    let mut album_input = hearthsound_library::AlbumInput::new(
+        "Hello Song album",
+        hearthsound_library::Origin::Catalog,
+    );
+    album_input.year = Some(1993);
+    album_input.display_artist = Some("Hello Artist".to_owned());
+    let album = library
+        .upsert_album(
+            &album_input,
+            &[hearthsound_library::ArtistCredit::new(
+                "Hello Artist",
+                "main",
+            )],
+        )
+        .await
+        .unwrap();
+    let mut input = hearthsound_library::TrackInput::new(
+        "Hello Song",
+        hearthsound_library::Origin::Catalog,
+        hearthsound_core::Availability::Remote,
+    );
+    input.album_id = Some(album);
+    input.display_artist = Some("Hello Artist".to_owned());
+    input.track_number = Some(1);
+    input.duration_ms = Some(200);
+    let track = library
+        .insert_track(
+            &input,
+            &[hearthsound_library::ArtistCredit::new(
+                "Hello Artist",
+                "main",
+            )],
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let id = uuid::Uuid::now_v7();
+    let mut tx = database.writer().begin().await.unwrap();
+    hearthsound_acquire::repo::insert(
+        &mut tx,
+        &hearthsound_acquire::repo::NewAcquisition {
+            id,
+            track_id: Some(track),
+            album_id: None,
+            granularity: hearthsound_core::Granularity::Track,
+            priority: hearthsound_core::Priority::Play,
+            reason: "user pressed play".to_owned(),
+            requested_by: None,
+        },
+    )
+    .await
+    .unwrap();
+    hearthsound_library::tracks::set_track_availability(
+        &mut tx,
+        track,
+        hearthsound_core::Availability::Acquiring,
+        None,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let client_id =
+        hearthsound_core::EntityId::from_uuid(hearthsound_core::IdPrefix::Acquisition, id)
+            .to_string();
+    assert!(client_id.starts_with("ac_"));
+
+    // The listing shows the job with its track, and only while it holds work.
+    let listed = succeeded(&sandbox.run(&["acquisitions", "list"]));
+    assert!(listed.contains(&client_id), "{listed}");
+    assert!(listed.contains("queued"), "{listed}");
+    assert!(listed.contains("play"), "{listed}");
+    assert!(listed.contains("Hello Artist - Hello Song"), "{listed}");
+    assert!(
+        listed.trim_end().ends_with('Z'),
+        "created is stamped: {listed}"
+    );
+
+    let queued = succeeded(&sandbox.run(&["acquisitions", "list", "--state", "queued"]));
+    assert!(queued.contains(&client_id), "{queued}");
+    let failed = succeeded(&sandbox.run(&["acquisitions", "list", "--state", "failed"]));
+    assert_eq!(failed.trim(), "no acquisitions");
+    let unknown = sandbox.run(&["acquisitions", "list", "--state", "nonsense"]);
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(
+        stderr(&unknown).contains("is not an acquisition state"),
+        "{}",
+        stderr(&unknown)
+    );
+
+    // The cancel writes the terminal row and its log entry.
+    let cancelled = succeeded(&sandbox.run(&["acquisitions", "cancel", &client_id]));
+    assert!(
+        cancelled.contains(&format!("cancelled {client_id}")),
+        "{cancelled}"
+    );
+
+    let repository = hearthsound_acquire::repo::AcquisitionRepository::new(&database);
+    let row = repository.get(id).await.unwrap().unwrap();
+    assert_eq!(row.state, hearthsound_core::AcquisitionState::Cancelled);
+    assert_eq!(
+        row.failure_reason,
+        Some(hearthsound_core::FailureReason::Cancelled)
+    );
+    assert_eq!(
+        row.error_detail.as_deref(),
+        Some("cancelled from the command line")
+    );
+    assert_eq!(
+        repository.log(id).await.unwrap().last().unwrap().state,
+        hearthsound_core::AcquisitionState::Cancelled
+    );
+    assert_eq!(
+        library
+            .get_track(track)
+            .await
+            .unwrap()
+            .unwrap()
+            .availability,
+        hearthsound_core::Availability::Acquiring,
+        "the running server restores the track, not the command"
+    );
+
+    // The row is still listed under `--all`, and the active listing hides it.
+    let all = succeeded(&sandbox.run(&["acquisitions", "list", "--all"]));
+    assert!(all.contains(&client_id), "{all}");
+    assert!(all.contains("cancelled"), "{all}");
+    // A state filter selects that state even though the acquisition has ended.
+    let cancelled_only = succeeded(&sandbox.run(&["acquisitions", "list", "--state", "cancelled"]));
+    assert!(cancelled_only.contains(&client_id), "{cancelled_only}");
+    assert!(cancelled_only.contains("cancelled"), "{cancelled_only}");
+    let active = succeeded(&sandbox.run(&["acquisitions", "list"]));
+    assert_eq!(active.trim(), "no acquisitions");
+
+    // Cancelling an ended acquisition is not an error, and a client id of
+    // another kind is refused.
+    let again = succeeded(&sandbox.run(&["acquisitions", "cancel", &client_id]));
+    assert!(again.contains("had already ended"), "{again}");
+    let track_id =
+        hearthsound_core::EntityId::from_uuid(hearthsound_core::IdPrefix::Track, track.uuid())
+            .to_string();
+    let wrong_kind = sandbox.run(&["acquisitions", "cancel", &track_id]);
+    assert_eq!(wrong_kind.status.code(), Some(1));
+    assert!(
+        stderr(&wrong_kind).contains("is not an acquisition id"),
+        "{}",
+        stderr(&wrong_kind)
+    );
+}

@@ -5,6 +5,7 @@
 //! `hearthsound-server`, prints what it did, and returns an `anyhow::Result`
 //! that `main` renders as a message and an exit code.
 
+pub mod acquisitions;
 pub mod admin;
 pub mod layers;
 pub mod migrate;

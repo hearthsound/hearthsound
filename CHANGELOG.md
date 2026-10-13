@@ -558,3 +558,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   download resolved, which are stored in the candidate column for exactly this
   reason. A server that stops after a download or during an import therefore
   finishes the acquisition without downloading the file again.
+- The `acquisitions` command line: `acquisitions list [--state <s>] [--all]`
+  prints one acquisition per line - its `ac_` client id, state, priority, track
+  artist and title, the instance serving it, the download percentage, the failure
+  reason and the creation time, with a `-` for a field the ledger does not hold -
+  showing only the acquisitions that still hold work unless `--all` is given, and
+  `acquisitions cancel <ac_id>` writes the cancellation through the acquisition
+  crate's repository. The command opens the database directly rather than talking
+  to a server, so the running server's `reconcile` is what stops the worker and
+  returns the track to catalog-only availability.
