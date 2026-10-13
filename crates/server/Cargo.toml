@@ -14,6 +14,7 @@ workspace = true
 async-trait.workspace = true
 axum.workspace = true
 hearthsound-activity = { path = "../activity" }
+hearthsound-acquire = { path = "../acquire" }
 hearthsound-api-subsonic = { path = "../api-subsonic" }
 hearthsound-auth = { path = "../auth" }
 hearthsound-catalog = { path = "../catalog" }

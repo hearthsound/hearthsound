@@ -520,3 +520,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers `503` with `Retry-After` at once while the acquisition continues. A
   `format=raw` request under `pad` behaves as `hold`, and a cooling-down or
   denied track is answered `404` or `403` without starting anything.
+- The acquisition orchestrator in the composition root: `Services::build` builds
+  it over the catalog layer, the provider registry, the ffmpeg runner, the event
+  bus, and the staging root, starts its scheduler, and shares it with the
+  `/rest` surface, so `/rest/stream` of a track the server has not stored is
+  answered by the same pipeline that runs the server's acquisition workers.

@@ -14,9 +14,9 @@
 //!    registry (rebuilt from the plugin tables), and the catalog layer over
 //!    that registry;
 //! 6. build the ffmpeg runner capped by `stream.max_concurrent_transcodes`, the
-//!    managed storage roots the stream and artwork paths resolve files against,
-//!    the library scanner, the job queue, the job runner with its handlers, and
-//!    the cron scheduler with the system schedules;
+//!    acquisition orchestrator over the catalog, registry and storage, and start
+//!    its scheduler, then the managed storage roots, the library scanner, the
+//!    job queue, the job runner, and the cron scheduler;
 //! 7. build the activity service and the trusted-proxy list.
 //!
 //! Every service is shared through an `Arc`, so a handler, a job, or an
@@ -31,13 +31,13 @@
 //!
 //! # Where later wiring goes
 //!
-//! The acquisition orchestrator (with its job handlers and schedules), the
-//! stream service, and the stream surface are constructed in [`Services::build`]
-//! between the catalog layer and the job runner, and their fields are added to
-//! [`Services`] with accessors next to the existing ones. Nothing else needs to
-//! change: the domain crates take the handles they are given, the API crates
-//! read them through [`SubsonicState`](hearthsound_api_subsonic::SubsonicState),
-//! and [`crate::Server`] already starts whatever background work the services
+//! The acquisition job handlers and schedules, and the remaining API surfaces,
+//! are constructed in [`Services::build`] next to the services they belong to,
+//! and their fields are added to [`Services`] with accessors next to the
+//! existing ones. Nothing else needs to change: the domain crates take the
+//! handles they are given, the API crates read them through
+//! [`SubsonicState`](hearthsound_api_subsonic::SubsonicState), and
+//! [`crate::Server`] already starts whatever background work the services
 //! expose.
 
 use std::collections::BTreeMap;
@@ -45,8 +45,9 @@ use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
+use hearthsound_acquire::orchestrator::{AcquisitionOrchestrator, AcquisitionStorage};
 use hearthsound_activity::ActivityService;
-use hearthsound_api_subsonic::{SubsonicState, TrustedProxies};
+use hearthsound_api_subsonic::{PendingSource, SubsonicState, TrustedProxies};
 use hearthsound_auth::Authenticator;
 use hearthsound_catalog::CatalogService;
 use hearthsound_config::bootstrap::BootstrapConfig;
@@ -94,6 +95,8 @@ pub struct Services {
     instances: InstanceService,
     /// The ffmpeg process runner.
     ffmpeg: Arc<FfmpegRunner>,
+    /// The acquisition orchestrator the pending stream and the admin views use.
+    orchestrator: Arc<AcquisitionOrchestrator>,
     /// The library folder scanner.
     scanner: Arc<LibraryScanner>,
     /// The persistent job queue.
@@ -208,6 +211,19 @@ impl Services {
             None,
             max_concurrent_transcodes(&snapshot)?,
         ));
+        let orchestrator = Arc::new(AcquisitionOrchestrator::new(
+            Arc::clone(&database),
+            settings.clone(),
+            Arc::clone(&registry),
+            Arc::clone(&catalog),
+            Arc::clone(&ffmpeg),
+            Arc::clone(&events),
+            AcquisitionStorage::new(
+                config.paths.staging.clone(),
+                StorageRoots::new(config.paths.library.clone(), config.paths.cache.clone()),
+            ),
+        ));
+        orchestrator.start();
         let scanner = Arc::new(LibraryScanner::new(&database, Arc::clone(&events)));
 
         let queue = Arc::new(JobQueue::new(&database, QueueOptions::default()));
@@ -256,6 +272,7 @@ impl Services {
             catalog,
             instances,
             ffmpeg,
+            orchestrator,
             scanner,
             queue,
             runner,
@@ -322,6 +339,15 @@ impl Services {
         &self.ffmpeg
     }
 
+    /// Returns the acquisition orchestrator.
+    ///
+    /// `/rest/stream` asks it for a track the server has not stored, and the
+    /// admin views read its ledger; its scheduler runs for the life of the
+    /// process.
+    pub fn orchestrator(&self) -> &Arc<AcquisitionOrchestrator> {
+        &self.orchestrator
+    }
+
     /// Returns the library scanner.
     pub fn scanner(&self) -> &Arc<LibraryScanner> {
         &self.scanner
@@ -358,6 +384,7 @@ impl Services {
 
     /// Returns the shared state of the `/rest` surface.
     pub fn subsonic_state(&self) -> SubsonicState {
+        let pending: Arc<dyn PendingSource> = self.orchestrator.clone();
         SubsonicState::new(
             Arc::clone(&self.database),
             self.settings.clone(),
@@ -367,6 +394,7 @@ impl Services {
             Arc::clone(&self.ffmpeg),
             self.storage_roots.clone(),
         )
+        .with_pending_source(pending)
         .with_trusted_proxies(self.trusted_proxies.clone())
     }
 
