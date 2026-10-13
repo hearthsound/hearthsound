@@ -4,9 +4,10 @@
 //! naming every pluggable behavior, [`EntityKind`] naming the catalog entities,
 //! the shared [`ProviderError`], the [`Slug`] identifier used for provider
 //! instances, the client id codec in [`id`], the availability, acquisition,
-//! quality and storage literals, and the provider traits and WebAssembly
-//! interface records in [`providers`]. It deliberately depends on almost
-//! nothing so every other crate can depend on it without pulling in a runtime.
+//! quality and storage literals, the provider traits and WebAssembly interface
+//! records in [`providers`], and the server event vocabulary and bus in
+//! [`events`]. It deliberately depends on almost nothing so every other crate
+//! can depend on it without pulling in a runtime.
 #![forbid(unsafe_code)]
 
 mod acquisition;
@@ -19,6 +20,7 @@ mod quality;
 mod slug;
 mod storage;
 
+pub mod events;
 pub mod providers;
 
 pub use acquisition::{

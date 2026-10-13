@@ -44,3 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Metadata and acquisition provider records mirroring the plugin interfaces,
   the `MetadataProvider` and `AcquisitionProvider` traits, and the per-job
   staging context acquisition calls carry.
+- The server event vocabulary covering every event type of the API, serialized
+  with its exact type string and camelCase payload, and the event bus that
+  sequences events, broadcasts them, and replays the last thousand to a
+  reconnecting subscriber.
