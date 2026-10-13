@@ -531,3 +531,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   track or album is built from it, and materialization records it as the
   credited artist's `p:<slug>` alias in the same transaction as the rows, so a
   later `x_<slug>_r_<id>` resolves to the stored artist.
+- Bundled Deezer catalog plugin 0.1.1, whose artist credits carry the Deezer
+  artist ids that catalog artist links resolve through.
