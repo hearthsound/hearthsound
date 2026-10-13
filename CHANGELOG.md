@@ -16,3 +16,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Settings registry with environment, config file, and default precedence.
 - SQLite database layer with a writer pool, a reader pool, and pre-migration
   backups.
+- `hearthsound` binary that reports its version.
