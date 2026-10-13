@@ -12,6 +12,8 @@ mod kind;
 mod layer;
 mod slug;
 
+pub mod providers;
+
 pub use error::ProviderError;
 pub use kind::EntityKind;
 pub use layer::{Layer, UnknownLayer};

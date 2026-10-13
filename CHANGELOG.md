@@ -12,3 +12,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Project license, contributing guide, security policy, and changelog.
 - Cargo workspace with the `hearthsound-core` crate: layer and entity kind enums,
   the shared provider error, and provider instance slugs.
+- Catalog provider records and the lifecycle and catalog provider traits.
