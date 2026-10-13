@@ -1,0 +1,230 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, track_id, album_id, granularity, priority, reason, state, requested_by, instance_id, candidate, plugin_token, progress, attempts, failure_reason, error_detail, media_file_id, created_at, updated_at FROM acquisitions WHERE state = 'queued' ORDER BY CASE priority WHEN 'play' THEN 0 WHEN 'next' THEN 1 WHEN 'queue' THEN 2 WHEN 'background' THEN 3 ELSE 4 END, created_at, rowid LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "track_id",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "track_id"
+          }
+        }
+      },
+      {
+        "name": "album_id",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "album_id"
+          }
+        }
+      },
+      {
+        "name": "granularity",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "granularity"
+          }
+        }
+      },
+      {
+        "name": "priority",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "priority"
+          }
+        }
+      },
+      {
+        "name": "reason",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "requested_by",
+        "ordinal": 7,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "requested_by"
+          }
+        }
+      },
+      {
+        "name": "instance_id",
+        "ordinal": 8,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "instance_id"
+          }
+        }
+      },
+      {
+        "name": "candidate",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "candidate"
+          }
+        }
+      },
+      {
+        "name": "plugin_token",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "plugin_token"
+          }
+        }
+      },
+      {
+        "name": "progress",
+        "ordinal": 11,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "progress"
+          }
+        }
+      },
+      {
+        "name": "attempts",
+        "ordinal": 12,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "attempts"
+          }
+        }
+      },
+      {
+        "name": "failure_reason",
+        "ordinal": 13,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "failure_reason"
+          }
+        }
+      },
+      {
+        "name": "error_detail",
+        "ordinal": 14,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "error_detail"
+          }
+        }
+      },
+      {
+        "name": "media_file_id",
+        "ordinal": 15,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "media_file_id"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 16,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 17,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "3e6621d2625c9bb6316504869481cbaf83ad9e36f538eaff662bf4bf0a20f878"
+}

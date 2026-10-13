@@ -438,3 +438,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   id whose entity the catalog layer materialized records the play of the stored
   row it resolves to, while an entity that was never materialized is still
   accepted and discarded.
+- Acquisition request intake and the acquisition ledger: `hearthsound-acquire`
+  owns the `acquisitions` and `acquisition_log` tables and gains an
+  `AcquisitionOrchestrator` that admits one active acquisition per track,
+  raises an existing job's priority when a more urgent request joins it,
+  refuses a track that is cooling down and a requester without the permission,
+  fans an album request out into one request per album track, creates the
+  acquisition's staging directory, marks the track `acquiring`, and publishes
+  `acquisition.updated` and `track.availability`. A waiter follows a job
+  through a `tokio::sync::watch` channel, and the scheduler claims the most
+  urgent queued acquisition within `acquisition.max_concurrent`, logging every
+  state change in the same transaction as the row it changes.

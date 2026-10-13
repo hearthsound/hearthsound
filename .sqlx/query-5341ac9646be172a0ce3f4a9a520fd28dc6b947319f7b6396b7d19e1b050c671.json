@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT at, state, message FROM acquisition_log WHERE acquisition_id = ? ORDER BY at, rowid",
+  "describe": {
+    "columns": [
+      {
+        "name": "at",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "acquisition_log",
+            "name": "at"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "acquisition_log",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "message",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "acquisition_log",
+            "name": "message"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "5341ac9646be172a0ce3f4a9a520fd28dc6b947319f7b6396b7d19e1b050c671"
+}

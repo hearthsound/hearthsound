@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO acquisition_log (acquisition_id, at, state, message) VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "cfeaf443e28c2bff30f4b12bcd6fbf4bd889ad22997b9d3f0b8260c63f99cf9d"
+}

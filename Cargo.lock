@@ -1616,9 +1616,24 @@ dependencies = [
 name = "hearthsound-acquire"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "hearthsound-config",
  "hearthsound-core",
+ "hearthsound-db",
+ "hearthsound-library",
+ "hearthsound-media",
+ "hearthsound-plugin-host",
+ "hearthsound-test-support",
+ "serde",
+ "serde_json",
+ "sqlx",
  "strsim",
+ "tempfile",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "tracing",
  "unicode-normalization",
+ "uuid",
 ]
 
 [[package]]

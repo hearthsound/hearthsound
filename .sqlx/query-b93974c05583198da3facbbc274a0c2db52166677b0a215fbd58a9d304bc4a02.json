@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE acquisitions SET priority = ?, updated_at = ? WHERE id = ? AND priority <> ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "b93974c05583198da3facbbc274a0c2db52166677b0a215fbd58a9d304bc4a02"
+}

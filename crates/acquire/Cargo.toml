@@ -11,6 +11,24 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+hearthsound-config = { path = "../config" }
 hearthsound-core = { path = "../core" }
+hearthsound-db = { path = "../db" }
+hearthsound-library = { path = "../library" }
+hearthsound-media = { path = "../media" }
+hearthsound-plugin-host = { path = "../plugin-host" }
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
 strsim.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["fs", "rt", "sync", "time"] }
+tracing.workspace = true
 unicode-normalization.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+hearthsound-test-support = { path = "../test-support" }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

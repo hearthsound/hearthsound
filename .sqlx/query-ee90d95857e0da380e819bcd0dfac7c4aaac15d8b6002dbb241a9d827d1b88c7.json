@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO acquisitions (id, track_id, album_id, granularity, priority, reason, state, requested_by, instance_id, candidate, plugin_token, progress, attempts, failure_reason, error_detail, media_file_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "ee90d95857e0da380e819bcd0dfac7c4aaac15d8b6002dbb241a9d827d1b88c7"
+}
