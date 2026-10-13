@@ -635,3 +635,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through the normal failure path - `failed` with `all-candidates-failed` and
   the import error as the detail, and the track in cooldown - so no worker is
   left holding a row in `importing`.
+- Full-stack tests of on-demand playback in `crates/server/tests/on_demand.rs`,
+  which start the real server over a temporary data directory and drive it over
+  HTTP with the album catalog and acquisition fixtures: `search3` answers the
+  requester's own library first and the catalog after it; a stream of an
+  unmaterialized catalog id answers `200 audio/mpeg` whose first bytes arrive
+  within a second, plays silence until the acquisition finishes, and then plays
+  the imported file, which lands in the cache under the template's name with the
+  track's own tags and leaves the `move` import root empty; a replay of that id
+  serves the stored file and answers a `Range` request with `206`; a track no
+  backend can find ends its stream and cools down, and a replay inside the
+  cooldown answers `404` without starting a second acquisition; `stream.pending.mode`
+  switches between `hold`, which serves the whole file once it is ready, and
+  `fail`, which answers `503` with `Retry-After`; and a server stopped in the
+  middle of a download resumes it in a new process on the same data directory,
+  imports the file and empties the import root. The shared fixture grows the
+  helpers a restart needs: the data directory it runs over, a stop that hands
+  that directory back, and a reopen that builds a new process over it.

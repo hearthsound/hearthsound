@@ -96,6 +96,65 @@ impl Fixture {
     pub fn database_path(&self) -> &Path {
         &self.services.config().database.path
     }
+
+    /// Returns the directory holding the data tree and the config file.
+    pub fn directory(&self) -> &Path {
+        self._dir.path()
+    }
+
+    /// Stops the server and hands the data directory back.
+    ///
+    /// This is what a restart looks like to a test: the data tree, the config
+    /// file, the installed plugins and the ledger are the ones the stopped
+    /// process left behind, and the caller starts a new process over them with
+    /// [`Fixture::reopen`].
+    pub async fn stop(self) -> TempDir {
+        self.server.shutdown().await;
+        self._dir
+    }
+
+    /// Starts a process over the data directory a stopped fixture left.
+    ///
+    /// Nothing is created or installed: the account, its api key, the plugin
+    /// instances and every row are the ones the previous process wrote, and the
+    /// new services are built over them, which is exactly what restarting the
+    /// server does.
+    ///
+    /// # Parameters
+    ///
+    /// - `dir`: the directory a [`Fixture::stop`] returned.
+    /// - `api_key`: the api key of the account the directory holds, whose
+    ///   plaintext is only known when it is created.
+    pub async fn reopen(dir: TempDir, api_key: String) -> Fixture {
+        let services = Services::build(load_config(dir.path()), &BTreeMap::new())
+            .await
+            .unwrap();
+        let user = Users::new(services.database())
+            .find_by_username(USERNAME)
+            .await
+            .unwrap()
+            .expect("the account the previous process created");
+        let server = Server::start_on(Arc::clone(&services), "127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        Fixture {
+            _dir: dir,
+            server,
+            services,
+            api_key,
+            user_id: user.id,
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+/// Loads the config file a previous [`write_config`] wrote.
+///
+/// # Panics
+///
+/// Panics when the file is missing, which means `dir` never held a fixture.
+pub fn load_config(dir: &Path) -> BootstrapConfig {
+    BootstrapConfig::load(Some(&dir.join("hearthsound.toml")), &BTreeMap::new()).unwrap()
 }
 
 /// Writes a config file into `dir` and loads it.
