@@ -31,6 +31,7 @@ use crate::files::FileAccess;
 use crate::http::HttpClient;
 use crate::kv::KvStore;
 use crate::log::LogSink;
+use crate::repo::InstanceDisabler;
 use crate::state::InstanceState;
 
 /// How many traps inside [`TRAP_WINDOW`] disable an instance.
@@ -165,6 +166,8 @@ pub(crate) struct PoolConfig {
     pub max_instances: u8,
     /// The deadline of one call in milliseconds.
     pub call_timeout_ms: u32,
+    /// What to write when the instance is disabled after repeated traps.
+    pub auto_disable: InstanceDisabler,
 }
 
 /// The pool of stores for one plugin instance.
@@ -188,6 +191,7 @@ struct PoolInner<W: World> {
     kv: Arc<KvStore>,
     files: Arc<FileAccess>,
     memory_mb: u32,
+    auto_disable: InstanceDisabler,
 }
 
 /// One instantiated store and its world handle.
@@ -231,6 +235,7 @@ impl<W: World> StorePool<W> {
                 kv: config.kv,
                 files: config.files,
                 memory_mb: config.memory_mb,
+                auto_disable: config.auto_disable,
             }),
         })
     }
@@ -338,6 +343,13 @@ impl<W: World> PoolInner<W> {
 
     /// Records a trap and reports whether it disabled the instance.
     ///
+    /// Reaching the trap limit disables the instance for this run and hands the
+    /// persistence to a task: the flip is written to `provider_instances` so a
+    /// restart does not bring the instance back, and a `plugin.status` event
+    /// tells every connected client. Both happen off the call path, because the
+    /// caller is already returning an error and must not wait on a database
+    /// write.
+    ///
     /// # Parameters
     ///
     /// - `reason`: a human readable description of the failure.
@@ -360,6 +372,9 @@ impl<W: World> PoolInner<W> {
                 instance = %self.slug,
                 "plugin instance disabled after repeated traps"
             );
+            let disabler = self.auto_disable.clone();
+            let detail = reason.to_owned();
+            tokio::spawn(async move { disabler.disable(&detail).await });
         }
         ProviderError::Internal
     }

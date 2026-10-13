@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE provider_instances SET enabled = ?, updated_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "f8072a2d43e7aa088f548d90ed322ad46f6e5662eeff3809d96bd749be23dd82"
+}

@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT layer, position, instance_id FROM layer_assignments\n             ORDER BY layer, position",
+  "describe": {
+    "columns": [
+      {
+        "name": "layer",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "layer_assignments",
+            "name": "layer"
+          }
+        }
+      },
+      {
+        "name": "position",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "layer_assignments",
+            "name": "position"
+          }
+        }
+      },
+      {
+        "name": "instance_id",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "layer_assignments",
+            "name": "instance_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a6ebbfbb3de85fd8bcb95847d8b43c3005bf07355cb6a5cb1617306beb90ac3a"
+}

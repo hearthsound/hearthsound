@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use hearthsound_config::SettingsStore;
 use hearthsound_core::Layer;
+use hearthsound_core::events::EventBus;
 use hearthsound_core::providers::{AcquisitionProvider, CatalogProvider, MetadataProvider};
 use hearthsound_db::Database;
 use sha2::{Digest, Sha256};
@@ -35,6 +36,7 @@ use crate::log::LogSink;
 use crate::manifest::{Manifest, ManifestError, SUPPORTED_API};
 use crate::metadata::WasmMetadataProvider;
 use crate::pool::{self, PoolConfig, StorePool};
+use crate::repo::InstanceDisabler;
 use crate::state::InstanceState;
 use crate::validate;
 
@@ -42,6 +44,7 @@ use crate::validate;
 #[derive(Debug)]
 pub struct InstalledPlugin {
     manifest: Manifest,
+    manifest_json: String,
     dir: PathBuf,
     sha256: [u8; 32],
     component: Component,
@@ -51,6 +54,15 @@ impl InstalledPlugin {
     /// Returns the plugin's manifest.
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
+    }
+
+    /// Returns the plugin's manifest as the JSON text the install wrote.
+    ///
+    /// This is the document that is stored in `plugins.manifest`, not a
+    /// re-serialization of the parsed manifest, so nothing the parser accepted
+    /// is lost or reformatted on the way into the database.
+    pub fn manifest_json(&self) -> &str {
+        &self.manifest_json
     }
 
     /// Returns the directory the plugin is installed in.
@@ -76,6 +88,7 @@ pub struct PluginHost {
     plugins_dir: PathBuf,
     settings: Arc<SettingsStore>,
     database: Arc<Database>,
+    events: Arc<EventBus>,
 }
 
 impl PluginHost {
@@ -114,12 +127,32 @@ impl PluginHost {
             plugins_dir,
             settings,
             database,
+            events: Arc::new(EventBus::new()),
         })
     }
 
     /// Returns the directory plugin installs live under.
     pub fn plugins_dir(&self) -> &Path {
         &self.plugins_dir
+    }
+
+    /// Returns the bus the host publishes plugin status events on.
+    ///
+    /// The host publishes a `plugin.status` event whenever it disables an
+    /// instance itself, and a composition root that wants those events on the
+    /// server's bus hands its own bus to [`PluginHost::with_event_bus`].
+    pub fn events(&self) -> &Arc<EventBus> {
+        &self.events
+    }
+
+    /// Publishes plugin status events on `events` instead of a private bus.
+    ///
+    /// # Parameters
+    ///
+    /// - `events`: the bus the server serves its clients from.
+    pub fn with_event_bus(mut self, events: Arc<EventBus>) -> PluginHost {
+        self.events = events;
+        self
     }
 
     /// Installs the archive at `archive`.
@@ -302,17 +335,7 @@ impl PluginHost {
         let manifest = plugin.manifest();
         let log = Arc::new(LogSink::new(manifest.id.clone(), instance.slug.clone()));
 
-        let grant = HttpGrant::new(instance.permissions.http.as_ref(), &instance.server_config);
-        let http = Arc::new(
-            HttpClient::new(
-                manifest.id.clone(),
-                &manifest.version,
-                instance.slug.clone(),
-                grant,
-            )
-            .map_err(|error| HostError::Http(error.to_string()))?,
-        );
-
+        let http = instance_http_client(manifest, instance)?;
         let kv = Arc::new(KvStore::from_permission(
             self.database.writer().clone(),
             instance.id,
@@ -339,10 +362,47 @@ impl PluginHost {
                 memory_mb: manifest.resources.memory_mb,
                 max_instances: manifest.resources.max_instances,
                 call_timeout_ms: manifest.resources.call_timeout_ms,
+                auto_disable: InstanceDisabler::new(
+                    &self.database,
+                    Arc::clone(&self.events),
+                    instance.id,
+                    manifest.id.clone(),
+                    instance.slug.to_string(),
+                ),
             },
         )
         .map_err(|error| HostError::Incompatible(format!("{error:#}")))
     }
+}
+
+/// Builds the outbound HTTP client of one instance.
+///
+/// The client applies the instance's approved allowlist and its resolved
+/// `$config:` hosts, so everything that reaches the network on an instance's
+/// behalf shares one grant: the `host-http` import and the host's own artwork
+/// fetches.
+///
+/// # Parameters
+///
+/// - `manifest`: the plugin's manifest, used for the User-Agent.
+/// - `instance`: the instance's configuration, with secrets decrypted.
+///
+/// # Errors
+///
+/// Returns [`HostError::Http`] when the client cannot be built.
+pub(crate) fn instance_http_client(
+    manifest: &Manifest,
+    instance: &InstanceConfig,
+) -> Result<Arc<HttpClient>, HostError> {
+    let grant = HttpGrant::new(instance.permissions.http.as_ref(), &instance.server_config);
+    HttpClient::new(
+        manifest.id.clone(),
+        &manifest.version,
+        instance.slug.clone(),
+        grant,
+    )
+    .map(Arc::new)
+    .map_err(|error| HostError::Http(error.to_string()))
 }
 
 /// Installs an archive without touching the async runtime.
@@ -410,6 +470,8 @@ fn install_blocking(
 
     Ok(InstalledPlugin {
         manifest,
+        // The bytes parsed as JSON, so this lossy conversion is exact.
+        manifest_json: String::from_utf8_lossy(archive.manifest()).into_owned(),
         dir: target,
         sha256: archive.sha256(),
         component,
@@ -471,6 +533,8 @@ fn load_blocking(
 
     Ok(InstalledPlugin {
         manifest,
+        // The bytes parsed as JSON, so this lossy conversion is exact.
+        manifest_json: String::from_utf8_lossy(&manifest_bytes).into_owned(),
         dir,
         sha256,
         component,

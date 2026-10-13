@@ -1,0 +1,122 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, version, api, manifest, sha256, source, approved_permissions, enabled, installed_at\n             FROM plugins WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "plugins",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "version",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "plugins",
+            "name": "version"
+          }
+        }
+      },
+      {
+        "name": "api",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "plugins",
+            "name": "api"
+          }
+        }
+      },
+      {
+        "name": "manifest",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "plugins",
+            "name": "manifest"
+          }
+        }
+      },
+      {
+        "name": "sha256",
+        "ordinal": 4,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "plugins",
+            "name": "sha256"
+          }
+        }
+      },
+      {
+        "name": "source",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "plugins",
+            "name": "source"
+          }
+        }
+      },
+      {
+        "name": "approved_permissions",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "plugins",
+            "name": "approved_permissions"
+          }
+        }
+      },
+      {
+        "name": "enabled",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "plugins",
+            "name": "enabled"
+          }
+        }
+      },
+      {
+        "name": "installed_at",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "plugins",
+            "name": "installed_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "3e4bdab1ddb5f16822a577c08dcfab3fbe66b8f757d5e1fb1dd091d9ca8e65e5"
+}

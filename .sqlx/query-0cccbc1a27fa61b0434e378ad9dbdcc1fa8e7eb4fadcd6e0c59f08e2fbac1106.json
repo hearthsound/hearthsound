@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM provider_instances WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "0cccbc1a27fa61b0434e378ad9dbdcc1fa8e7eb4fadcd6e0c59f08e2fbac1106"
+}

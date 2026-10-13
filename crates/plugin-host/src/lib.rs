@@ -9,6 +9,12 @@
 //!
 //! The rest of the server never sees WebAssembly: [`PluginHost::catalog_provider`]
 //! hands out a core trait object whose calls cross the guest boundary and back.
+//! [`ProviderRegistry`] is how the server finds those objects: it is built from
+//! the plugin tables, ordered by the administrator's layer assignments, and
+//! rebuilt when the tables change. [`InstanceService`] is the write side of the
+//! same tables - creating an instance validates its configuration against the
+//! plugin's schema, seals its secrets, and asks the plugin whether the
+//! configuration works before anything is stored.
 //!
 //! Every host import enforces the instance's approved permissions itself.
 //! [`http`] is the outbound HTTP import: it applies the instance's host
@@ -29,12 +35,16 @@ mod error;
 pub mod files;
 mod host;
 pub mod http;
+pub mod install;
 mod instance;
+pub mod instances;
 pub mod kv;
 pub mod log;
 pub mod manifest;
 mod metadata;
 mod pool;
+pub mod registry;
+mod repo;
 mod state;
 mod validate;
 
@@ -43,8 +53,14 @@ pub use engine::PluginEngine;
 pub use error::{HostError, InstallError};
 pub use files::{FileAccess, FileStat, FilesError};
 pub use host::{InstalledPlugin, PluginHost};
+pub use install::{PluginRegistration, RequestedPermission, Risk};
 pub use instance::{ImportRoot, InstanceConfig, InstanceHostConfig};
+pub use instances::{
+    InstanceError, InstanceService, InstanceSpec, InstanceView, SECRET_PLACEHOLDER,
+};
 pub use kv::KvStore;
 pub use log::{GuestOutput, LogSink};
 pub use manifest::{Manifest, ManifestError};
+pub use registry::{ProviderRegistry, RegistryInstance, RegistryReport, SkippedInstance};
+pub use repo::{Assignment, InstanceRow, PluginRepository, PluginRow, PluginSource, RepoError};
 pub use state::InstanceState;

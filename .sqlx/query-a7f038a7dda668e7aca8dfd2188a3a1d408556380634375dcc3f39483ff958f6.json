@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE plugins SET enabled = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "a7f038a7dda668e7aca8dfd2188a3a1d408556380634375dcc3f39483ff958f6"
+}

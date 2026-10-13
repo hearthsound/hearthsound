@@ -193,3 +193,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `getOpenSubsonicExtensions` with the `apiKeyAuthentication` and `formPost`
   extensions, `tokenInfo`, and `getMusicFolders` with the personal library and
   the server browse folder, each snapshot tested in both encodings.
+- The plugin, provider instance and layer assignment repositories, and the
+  provider registry built from them: each layer holds the enabled instances in
+  the order the administrator assigned, exposes the plugin id and version, the
+  manifest, the import roots and the matching provider trait object, and reuses
+  one compiled component per plugin version across rebuilds.
+- Configuring a provider instance: the slug is validated and must be free, the
+  plugin must be enabled, the server-scoped configuration is validated against
+  the plugin's JSON Schema with its defaults applied and its `writeOnly` fields
+  sealed with the secret box, the import roots must be existing directories, and
+  the plugin's `lifecycle.validate-config` decides whether the configuration is
+  stored at all; installing a plugin records its manifest, hash and permissions
+  as approved and returns the requested permissions with their risk labels.
+- Instances are disabled in the database and reported through a `plugin.status`
+  event when a plugin traps five times in ten minutes, and every plugin host
+  publishes on one `EventBus` a composition root can replace.

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM layer_assignments WHERE layer = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "6eef5657af0f26488d94ef1e66c0591f51e6d9db977e094ad36f7af0398da430"
+}

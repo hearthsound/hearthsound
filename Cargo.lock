@@ -1714,6 +1714,7 @@ name = "hearthsound-plugin-host"
 version = "0.1.0-alpha.0"
 dependencies = [
  "async-trait",
+ "data-encoding",
  "governor",
  "hearthsound-config",
  "hearthsound-core",

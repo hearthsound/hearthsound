@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 use hearthsound_config::{ConfigError, SettingsStore, keys};
 use hearthsound_core::Layer;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The API version this server hosts.
 pub const SUPPORTED_API: &str = "hearthsound:plugin@0.1.0";
@@ -331,7 +331,7 @@ impl Manifest {
 ///
 /// A `Default` value grants nothing: an instance whose plugin was approved for
 /// no permission can reach nothing.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Permissions {
     /// Outbound HTTP permission.
@@ -349,7 +349,7 @@ pub struct Permissions {
 }
 
 /// The hosts a plugin may reach, and how hard it may hammer them.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HttpPermission {
     /// The approved hosts.
@@ -363,7 +363,7 @@ pub struct HttpPermission {
 }
 
 /// A request rate limit.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RateLimit {
     /// Sustained requests per second.
@@ -373,7 +373,7 @@ pub struct RateLimit {
 }
 
 /// The key-value storage quota.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KvPermission {
     /// The maximum number of bytes the plugin may store.
@@ -382,7 +382,7 @@ pub struct KvPermission {
 }
 
 /// The filesystem permission.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FilesPermission {
     /// Whether the plugin may read import roots.
@@ -391,7 +391,7 @@ pub struct FilesPermission {
 }
 
 /// The process execution permission.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProcessPermission {
     /// The approved tools; must be empty in this API version.

@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
+data-encoding.workspace = true
 governor.workspace = true
 hearthsound-config = { path = "../config" }
 hearthsound-core = { path = "../core" }

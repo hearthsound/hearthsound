@@ -1,0 +1,134 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, plugin_id, slug, display_name, server_config, host_config,\n                    enabled, health, created_at, updated_at\n             FROM provider_instances ORDER BY slug",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "provider_instances",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "plugin_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_instances",
+            "name": "plugin_id"
+          }
+        }
+      },
+      {
+        "name": "slug",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_instances",
+            "name": "slug"
+          }
+        }
+      },
+      {
+        "name": "display_name",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_instances",
+            "name": "display_name"
+          }
+        }
+      },
+      {
+        "name": "server_config",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_instances",
+            "name": "server_config"
+          }
+        }
+      },
+      {
+        "name": "host_config",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_instances",
+            "name": "host_config"
+          }
+        }
+      },
+      {
+        "name": "enabled",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "provider_instances",
+            "name": "enabled"
+          }
+        }
+      },
+      {
+        "name": "health",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_instances",
+            "name": "health"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "provider_instances",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "provider_instances",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "4f59c7775a227dee1f289478949fae23e830ae45baca7d0f02b3664368c06f9f"
+}
