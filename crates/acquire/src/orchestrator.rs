@@ -64,6 +64,13 @@ use crate::search::SearchOutcome;
 /// process - the CLI - wrote.
 const SCHEDULER_TICK: Duration = Duration::from_secs(1);
 
+/// How long a resumed acquisition waits for a worker slot before looking again.
+///
+/// A server that resumes more acquisitions than there are slots has to wait for
+/// the ones already running, and this is the longest it sleeps between two
+/// attempts.
+const RESUME_SLOT_WAIT: Duration = Duration::from_millis(100);
+
 /// A request for a track that is not on disk.
 ///
 /// The request carries everything admission decides on: what to acquire, how
@@ -910,14 +917,90 @@ impl AcquisitionOrchestrator {
     /// Starts the scheduler that claims queued acquisitions.
     ///
     /// The composition root calls this once after building the orchestrator. It
-    /// is idempotent: a second call does nothing. The scheduler runs until the
-    /// server stops, so the task it spawns is deliberately not joined.
+    /// is idempotent: a second call does nothing. Before the scheduler runs, the
+    /// acquisitions a previous process left unfinished are resumed from the
+    /// ledger, so a server that stopped mid-download or mid-import finishes what
+    /// it started instead of leaving those rows stranded. The scheduler runs
+    /// until the server stops, so the task it spawns is deliberately not joined.
     pub fn start(self: &Arc<Self>) {
         if self.inner.started.swap(true, Ordering::AcqRel) {
             return;
         }
         let this = Arc::clone(self);
-        tokio::spawn(async move { this.schedule().await });
+        tokio::spawn(async move {
+            if let Err(error) = this.resume().await {
+                tracing::warn!(%error, "resuming the acquisitions of a previous process failed");
+            }
+            this.schedule().await;
+        });
+    }
+
+    /// Resumes the acquisitions a previous process left unfinished.
+    ///
+    /// The ledger is the pipeline's only memory, so a row that is not terminal
+    /// names the stage it stopped in: a `queued` row is claimed by the scheduler
+    /// like any other, a `resolving` or `searching` row runs the search again, a
+    /// `downloading` row continues with the instance, candidate and token it
+    /// recorded, and a `verifying` or `importing` row redoes the completion
+    /// checks and the import from the files it resolved. Every resumed row is
+    /// put under a worker that waits for a free slot, so a restart cannot exceed
+    /// `acquisition.max_concurrent` any more than a fresh start can.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error of the read that loads the rows.
+    async fn resume(&self) -> Result<(), AcquireError> {
+        let rows = self.inner.repository.active().await?;
+        for row in rows {
+            self.stop_signal(row.id);
+            if row.state == AcquisitionState::Queued {
+                // The scheduler claims it, in priority order, like any other
+                // queued acquisition.
+                continue;
+            }
+            tracing::info!(
+                acquisition = %row.id,
+                state = row.state.as_str(),
+                "resuming an acquisition"
+            );
+            let this = self.clone();
+            tokio::spawn(async move {
+                if let Err(error) = this.acquire_slot().await {
+                    tracing::warn!(
+                        acquisition = %row.id,
+                        %error,
+                        "a resumed acquisition could not take a worker slot"
+                    );
+                    return;
+                }
+                this.advance(row.id).await;
+                this.release_slot();
+            });
+        }
+        self.notify_work();
+        Ok(())
+    }
+
+    /// Waits for a free worker slot.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` once a slot is reserved, which the caller has to release.
+    ///
+    /// # Errors
+    ///
+    /// Returns the settings error when `acquisition.max_concurrent` cannot be
+    /// read; no slot is taken then.
+    async fn acquire_slot(&self) -> Result<(), AcquireError> {
+        loop {
+            if self.try_reserve_slot()? {
+                return Ok(());
+            }
+            tokio::select! {
+                () = self.inner.notify.notified() => {}
+                () = tokio::time::sleep(RESUME_SLOT_WAIT) => {}
+            }
+        }
     }
 
     /// Returns how many worker slots are in use.
@@ -1031,6 +1114,13 @@ impl AcquisitionOrchestrator {
 
     /// Runs the stages an acquisition is ready for.
     ///
+    /// The state the row is in decides where the pipeline enters: `resolving`
+    /// runs identity resolution and moves on to the search, `downloading`
+    /// continues the attempt the ledger recorded, and `verifying` or `importing`
+    /// redoes verification and the import from the files that attempt resolved.
+    /// Those last two only happen after a restart, because a process that drives
+    /// an acquisition through the stages itself never leaves one there.
+    ///
     /// # Parameters
     ///
     /// - `id`: the acquisition to advance.
@@ -1056,6 +1146,19 @@ impl AcquisitionOrchestrator {
                 .await?;
             row.state = AcquisitionState::Searching;
             self.announce(&self.progress_of_row(&row, row.priority));
+        }
+        if row.state == AcquisitionState::Downloading {
+            match self.resume_download(&row).await? {
+                DownloadOutcome::Ready | DownloadOutcome::Stopped | DownloadOutcome::Cancelled => {
+                    return Ok(());
+                }
+                DownloadOutcome::RestartSearch => row.state = AcquisitionState::Searching,
+            }
+        } else if matches!(
+            row.state,
+            AcquisitionState::Verifying | AcquisitionState::Importing
+        ) {
+            return self.resume_import(&row).await;
         }
         loop {
             if row.state == AcquisitionState::Searching {
@@ -1449,7 +1552,7 @@ impl AcquisitionOrchestrator {
     /// # Returns
     ///
     /// The instance, or `None` when the registry no longer serves it.
-    fn instance_by_id(&self, id: Uuid) -> Option<Arc<RegistryInstance>> {
+    pub(crate) fn instance_by_id(&self, id: Uuid) -> Option<Arc<RegistryInstance>> {
         self.inner
             .registry
             .layers(hearthsound_core::Layer::Acquisition)

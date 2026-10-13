@@ -547,3 +547,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   side effects. `list` renders the ledger for an administrative view with the
   track's title and artist, the instance, the percentage and the failure reason,
   filtered by state or by whether the acquisition still holds work.
+- Restart safety for the acquisition pipeline: `start` resumes the acquisitions a
+  previous process left unfinished instead of stranding them, in the order the
+  ledger holds them and within `acquisition.max_concurrent`. A `queued` row is
+  claimed by the scheduler like any other, a `resolving` or `searching` row runs
+  the search again, a `downloading` row keeps polling the instance, candidate and
+  download token the ledger recorded - and restarts the search when the backend
+  no longer knows that token - and a `verifying` or `importing` row redoes the
+  completion check and then verification and the import from the files that
+  download resolved, which are stored in the candidate column for exactly this
+  reason. A server that stops after a download or during an import therefore
+  finishes the acquisition without downloading the file again.

@@ -30,12 +30,13 @@ use std::time::Duration;
 
 use hearthsound_config::keys;
 use hearthsound_core::providers::{
-    AcquisitionContext, AcquisitionProvider, Candidate, DownloadState, OutputFile, Progress,
+    AcquisitionContext, AcquisitionProvider, Candidate, CandidateFile, DownloadState, OutputFile,
+    Progress, SourceInfo,
 };
-use hearthsound_core::{AcquisitionState, FailureReason, ProviderError};
+use hearthsound_core::{AcquisitionState, FailureReason, ProviderError, QualityTier};
 use hearthsound_plugin_host::RegistryInstance;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedSemaphorePermit};
 use tokio::time::Instant;
 use uuid::Uuid;
 
@@ -112,6 +113,15 @@ enum CandidateAttempt {
     LostToken,
 }
 
+/// What one candidate's attempt leaves to do.
+pub(crate) enum AttemptVerdict {
+    /// The download stage is over with this outcome.
+    Done(DownloadOutcome),
+    /// The candidate was rejected; the caller may try the next one, and fails
+    /// the acquisition with the reason when none is left.
+    Next(Option<(FailureReason, Option<String>)>),
+}
+
 /// How long one candidate's attempt may take and how often it is polled.
 #[derive(Debug, Clone, Copy)]
 struct AttemptLimits {
@@ -143,7 +153,9 @@ enum Stability {
 ///
 /// The ledger keeps the candidate as JSON so a restart can tell which files a
 /// persisted download token is fetching. The shape mirrors the provider's
-/// candidate, which is not itself serializable.
+/// candidate, which is not itself serializable; `resolved` is added once the
+/// backend reports the download complete, and is what lets a process that starts
+/// later verify and import the files without asking the backend again.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StoredCandidate {
@@ -157,6 +169,9 @@ pub(crate) struct StoredCandidate {
     pub(crate) files: Vec<StoredCandidateFile>,
     /// What the backend knows about the source.
     pub(crate) source: StoredSource,
+    /// The files the download produced, once its completion was accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) resolved: Option<Vec<StoredResolvedFile>>,
 }
 
 /// One file of a [`StoredCandidate`].
@@ -183,6 +198,42 @@ pub(crate) struct StoredCandidateFile {
     /// The duration in milliseconds, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) duration_ms: Option<u32>,
+}
+
+impl StoredCandidateFile {
+    /// Stores one of a candidate's files.
+    ///
+    /// # Parameters
+    ///
+    /// - `file`: the file the provider reported.
+    pub(crate) fn from_candidate_file(file: &CandidateFile) -> StoredCandidateFile {
+        StoredCandidateFile {
+            name: file.name.clone(),
+            size: file.size,
+            format: file.format.clone(),
+            bitrate_kbps: file.bitrate_kbps,
+            sample_rate: file.sample_rate,
+            bit_depth: file.bit_depth,
+            duration_ms: file.duration_ms,
+        }
+    }
+
+    /// Returns the provider file this stored form was built from.
+    ///
+    /// The track index the provider may carry is not stored, so the returned file
+    /// has none; nothing in the pipeline reads it after selection.
+    pub(crate) fn to_candidate_file(&self) -> CandidateFile {
+        CandidateFile {
+            name: self.name.clone(),
+            size: self.size,
+            format: self.format.clone(),
+            bitrate_kbps: self.bitrate_kbps,
+            sample_rate: self.sample_rate,
+            bit_depth: self.bit_depth,
+            duration_ms: self.duration_ms,
+            track_index: None,
+        }
+    }
 }
 
 /// The source of a [`StoredCandidate`].
@@ -216,15 +267,7 @@ impl StoredCandidate {
             files: candidate
                 .files
                 .iter()
-                .map(|file| StoredCandidateFile {
-                    name: file.name.clone(),
-                    size: file.size,
-                    format: file.format.clone(),
-                    bitrate_kbps: file.bitrate_kbps,
-                    sample_rate: file.sample_rate,
-                    bit_depth: file.bit_depth,
-                    duration_ms: file.duration_ms,
-                })
+                .map(StoredCandidateFile::from_candidate_file)
                 .collect(),
             source: StoredSource {
                 key: candidate.source.key.clone(),
@@ -232,6 +275,82 @@ impl StoredCandidate {
                 queue_length: candidate.source.queue_length,
                 free_slot: candidate.source.free_slot,
             },
+            resolved: None,
+        }
+    }
+
+    /// Returns the provider candidate this stored form was built from.
+    ///
+    /// The two forms carry the same fields, because the provider's candidate is
+    /// what the pipeline reasons about: a resume needs the candidate's tier,
+    /// which is derived from its files.
+    ///
+    /// # Returns
+    ///
+    /// The candidate, without the track index of a file, which the stored form
+    /// does not keep.
+    pub(crate) fn to_candidate(&self) -> Candidate {
+        Candidate {
+            token: self.token.clone(),
+            title: self.title.clone(),
+            path: self.path.clone(),
+            files: self
+                .files
+                .iter()
+                .map(StoredCandidateFile::to_candidate_file)
+                .collect(),
+            source: SourceInfo {
+                key: self.source.key.clone(),
+                speed_bps: self.source.speed_bps,
+                queue_length: self.source.queue_length,
+                free_slot: self.source.free_slot,
+            },
+        }
+    }
+}
+
+/// One file a completed download produced, as it is stored in
+/// `acquisitions.candidate`.
+///
+/// The absolute path is stored rather than recomputed, because resolving it needs
+/// the instance's import roots and a path the backend may have reported relative
+/// to one of them; keeping what the download resolved is what makes a restart
+/// able to import the same file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StoredResolvedFile {
+    /// The host root the plugin named, `staging` or an import root id.
+    pub(crate) root: String,
+    /// The path relative to that root.
+    pub(crate) path: String,
+    /// The absolute path the two resolve to.
+    pub(crate) absolute_path: String,
+    /// The file's size in bytes, as the last check saw it.
+    pub(crate) size: u64,
+}
+
+impl StoredResolvedFile {
+    /// Stores a resolved file.
+    ///
+    /// # Parameters
+    ///
+    /// - `file`: the file the download resolved.
+    pub(crate) fn from_resolved(file: &ResolvedFile) -> StoredResolvedFile {
+        StoredResolvedFile {
+            root: file.root.clone(),
+            path: file.path.clone(),
+            absolute_path: file.absolute_path.to_string_lossy().into_owned(),
+            size: file.size,
+        }
+    }
+
+    /// Returns the resolved file this stored form was built from.
+    pub(crate) fn to_resolved(&self) -> ResolvedFile {
+        ResolvedFile {
+            root: self.root.clone(),
+            path: self.path.clone(),
+            absolute_path: PathBuf::from(&self.absolute_path),
+            size: self.size,
         }
     }
 }
@@ -290,6 +409,19 @@ pub(crate) fn stored_progress(text: Option<&str>) -> Option<StoredProgress> {
     serde_json::from_str(text?).ok()
 }
 
+/// Parses the candidate a download is working on.
+///
+/// # Parameters
+///
+/// - `text`: the JSON text of `acquisitions.candidate`, when it has one.
+///
+/// # Returns
+///
+/// The candidate, or `None` when the column is empty or unreadable.
+pub(crate) fn stored_candidate(text: Option<&str>) -> Option<StoredCandidate> {
+    serde_json::from_str(text?).ok()
+}
+
 impl AcquisitionOrchestrator {
     /// Runs the download stage of one acquisition.
     ///
@@ -307,10 +439,11 @@ impl AcquisitionOrchestrator {
     ///
     /// # Returns
     ///
-    /// [`DownloadOutcome::Ready`] when the files are resolved and the
-    /// acquisition is `verifying`, [`DownloadOutcome::RestartSearch`] when the
-    /// backend lost the token and the acquisition has to be searched again, and
-    /// [`DownloadOutcome::Stopped`] when the acquisition was failed.
+    /// [`DownloadOutcome::Ready`] when the files are resolved and passed
+    /// verification, [`DownloadOutcome::RestartSearch`] when the backend lost
+    /// the token and the acquisition has to be searched again,
+    /// [`DownloadOutcome::Stopped`] when the acquisition was failed, and
+    /// [`DownloadOutcome::Cancelled`] when it was cancelled.
     ///
     /// # Errors
     ///
@@ -325,29 +458,12 @@ impl AcquisitionOrchestrator {
             return Err(AcquireError::UnknownAcquisition(acquisition_id));
         };
         let row = &row;
-        let snapshot = self.settings().current();
-        let class = RequestClass::from_priority(row.priority);
-        let poll_interval = if class.is_interactive() {
-            INTERACTIVE_POLL_INTERVAL
-        } else {
-            BACKGROUND_POLL_INTERVAL
-        };
-        let stall_timeout =
-            Duration::from_secs(snapshot.get(keys::ACQUISITION_STALL_TIMEOUT_SECS)?.max(0) as u64);
-        let queue_timeout = Duration::from_secs(
-            if class.is_interactive() {
-                snapshot.get(keys::ACQUISITION_QUEUE_TIMEOUT_SECS_INTERACTIVE)?
-            } else {
-                snapshot.get(keys::ACQUISITION_QUEUE_TIMEOUT_SECS_BACKGROUND)?
-            }
-            .max(0) as u64,
-        );
-        let max_candidates = snapshot.get(keys::ACQUISITION_MAX_CANDIDATES)?.max(0) as usize;
-        let limits = AttemptLimits {
-            poll_interval,
-            stall_timeout,
-            queue_timeout,
-        };
+        let max_candidates = self
+            .settings()
+            .current()
+            .get(keys::ACQUISITION_MAX_CANDIDATES)?
+            .max(0) as usize;
+        let limits = self.attempt_limits(row)?;
 
         let mut attempts = row.attempts;
         let mut failure: Option<(FailureReason, Option<String>)> = None;
@@ -358,7 +474,6 @@ impl AcquisitionOrchestrator {
             let Some(provider) = instance.acquisition().cloned() else {
                 continue;
             };
-            let context = AcquisitionContext::new(self.staging_dir(row.id));
             if attempts == row.attempts {
                 self.repository()
                     .transition(
@@ -406,50 +521,16 @@ impl AcquisitionOrchestrator {
                 }
             };
 
-            match outcome {
-                CandidateAttempt::Downloaded { token, files } => {
-                    match self
-                        .stabilize_download(instance, &context, provider.as_ref(), &token, &files)
-                        .await?
-                    {
-                        Stability::Stable(resolved) | Stability::StillComplete(resolved) => {
-                            match self
-                                .hand_off_for_verification(row.id, instance, attempt, &resolved)
-                                .await?
-                            {
-                                HandoffOutcome::Completed => {
-                                    return Ok(DownloadOutcome::Ready);
-                                }
-                                HandoffOutcome::Rejected { reason, detail } => {
-                                    failure = Some((reason, detail));
-                                }
-                            }
-                        }
-                        Stability::Failed { reason, detail } => {
-                            failure = Some((reason, detail));
-                        }
+            match self
+                .settle_attempt(row, instance, provider.as_ref(), attempt.tier, outcome)
+                .await?
+            {
+                AttemptVerdict::Done(outcome) => return Ok(outcome),
+                AttemptVerdict::Next(reason) => {
+                    if reason.is_some() {
+                        failure = reason;
                     }
                 }
-                CandidateAttempt::Failed { reason, detail } => {
-                    failure = Some((reason, detail));
-                }
-                CandidateAttempt::Cancelled => {
-                    // The acquisition was cancelled while this candidate was
-                    // downloading; the row already says so.
-                    return Ok(DownloadOutcome::Cancelled);
-                }
-                CandidateAttempt::LostToken => {
-                    self.repository()
-                        .transition(
-                            row.id,
-                            AcquisitionState::Searching,
-                            Some("the backend lost the download token; searching again"),
-                        )
-                        .await?;
-                    self.repository().set_progress(row.id, None).await?;
-                    return Ok(DownloadOutcome::RestartSearch);
-                }
-                CandidateAttempt::Preempted => unreachable!("the preemption loop retries"),
             }
         }
 
@@ -457,6 +538,263 @@ impl AcquisitionOrchestrator {
         self.fail_acquisition(row.id, reason, detail.as_deref())
             .await?;
         Ok(DownloadOutcome::Stopped)
+    }
+
+    /// Resumes a download that was already started.
+    ///
+    /// The ledger names the instance, the candidate and the token of the attempt
+    /// that was in flight when the previous process stopped, so the download is
+    /// picked up where it stopped: the same backend token is polled on the same
+    /// instance, and the files it reports when it completes are verified and
+    /// imported like any other candidate's. A row that cannot be resumed
+    /// continues as the ledger allows instead of failing: a download that is
+    /// missing its instance, candidate or token, or whose candidate has no
+    /// usable tier, goes back to `searching`, and an instance the registry no
+    /// longer serves fails the acquisition as `backend-unavailable`.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the acquisition's ledger row, in `downloading`.
+    ///
+    /// # Returns
+    ///
+    /// The same outcomes [`AcquisitionOrchestrator::download`] returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns the settings, ledger or filesystem error that stopped the resume.
+    pub(crate) async fn resume_download(
+        &self,
+        row: &AcquisitionRow,
+    ) -> Result<DownloadOutcome, AcquireError> {
+        let Some(instance_id) = row.instance_id else {
+            return self
+                .restart_search(row, "the ledger does not name the instance to resume from")
+                .await;
+        };
+        let Some(stored) = stored_candidate(row.candidate.as_deref()) else {
+            return self
+                .restart_search(row, "the ledger does not hold the candidate to resume")
+                .await;
+        };
+        let Some(token) = row.plugin_token.as_deref() else {
+            return self
+                .restart_search(row, "the ledger does not hold the token to resume")
+                .await;
+        };
+        let Some(tier) = stored
+            .to_candidate()
+            .files
+            .first()
+            .and_then(crate::profile::quality_tier)
+        else {
+            return self
+                .restart_search(row, "the resumed candidate has no usable quality tier")
+                .await;
+        };
+        let Some(instance) = self.instance_by_id(instance_id) else {
+            tracing::warn!(
+                acquisition = %row.id,
+                instance = %instance_id,
+                "the instance that served a download is gone"
+            );
+            self.fail_acquisition(
+                row.id,
+                FailureReason::BackendUnavailable,
+                Some("the instance that served the download is gone"),
+            )
+            .await?;
+            return Ok(DownloadOutcome::Stopped);
+        };
+        let Some(provider) = instance.acquisition().cloned() else {
+            tracing::warn!(
+                acquisition = %row.id,
+                instance = instance.slug().as_str(),
+                "the instance can no longer download"
+            );
+            self.fail_acquisition(
+                row.id,
+                FailureReason::BackendUnavailable,
+                Some("the instance that served the download can no longer download"),
+            )
+            .await?;
+            return Ok(DownloadOutcome::Stopped);
+        };
+        let limits = self.attempt_limits(row)?;
+        tracing::info!(
+            acquisition = %row.id,
+            instance = instance.slug().as_str(),
+            "resuming a download"
+        );
+
+        let outcome = self
+            .run_resumed_candidate(row, &instance, provider.as_ref(), token, limits)
+            .await?;
+        match self
+            .settle_attempt(row, &instance, provider.as_ref(), tier, outcome)
+            .await?
+        {
+            AttemptVerdict::Done(outcome) => Ok(outcome),
+            // The plan the previous process selected is gone with it, so a
+            // rejected candidate sends the acquisition back to a fresh search
+            // instead of to a next candidate that is no longer known.
+            AttemptVerdict::Next(_) => {
+                self.restart_search(row, "the resumed candidate was rejected")
+                    .await
+            }
+        }
+    }
+
+    /// Moves a downloading acquisition back to `searching`.
+    ///
+    /// The retry edge of the state machine is `downloading -> searching`, which
+    /// is what a lost or unusable download uses: the row's instance, candidate,
+    /// token and progress describe an attempt that no longer exists, so they are
+    /// cleared and the pipeline searches again.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the acquisition's ledger row.
+    /// - `message`: why the search is restarted, for the log.
+    ///
+    /// # Returns
+    ///
+    /// [`DownloadOutcome::RestartSearch`], so a caller can return it directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger error when the transition or a write fails.
+    async fn restart_search(
+        &self,
+        row: &AcquisitionRow,
+        message: &str,
+    ) -> Result<DownloadOutcome, AcquireError> {
+        self.repository()
+            .transition(row.id, AcquisitionState::Searching, Some(message))
+            .await?;
+        self.repository().set_progress(row.id, None).await?;
+        self.repository()
+            .set_download(row.id, None, None, None)
+            .await?;
+        tracing::info!(acquisition = %row.id, reason = message, "restarting a download as a search");
+        Ok(DownloadOutcome::RestartSearch)
+    }
+
+    /// Acts on one finished candidate attempt.
+    ///
+    /// The download of the candidate is over, so the acquisition either moves
+    /// past the download stage, has to search again, or may try the next
+    /// candidate. The files a completed download resolved are written to the
+    /// ledger before verification runs, which is what lets a process that stops
+    /// in the middle of verification or import finish the job later.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the acquisition's ledger row.
+    /// - `instance`: the instance that served the attempt.
+    /// - `provider`: the instance's acquisition provider.
+    /// - `tier`: the quality tier the candidate claimed.
+    /// - `outcome`: what the attempt produced.
+    ///
+    /// # Returns
+    ///
+    /// [`AttemptVerdict::Done`] when the download stage is over, and
+    /// [`AttemptVerdict::Next`] when the caller should try the next candidate.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger or filesystem error that stopped the stage.
+    async fn settle_attempt(
+        &self,
+        row: &AcquisitionRow,
+        instance: &RegistryInstance,
+        provider: &dyn AcquisitionProvider,
+        tier: QualityTier,
+        outcome: CandidateAttempt,
+    ) -> Result<AttemptVerdict, AcquireError> {
+        let context = AcquisitionContext::new(self.staging_dir(row.id));
+        match outcome {
+            CandidateAttempt::Downloaded { token, files } => {
+                match self
+                    .stabilize_download(instance, &context, provider, &token, &files)
+                    .await?
+                {
+                    Stability::Stable(resolved) | Stability::StillComplete(resolved) => {
+                        self.record_resolved(row.id, instance, &token, &resolved)
+                            .await?;
+                        match self
+                            .hand_off_for_verification(row.id, instance, tier, &resolved)
+                            .await?
+                        {
+                            HandoffOutcome::Completed => {
+                                Ok(AttemptVerdict::Done(DownloadOutcome::Ready))
+                            }
+                            HandoffOutcome::Rejected { reason, detail } => {
+                                Ok(AttemptVerdict::Next(Some((reason, detail))))
+                            }
+                        }
+                    }
+                    Stability::Failed { reason, detail } => {
+                        Ok(AttemptVerdict::Next(Some((reason, detail))))
+                    }
+                }
+            }
+            CandidateAttempt::Failed { reason, detail } => {
+                Ok(AttemptVerdict::Next(Some((reason, detail))))
+            }
+            CandidateAttempt::Cancelled => {
+                // The acquisition was cancelled while this candidate was
+                // downloading; the row already says so.
+                Ok(AttemptVerdict::Done(DownloadOutcome::Cancelled))
+            }
+            CandidateAttempt::LostToken => {
+                let outcome = self
+                    .restart_search(row, "the backend lost the download token; searching again")
+                    .await?;
+                Ok(AttemptVerdict::Done(outcome))
+            }
+            CandidateAttempt::Preempted => unreachable!("the preemption loop retries"),
+        }
+    }
+
+    /// Reads the limits one download attempt obeys.
+    ///
+    /// The poll interval and the queue timeout follow the request's class: a user
+    /// is waiting for a `play` or `next` acquisition, so it is polled often and
+    /// abandoned sooner.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the acquisition's ledger row.
+    ///
+    /// # Returns
+    ///
+    /// The limits the attempt's stages use.
+    ///
+    /// # Errors
+    ///
+    /// Returns the settings error when a key cannot be read.
+    fn attempt_limits(&self, row: &AcquisitionRow) -> Result<AttemptLimits, AcquireError> {
+        let snapshot = self.settings().current();
+        let interactive = RequestClass::from_priority(row.priority).is_interactive();
+        Ok(AttemptLimits {
+            poll_interval: if interactive {
+                INTERACTIVE_POLL_INTERVAL
+            } else {
+                BACKGROUND_POLL_INTERVAL
+            },
+            stall_timeout: Duration::from_secs(
+                snapshot.get(keys::ACQUISITION_STALL_TIMEOUT_SECS)?.max(0) as u64,
+            ),
+            queue_timeout: Duration::from_secs(
+                if interactive {
+                    snapshot.get(keys::ACQUISITION_QUEUE_TIMEOUT_SECS_INTERACTIVE)?
+                } else {
+                    snapshot.get(keys::ACQUISITION_QUEUE_TIMEOUT_SECS_BACKGROUND)?
+                }
+                .max(0) as u64,
+            ),
+        })
     }
 
     /// Downloads one candidate, holding an instance download slot for the whole
@@ -490,38 +828,12 @@ impl AcquisitionOrchestrator {
         limits: AttemptLimits,
         must_wait: bool,
     ) -> Result<CandidateAttempt, AcquireError> {
-        let slots = self.download_budgets().slots(instance);
-        let available = if must_wait {
-            None
-        } else {
-            Arc::clone(&slots).try_acquire_owned().ok()
+        let Some(permit) = self.take_download_slot(row, instance, must_wait).await else {
+            return Ok(CandidateAttempt::Failed {
+                reason: FailureReason::BackendUnavailable,
+                detail: Some("the download budget is closed".to_owned()),
+            });
         };
-        let permit = match available {
-            Some(permit) => permit,
-            None => {
-                if RequestClass::from_priority(row.priority).is_interactive()
-                    && let Some(victim) =
-                        self.download_budgets().preempt(instance.id(), row.priority)
-                {
-                    tracing::info!(
-                        acquisition = %victim,
-                        instance = instance.slug().as_str(),
-                        requester = %row.id,
-                        "preempted a bulk download for an interactive request"
-                    );
-                }
-                match Arc::clone(&slots).acquire_owned().await {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        return Ok(CandidateAttempt::Failed {
-                            reason: FailureReason::BackendUnavailable,
-                            detail: Some("the download budget is closed".to_owned()),
-                        });
-                    }
-                }
-            }
-        };
-
         let preempted = self
             .download_budgets()
             .register(row.id, instance.id(), row.priority);
@@ -531,6 +843,91 @@ impl AcquisitionOrchestrator {
         self.download_budgets().unregister(row.id);
         drop(permit);
         outcome
+    }
+
+    /// Polls a download that was already started, holding an instance slot.
+    ///
+    /// This is [`AcquisitionOrchestrator::run_candidate`] without the start: the
+    /// attempt's download is already in flight at the backend, so it takes a
+    /// download slot, registers for preemption like any other attempt, and polls
+    /// the token the ledger holds.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the acquisition's ledger row.
+    /// - `instance`: the instance serving the download.
+    /// - `provider`: the instance's acquisition provider.
+    /// - `token`: the download token the previous process received.
+    /// - `limits`: how long the attempt may take and how often it is polled.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger or filesystem error that stopped the attempt.
+    async fn run_resumed_candidate(
+        &self,
+        row: &AcquisitionRow,
+        instance: &RegistryInstance,
+        provider: &dyn AcquisitionProvider,
+        token: &str,
+        limits: AttemptLimits,
+    ) -> Result<CandidateAttempt, AcquireError> {
+        let Some(permit) = self.take_download_slot(row, instance, true).await else {
+            return Ok(CandidateAttempt::Failed {
+                reason: FailureReason::BackendUnavailable,
+                detail: Some("the download budget is closed".to_owned()),
+            });
+        };
+        let preempted = self
+            .download_budgets()
+            .register(row.id, instance.id(), row.priority);
+        let outcome = self
+            .watch_download(row, instance, provider, token, limits, &preempted)
+            .await;
+        self.download_budgets().unregister(row.id);
+        drop(permit);
+        outcome
+    }
+
+    /// Takes one of an instance's download slots for an attempt.
+    ///
+    /// The slot is taken without waiting when one is free. When none is, an
+    /// interactive request preempts the instance's least urgent bulk download and
+    /// then waits for the slot, which the preempted download releases as soon as
+    /// it is woken; the waiters are served in order, so the interactive request
+    /// takes the slot first.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the acquisition's ledger row.
+    /// - `instance`: the instance the attempt runs on.
+    /// - `must_wait`: whether the slot has to be waited for, which is set for the
+    ///   retry that follows a preemption.
+    ///
+    /// # Returns
+    ///
+    /// The permit, which the caller must hold for the whole attempt, or `None`
+    /// when the instance's budget is closed.
+    async fn take_download_slot(
+        &self,
+        row: &AcquisitionRow,
+        instance: &RegistryInstance,
+        must_wait: bool,
+    ) -> Option<OwnedSemaphorePermit> {
+        let slots = self.download_budgets().slots(instance);
+        if !must_wait && let Ok(permit) = Arc::clone(&slots).try_acquire_owned() {
+            return Some(permit);
+        }
+        if RequestClass::from_priority(row.priority).is_interactive()
+            && let Some(victim) = self.download_budgets().preempt(instance.id(), row.priority)
+        {
+            tracing::info!(
+                acquisition = %victim,
+                instance = instance.slug().as_str(),
+                requester = %row.id,
+                "preempted a bulk download for an interactive request"
+            );
+        }
+        Arc::clone(&slots).acquire_owned().await.ok()
     }
 
     /// Starts a candidate's download and polls it until it ends.
@@ -792,6 +1189,9 @@ impl AcquisitionOrchestrator {
 
     /// Waits until a file's size stops changing.
     ///
+    /// The import stage runs the same check after a resume, which is why it is
+    /// shared.
+    ///
     /// # Parameters
     ///
     /// - `path`: the absolute path of the file.
@@ -804,7 +1204,10 @@ impl AcquisitionOrchestrator {
     ///
     /// Returns [`AcquireError::Io`] when the file cannot be stat-ed, which
     /// includes a file the backend reported but never wrote.
-    async fn wait_for_stable_size(&self, path: &Path) -> Result<(u64, bool), AcquireError> {
+    pub(crate) async fn wait_for_stable_size(
+        &self,
+        path: &Path,
+    ) -> Result<(u64, bool), AcquireError> {
         let mut previous = file_size(path).await?;
         let deadline = Instant::now() + COMPLETION_MAX_WAIT;
         loop {
@@ -888,6 +1291,55 @@ impl AcquisitionOrchestrator {
             speed_bps: progress.speed_bps,
         })?;
         self.repository().set_progress(id, Some(&stored)).await?;
+        Ok(())
+    }
+
+    /// Records the files a completed download resolved.
+    ///
+    /// The candidate column already says which candidate the token fetched; this
+    /// adds the absolute paths the backend reported, so a process that starts
+    /// after a crash can verify and import the same files without asking the
+    /// backend again. The instance and the token are written with them, because
+    /// they are what a resumed attempt polls.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the acquisition being downloaded.
+    /// - `instance`: the instance that served the download.
+    /// - `token`: the download token the backend issued.
+    /// - `resolved`: the files the completion rule accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::Json`] when the candidate cannot be serialized and
+    /// the ledger error when the row cannot be written.
+    async fn record_resolved(
+        &self,
+        id: Uuid,
+        instance: &RegistryInstance,
+        token: &str,
+        resolved: &[ResolvedFile],
+    ) -> Result<(), AcquireError> {
+        let Some(mut stored) = self
+            .repository()
+            .get(id)
+            .await?
+            .and_then(|row| stored_candidate(row.candidate.as_deref()))
+        else {
+            // A candidate the ledger cannot parse is one a resume will search
+            // again; recording its files would not make it resumable.
+            return Ok(());
+        };
+        stored.resolved = Some(
+            resolved
+                .iter()
+                .map(StoredResolvedFile::from_resolved)
+                .collect(),
+        );
+        let text = serde_json::to_string(&stored)?;
+        self.repository()
+            .set_download(id, Some(instance.id()), Some(&text), Some(token))
+            .await?;
         Ok(())
     }
 

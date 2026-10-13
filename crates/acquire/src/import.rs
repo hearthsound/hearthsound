@@ -44,12 +44,11 @@ use hearthsound_plugin_host::RegistryInstance;
 use hearthsound_plugin_host::manifest::ImageCachePolicy;
 use uuid::Uuid;
 
-use crate::download::{ResolvedFile, STAGING_ROOT};
+use crate::download::{ResolvedFile, STAGING_ROOT, StoredResolvedFile, stored_candidate};
 use crate::error::AcquireError;
 use crate::orchestrator::AcquisitionOrchestrator;
 use crate::profile;
 use crate::repo::{self, AcquisitionRow};
-use crate::select::ScoredCandidate;
 
 /// The window within which a downloaded file's duration must match the wanted
 /// track's catalog duration, in milliseconds.
@@ -104,8 +103,8 @@ impl AcquisitionOrchestrator {
     ///
     /// - `acquisition_id`: the acquisition whose files are ready.
     /// - `instance`: the instance that served the download.
-    /// - `candidate`: the candidate that was downloaded, whose tier is the
-    ///   lossless claim the check verifies.
+    /// - `tier`: the quality tier the candidate claimed, which is the lossless
+    ///   claim the check verifies.
     /// - `files`: the resolved files, in the order the backend reported them.
     ///
     /// # Returns
@@ -122,7 +121,7 @@ impl AcquisitionOrchestrator {
         &self,
         acquisition_id: Uuid,
         instance: &RegistryInstance,
-        candidate: &ScoredCandidate,
+        tier: QualityTier,
         files: &[ResolvedFile],
     ) -> Result<HandoffOutcome, AcquireError> {
         let Some(row) = self.repository().get(acquisition_id).await? else {
@@ -137,10 +136,7 @@ impl AcquisitionOrchestrator {
             None => None,
         };
 
-        let verified = match self
-            .verify_files(candidate.tier, catalog_duration_ms, files)
-            .await
-        {
+        let verified = match self.verify_files(tier, catalog_duration_ms, files).await {
             Ok(verified) => verified,
             Err(rejection) => {
                 cleanup_rejected(files).await;
@@ -176,6 +172,107 @@ impl AcquisitionOrchestrator {
         self.import_candidate(acquisition_id, instance, &verified, &row)
             .await?;
         Ok(HandoffOutcome::Completed)
+    }
+
+    /// Verifies and imports the files of a download a previous process finished.
+    ///
+    /// A process that stops between a download completing and its file reaching
+    /// managed storage leaves the acquisition in `verifying` or `importing` with
+    /// the resolved files in the ledger. This runs the same stages again from
+    /// those paths - the completion rule, then verification, then the import -
+    /// which is why the download stage stores them: nothing is downloaded twice,
+    /// and the acquisition finishes where it stopped. A row whose files cannot be
+    /// recovered is failed, because the state machine has no edge from
+    /// `verifying` or `importing` back to a search.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the acquisition's ledger row, in `verifying` or `importing`.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the acquisition was completed or failed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger, settings, library or filesystem error that stopped the
+    /// stage.
+    pub(crate) async fn resume_import(&self, row: &AcquisitionRow) -> Result<(), AcquireError> {
+        let id = row.id;
+        let stored = stored_candidate(row.candidate.as_deref());
+        let instance = row.instance_id.and_then(|id| self.instance_by_id(id));
+        let (Some(stored), Some(instance)) = (stored, instance) else {
+            return self
+                .fail_acquisition(
+                    id,
+                    FailureReason::VerificationFailed,
+                    Some("the ledger no longer names the files to import"),
+                )
+                .await;
+        };
+        let Some(resolved) = stored.resolved.as_ref().filter(|files| !files.is_empty()) else {
+            return self
+                .fail_acquisition(
+                    id,
+                    FailureReason::VerificationFailed,
+                    Some("the ledger does not hold the resolved files to import"),
+                )
+                .await;
+        };
+        let files: Vec<ResolvedFile> = resolved
+            .iter()
+            .map(StoredResolvedFile::to_resolved)
+            .collect();
+        let Some(tier) = stored
+            .to_candidate()
+            .files
+            .first()
+            .and_then(profile::quality_tier)
+        else {
+            return self
+                .fail_acquisition(
+                    id,
+                    FailureReason::VerificationFailed,
+                    Some("the imported candidate has no usable quality tier"),
+                )
+                .await;
+        };
+
+        // The completion rule runs again, because the files were written by a
+        // process that may have died while they were still growing.
+        let mut settled = Vec::with_capacity(files.len());
+        for file in &files {
+            let (size, _stable) = self.wait_for_stable_size(&file.absolute_path).await?;
+            settled.push(ResolvedFile {
+                size,
+                ..file.clone()
+            });
+        }
+
+        let catalog_duration_ms = match row.track_id {
+            Some(track_id) => self
+                .library()
+                .get_track(track_id)
+                .await?
+                .and_then(|track| track.duration_ms),
+            None => None,
+        };
+        match self.verify_files(tier, catalog_duration_ms, &settled).await {
+            Ok(verified) => {
+                tracing::info!(
+                    acquisition = %id,
+                    instance = instance.slug().as_str(),
+                    "resuming the import of a verified download"
+                );
+                self.import_candidate(id, &instance, &verified, row).await
+            }
+            Err(rejection) => {
+                cleanup_rejected(&settled).await;
+                self.log_rejection(id, &rejection).await;
+                self.fail_acquisition(id, rejection.reason, Some(&rejection.detail))
+                    .await
+            }
+        }
     }
 
     /// Appends a rejected candidate to the acquisition's log.
@@ -297,7 +394,9 @@ impl AcquisitionOrchestrator {
     /// - `instance`: the instance that served the download, for its slug and its
     ///   import roots.
     /// - `verified`: the verified files; the first one is imported.
-    /// - `row`: the acquisition's ledger row.
+    /// - `row`: the acquisition's ledger row, whose state decides whether the
+    ///   `importing` transition still has to be written: a row that a resume
+    ///   found in `importing` is already there.
     ///
     /// # Errors
     ///
@@ -317,13 +416,15 @@ impl AcquisitionOrchestrator {
             .first()
             .ok_or(AcquireError::UnknownAcquisition(acquisition_id))?;
 
-        self.repository()
-            .transition(
-                acquisition_id,
-                AcquisitionState::Importing,
-                Some("importing the verified file"),
-            )
-            .await?;
+        if row.state != AcquisitionState::Importing {
+            self.repository()
+                .transition(
+                    acquisition_id,
+                    AcquisitionState::Importing,
+                    Some("importing the verified file"),
+                )
+                .await?;
+        }
 
         let track = self
             .library()

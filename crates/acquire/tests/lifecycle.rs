@@ -323,3 +323,243 @@ async fn lists_acquisitions_with_their_track_and_instance() {
         .unwrap();
     assert!(none.is_empty(), "the limit is honored");
 }
+
+#[test]
+fn resumes_verification_and_import_after_a_restart() {
+    let first = runtime();
+    let (dir, verifying_id, verifying_track, importing_id, importing_track) =
+        first.block_on(async {
+            let mut env = Env::with_import_mode(
+                config(one_candidate(), "normal", 0, "downloads", ".flac"),
+                InstanceLimits::default(),
+                &[],
+                // The source stays in the import root, so both stopped acquisitions
+                // can import it.
+                "copy",
+                false,
+            )
+            .await;
+            env.place_download("01 - Hello Song.flac").await;
+
+            // One acquisition runs to completion, which is what leaves a candidate
+            // with the files it resolved in the ledger.
+            let done_track = env.remote_track("Hello Song", "Hello Artist").await;
+            let done = request(&env, done_track).await;
+            env.start();
+            env.wait_for_state(done.id, AcquisitionState::Completed)
+                .await;
+            let candidate = env
+                .acquisition(done.id)
+                .await
+                .candidate
+                .expect("a completed download records its candidate");
+
+            // Two acquisitions that stopped after their download: one before
+            // verification ran, one before its import committed.
+            let verifying_track = env.remote_track("Hello Song", "Hello Artist").await;
+            let verifying_id = env
+                .stopped_after_download(verifying_track, AcquisitionState::Verifying, &candidate)
+                .await;
+            let importing_track = env.remote_track("Hello Song", "Hello Artist").await;
+            let importing_id = env
+                .stopped_after_download(importing_track, AcquisitionState::Importing, &candidate)
+                .await;
+
+            let dir = env.dir.take().unwrap();
+            (
+                dir,
+                verifying_id,
+                verifying_track,
+                importing_id,
+                importing_track,
+            )
+        });
+    drop(first);
+
+    let second = runtime();
+    second.block_on(async {
+        let env = Env::reopen(dir.path(), &[]).await;
+        env.orchestrator.start();
+
+        // Both acquisitions finish without a download or a search: verification
+        // and the import run again from the files the ledger holds.
+        for (id, track) in [
+            (verifying_id, verifying_track),
+            (importing_id, importing_track),
+        ] {
+            env.wait_for_state(id, AcquisitionState::Completed).await;
+            let row = env.acquisition(id).await;
+            assert!(row.media_file_id.is_some(), "acquisition {id} imported");
+            assert_eq!(row.failure_reason, None);
+            assert_eq!(env.track(track).await.availability, Availability::Cached);
+            assert!(!env.orchestrator.staging_dir(id).exists());
+            let states: Vec<AcquisitionState> = env
+                .log(id)
+                .await
+                .into_iter()
+                .map(|entry| entry.state)
+                .collect();
+            assert_eq!(states.last(), Some(&AcquisitionState::Completed));
+        }
+        assert_eq!(
+            env.downloads_started(INSTANCE).await,
+            1,
+            "no acquisition downloaded again"
+        );
+        assert_eq!(
+            env.searches_started(INSTANCE).await,
+            1,
+            "no acquisition searched again"
+        );
+    });
+}
+
+/// Builds a multi-threaded runtime for one simulated process.
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+/// Runs the first of two processes: it admits one acquisition and starts its
+/// download, then stops with the pipeline task still running.
+///
+/// The runtime is dropped, which is what a server stopping looks like to the
+/// ledger: the download is left in flight, with the token the backend issued in
+/// the row and the backend's own state in `plugin_kv`.
+///
+/// # Parameters
+///
+/// - `server_config`: the fixture configuration of the simulated backend.
+///
+/// # Returns
+///
+/// The directory the process built - the caller keeps it alive, because the
+/// reopened environment does not own it - plus the acquisition and its track.
+fn first_process_mid_download(
+    server_config: serde_json::Value,
+) -> (tempfile::TempDir, Uuid, EntityId) {
+    let first = runtime();
+    let outcome = first.block_on(async {
+        let mut env = Env::new(server_config, InstanceLimits::default(), &[]).await;
+        env.place_download("01 - Hello Song.flac").await;
+        let track = env.remote_track("Hello Song", "Hello Artist").await;
+        let handle = request(&env, track).await;
+        env.start();
+        wait_for_download(&env, handle.id).await;
+        assert_eq!(
+            env.acquisition(handle.id).await.state,
+            AcquisitionState::Downloading
+        );
+        assert_eq!(env.downloads_started(INSTANCE).await, 1);
+        assert!(env.orchestrator.staging_dir(handle.id).is_dir());
+        // The directory outlives the process that created it.
+        let dir = env.dir.take().unwrap();
+        (dir, handle.id, track)
+    });
+    drop(first);
+    outcome
+}
+
+#[test]
+fn resumes_a_download_after_a_restart() {
+    let mut server_config = config(one_candidate(), "normal", 0, "downloads", ".flac");
+    // Three running polls two seconds apart: long enough for the first process
+    // to be stopped mid-download, short enough for the second to finish it.
+    server_config["downloadRunningPolls"] = json!(3);
+    let (dir, id, track) = first_process_mid_download(server_config);
+
+    // The second process finds the same database, the same storage and the same
+    // fixture backend, and resumes what the first one left in flight.
+    let second = runtime();
+    second.block_on(async {
+        let env = Env::reopen(dir.path(), &[]).await;
+        let row = env.acquisition(id).await;
+        assert_eq!(row.state, AcquisitionState::Downloading);
+        assert!(row.plugin_token.is_some(), "the download token survived");
+        assert_eq!(env.downloads_started(INSTANCE).await, 1);
+        assert_eq!(env.searches_started(INSTANCE).await, 1);
+
+        env.orchestrator.start();
+        env.wait_for_state(id, AcquisitionState::Completed).await;
+
+        // The resumed download imported its file without searching again, and
+        // the source left the import root.
+        let row = env.acquisition(id).await;
+        assert!(row.media_file_id.is_some(), "the file was imported");
+        assert_eq!(row.failure_reason, None);
+        assert_eq!(
+            env.searches_started(INSTANCE).await,
+            1,
+            "the resumed download did not search again"
+        );
+        let destination = env
+            .cache_root
+            .join("Hello Artist/Hello Song album (1993)/01 - Hello Song.flac");
+        assert!(destination.is_file(), "{}", destination.display());
+        assert!(!env.downloads.join("01 - Hello Song.flac").exists());
+        assert_eq!(env.track(track).await.availability, Availability::Cached);
+        assert!(!env.orchestrator.staging_dir(id).exists());
+
+        let states: Vec<AcquisitionState> = env
+            .log(id)
+            .await
+            .into_iter()
+            .map(|entry| entry.state)
+            .collect();
+        assert_eq!(states.last(), Some(&AcquisitionState::Completed));
+    });
+}
+
+#[test]
+fn a_download_the_backend_forgot_restarts_the_search_after_a_restart() {
+    let mut server_config = config(one_candidate(), "normal", 0, "downloads", ".flac");
+    // Three running polls, so the search the resume restarts downloads again and
+    // finishes quickly.
+    server_config["downloadRunningPolls"] = json!(3);
+    let (dir, id, track) = first_process_mid_download(server_config);
+
+    let second = runtime();
+    second.block_on(async {
+        let env = Env::reopen(dir.path(), &[]).await;
+        assert_eq!(
+            env.acquisition(id).await.state,
+            AcquisitionState::Downloading
+        );
+
+        // The backend lost the download while the server was down, as it does
+        // when it restarts or evicts a job.
+        let instance_id = env
+            .registry
+            .instance(INSTANCE)
+            .unwrap()
+            .id()
+            .as_bytes()
+            .to_vec();
+        sqlx::query!(
+            "DELETE FROM plugin_kv WHERE instance_id = ? AND key LIKE 'download:%'",
+            instance_id,
+        )
+        .execute(env.database.writer())
+        .await
+        .unwrap();
+
+        env.orchestrator.start();
+        env.wait_for_state(id, AcquisitionState::Completed).await;
+
+        assert!(
+            env.searches_started(INSTANCE).await >= 2,
+            "the lost download restarted the search"
+        );
+        assert!(env.acquisition(id).await.media_file_id.is_some());
+        assert_eq!(env.track(track).await.availability, Availability::Cached);
+        assert!(
+            env.log(id)
+                .await
+                .into_iter()
+                .filter_map(|entry| entry.message)
+                .any(|message| message.contains("lost the download token"))
+        );
+    });
+}
