@@ -71,3 +71,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and sample rate, including the V0 boundary for VBR MP3, and the
   `lossless-preferred` and `compact` quality profiles with their preference
   order, minimum tier and cutoff tier.
+- ETA-based candidate selection: the download estimate from size, source speed
+  and queue length, the interactive and background ordering rules, the attempt
+  list cap, and the `no-candidates` and `no-acceptable-quality` outcomes.
