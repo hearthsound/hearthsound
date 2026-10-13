@@ -32,6 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use hearthsound_catalog::CatalogService;
 use hearthsound_config::keys;
 use hearthsound_config::settings::Settings;
 use hearthsound_core::events::{AcquisitionUpdated, EventBus, ServerEvent, TrackAvailability};
@@ -390,6 +391,7 @@ impl AcquisitionProgress {
 /// use std::sync::Arc;
 ///
 /// use hearthsound_acquire::orchestrator::AcquisitionOrchestrator;
+/// use hearthsound_catalog::CatalogService;
 /// use hearthsound_config::settings::Settings;
 /// use hearthsound_core::events::EventBus;
 /// use hearthsound_db::Database;
@@ -401,14 +403,21 @@ impl AcquisitionProgress {
 /// #     settings: Settings,
 /// #     registry: Arc<ProviderRegistry>,
 /// # ) -> Result<(), Box<dyn std::error::Error>> {
+/// let catalog = Arc::new(CatalogService::new(
+///     Arc::clone(&registry),
+///     Arc::clone(&database),
+///     settings.clone(),
+///     PathBuf::from("/srv/hearthsound/artwork"),
+/// ));
 /// let orchestrator = Arc::new(AcquisitionOrchestrator::new(
 ///     database,
 ///     settings,
 ///     registry,
+///     catalog,
 ///     Arc::new(FfmpegRunner::new(None, 8)),
 ///     Arc::new(EventBus::new()),
 ///     PathBuf::from("/srv/hearthsound/storage/staging"),
-/// ));
+///));
 /// orchestrator.start();
 /// # Ok(())
 /// # }
@@ -427,6 +436,8 @@ struct Inner {
     settings: Settings,
     /// The provider instances the acquisition layer walks.
     registry: Arc<ProviderRegistry>,
+    /// The catalog service identity resolution goes through.
+    catalog: Arc<CatalogService>,
     /// The media runner the verification stage uses.
     ffmpeg: Arc<FfmpegRunner>,
     /// The bus every state change is published on.
@@ -461,6 +472,8 @@ impl AcquisitionOrchestrator {
     /// - `settings`: the settings service; every decision reads its current
     ///   snapshot, so a change takes effect without a restart.
     /// - `registry`: the provider instances of the acquisition layer.
+    /// - `catalog`: the catalog service; the `resolving` stage resolves the
+    ///   wanted track's recording identity through it.
     /// - `ffmpeg`: the media runner the verification stage drives.
     /// - `events`: the bus every state change and availability change is
     ///   published on.
@@ -470,6 +483,7 @@ impl AcquisitionOrchestrator {
         database: Arc<Database>,
         settings: Settings,
         registry: Arc<ProviderRegistry>,
+        catalog: Arc<CatalogService>,
         ffmpeg: Arc<FfmpegRunner>,
         events: Arc<EventBus>,
         staging_root: PathBuf,
@@ -481,6 +495,7 @@ impl AcquisitionOrchestrator {
                 database,
                 settings,
                 registry,
+                catalog,
                 ffmpeg,
                 events,
                 library,
@@ -509,6 +524,11 @@ impl AcquisitionOrchestrator {
     /// Returns the provider registry the acquisition layer is read from.
     pub fn registry(&self) -> &ProviderRegistry {
         &self.inner.registry
+    }
+
+    /// Returns the catalog service the identity stage resolves through.
+    pub fn catalog(&self) -> &Arc<CatalogService> {
+        &self.inner.catalog
     }
 
     /// Returns the media runner the verification stage drives.
@@ -877,8 +897,8 @@ impl AcquisitionOrchestrator {
     ///
     /// The pipeline runs stage by stage and the row records how far it got, so
     /// this method is driven by the acquisition's state rather than by its
-    /// history. Identity resolution is a pass-through until the metadata layer
-    /// is wired in, which leaves a claimed acquisition in `searching`; the
+    /// history. Identity resolution is best-effort - a `play` acquisition does
+    /// not wait for it - which leaves a claimed acquisition in `searching`; the
     /// search stage then selects the candidates its download stage will try.
     ///
     /// # Parameters
@@ -906,12 +926,13 @@ impl AcquisitionOrchestrator {
             return Err(AcquireError::UnknownAcquisition(id));
         };
         if row.state == AcquisitionState::Resolving {
+            self.resolve_identity(&row).await;
             self.inner
                 .repository
                 .transition(
                     id,
                     AcquisitionState::Searching,
-                    Some("identity resolution passed through"),
+                    Some("identity resolution is best-effort"),
                 )
                 .await?;
             row.state = AcquisitionState::Searching;

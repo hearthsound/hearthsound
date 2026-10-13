@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hearthsound_acquire::orchestrator::AcquisitionOrchestrator;
+use hearthsound_catalog::CatalogService;
 use hearthsound_config::secret::{SecretBox, SecretKey};
 use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingSources, SettingsRegistry};
@@ -26,12 +27,15 @@ use hearthsound_plugin_host::{
     InstanceService, InstanceSpec, PluginHost, PluginRepository, PluginSource, ProviderRegistry,
 };
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
-use hearthsound_test_support::{ACQUISITION_FIXTURE, fixture_plugin};
+use hearthsound_test_support::{ACQUISITION_FIXTURE, METADATA_FIXTURE, fixture_plugin};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 /// The plugin id of the acquisition fixture.
 pub const PLUGIN_ID: &str = "com.example.acquisition-fixture";
+
+/// The plugin id of the metadata fixture.
+pub const METADATA_PLUGIN_ID: &str = "com.example.metadata-fixture";
 
 /// The slug of the fixture instance every test configures first.
 pub const INSTANCE: &str = "acq";
@@ -70,6 +74,8 @@ pub struct Env {
     pub host: Arc<PluginHost>,
     /// The provider registry the acquisition layer is read from.
     pub registry: Arc<ProviderRegistry>,
+    /// The catalog service identity resolution goes through.
+    pub catalog: Arc<CatalogService>,
     /// The plugin tables.
     pub repository: PluginRepository,
     /// The secret box instance configurations are sealed with.
@@ -167,10 +173,17 @@ impl Env {
 
         let events = Arc::new(EventBus::new());
         let library = LibraryRepository::new(&database);
+        let catalog = Arc::new(CatalogService::new(
+            Arc::clone(&registry),
+            Arc::clone(&database),
+            settings.clone(),
+            dir.path().join("artwork"),
+        ));
         let orchestrator = Arc::new(AcquisitionOrchestrator::new(
             Arc::clone(&database),
             settings.clone(),
             Arc::clone(&registry),
+            Arc::clone(&catalog),
             Arc::new(FfmpegRunner::new(None, 8)),
             Arc::clone(&events),
             staging.clone(),
@@ -182,6 +195,7 @@ impl Env {
             settings,
             host,
             registry,
+            catalog,
             repository,
             secrets,
             events,
@@ -269,6 +283,49 @@ impl Env {
         view.id
     }
 
+    /// Installs the metadata fixture and makes it the metadata layer.
+    ///
+    /// # Parameters
+    ///
+    /// - `server_config`: the fixture configuration, which lists the recordings
+    ///   it knows.
+    ///
+    /// # Returns
+    ///
+    /// The instance id.
+    pub async fn add_metadata_instance(&self, server_config: Value) -> Uuid {
+        let installed = self
+            .host
+            .install(&fixture_plugin(METADATA_FIXTURE))
+            .await
+            .unwrap();
+        self.repository
+            .register_installed(&installed, PluginSource::Sideload)
+            .await
+            .unwrap();
+        let service = InstanceService::new(
+            Arc::clone(&self.host),
+            self.repository.clone(),
+            self.secrets.clone(),
+        );
+        let view = service
+            .create(&InstanceSpec {
+                slug: "meta".to_owned(),
+                plugin_id: METADATA_PLUGIN_ID.to_owned(),
+                display_name: "Metadata fixture".to_owned(),
+                server_config,
+                host_config: host_config(&self.downloads, InstanceLimits::default()),
+            })
+            .await
+            .unwrap();
+        service
+            .set_layer(Layer::Metadata, &["meta".to_owned()])
+            .await
+            .unwrap();
+        self.registry.rebuild().await.unwrap();
+        view.id
+    }
+
     /// Starts the scheduler.
     pub fn start(&self) {
         self.orchestrator.start();
@@ -302,7 +359,7 @@ impl Env {
         input.display_artist = Some(artist.to_owned());
         input.disc_number = Some(1);
         input.track_number = Some(1);
-        input.duration_ms = Some(180_000);
+        input.duration_ms = Some(200);
         input.isrc = Some("USHW12600001".to_owned());
         input.unavailable_until = unavailable_until;
         self.library
@@ -516,7 +573,7 @@ pub fn candidate(token: &str, format: &str, bitrate_kbps: Option<u32>) -> Value 
                 "bitrateKbps": bitrate_kbps,
                 "sampleRate": 44100,
                 "bitDepth": 16,
-                "durationMs": 180_000,
+                "durationMs": 200,
                 "trackIndex": 0,
             }
         ],

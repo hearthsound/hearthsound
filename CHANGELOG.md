@@ -478,3 +478,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks, resolves the paths through the instance's import roots, moves the
   acquisition to `verifying`, and hands the stable files to the verification and
   import entry point.
+- The acquisition verification stage: every file of a completed candidate is
+  decoded, its duration must be within five seconds of the wanted track's
+  catalog duration when that is known, and a candidate that claimed a lossless
+  tier must have produced a file that decodes losslessly. A rejected candidate
+  is recorded in the acquisition log, its staged copies are removed, and the
+  download stage tries the next one; when no candidate is left the acquisition
+  fails as `verification-failed`. The pipeline's `resolving` stage resolves the
+  track's recording identity through the catalog's metadata layer - by ISRC when
+  the track has one and otherwise by a title, artist, album and duration hint -
+  spawning the resolution for `play` requests so it never delays audio and
+  awaiting it under the metadata instances' call deadline for every other
+  priority, and never failing an acquisition because the resolution failed.

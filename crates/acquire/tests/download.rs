@@ -167,7 +167,7 @@ async fn a_completed_download_hands_stable_files_to_verification() {
         )
         .await
     );
-    assert!(logged(&env, id, "the download completed with stable files").await);
+    assert!(logged(&env, id, "the candidate passed verification").await);
 
     // The percentage and the ETA advance through the download.
     let published = common::drain(&mut events);

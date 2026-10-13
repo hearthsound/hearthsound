@@ -15,10 +15,11 @@
 //!
 //! A backend that reports `complete` may not have flushed the file yet, so the
 //! completion rule waits for each reported file's size to hold across two checks
-//! a second apart, with a 30 second ceiling. Only then does the acquisition move
-//! to `verifying` and the resolved files go to
-//! [`AcquisitionOrchestrator::hand_off_for_verification`], which is where the
-//! verification and import stages are implemented.
+//! a second apart, with a 30 second ceiling. Only then are the resolved files
+//! handed to [`AcquisitionOrchestrator::hand_off_for_verification`], which
+//! verifies them and, when they pass, moves the acquisition on; a candidate that
+//! fails verification is a failed candidate like any other, and the loop tries
+//! the next one.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -36,6 +37,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::error::AcquireError;
+use crate::import::HandoffOutcome;
 use crate::orchestrator::AcquisitionOrchestrator;
 use crate::repo::AcquisitionRow;
 use crate::select::{AttemptPlan, RequestClass, ScoredCandidate};
@@ -57,7 +59,8 @@ pub(crate) const STAGING_ROOT: &str = "staging";
 
 /// What the download stage did with an acquisition.
 pub(crate) enum DownloadOutcome {
-    /// The files are resolved and the acquisition is in `verifying`.
+    /// A candidate's files were resolved and passed verification, so the
+    /// acquisition has moved on past the download stage.
     Ready,
     /// The backend lost the download token, so the acquisition has to be
     /// searched again from the beginning.
@@ -67,6 +70,7 @@ pub(crate) enum DownloadOutcome {
 }
 
 /// One file a completed download produced, resolved to an absolute path.
+#[derive(Debug, Clone)]
 pub(crate) struct ResolvedFile {
     /// The host root the plugin named, `staging` or an import root id.
     pub(crate) root: String,
@@ -401,16 +405,17 @@ impl AcquisitionOrchestrator {
                         .await?
                     {
                         Stability::Stable(resolved) | Stability::StillComplete(resolved) => {
-                            self.repository()
-                                .transition(
-                                    row.id,
-                                    AcquisitionState::Verifying,
-                                    Some("the download completed with stable files"),
-                                )
-                                .await?;
-                            self.hand_off_for_verification(row.id, instance, &resolved)
-                                .await?;
-                            return Ok(DownloadOutcome::Ready);
+                            match self
+                                .hand_off_for_verification(row.id, instance, attempt, &resolved)
+                                .await?
+                            {
+                                HandoffOutcome::Verified => {
+                                    return Ok(DownloadOutcome::Ready);
+                                }
+                                HandoffOutcome::Rejected { reason, detail } => {
+                                    failure = Some((reason, detail));
+                                }
+                            }
                         }
                         Stability::Failed { reason, detail } => {
                             failure = Some((reason, detail));
@@ -846,62 +851,6 @@ impl AcquisitionOrchestrator {
         progress.percent = percent;
         progress.eta_secs = eta_secs;
         self.announce(&progress);
-    }
-
-    /// Hands a completed download's files to the verification and import stages.
-    ///
-    /// This is the entry point of the rest of the pipeline: the verification
-    /// stage probes the files, checks their duration against the wanted track
-    /// and optionally fingerprints them, and the import stage writes tags, names
-    /// the files by the library template, moves them into managed storage and
-    /// records the media file. It is handed files whose sizes are already
-    /// stable, each with the absolute path it resolves to.
-    ///
-    /// Until those stages are implemented here, this function publishes the
-    /// resolved file on the acquisition's progress - which is what a client
-    /// waiting for audio reads - and leaves the acquisition in `verifying`,
-    /// where the ledger records that the download completed.
-    ///
-    /// # Parameters
-    ///
-    /// - `acquisition_id`: the acquisition whose files are ready.
-    /// - `instance`: the instance that served the download.
-    /// - `files`: the resolved files, in the order the backend reported them.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AcquireError::UnknownAcquisition`] when the acquisition has no
-    /// row, and the ledger error when the progress cannot be published.
-    pub(crate) async fn hand_off_for_verification(
-        &self,
-        acquisition_id: Uuid,
-        instance: &RegistryInstance,
-        files: &[ResolvedFile],
-    ) -> Result<(), AcquireError> {
-        let Some(row) = self.repository().get(acquisition_id).await? else {
-            return Err(AcquireError::UnknownAcquisition(acquisition_id));
-        };
-        let mut progress = self.progress_of_row(&row, row.priority);
-        progress.state = AcquisitionState::Verifying;
-        progress.instance = Some(instance.slug().as_str().to_owned());
-        progress.percent = None;
-        progress.eta_secs = None;
-        progress.file = files.first().map(|file| file.absolute_path.clone());
-        self.announce(&progress);
-        let first = files.first();
-        tracing::info!(
-            acquisition = %acquisition_id,
-            instance = instance.slug().as_str(),
-            files = files.len(),
-            bytes = files.iter().map(|file| file.size).sum::<u64>(),
-            root = first.map(|file| file.root.as_str()).unwrap_or_default(),
-            path = first.map(|file| file.path.as_str()).unwrap_or_default(),
-            absolute = first
-                .map(|file| file.absolute_path.display().to_string())
-                .unwrap_or_default(),
-            "the download completed and the files are resolved"
-        );
-        Ok(())
     }
 }
 
