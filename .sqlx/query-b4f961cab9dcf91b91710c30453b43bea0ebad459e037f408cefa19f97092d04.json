@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO track_retention (track_id, pinned, pin_reasons, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (track_id) DO UPDATE SET pinned = ?, pin_reasons = ?, updated_at = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "b4f961cab9dcf91b91710c30453b43bea0ebad459e037f408cefa19f97092d04"
+}

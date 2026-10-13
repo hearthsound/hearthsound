@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use hearthsound_core::{Availability, EntityId};
+use hearthsound_core::{Availability, EntityId, PinReason};
 use hearthsound_db::Database;
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -23,7 +23,7 @@ use crate::model::{
     Album, AlbumInput, Artist, ArtistCredit, ArtistInput, Credit, Genre, LibraryFolder,
     ManagedMediaFile, MediaFile, MediaFileInput, ScannedMediaFile, Track, TrackInput,
 };
-use crate::{albums, artists, folders, media_files, tracks};
+use crate::{albums, artists, folders, media_files, retention, tracks};
 
 /// The library tables, read and written over a database's two pools.
 ///
@@ -215,7 +215,8 @@ impl LibraryRepository {
     /// transaction.
     ///
     /// The folder's tracks are re-pinned by the retention layer inside the same
-    /// transaction.
+    /// transaction, so the `folder` reason and the availability never lag the
+    /// ownership column.
     ///
     /// # Errors
     ///
@@ -226,9 +227,51 @@ impl LibraryRepository {
         owner_user_id: Option<Uuid>,
     ) -> Result<bool, LibraryError> {
         let mut tx = self.writer.begin().await?;
-        let updated = folders::set_library_folder_owner(&mut tx, id, owner_user_id).await?;
+        let updated = retention::set_folder_owner(&mut tx, id, owner_user_id).await?;
         tx.commit().await?;
         Ok(updated)
+    }
+
+    /// Adds a pin reason to a track in its own transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when the write fails.
+    pub async fn add_pin_reason(
+        &self,
+        track_id: EntityId,
+        reason: PinReason,
+    ) -> Result<bool, LibraryError> {
+        let mut tx = self.writer.begin().await?;
+        let added = retention::add_pin_reason(&mut tx, track_id, reason).await?;
+        tx.commit().await?;
+        Ok(added)
+    }
+
+    /// Removes a pin reason from a track in its own transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when the write fails.
+    pub async fn remove_pin_reason(
+        &self,
+        track_id: EntityId,
+        reason: PinReason,
+    ) -> Result<bool, LibraryError> {
+        let mut tx = self.writer.begin().await?;
+        let removed = retention::remove_pin_reason(&mut tx, track_id, reason).await?;
+        tx.commit().await?;
+        Ok(removed)
+    }
+
+    /// Reports whether a track is pinned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when the read fails.
+    pub async fn track_is_pinned(&self, track_id: EntityId) -> Result<bool, LibraryError> {
+        let mut conn = self.readers.acquire().await?;
+        retention::track_is_pinned(&mut conn, track_id).await
     }
 
     /// Reads an artist.

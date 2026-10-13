@@ -35,15 +35,14 @@ use hearthsound_db::Database;
 use hearthsound_jobs::{Job, JobError, JobHandler};
 use hearthsound_media::ProbeResult;
 use serde::{Deserialize, Serialize};
-use sqlx::{SqliteConnection, SqlitePool};
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::error::LibraryError;
 use crate::model::{
     AlbumInput, ArtistCredit, ArtistInput, LibraryFolder, Origin, ScannedMediaFile, TrackInput,
-    entity_key,
 };
-use crate::{albums, folders, media_files, now_millis, tracks};
+use crate::{albums, folders, media_files, now_millis, retention, tracks};
 
 /// The job kind a library scan is enqueued under.
 pub const SCAN_JOB_KIND: &str = "library.scan";
@@ -347,7 +346,7 @@ impl LibraryScanner {
             )
             .await?;
             if folder.owner_user_id.is_some() {
-                pin_folder(&mut tx, track_id).await?;
+                retention::add_pin_reason(&mut tx, track_id, PinReason::Folder).await?;
             }
             report.files_indexed += 1;
         }
@@ -577,48 +576,6 @@ fn scanned_file(folder_id: Uuid, file: &PendingFile) -> ScannedMediaFile {
         lossless: Some(probe.lossless),
         has_embedded_art: Some(probe.has_embedded_art),
     }
-}
-
-/// Adds the `folder` pin reason to a track's retention row.
-///
-/// # Parameters
-///
-/// - `conn`: the connection or transaction to write on.
-/// - `track_id`: the track to pin.
-///
-/// # Errors
-///
-/// Returns [`LibraryError`] when a statement fails or a stored reason list
-/// cannot be decoded.
-async fn pin_folder(conn: &mut SqliteConnection, track_id: EntityId) -> Result<(), LibraryError> {
-    let existing: Option<String> = sqlx::query_scalar!(
-        "SELECT pin_reasons FROM track_retention WHERE track_id = ?",
-        entity_key(track_id),
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
-    let mut reasons: Vec<PinReason> = match existing {
-        Some(text) => serde_json::from_str(&text)?,
-        None => Vec::new(),
-    };
-    if !reasons.contains(&PinReason::Folder) {
-        reasons.push(PinReason::Folder);
-    }
-    let reasons = serde_json::to_string(&reasons)?;
-    let now = now_millis();
-    sqlx::query!(
-        "INSERT INTO track_retention (track_id, pinned, pin_reasons, updated_at) \
-         VALUES (?, 1, ?, ?) \
-         ON CONFLICT (track_id) DO UPDATE SET pinned = 1, pin_reasons = ?, updated_at = ?",
-        entity_key(track_id),
-        reasons,
-        now,
-        reasons,
-        now,
-    )
-    .execute(&mut *conn)
-    .await?;
-    Ok(())
 }
 
 /// Walks a folder and returns its audio files.

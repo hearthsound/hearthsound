@@ -245,3 +245,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trimmed, the component is capped at 200 bytes without splitting a UTF-8
   sequence, Windows device names are prefixed with `_`), empty components are
   dropped, and a component that would be `..` is rejected.
+- Track retention kept in step with pin changes: adding and removing a pin
+  reason on a track inside the caller's transaction, maintaining `pinned`, the
+  `pin_reasons` JSON array and `updated_at`, and moving the availability of a
+  managed file between `local` and `cached` while a folder or managed permanent
+  file stays `local` and an acquiring track is left alone. Changing a library
+  folder's owner re-pins or unpins every track of the folder in one transaction,
+  and a helper answers whether a track is pinned so an import lands under
+  `<storage>/library` when it is and under `<storage>/cache` when it is not.

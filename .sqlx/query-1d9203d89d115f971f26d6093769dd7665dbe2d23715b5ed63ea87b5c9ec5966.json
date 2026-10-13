@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT pinned FROM track_retention WHERE track_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "pinned",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "track_retention",
+            "name": "pinned"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1d9203d89d115f971f26d6093769dd7665dbe2d23715b5ed63ea87b5c9ec5966"
+}
