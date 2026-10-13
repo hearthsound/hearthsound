@@ -422,3 +422,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and no ranges (`Accept-Ranges: none`), an unknown format is a bad request, and
   a request the stored file already satisfies - no format, `format=raw`, a cap
   the file fits, or the file's own format - is served straight from disk.
+- The `getCoverArt` endpoint, answering with image bytes instead of an envelope:
+  a stored track is served the embedded picture of its preferred file or a
+  sidecar image beside it, a stored album and artist the first of their tracks
+  that has one, and an entity with no image of its own but a `p:<slug>` alias,
+  or a plain `x_` catalog id, the image its issuing instance describes, proxied
+  under that instance's HTTP grant and image cache policy, so a `no-store`
+  instance's bytes are never written to the artwork cache. Every image carries
+  its content type, its length, a strong `ETag` and a `Cache-Control` (`no-store`
+  for an instance that forbids caching), an `If-None-Match` naming the tag is
+  answered with 304, `size` is handed to the catalog image choice while local
+  images are served unscaled, and a refusal is a real HTTP status - 400, 401,
+  404, 500, or 503 with `Retry-After` - never a failure envelope.

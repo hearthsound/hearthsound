@@ -19,10 +19,8 @@ use std::ops::Deref;
 
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::{FromRequest, Request};
-use axum::http::HeaderName;
-use axum::http::StatusCode;
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, Method};
+use axum::http::{HeaderMap, HeaderName, Method, StatusCode};
 use axum::response::{IntoResponse, Response as HttpResponse};
 use hearthsound_auth::Principal;
 

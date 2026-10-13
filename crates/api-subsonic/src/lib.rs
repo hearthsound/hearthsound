@@ -83,6 +83,7 @@
 //! | `getAlbumList2` | the albums in scope, ordered by `newest`, `alphabeticalByName`, or `random` |
 //! | `search3` | local matches first, then catalog matches when `search.catalog.enabled` |
 //! | `stream` | the track's media bytes: the stored file with ranges and validators, or a transcode |
+//! | `getCoverArt` | the stored entity's own image, or the issuing instance's through the catalog layer; local images are served unscaled |
 //! | `scrobble` | records a play for a stored track; now-playing is accepted and discarded |
 //!
 //! The browse endpoints share one scope rule: an explicit `musicFolderId` of
@@ -148,8 +149,9 @@ mod value;
 
 pub use auth::{BinaryCall, Call, InvalidProxy, TrustedProxies, forbidden};
 pub use endpoints::{
-    get_album, get_album_list_2, get_artist, get_artists, get_license, get_music_folders,
-    get_open_subsonic_extensions, get_song, ping, scrobble, search3, stream, token_info,
+    get_album, get_album_list_2, get_artist, get_artists, get_cover_art, get_license,
+    get_music_folders, get_open_subsonic_extensions, get_song, ping, scrobble, search3, stream,
+    token_info,
 };
 pub use params::{MAX_FORM_BODY_BYTES, Params, ParamsRejection};
 pub use response::{

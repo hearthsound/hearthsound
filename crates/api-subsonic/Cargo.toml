@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 axum.workspace = true
 bytes.workspace = true
+data-encoding.workspace = true
 futures-util.workspace = true
 hearthsound-activity = { path = "../activity" }
 hearthsound-auth = { path = "../auth" }
@@ -22,7 +23,9 @@ hearthsound-core = { path = "../core" }
 hearthsound-db = { path = "../db" }
 hearthsound-library = { path = "../library" }
 hearthsound-media = { path = "../media" }
+hearthsound-plugin-host = { path = "../plugin-host" }
 httpdate.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 time = { workspace = true, features = ["formatting"] }
 tokio = { workspace = true, features = ["fs", "rt"] }
@@ -31,10 +34,10 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-hearthsound-plugin-host = { path = "../plugin-host" }
 hearthsound-test-support = { path = "../test-support" }
 insta = { workspace = true, features = ["filters"] }
 serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "process", "rt-multi-thread", "time"] }
 tower = { workspace = true, features = ["util"] }
+wiremock.workspace = true

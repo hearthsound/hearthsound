@@ -50,6 +50,7 @@ pub const SNAPSHOT_FILTERS: [(&str, &str); 1] = [(
     "TIMESTAMP",
 )];
 
+pub mod artwork;
 pub mod seed;
 
 /// A migrated temporary database with one account and its credentials.
@@ -70,6 +71,8 @@ pub struct Fixture {
     pub state: SubsonicState,
     /// The managed storage roots the state resolves stored files against.
     pub roots: StorageRoots,
+    /// The artwork cache directory catalog cover art is written to.
+    artwork: PathBuf,
     /// The plugin host a fixture plugin is installed into.
     host: Arc<PluginHost>,
     /// The plugin tables an instance is configured in.
@@ -132,11 +135,12 @@ impl Fixture {
             repository.clone(),
             secret_box.clone(),
         ));
+        let artwork = dir.path().join("artwork");
         let catalog = Arc::new(CatalogService::new(
             Arc::clone(&registry),
             Arc::clone(&database),
             settings.clone(),
-            dir.path().join("artwork"),
+            artwork.clone(),
         ));
         let activity = Arc::new(ActivityService::new(&database));
         let roots = StorageRoots::new(dir.path().join("library"), dir.path().join("cache"));
@@ -163,6 +167,7 @@ impl Fixture {
             app_password,
             state,
             roots,
+            artwork,
             host,
             repository,
             secrets: secret_box,
@@ -225,7 +230,7 @@ impl Fixture {
     /// Returns the artwork cache directory, which exists from
     /// [`Fixture::new`].
     pub fn artwork_dir(&self) -> PathBuf {
-        self._dir.path().join("artwork")
+        self.artwork.clone()
     }
 
     /// Returns the `/rest` router under test.
