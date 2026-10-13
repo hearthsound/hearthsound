@@ -569,6 +569,31 @@ impl Env {
         self.library.get_track(id).await.unwrap().unwrap()
     }
 
+    /// Inserts a user row and returns its id.
+    ///
+    /// The ledger's `requested_by` column is a foreign key, so a test that
+    /// requests an acquisition on a user's behalf needs the row to exist. The
+    /// row holds the bare minimum the table requires; nothing here checks a
+    /// password, because no test authenticates one.
+    ///
+    /// # Returns
+    ///
+    /// The new user's id.
+    pub async fn add_user(&self) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO users (id, username, display_name, password_hash, created_at, updated_at)
+             VALUES (?, ?, ?, 'not-a-hash', 0, 0)",
+        )
+        .bind(id.as_bytes().as_slice())
+        .bind(format!("user-{id}"))
+        .bind("Test User")
+        .execute(self.database.writer())
+        .await
+        .unwrap();
+        id
+    }
+
     /// Reads an acquisition row.
     pub async fn acquisition(&self, id: Uuid) -> hearthsound_acquire::repo::AcquisitionRow {
         self.orchestrator

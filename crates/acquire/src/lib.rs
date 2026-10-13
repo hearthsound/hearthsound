@@ -25,6 +25,10 @@
 //! [`repo`]), decides which requests become jobs, and drives a job through its
 //! stages.
 //!
+//! [`prefetch`] sits on top of the orchestrator: it infers the queue a client is
+//! about to play from the listing it last read, and requests the items the
+//! client is about to reach before it asks for them.
+//!
 //! Every threshold and limit is a parameter the composition root reads from the
 //! settings registry; the pure rules never read settings, and the orchestrator
 //! reads them through [`hearthsound_config::settings::Settings`].
@@ -40,6 +44,7 @@ pub mod download;
 pub mod normalize;
 pub mod orchestrator;
 pub mod path;
+pub mod prefetch;
 pub mod profile;
 pub mod repo;
 pub mod score;

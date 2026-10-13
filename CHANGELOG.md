@@ -578,3 +578,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tracks therefore carry the album, albumartist and date tags and are named
   `<album artist>/<album> (<year>)/<track> - <title>.<ext>` instead of landing
   beside the storage root with only a title.
+- Prefetching the tracks a client is about to play: `PrefetchScheduler` infers
+  the implied queue from the listing the client last read - the most recent
+  `getAlbum` of the same user and client instance, kept in memory for 30 minutes
+  and bounded to one entry per user and client - and when a streamed track is in
+  that listing it requests the next `prefetch.lookahead` items, the first at
+  priority `next` and the rest at `queue`, with reason `prefetch` and the user as
+  the requester, skipping the items that already have a file or are cooling down.
+  A later stream that moves the upcoming set cancels the prefetch acquisitions
+  that left it, unless their track is pinned or their download is past half done,
+  and every start and drop is published as a `queue.prefetch` event.
+  `prefetch.enabled` off disables the whole scheduler, and an `x_` catalog item
+  is materialized only when it is actually prefetched.
