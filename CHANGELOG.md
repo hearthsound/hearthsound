@@ -652,3 +652,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   imports the file and empties the import root. The shared fixture grows the
   helpers a restart needs: the data directory it runs over, a stop that hands
   that directory back, and a reopen that builds a new process over it.
+- README instructions for running the server: the build prerequisites (`ffmpeg`
+  and `ffprobe` on `PATH`, the pinned Rust toolchain, `wasm32-wasip2` only for
+  the test fixtures, `cargo xtask fetch-plugins` for the bundled archives), a
+  local quick start that walks the exact command-line sequence from `migrate`
+  through the administrator, both credential kinds, the scanned folder, the three
+  bundled plugin installs, the three provider instances with their plugin
+  configuration and the slskd import root in `move` mode, the catalog, metadata
+  and acquisition layer assignments, and `serve`; the `dev/compose.yml` stack
+  with the `dev/.env` keys it reads and the provider command the container needs;
+  which credential a client uses; and what the three `stream.pending.mode` values
+  (`pad`, `hold`, `fail`) do to a stream of a song the server does not have yet.
