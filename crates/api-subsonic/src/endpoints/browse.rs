@@ -215,8 +215,8 @@ pub async fn get_song(call: Call) -> Encoded {
 
 /// Answers `getAlbumList2`: the albums in scope in a fixed order.
 ///
-/// This milestone supports `newest`, `alphabeticalByName`, and `random`; the
-/// remaining types of the base protocol are added by later work.
+/// The supported types are `newest`, `alphabeticalByName`, and `random`; the
+/// remaining types of the base protocol are answered with error 0.
 ///
 /// # Parameters
 ///

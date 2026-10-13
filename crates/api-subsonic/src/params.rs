@@ -155,7 +155,7 @@ impl Params {
 
     /// Returns the protocol version the client implements, the `v` parameter.
     ///
-    /// The value is informational in this milestone: the server answers a
+    /// The value is informational: the server answers a
     /// supported protocol version in the envelope and does not negotiate on the
     /// client's, so no call is rejected for an older or newer `v`.
     pub fn protocol_version(&self) -> Option<&str> {

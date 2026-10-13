@@ -21,9 +21,9 @@
 //! file stays where the import put it. Unpinning a track whose file is in
 //! `<storage>/library` therefore leaves the file there and marks the track
 //! `cached`, and pinning a track whose file is in `<storage>/cache` leaves the
-//! file there and marks it `local`. Moving files between the two roots is the
-//! storage-policy work of a later milestone; until then the two roots hold the
-//! same kind of file and the availability decides whether eviction may touch it.
+//! file there and marks it `local`. Moving files between the two roots is not
+//! done yet; the two roots hold the same kind of file and the availability
+//! decides whether eviction may touch it.
 
 use std::path::{Path, PathBuf};
 

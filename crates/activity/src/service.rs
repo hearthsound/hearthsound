@@ -6,7 +6,7 @@
 //! reported that it delivered no song audio, which is what a client fed only
 //! silence padding while an acquisition failed would otherwise turn into a
 //! false play. When the call carries `submission=false` it is a now-playing
-//! report; in M1 that is accepted and discarded.
+//! report, which is accepted and discarded because now-playing is not stored.
 
 use hearthsound_db::Database;
 use uuid::Uuid;

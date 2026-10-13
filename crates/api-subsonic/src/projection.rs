@@ -18,8 +18,8 @@
 //! - `coverArt` names the album when the track's preferred media file carries
 //!   embedded art and the track belongs to an album, and the track itself
 //!   otherwise. An album's own `coverArt` is its id when any of its tracks
-//!   carries embedded art, and empty otherwise. Later milestones resolve the
-//!   named id to bytes; this milestone only names it.
+//!   carries embedded art, and empty otherwise; `getCoverArt` resolves the
+//!   named id to bytes.
 //! - The file-derived fields (`suffix`, `contentType`, `size`, `bitRate`,
 //!   `bitDepth`, `samplingRate`, `channelCount`, `duration`, `path`) come from
 //!   the media file row rather than from the query projection, because only the
@@ -115,8 +115,7 @@ pub(crate) fn artists_id3(summaries: &[ArtistSummary]) -> Object {
 ///
 /// The artist, with the base protocol's `id`, `name`, and `albumCount` first
 /// and the OpenSubsonic `musicBrainzId` and `sortName` after them. `coverArt`,
-/// `roles`, and `disambiguation` are not supported by this milestone and are
-/// omitted.
+/// `roles`, and `disambiguation` are not supported yet and are omitted.
 pub(crate) fn artist_id3(artist: &Artist, album_count: i64) -> Object {
     Object::new()
         .set("id", artist.id.to_string())
@@ -387,7 +386,7 @@ fn genre(name: &str) -> Object {
     Object::new().set("name", name.to_owned())
 }
 
-/// Builds the `replayGain` member this milestone reports.
+/// Builds the `replayGain` member, all zeros until ReplayGain is read from tags.
 ///
 /// # Returns
 ///
