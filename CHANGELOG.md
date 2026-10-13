@@ -296,3 +296,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   settings, rebuilds the provider registry from the plugin tables, and
   reapplies the settings the services cache, so a command-line change such as a
   new layer assignment takes effect within about a second without a restart.
+- The `serve`, `migrate`, and `scan` commands of the `hearthsound` binary: a
+  global `--config <file>` with the rest of the bootstrap keys from the
+  environment, logging at `log.level` in text or JSON per `log.format`, a
+  migration report naming the version the database started at, moved to, and,
+  when one was needed, the backup it wrote, and a scan that indexes one folder
+  (by id or by path) or every folder and prints the counts per folder.
