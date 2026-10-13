@@ -449,3 +449,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through a `tokio::sync::watch` channel, and the scheduler claims the most
   urgent queued acquisition within `acquisition.max_concurrent`, logging every
   state change in the same transaction as the row it changes.
+- The acquisition search stage: the orchestrator builds an `AcquisitionQuery`
+  from the library track (title, credits, track and disc numbers, duration,
+  ISRC, the MusicBrainz recording id, and the album with its artist and year)
+  plus the preferred formats of the quality profile, walks the acquisition
+  layer in assignment order, skips instances that cannot search a track, and
+  honors each instance's `maxConcurrentSearches` semaphore and its
+  `searchesPerHour` token bucket (burst 10), the latter for `queue`,
+  `background` and `upgrade` work only. It polls a search every second until it
+  completes, the plugin's call deadline passes, or an interactive request
+  already has a usable candidate; scores and orders the candidates with
+  `acquisition.min_match_score`, `interactive_eta_target_secs`,
+  `max_candidates` and `acquisition.quality_profile`; and fails an acquisition
+  as `no-candidates`, `no-acceptable-quality` or `backend-unavailable`, marking
+  the track `unavailable` for `acquisition.unavailable_cooldown_hours`.

@@ -1616,6 +1616,7 @@ dependencies = [
 name = "hearthsound-acquire"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "governor",
  "hearthsound-config",
  "hearthsound-core",
  "hearthsound-db",

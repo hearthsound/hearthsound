@@ -31,6 +31,7 @@
 #![forbid(unsafe_code)]
 
 mod brackets;
+mod budget;
 mod error;
 
 pub mod normalize;
@@ -39,6 +40,7 @@ pub mod path;
 pub mod profile;
 pub mod repo;
 pub mod score;
+pub mod search;
 pub mod select;
 
 pub use error::AcquireError;

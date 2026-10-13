@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hearthsound_acquire::orchestrator::AcquisitionOrchestrator;
-use hearthsound_config::secret::SecretKey;
+use hearthsound_config::secret::{SecretBox, SecretKey};
 use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingSources, SettingsRegistry};
 use hearthsound_core::events::{EventBus, EventEnvelope, ServerEvent};
@@ -32,8 +32,30 @@ use uuid::Uuid;
 /// The plugin id of the acquisition fixture.
 pub const PLUGIN_ID: &str = "com.example.acquisition-fixture";
 
-/// The slug of the fixture instance every test configures.
+/// The slug of the fixture instance every test configures first.
 pub const INSTANCE: &str = "acq";
+
+/// The concurrency and rate limits an instance is configured with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstanceLimits {
+    /// How many downloads the instance may run at once.
+    pub max_concurrent: u32,
+    /// How many searches the instance may run at once.
+    pub max_concurrent_searches: u32,
+    /// How many searches the instance may start per hour.
+    pub searches_per_hour: u32,
+}
+
+impl Default for InstanceLimits {
+    /// Returns the defaults the plugin host documents.
+    fn default() -> InstanceLimits {
+        InstanceLimits {
+            max_concurrent: 2,
+            max_concurrent_searches: 2,
+            searches_per_hour: 120,
+        }
+    }
+}
 
 /// One test's database, plugin host, settings and orchestrator.
 pub struct Env {
@@ -49,6 +71,8 @@ pub struct Env {
     pub registry: Arc<ProviderRegistry>,
     /// The plugin tables.
     pub repository: PluginRepository,
+    /// The secret box instance configurations are sealed with.
+    pub secrets: SecretBox,
     /// The event bus the orchestrator publishes on.
     pub events: Arc<EventBus>,
     /// The library tables the wanted tracks are read from.
@@ -68,10 +92,11 @@ impl Env {
     ///
     /// - `server_config`: the fixture's server-scoped configuration, which says
     ///   what the simulated backend does.
+    /// - `limits`: the instance's concurrency and rate limits.
     /// - `env`: extra environment variables for the settings layer, keyed by
     ///   their full `HEARTHSOUND__...` name. They are the highest-precedence
-    ///   source, which is how a test shortens a timeout.
-    pub async fn new(server_config: Value, env: &[(&str, &str)]) -> Env {
+    ///   source, which is how a test shortens a timeout or lowers a bound.
+    pub async fn new(server_config: Value, limits: InstanceLimits, env: &[(&str, &str)]) -> Env {
         let dir = tempfile::tempdir().unwrap();
         let downloads = dir.path().join("downloads");
         std::fs::create_dir_all(&downloads).unwrap();
@@ -122,18 +147,18 @@ impl Env {
             .await
             .unwrap();
 
-        let instances = InstanceService::new(Arc::clone(&host), repository.clone(), secrets);
-        instances
+        let service = InstanceService::new(Arc::clone(&host), repository.clone(), secrets.clone());
+        service
             .create(&InstanceSpec {
                 slug: INSTANCE.to_owned(),
                 plugin_id: PLUGIN_ID.to_owned(),
                 display_name: "Acquisition fixture".to_owned(),
                 server_config,
-                host_config: host_config(&downloads),
+                host_config: host_config(&downloads, limits),
             })
             .await
             .unwrap();
-        instances
+        service
             .set_layer(Layer::Acquisition, &[INSTANCE.to_owned()])
             .await
             .unwrap();
@@ -157,6 +182,7 @@ impl Env {
             host,
             registry,
             repository,
+            secrets,
             events,
             library,
             downloads,
@@ -165,18 +191,57 @@ impl Env {
         }
     }
 
-    /// Starts the scheduler.
-    pub fn start(&self) {
-        self.orchestrator.start();
-    }
-
-    /// Builds an environment whose instance runs a normal search for one file.
+    /// Builds an environment whose instance finds one lossless candidate.
     ///
     /// # Parameters
     ///
     /// - `env`: extra settings environment variables.
     pub async fn normal(env: &[(&str, &str)]) -> Env {
-        Env::new(candidate_config("downloads", ".flac"), env).await
+        Env::new(
+            config(one_candidate(), "normal", 0, "downloads", ".flac"),
+            InstanceLimits::default(),
+            env,
+        )
+        .await
+    }
+
+    /// Adds a second instance to the acquisition layer, after the first.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the instance slug.
+    /// - `server_config`: the fixture configuration of the new instance.
+    ///
+    /// # Returns
+    ///
+    /// The instance id, which is the key its key-value rows use.
+    pub async fn add_instance(&self, slug: &str, server_config: Value) -> Uuid {
+        let service = InstanceService::new(
+            Arc::clone(&self.host),
+            self.repository.clone(),
+            self.secrets.clone(),
+        );
+        let view = service
+            .create(&InstanceSpec {
+                slug: slug.to_owned(),
+                plugin_id: PLUGIN_ID.to_owned(),
+                display_name: format!("{slug} display"),
+                server_config,
+                host_config: host_config(&self.downloads, InstanceLimits::default()),
+            })
+            .await
+            .unwrap();
+        service
+            .set_layer(Layer::Acquisition, &[INSTANCE.to_owned(), slug.to_owned()])
+            .await
+            .unwrap();
+        self.registry.rebuild().await.unwrap();
+        view.id
+    }
+
+    /// Starts the scheduler.
+    pub fn start(&self) {
+        self.orchestrator.start();
     }
 
     /// Inserts an album and one track of it.
@@ -253,6 +318,50 @@ impl Env {
         .unwrap()
     }
 
+    /// Counts how many searches the instance with `slug` has started.
+    ///
+    /// The fixture counts its own searches through the host's key-value store,
+    /// which makes the searches a test can observe exactly the searches the
+    /// plugin was asked for.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the instance slug.
+    pub async fn searches_started(&self, slug: &str) -> u64 {
+        let instance = self.registry.instance(slug).unwrap();
+        let instance_id = instance.id().as_bytes().to_vec();
+        let stored: Option<Vec<u8>> = sqlx::query_scalar!(
+            "SELECT value FROM plugin_kv WHERE instance_id = ? AND key = 'counter:search'",
+            instance_id,
+        )
+        .fetch_optional(self.database.readers())
+        .await
+        .unwrap();
+        stored
+            .map(|value| serde_json::from_slice::<u64>(&value).unwrap())
+            .unwrap_or(0)
+    }
+
+    /// Counts how many downloads the instance with `slug` has started.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the instance slug.
+    pub async fn downloads_started(&self, slug: &str) -> u64 {
+        let instance = self.registry.instance(slug).unwrap();
+        let instance_id = instance.id().as_bytes().to_vec();
+        let stored: Option<Vec<u8>> = sqlx::query_scalar!(
+            "SELECT value FROM plugin_kv WHERE instance_id = ? AND key = 'counter:download'",
+            instance_id,
+        )
+        .fetch_optional(self.database.readers())
+        .await
+        .unwrap();
+        stored
+            .map(|value| serde_json::from_slice::<u64>(&value).unwrap())
+            .unwrap_or(0)
+    }
+
     /// Waits until an acquisition reaches a state.
     ///
     /// # Panics
@@ -296,8 +405,14 @@ impl Env {
     }
 }
 
-/// The host configuration that grants `downloads` as the instance's import root.
-pub fn host_config(downloads: &Path) -> Value {
+/// The host configuration of the fixture instance.
+///
+/// # Parameters
+///
+/// - `downloads`: the directory granted as the instance's `downloads` import
+///   root, in `move` mode.
+/// - `limits`: the instance's concurrency and rate limits.
+pub fn host_config(downloads: &Path, limits: InstanceLimits) -> Value {
     json!({
         "importRoots": [
             {
@@ -307,23 +422,33 @@ pub fn host_config(downloads: &Path) -> Value {
                 "readOnly": false,
             }
         ],
-        "maxConcurrent": 2,
-        "maxConcurrentSearches": 2,
-        "searchesPerHour": 120,
+        "maxConcurrent": limits.max_concurrent,
+        "maxConcurrentSearches": limits.max_concurrent_searches,
+        "searchesPerHour": limits.searches_per_hour,
     })
 }
 
-/// The fixture configuration of a search that finds one matching candidate.
+/// The fixture configuration of a simulated backend.
 ///
 /// # Parameters
 ///
-/// - `output_root`: the root the completed download lists, `staging` or the id
-///   of an import root the instance was granted.
+/// - `candidates`: the candidates a search returns.
+/// - `scenario`: `normal`, `no-candidates`, `download-failure` or `stalled`.
+/// - `search_polls`: how many polls answer `running` before a search completes.
+/// - `output_root`: the root a completed download lists, `staging` or the id of
+///   an import root the instance was granted.
 /// - `match_suffix`: the suffix an output file must have to be reported.
-pub fn candidate_config(output_root: &str, match_suffix: &str) -> Value {
+pub fn config(
+    candidates: Value,
+    scenario: &str,
+    search_polls: u32,
+    output_root: &str,
+    match_suffix: &str,
+) -> Value {
     json!({
-        "candidates": [candidate("cand-1", "Hello Song", "peer/hello.flac")],
-        "searchPolls": 1,
+        "candidates": candidates,
+        "scenario": scenario,
+        "searchPolls": search_polls,
         "downloadQueuedPolls": 0,
         "downloadRunningPolls": 1,
         "downloadBytesPerPoll": 4000,
@@ -332,18 +457,33 @@ pub fn candidate_config(output_root: &str, match_suffix: &str) -> Value {
     })
 }
 
-/// One fixture candidate that matches the `Hello Song` track of [`Env::add_track`].
-pub fn candidate(token: &str, title: &str, path: &str) -> Value {
+/// The list holding one candidate that matches the harness's tracks.
+pub fn one_candidate() -> Value {
+    json!([candidate("cand-1", "flac", Some(900))])
+}
+
+/// One fixture candidate that matches the tracks [`Env::add_track`] inserts.
+///
+/// The path carries the artist, the album and the track number, so the core's
+/// scoring recovers all three from it the way it would from a real backend's
+/// path.
+///
+/// # Parameters
+///
+/// - `token`: the token that addresses the candidate in a download.
+/// - `format`: the container format of the file.
+/// - `bitrate_kbps`: the file's bitrate, which decides the tier of a lossy file.
+pub fn candidate(token: &str, format: &str, bitrate_kbps: Option<u32>) -> Value {
     json!({
         "token": token,
-        "title": title,
-        "path": path,
+        "title": "Hello Song",
+        "path": "Hello Artist/Hello Song album/01 - Hello Song.flac",
         "files": [
             {
-                "name": "hello.flac",
+                "name": "01 - Hello Song.flac",
                 "size": 4000,
-                "format": "flac",
-                "bitrateKbps": 900,
+                "format": format,
+                "bitrateKbps": bitrate_kbps,
                 "sampleRate": 44100,
                 "bitDepth": 16,
                 "durationMs": 180_000,

@@ -231,15 +231,22 @@ async fn a_claimed_acquisition_is_logged_at_every_state() {
     env.start();
     env.wait_for_state(id, AcquisitionState::Searching).await;
 
-    let states: Vec<AcquisitionState> =
-        env.log(id).await.into_iter().map(|row| row.state).collect();
+    let log = env.log(id).await;
+    let states: Vec<AcquisitionState> = log.iter().map(|row| row.state).collect();
     assert_eq!(
-        states,
+        &states[..3],
         [
             AcquisitionState::Queued,
             AcquisitionState::Resolving,
             AcquisitionState::Searching
         ]
+    );
+    assert!(
+        log.last()
+            .and_then(|row| row.message.as_deref())
+            .unwrap_or_default()
+            .contains("selected"),
+        "the search result is logged: {log:?}"
     );
     assert_eq!(env.acquisition(id).await.attempts, 0);
 }

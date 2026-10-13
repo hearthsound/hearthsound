@@ -48,6 +48,7 @@ use uuid::Uuid;
 
 use crate::error::AcquireError;
 use crate::repo::{self, AcquisitionRepository, AcquisitionRow, NewAcquisition};
+use crate::search::SearchOutcome;
 
 /// How often the scheduler looks for work it was not woken for.
 ///
@@ -439,6 +440,8 @@ struct Inner {
     waiters: Mutex<HashMap<Uuid, watch::Sender<AcquisitionProgress>>>,
     /// How many worker slots are in use.
     running: AtomicUsize,
+    /// The per-instance search budgets the search stage respects.
+    search_budgets: crate::budget::InstanceBudgets,
     /// Whether the scheduler task has been started.
     started: AtomicBool,
     /// Wakes the scheduler when there is work.
@@ -482,6 +485,7 @@ impl AcquisitionOrchestrator {
                 staging_root,
                 waiters: Mutex::new(HashMap::new()),
                 running: AtomicUsize::new(0),
+                search_budgets: crate::budget::InstanceBudgets::new(),
                 started: AtomicBool::new(false),
                 notify: Notify::new(),
             }),
@@ -521,6 +525,11 @@ impl AcquisitionOrchestrator {
     /// Returns the acquisition ledger.
     pub fn repository(&self) -> &AcquisitionRepository {
         &self.inner.repository
+    }
+
+    /// Returns the per-instance search budgets.
+    pub(crate) fn search_budgets(&self) -> &crate::budget::InstanceBudgets {
+        &self.inner.search_budgets
     }
 
     /// Returns the root per-acquisition staging directories are created under.
@@ -855,51 +864,136 @@ impl AcquisitionOrchestrator {
 
     /// Advances one claimed acquisition.
     ///
-    /// The pipeline runs stage by stage, and the row records how far it got.
-    /// Identity resolution is the stage this method runs: it is a pass-through
-    /// until the metadata layer is wired in, so a claimed acquisition moves
-    /// `resolving` -> `searching` and its worker slot is released, leaving the
-    /// ledger to say where the pipeline stopped.
+    /// The pipeline runs stage by stage and the row records how far it got, so
+    /// this method is driven by the acquisition's state rather than by its
+    /// history. Identity resolution is a pass-through until the metadata layer
+    /// is wired in, which leaves a claimed acquisition in `searching`; the
+    /// search stage then selects the candidates its download stage will try.
     ///
     /// # Parameters
     ///
     /// - `id`: the acquisition to advance.
     async fn advance(&self, id: Uuid) {
-        match self.identity_resolution(id).await {
-            Ok(()) => {}
-            Err(error) => {
-                tracing::warn!(acquisition = %id, %error, "advancing an acquisition failed");
+        if let Err(error) = self.run_pipeline(id).await {
+            tracing::warn!(acquisition = %id, %error, "advancing an acquisition failed");
+        }
+    }
+
+    /// Runs the stages an acquisition is ready for.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the acquisition to advance.
+    ///
+    /// # Errors
+    ///
+    /// Returns the library, settings, plugin or database error that stopped a
+    /// stage. A stage that decides the acquisition cannot succeed records the
+    /// failure itself and returns `Ok`.
+    async fn run_pipeline(&self, id: Uuid) -> Result<(), AcquireError> {
+        let Some(mut row) = self.inner.repository.get(id).await? else {
+            return Err(AcquireError::UnknownAcquisition(id));
+        };
+        if row.state == AcquisitionState::Resolving {
+            self.inner
+                .repository
+                .transition(
+                    id,
+                    AcquisitionState::Searching,
+                    Some("identity resolution passed through"),
+                )
+                .await?;
+            row.state = AcquisitionState::Searching;
+            self.announce(&self.progress_of_row(&row, row.priority));
+        }
+        if row.state != AcquisitionState::Searching {
+            return Ok(());
+        }
+        match self.search(&row).await? {
+            SearchOutcome::Failed(_reason) => Ok(()),
+            // The search selected the candidates to try and logged them. The
+            // best one names the instance and the ETA a client sees while the
+            // acquisition waits in `searching` for its download stage.
+            SearchOutcome::Planned { instances, plan } => {
+                let mut progress = self.progress_of_row(&row, row.priority);
+                if let Some(best) = plan.attempts.first() {
+                    progress.instance = instances
+                        .get(best.instance_index)
+                        .map(|instance| instance.slug().as_str().to_owned());
+                    progress.eta_secs = best
+                        .eta
+                        .map(|eta| eta.as_secs().min(u64::from(u32::MAX)) as u32);
+                }
+                self.announce(&progress);
+                Ok(())
             }
         }
     }
 
-    /// Runs the identity-resolution stage.
+    /// Fails an acquisition and puts its track into cooldown.
+    ///
+    /// The failure, the track's new availability and the cooldown end are
+    /// written in one transaction, so a client can never see a failed
+    /// acquisition whose track is still `acquiring`, and both events are
+    /// published afterwards. The cooldown is
+    /// `acquisition.unavailable_cooldown_hours`, which stops a track nobody has
+    /// can find from making every client retry hit the backends again.
     ///
     /// # Parameters
     ///
-    /// - `id`: the acquisition to resolve.
+    /// - `id`: the acquisition to fail.
+    /// - `reason`: why it failed, one of the fixed [`FailureReason`] literals.
+    /// - `detail`: the backend's own message, when the failure has one.
     ///
     /// # Errors
     ///
-    /// Returns the ledger error when the acquisition cannot be read or moved.
-    async fn identity_resolution(&self, id: Uuid) -> Result<(), AcquireError> {
+    /// Returns [`AcquireError::UnknownAcquisition`] when the row is missing, the
+    /// settings error when the cooldown cannot be read, and
+    /// [`AcquireError::IllegalTransition`] when the current state has no edge to
+    /// `failed`.
+    pub(crate) async fn fail_acquisition(
+        &self,
+        id: Uuid,
+        reason: FailureReason,
+        detail: Option<&str>,
+    ) -> Result<(), AcquireError> {
         let Some(row) = self.inner.repository.get(id).await? else {
             return Err(AcquireError::UnknownAcquisition(id));
         };
-        if row.state != AcquisitionState::Resolving {
-            return Ok(());
-        }
-        self.inner
-            .repository
-            .transition(
-                id,
-                AcquisitionState::Searching,
-                Some("identity resolution passed through"),
+        let cooldown_hours = self
+            .inner
+            .settings
+            .current()
+            .get(keys::ACQUISITION_UNAVAILABLE_COOLDOWN_HOURS)?;
+        let unavailable_until = crate::now_millis() + cooldown_hours.max(0) * 3_600_000;
+
+        let mut tx = self.inner.database.writer().begin().await?;
+        repo::fail(&mut tx, id, reason, detail).await?;
+        if let Some(track_id) = row.track_id {
+            hearthsound_library::tracks::set_track_availability(
+                &mut tx,
+                track_id,
+                Availability::Unavailable,
+                Some(unavailable_until),
             )
             .await?;
+        }
+        tx.commit().await?;
+
         let mut progress = self.progress_of_row(&row, row.priority);
-        progress.state = AcquisitionState::Searching;
+        progress.state = AcquisitionState::Failed;
+        progress.failure_reason = Some(reason);
         self.announce(&progress);
+        if let Some(track_id) = row.track_id {
+            self.publish_availability(track_id, Availability::Unavailable);
+        }
+        tracing::info!(
+            acquisition = %id,
+            track = ?row.track_id,
+            reason = reason.as_str(),
+            unavailable_until,
+            "failed an acquisition"
+        );
         Ok(())
     }
 
@@ -956,7 +1050,7 @@ impl AcquisitionOrchestrator {
     /// # Parameters
     ///
     /// - `progress`: the snapshot to publish.
-    fn announce(&self, progress: &AcquisitionProgress) {
+    pub(crate) fn announce(&self, progress: &AcquisitionProgress) {
         {
             let waiters = lock(&self.inner.waiters);
             if let Some(sender) = waiters.get(&progress.acquisition_id) {
@@ -984,7 +1078,7 @@ impl AcquisitionOrchestrator {
     ///
     /// - `track_id`: the track that changed.
     /// - `availability`: its new availability.
-    fn publish_availability(&self, track_id: EntityId, availability: Availability) {
+    pub(crate) fn publish_availability(&self, track_id: EntityId, availability: Availability) {
         self.inner
             .events
             .publish(ServerEvent::TrackAvailability(TrackAvailability {
@@ -1001,7 +1095,11 @@ impl AcquisitionOrchestrator {
     /// - `row`: the row to read.
     /// - `priority`: the priority to report, which is the row's after a join
     ///   may have raised it.
-    fn progress_of_row(&self, row: &AcquisitionRow, priority: Priority) -> AcquisitionProgress {
+    pub(crate) fn progress_of_row(
+        &self,
+        row: &AcquisitionRow,
+        priority: Priority,
+    ) -> AcquisitionProgress {
         AcquisitionProgress {
             acquisition_id: row.id,
             target_id: row
