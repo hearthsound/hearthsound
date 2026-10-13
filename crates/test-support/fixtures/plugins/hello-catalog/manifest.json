@@ -1,0 +1,26 @@
+{
+  "manifestVersion": 1,
+  "id": "com.example.hello-catalog",
+  "name": "Hello catalog",
+  "version": "0.1.0",
+  "description": "A minimal catalog plugin that answers every search with a greeting.",
+  "authors": ["Hearthsound contributors"],
+  "license": "MIT OR Apache-2.0",
+  "homepage": "https://github.com/hearthsound/plugin-template-rust",
+  "api": "hearthsound:plugin@0.1.0",
+  "provides": ["catalog"],
+  "permissions": {},
+  "config": {
+    "server": {
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": { "greeting": { "type": "string", "title": "Greeting", "default": "Hello" } }
+      },
+      "uiSchema": { "type": "VerticalLayout", "elements": [ { "type": "Control", "scope": "#/properties/greeting" } ] }
+    },
+    "user": null
+  },
+  "resources": { "memoryMb": 64, "callTimeoutMs": 5000, "maxInstances": 2 },
+  "catalog": { "imageCachePolicy": "cache" }
+}

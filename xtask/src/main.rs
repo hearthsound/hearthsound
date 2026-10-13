@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -26,6 +27,8 @@ struct Cli {
 enum Task {
     /// Copy or verify the WebAssembly interface files owned by plugin-sdk.
     SyncWit(SyncWitArgs),
+    /// Build every fixture plugin into a `.hsplugin` archive.
+    Fixtures,
 }
 
 #[derive(Debug, Args)]
@@ -45,6 +48,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Task::SyncWit(args) => sync_wit(args),
+        Task::Fixtures => fixtures(),
     }
 }
 
@@ -188,5 +192,107 @@ fn check_wit(wit_dir: &Path, source: &Path, files: &[String], version: &str) -> 
     }
 
     println!("wit/ matches plugin-sdk v{version}");
+    Ok(())
+}
+
+/// Builds every fixture plugin into a `.hsplugin` archive.
+///
+/// Fixture directories live in `crates/test-support/fixtures/plugins/<name>`,
+/// where `<name>` is the package name. Each one is built for `wasm32-wasip2`
+/// with a shared target directory, then packed with its manifest into
+/// `target/fixtures/plugins/<id>-<version>.hsplugin`.
+fn fixtures() -> Result<()> {
+    let root = repo_root()?;
+    let plugins_dir = root.join("crates/test-support/fixtures/plugins");
+    let build_dir = root.join("target/fixtures/build");
+    let out_dir = root.join("target/fixtures/plugins");
+
+    fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for entry in fs::read_dir(&plugins_dir)
+        .with_context(|| format!("reading directory {}", plugins_dir.display()))?
+    {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            dirs.push(entry.path());
+        }
+    }
+    dirs.sort();
+
+    for dir in dirs {
+        let name = dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .with_context(|| format!("fixture directory {} is not valid UTF-8", dir.display()))?
+            .to_owned();
+        let manifest_path = dir.join("manifest.json");
+        let cargo_toml = dir.join("Cargo.toml");
+
+        let status = Command::new(&cargo)
+            .args([
+                "build",
+                "--release",
+                "--locked",
+                "--target",
+                "wasm32-wasip2",
+                "--manifest-path",
+            ])
+            .arg(&cargo_toml)
+            .arg("--target-dir")
+            .arg(&build_dir)
+            .status()
+            .with_context(|| format!("building fixture {name}"))?;
+        if !status.success() {
+            bail!("building fixture {name} failed");
+        }
+
+        let manifest_bytes = fs::read(&manifest_path)
+            .with_context(|| format!("reading {}", manifest_path.display()))?;
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
+            .with_context(|| format!("parsing {}", manifest_path.display()))?;
+        let id = manifest
+            .get("id")
+            .and_then(|value| value.as_str())
+            .with_context(|| format!("{}: manifest has no string `id`", manifest_path.display()))?;
+        let version = manifest
+            .get("version")
+            .and_then(|value| value.as_str())
+            .with_context(|| {
+                format!(
+                    "{}: manifest has no string `version`",
+                    manifest_path.display()
+                )
+            })?;
+
+        let wasm_name = format!("{}.wasm", name.replace('-', "_"));
+        let wasm_path = build_dir
+            .join("wasm32-wasip2")
+            .join("release")
+            .join(&wasm_name);
+        let wasm =
+            fs::read(&wasm_path).with_context(|| format!("reading {}", wasm_path.display()))?;
+
+        let archive = out_dir.join(format!("{id}-{version}.hsplugin"));
+        let file = fs::File::create(&archive)
+            .with_context(|| format!("creating {}", archive.display()))?;
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        writer
+            .start_file("manifest.json", options)
+            .context("writing manifest.json into the archive")?;
+        writer.write_all(&manifest_bytes)?;
+        writer
+            .start_file("plugin.wasm", options)
+            .context("writing plugin.wasm into the archive")?;
+        writer.write_all(&wasm)?;
+        writer.finish().context("finishing the archive")?;
+
+        println!("{}", archive.display());
+    }
+
     Ok(())
 }

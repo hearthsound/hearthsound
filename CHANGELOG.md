@@ -21,3 +21,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   WebAssembly interface files from the plugin SDK and verifies them.
 - The `hearthsound:plugin@0.1.0` WebAssembly interface files, synced from the
   plugin SDK.
+- Fixture plugins and the `xtask fixtures` command that packs them into
+  `.hsplugin` archives.
