@@ -12,14 +12,17 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
+governor.workspace = true
 hearthsound-config = { path = "../config" }
 hearthsound-core = { path = "../core" }
 jsonschema.workspace = true
+reqwest.workspace = true
 semver = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing.workspace = true
 uuid.workspace = true
@@ -32,3 +35,4 @@ hearthsound-test-support = { path = "../test-support" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber.workspace = true
+wiremock.workspace = true

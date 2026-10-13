@@ -10,6 +10,11 @@
 //! The rest of the server never sees WebAssembly: [`PluginHost::catalog_provider`]
 //! hands out a core trait object whose calls cross the guest boundary and back.
 //!
+//! Every host import enforces the instance's approved permissions itself.
+//! [`http`] is the outbound HTTP import: it applies the instance's host
+//! allowlist, address policy, timeout, redirect, body-cap and rate-limit rules
+//! before any request leaves the process.
+//!
 //! The crate contains one `unsafe` call: deserializing a precompiled component
 //! from the host's own data directory. Every other operation is safe Rust.
 #![deny(unsafe_code)]
@@ -21,6 +26,8 @@ mod catalog;
 mod engine;
 mod error;
 mod host;
+pub mod http;
+mod instance;
 pub mod log;
 pub mod manifest;
 mod pool;
@@ -28,10 +35,10 @@ mod state;
 mod validate;
 
 pub use archive::PluginArchive;
-pub use catalog::InstanceConfig;
 pub use engine::PluginEngine;
 pub use error::{HostError, InstallError};
 pub use host::{InstalledPlugin, PluginHost};
+pub use instance::{ImportRoot, InstanceConfig, InstanceHostConfig};
 pub use log::{GuestOutput, LogSink};
 pub use manifest::{Manifest, ManifestError};
 pub use state::InstanceState;

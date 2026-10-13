@@ -19,9 +19,11 @@ use wasmtime::component::{Component, HasSelf, Linker};
 
 use crate::archive::PluginArchive;
 use crate::bindings::{self, CatalogProviderPre};
-use crate::catalog::{InstanceConfig, WasmCatalogProvider};
+use crate::catalog::WasmCatalogProvider;
 use crate::engine::PluginEngine;
 use crate::error::{HostError, InstallError};
+use crate::http::{HttpClient, HttpGrant};
+use crate::instance::InstanceConfig;
 use crate::log::LogSink;
 use crate::manifest::{Manifest, ManifestError, SUPPORTED_API};
 use crate::pool::{PoolConfig, StorePool};
@@ -203,6 +205,17 @@ impl PluginHost {
         let manifest = plugin.manifest();
         let log = Arc::new(LogSink::new(manifest.id.clone(), instance.slug.clone()));
 
+        let grant = HttpGrant::new(instance.permissions.http.as_ref(), &instance.server_config);
+        let http = Arc::new(
+            HttpClient::new(
+                manifest.id.clone(),
+                &manifest.version,
+                instance.slug.clone(),
+                grant,
+            )
+            .map_err(|error| HostError::Http(error.to_string()))?,
+        );
+
         let pool = StorePool::new(
             self.engine.engine(),
             &self.linker,
@@ -212,6 +225,7 @@ impl PluginHost {
                 slug: instance.slug.clone(),
                 server_config: Arc::from(instance.server_config.as_str()),
                 log,
+                http,
                 memory_mb: manifest.resources.memory_mb,
                 max_instances: manifest.resources.max_instances,
                 call_timeout_ms: manifest.resources.call_timeout_ms,

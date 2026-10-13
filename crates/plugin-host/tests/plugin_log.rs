@@ -63,10 +63,7 @@ async fn a_search_logs_its_query() {
     let provider: Arc<dyn CatalogProvider> = host
         .catalog_provider(
             &installed,
-            InstanceConfig {
-                slug: Slug::new("hello").unwrap(),
-                server_config: "{}".to_owned(),
-            },
+            InstanceConfig::new(Slug::new("hello").unwrap()).with_server_config("{}".to_owned()),
         )
         .unwrap();
 

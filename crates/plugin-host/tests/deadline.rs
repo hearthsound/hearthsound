@@ -19,10 +19,7 @@ fn settings() -> Arc<SettingsStore> {
 }
 
 fn instance(slug: &str) -> InstanceConfig {
-    InstanceConfig {
-        slug: Slug::new(slug).unwrap(),
-        server_config: "{}".to_owned(),
-    }
+    InstanceConfig::new(Slug::new(slug).unwrap()).with_server_config("{}".to_owned())
 }
 
 #[tokio::test]

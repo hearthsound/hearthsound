@@ -84,6 +84,9 @@ pub enum HostError {
     /// The component does not type-check against the host's world.
     #[error("the component is incompatible with this host: {0}")]
     Incompatible(String),
+    /// The instance's outbound HTTP client could not be built.
+    #[error("failed to build the instance's HTTP client: {0}")]
+    Http(String),
     /// A setting could not be read.
     #[error(transparent)]
     Settings(#[from] ConfigError),

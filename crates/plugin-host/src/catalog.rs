@@ -15,16 +15,6 @@ use crate::bindings::exports::hearthsound::plugin::catalog::{SearchQuery, Search
 use crate::bindings::hearthsound::plugin::types as wit;
 use crate::pool::StorePool;
 
-/// How one plugin instance is configured.
-#[derive(Debug, Clone)]
-pub struct InstanceConfig {
-    /// The instance slug, unique among the server's provider instances.
-    pub slug: Slug,
-    /// The server-scoped configuration as JSON text. A caller with no
-    /// configuration passes `{}`.
-    pub server_config: String,
-}
-
 /// A catalog provider backed by one plugin instance.
 pub(crate) struct WasmCatalogProvider {
     pool: StorePool,

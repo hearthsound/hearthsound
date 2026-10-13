@@ -25,10 +25,8 @@ async fn calls_the_hello_catalog() {
     let provider: Arc<dyn CatalogProvider> = host
         .catalog_provider(
             &installed,
-            InstanceConfig {
-                slug: Slug::new("hello").unwrap(),
-                server_config: r#"{"greeting":"Hi"}"#.to_owned(),
-            },
+            InstanceConfig::new(Slug::new("hello").unwrap())
+                .with_server_config(r#"{"greeting":"Hi"}"#.to_owned()),
         )
         .unwrap();
 

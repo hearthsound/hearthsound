@@ -20,6 +20,7 @@ use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
 use crate::bindings::{CatalogProvider, CatalogProviderPre};
+use crate::http::HttpClient;
 use crate::log::LogSink;
 use crate::state::InstanceState;
 
@@ -53,6 +54,8 @@ pub(crate) struct PoolConfig {
     pub server_config: Arc<str>,
     /// The instance's log sink.
     pub log: Arc<LogSink>,
+    /// The instance's outbound HTTP client.
+    pub http: Arc<HttpClient>,
     /// The instance's memory ceiling in megabytes.
     pub memory_mb: u32,
     /// How many stores may exist at once.
@@ -78,6 +81,7 @@ struct PoolInner {
     slug: Slug,
     server_config: Arc<str>,
     log: Arc<LogSink>,
+    http: Arc<HttpClient>,
     memory_mb: u32,
 }
 
@@ -119,6 +123,7 @@ impl StorePool {
                 slug: config.slug,
                 server_config: config.server_config,
                 log: config.log,
+                http: config.http,
                 memory_mb: config.memory_mb,
             }),
         })
@@ -154,6 +159,7 @@ impl StorePool {
         }
 
         let attempt = tokio::time::timeout(inner.call_timeout, async {
+            let deadline = Instant::now() + inner.call_timeout;
             let permit = match inner.permits.acquire().await {
                 Ok(permit) => permit,
                 Err(_) => return Attempt::Trap("the instance pool is closed".to_owned()),
@@ -164,6 +170,7 @@ impl StorePool {
                 Err(error) => return Attempt::Trap(format!("{error:#}")),
             };
 
+            store.data_mut().begin_call(deadline);
             match call(&mut store, &instance).await {
                 Ok(Ok(value)) => {
                     drop(permit);
@@ -206,6 +213,7 @@ impl StorePool {
                 Arc::clone(&inner.server_config),
                 Arc::clone(&inner.log),
                 inner.memory_mb,
+                Arc::clone(&inner.http),
             ),
         );
         store.limiter(|state| state.limits());

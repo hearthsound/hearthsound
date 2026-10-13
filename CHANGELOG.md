@@ -138,3 +138,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a reported failure, or when the wait elapses; it reports whether any file
   audio was delivered, and dropping it kills both processes and releases their
   permits.
+- The `host-http` import: outbound requests through an instance's approved host
+  allowlist with literal, wildcard and `$config:` entries, a public-address
+  policy enforced on the addresses the connection uses, request timeouts
+  clamped to the call deadline, re-checked redirects, a streaming response body
+  cap, a default User-Agent, and a per-instance rate limiter.
