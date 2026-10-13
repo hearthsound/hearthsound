@@ -17,6 +17,10 @@
 //! - a setting a user may override shadows the server value for that user only
 //!   ([`UserSettings`]).
 //!
+//! [`Authenticator`] ties them together: it turns the `u`, `p`, `t`, `s` and
+//! `apiKey` parameters of a `/rest` request into a [`Principal`] or a typed
+//! [`AuthenticationError`] carrying the Subsonic error code.
+//!
 //! Library code takes plain values and reads [`hearthsound_config::SettingsStore`]
 //! snapshots handed to it by the composition root; it never reads the process
 //! environment or a config file itself.
@@ -26,6 +30,8 @@ mod api_key;
 mod app_password;
 mod error;
 mod password;
+mod rate_limit;
+mod subsonic;
 mod user;
 mod user_settings;
 
@@ -36,6 +42,11 @@ pub use app_password::{
 };
 pub use error::AuthError;
 pub use password::{hash_password, verify_password};
+pub use rate_limit::{LoginKey, LoginRateLimiter, RateLimited};
+pub use subsonic::{
+    APP_PASSWORDS_HELP_URL, AuthenticationError, Authenticator, Credential, MIN_SALT_LEN,
+    Principal, ResolveError, SubsonicCredentials,
+};
 pub use user::{NewUser, Permission, UnknownPermission, User, UserPermissions, Users};
 pub use user_settings::{UserSettingEntry, UserSettings};
 

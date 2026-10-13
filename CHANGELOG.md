@@ -99,3 +99,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - App passwords: 20 characters drawn from a 32-symbol typeable alphabet, sealed
   at rest with the AES-256-GCM secret box, listed and revoked per app password,
   and opened for Subsonic credential verification.
+- Subsonic credential resolution: API keys, plain and `enc:` hex app passwords,
+  and `u`/`t`/`s` token authentication resolved into a principal that names the
+  user, the permissions, and the credential used, with the account password
+  accepted only when `subsonic.allow_account_password` enables it, the typed
+  Subsonic error codes 10, 40, 41, 42, 43, and 44, the app-password help URL,
+  and a login rate limit keyed by address and username.
