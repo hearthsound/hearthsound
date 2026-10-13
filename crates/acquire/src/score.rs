@@ -940,7 +940,10 @@ mod tests {
     #[test]
     fn an_accented_candidate_matches_an_ascii_target() {
         let target = MatchTarget::new("Hoppipolla", vec!["Sigur Ros".to_owned()], None, None, None);
-        let score = scored(&target, &candidate("Sigur Rós/01 - Hoppípolla.flac", None));
+        let score = scored(
+            &target,
+            &candidate("Sigur R\u{f3}s/01 - Hopp\u{ed}polla.flac", None),
+        );
         assert_eq!(score.title, Some(1.0));
         assert_eq!(score.artist, Some(1.0));
         assert_total(score.total, 1.0);

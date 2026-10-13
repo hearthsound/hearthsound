@@ -2,7 +2,7 @@
 //!
 //! Both sides of every field comparison pass through [`normalize_with`] before
 //! [`similarity`] computes a Jaro-Winkler value, so `Beyonce` matches
-//! `Beyoncé`, `Rock'n'Roll` matches `Rock n Roll`, and a title carrying a
+//! `Beyonc\u{e9}`, `Rock'n'Roll` matches `Rock n Roll`, and a title carrying a
 //! featuring credit matches the same title without one. Bracketed groups such
 //! as `(Official Video)` or `(Live)` are dropped from the candidate unless the
 //! target keeps the same group, which is what makes a bare Soulseek file name
@@ -415,10 +415,13 @@ mod tests {
     #[test]
     fn folds_case_accents_and_width() {
         assert_eq!(normalize("Beyonce"), normalize("BEYONCE"));
-        assert_eq!(normalize("Beyoncé"), "beyonce");
-        assert_eq!(normalize("BJORK"), normalize("Björk"));
-        assert_eq!(normalize("ＭＪ"), "mj");
-        assert_eq!(normalize("Sigur Rós - Hoppípolla"), "sigur ros hoppipolla");
+        assert_eq!(normalize("Beyonc\u{e9}"), "beyonce");
+        assert_eq!(normalize("BJORK"), normalize("Bj\u{f6}rk"));
+        assert_eq!(normalize("\u{ff2d}\u{ff2a}"), "mj");
+        assert_eq!(
+            normalize("Sigur R\u{f3}s - Hopp\u{ed}polla"),
+            "sigur ros hoppipolla"
+        );
     }
 
     #[test]
@@ -477,7 +480,7 @@ mod tests {
     #[test]
     fn similarity_ignores_case_accents_and_brackets() {
         assert_eq!(similarity("mojo pin", "Mojo Pin"), 1.0);
-        assert_eq!(similarity("Hoppípolla", "Hoppipolla"), 1.0);
+        assert_eq!(similarity("Hopp\u{ed}polla", "Hoppipolla"), 1.0);
         assert_eq!(similarity("Mojo Pin (Live)", "Mojo Pin"), 1.0);
         assert_eq!(similarity("", ""), 1.0);
         assert!(similarity("Mojo Pin", "Grace") < 0.6);
