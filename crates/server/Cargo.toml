@@ -1,0 +1,38 @@
+[package]
+name = "hearthsound-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+hearthsound-activity = { path = "../activity" }
+hearthsound-api-subsonic = { path = "../api-subsonic" }
+hearthsound-auth = { path = "../auth" }
+hearthsound-config = { path = "../config" }
+hearthsound-core = { path = "../core" }
+hearthsound-db = { path = "../db" }
+hearthsound-jobs = { path = "../jobs" }
+hearthsound-library = { path = "../library" }
+hearthsound-media = { path = "../media" }
+hearthsound-plugin-host = { path = "../plugin-host" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "rt", "signal", "sync", "time"] }
+tower-http.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+hearthsound-test-support = { path = "../test-support" }
+reqwest.workspace = true
+sqlx.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "time"] }

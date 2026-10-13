@@ -13,6 +13,7 @@ members = [
     "crates/library",
     "crates/media",
     "crates/plugin-host",
+    "crates/server",
     "crates/test-support",
     "xtask",
 ]
@@ -53,6 +54,7 @@ md-5 = "0.11.0"
 lofty = "0.25.4"
 rand = "0.10.3"
 reqwest = { version = "0.13.5", features = ["stream"] }
+rpassword = "7.5.4"
 semver = "1.0.28"
 serde = "1.0.229"
 serde_json = "1.0.154"
@@ -67,6 +69,7 @@ time = "0.3.55"
 tokio = "1.53.2"
 toml = "1.1.8"
 tower = "0.5.3"
+tower-http = { version = "0.7.1", features = ["trace"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 unicode-normalization = "0.1.25"

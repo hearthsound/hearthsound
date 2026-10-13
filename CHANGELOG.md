@@ -277,3 +277,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or default value when the server has none, name the album as `coverArt` when
   the track's file carries embedded art and the track itself otherwise, and a
   malformed, unknown, out-of-scope, or catalog id is answered with error 70.
+- The server composition root: a `hearthsound-server` crate that creates the
+  data and storage directory trees, opens and migrates the database, loads the
+  runtime settings and the secret key, and builds the event bus, the credential
+  resolver, the plugin host and provider registry, the ffmpeg runner capped by
+  `stream.max_concurrent_transcodes`, the library scanner, the job queue with
+  the scan and plugin key-value sweep handlers, the scheduler with an hourly
+  sweep schedule, and the activity service.
+- The surfaces the composition root mounts itself: `/healthz`, `/readyz`
+  reported against the schema version the bundled migrations bring a database
+  to, and the JSON status object `GET /` answers while there is no web client,
+  with request tracing and a graceful shutdown that stops the listener, the job
+  runner, and the scheduler on `SIGINT` or `SIGTERM`.
+- The schema version accessor on the database layer, reporting the migration
+  version a database file is actually at.

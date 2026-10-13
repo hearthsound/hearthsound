@@ -187,6 +187,36 @@ impl Database {
 
         Ok(MigrationOutcome { from, to, backup })
     }
+
+    /// Reports the schema version the database is migrated to.
+    ///
+    /// The value is read from `_sqlx_migrations` over a reader connection, so it
+    /// reflects the version a migrated database is actually at rather than what
+    /// this process intended to apply. A readiness probe compares it with the
+    /// version the bundled migrator supplies.
+    ///
+    /// # Returns
+    ///
+    /// The highest successfully applied migration version, or zero when the
+    /// bookkeeping table does not exist yet, which is the case for a database
+    /// file that was just created.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DbError::Sqlx`] when the query fails, which also covers a file
+    /// that is not a SQLite database.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example(db: &hearthsound_db::Database) -> Result<(), hearthsound_db::DbError> {
+    /// assert_eq!(db.migration_version().await?, 0);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn migration_version(&self) -> Result<i64, DbError> {
+        current_version(self.readers()).await
+    }
 }
 
 /// Reads the highest successfully applied migration version.
