@@ -163,6 +163,14 @@ pub async fn get_album(call: Call) -> Encoded {
         .iter()
         .zip(&loaded.files)
         .map(|(view, file)| projection::child(view, file.as_ref(), &loaded.detail.artists));
+    record_listing(
+        &call,
+        loaded
+            .detail
+            .tracks
+            .iter()
+            .map(|view| ClientId::Entity(view.track.id)),
+    );
     let album = album.set("song", Array::new(songs));
     call.encode(Response::ok().member("album", album))
 }
@@ -342,6 +350,33 @@ fn requested(call: &Call, expected: IdPrefix) -> Result<Requested, SubsonicError
     }
 }
 
+/// Records a listing as the client's implied queue.
+///
+/// The prefetch scheduler infers what a client is about to play from the
+/// listing it last read, so every endpoint that answers with an ordered
+/// tracklist reports it. Nothing is stored: the scheduler keeps the most recent
+/// listing per user and client instance in memory, and a state built without a
+/// scheduler records nothing.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call. Its principal names the user, and its `c`
+///   parameter names the client instance, the empty string when the client
+///   named none.
+/// - `listing`: the listing's track ids in playing order, as the client will
+///   name them: stored track ids for a local listing and `x_` catalog ids for a
+///   catalog one.
+fn record_listing(call: &Call, listing: impl IntoIterator<Item = ClientId>) {
+    let Some(prefetch) = call.state().prefetch() else {
+        return;
+    };
+    prefetch.record_listing(
+        call.principal().user_id.uuid(),
+        call.client_name().unwrap_or_default(),
+        listing.into_iter().collect(),
+    );
+}
+
 /// Answers `getSong` for an unmaterialized catalog id.
 ///
 /// The track is looked up through the instance that issued the id and
@@ -416,17 +451,24 @@ async fn catalog_album(call: &Call, id: CatalogId) -> Encoded {
         Ok(album) => album,
         Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
     };
-    let songs = album.album.tracks.iter().filter_map(|track| {
-        let track_id =
-            CatalogId::new(album.id.slug().clone(), EntityKind::Track, track.id.clone()).ok()?;
-        Some(projection::catalog_child(
+    let mut songs = Vec::new();
+    let mut listing = Vec::new();
+    for track in &album.album.tracks {
+        let Some(track_id) =
+            CatalogId::new(album.id.slug().clone(), EntityKind::Track, track.id.clone()).ok()
+        else {
+            continue;
+        };
+        songs.push(projection::catalog_child(
             &track_id,
             track,
             &format.suffix,
             &format.content_type,
             &suffix,
-        ))
-    });
+        ));
+        listing.push(ClientId::Catalog(track_id));
+    }
+    record_listing(call, listing);
     let album = projection::catalog_album(&album, &suffix).set("song", Array::new(songs));
     call.encode(Response::ok().member("album", album))
 }

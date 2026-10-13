@@ -757,6 +757,18 @@ impl PrefetchScheduler {
     }
 }
 
+impl std::fmt::Debug for PrefetchScheduler {
+    /// Writes how many listing contexts the scheduler holds.
+    ///
+    /// The listings themselves are omitted: a debug line wants the size of the
+    /// state, not every track id a client read.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrefetchScheduler")
+            .field("contexts", &lock(&self.inner.listings).count())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Locks a mutex, taking the value even when a previous holder panicked.
 ///
 /// The scheduler's map is plain data that a panic cannot leave inconsistent, so

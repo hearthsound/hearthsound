@@ -8,11 +8,13 @@
 //! when it moves.
 //!
 //! [`Services::watch_external_changes`] is that worker. A detected commit
-//! reloads the runtime settings and rebuilds the provider registry, which
-//! re-reads the plugin, instance, and layer tables; a change to the resolved
-//! settings additionally reapplies the settings the services cache a copy of,
-//! namely the ffmpeg concurrency cap. Users and credentials are read per
-//! request, so a user a command created authenticates without any reload.
+//! reloads the runtime settings, rebuilds the provider registry, which
+//! re-reads the plugin, instance, and layer tables, and reconciles the
+//! acquisition ledger, which is how a cancellation written by a command line
+//! stops the worker that is still serving that acquisition; a change to the
+//! resolved settings additionally reapplies the settings the services cache a
+//! copy of, namely the ffmpeg concurrency cap. Users and credentials are read
+//! per request, so a user a command created authenticates without any reload.
 //!
 //! The watcher polls once a second ([`DATA_VERSION_POLL_INTERVAL`]), so a
 //! command-line change takes effect within about a second without a restart.
@@ -77,6 +79,11 @@ impl Services {
 
     /// Reloads the settings and rebuilds the provider registry.
     ///
+    /// The acquisition ledger is reconciled afterwards, because the same
+    /// external write may have cancelled an acquisition: a command line
+    /// cancellation is written straight to the database, and only the running
+    /// process can stop the worker that still serves that acquisition.
+    ///
     /// # Parameters
     ///
     /// - `self`: the services whose stored layers are re-read.
@@ -88,6 +95,10 @@ impl Services {
         match self.registry().rebuild().await {
             Ok(report) => log_rebuild(&report),
             Err(error) => tracing::error!(%error, "could not rebuild the provider registry"),
+        }
+        match self.orchestrator().reconcile().await {
+            Ok(()) => {}
+            Err(error) => tracing::error!(%error, "could not reconcile the acquisitions"),
         }
         tracing::info!("reloaded the settings and providers after an external write");
     }

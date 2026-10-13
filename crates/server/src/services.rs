@@ -46,6 +46,7 @@ use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
 use hearthsound_acquire::orchestrator::{AcquisitionOrchestrator, AcquisitionStorage};
+use hearthsound_acquire::prefetch::PrefetchScheduler;
 use hearthsound_activity::ActivityService;
 use hearthsound_api_subsonic::{PendingSource, SubsonicState, TrustedProxies};
 use hearthsound_auth::Authenticator;
@@ -97,6 +98,8 @@ pub struct Services {
     ffmpeg: Arc<FfmpegRunner>,
     /// The acquisition orchestrator the pending stream and the admin views use.
     orchestrator: Arc<AcquisitionOrchestrator>,
+    /// The prefetch scheduler the listing and stream endpoints feed.
+    prefetch: Arc<PrefetchScheduler>,
     /// The library folder scanner.
     scanner: Arc<LibraryScanner>,
     /// The persistent job queue.
@@ -224,6 +227,7 @@ impl Services {
             ),
         ));
         orchestrator.start();
+        let prefetch = Arc::new(PrefetchScheduler::new(Arc::clone(&orchestrator)));
         let scanner = Arc::new(LibraryScanner::new(&database, Arc::clone(&events)));
 
         let queue = Arc::new(JobQueue::new(&database, QueueOptions::default()));
@@ -273,6 +277,7 @@ impl Services {
             instances,
             ffmpeg,
             orchestrator,
+            prefetch,
             scanner,
             queue,
             runner,
@@ -348,6 +353,16 @@ impl Services {
         &self.orchestrator
     }
 
+    /// Returns the prefetch scheduler.
+    ///
+    /// `getAlbum` records the listing it answered and `stream` notes the track
+    /// it served, so the scheduler can request what the client is about to
+    /// reach; the acquisitions it starts are the orchestrator's, and the
+    /// `queue.prefetch` events go out on the same bus.
+    pub fn prefetch(&self) -> &Arc<PrefetchScheduler> {
+        &self.prefetch
+    }
+
     /// Returns the library scanner.
     pub fn scanner(&self) -> &Arc<LibraryScanner> {
         &self.scanner
@@ -395,6 +410,7 @@ impl Services {
             self.storage_roots.clone(),
         )
         .with_pending_source(pending)
+        .with_prefetch(Arc::clone(&self.prefetch))
         .with_trusted_proxies(self.trusted_proxies.clone())
     }
 

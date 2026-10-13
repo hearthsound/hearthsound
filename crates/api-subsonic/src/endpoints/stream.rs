@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use hearthsound_core::ClientId;
 use hearthsound_media::TranscodeFormat;
 
 use crate::auth::BinaryCall;
@@ -70,7 +71,10 @@ pub async fn stream(call: BinaryCall) -> Response {
         can_acquire: call.principal().can_acquire,
     };
     match call.state().stream().serve(&request).await {
-        Ok(response) => response,
+        Ok(response) => {
+            note_stream(&call, id);
+            response
+        }
         Err(error) => {
             let status = error.status();
             if status.is_server_error() {
@@ -81,6 +85,37 @@ pub async fn stream(call: BinaryCall) -> Response {
             error.response()
         }
     }
+}
+
+/// Reports a served track to the prefetch scheduler.
+///
+/// The scheduler infers the queue a client is about to play from the listing it
+/// last read, and a streamed track is the signal that the client reached that
+/// listing. The work is spawned rather than awaited, because a look-ahead must
+/// never delay the audio: the response is already built when this runs, and a
+/// state built without a scheduler notes nothing.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call. Its principal names the user and its
+///   permission, and its `c` parameter names the client instance.
+/// - `id`: the `id` parameter the stream was served for: a stored track id or an
+///   `x_` catalog id.
+fn note_stream(call: &BinaryCall, id: &str) {
+    let Some(prefetch) = call.state().prefetch().cloned() else {
+        return;
+    };
+    let Ok(track) = ClientId::parse(id) else {
+        return;
+    };
+    let user = call.principal().user_id.uuid();
+    let client = call.client_name().unwrap_or_default().to_owned();
+    let can_acquire = call.principal().can_acquire;
+    tokio::spawn(async move {
+        prefetch
+            .note_stream(user, &client, &track, can_acquire)
+            .await;
+    });
 }
 
 /// Reads the `format` parameter.

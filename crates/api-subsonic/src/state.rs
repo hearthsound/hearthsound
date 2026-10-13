@@ -9,6 +9,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use hearthsound_acquire::prefetch::PrefetchScheduler;
 use hearthsound_activity::ActivityService;
 use hearthsound_auth::{Authenticator, Principal, ResolveError, SubsonicCredentials, UserSettings};
 use hearthsound_catalog::CatalogService;
@@ -50,6 +51,8 @@ struct Inner {
     ffmpeg: Arc<FfmpegRunner>,
     /// The credential resolver.
     authenticator: Arc<Authenticator>,
+    /// The prefetch scheduler, when the composition root has one.
+    prefetch: Option<Arc<PrefetchScheduler>>,
     /// The proxies whose forwarding headers are trusted.
     trusted_proxies: Arc<TrustedProxies>,
 }
@@ -108,6 +111,7 @@ impl SubsonicState {
                 stream,
                 ffmpeg,
                 authenticator,
+                prefetch: None,
                 trusted_proxies: Arc::new(TrustedProxies::default()),
             }),
         }
@@ -135,6 +139,7 @@ impl SubsonicState {
                 stream: self.inner.stream.clone(),
                 ffmpeg: Arc::clone(&self.inner.ffmpeg),
                 authenticator: Arc::clone(&self.inner.authenticator),
+                prefetch: self.inner.prefetch.clone(),
                 trusted_proxies: Arc::new(trusted_proxies),
             }),
         }
@@ -162,6 +167,39 @@ impl SubsonicState {
                 stream: self.inner.stream.clone().with_pending_source(pending),
                 ffmpeg: Arc::clone(&self.inner.ffmpeg),
                 authenticator: Arc::clone(&self.inner.authenticator),
+                prefetch: self.inner.prefetch.clone(),
+                trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
+            }),
+        }
+    }
+
+    /// Sets the prefetch scheduler the listing endpoints feed.
+    ///
+    /// # Parameters
+    ///
+    /// - `prefetch`: the scheduler, which must be the same one the composition
+    ///   root built over the running acquisition layer, so the look-ahead it
+    ///   starts and the acquisitions the rest of the server watches are one
+    ///   ledger.
+    ///
+    /// # Returns
+    ///
+    /// The state, sharing everything else with the state it was called on.
+    /// Without a scheduler, `getAlbum` records no listing and `stream` notes no
+    /// streamed track, which is what a surface that serves only stored files
+    /// wants.
+    pub fn with_prefetch(self, prefetch: Arc<PrefetchScheduler>) -> SubsonicState {
+        SubsonicState {
+            inner: Arc::new(Inner {
+                database: Arc::clone(&self.inner.database),
+                settings: self.inner.settings.clone(),
+                user_settings: self.inner.user_settings.clone(),
+                catalog: Arc::clone(&self.inner.catalog),
+                activity: Arc::clone(&self.inner.activity),
+                stream: self.inner.stream.clone(),
+                ffmpeg: Arc::clone(&self.inner.ffmpeg),
+                authenticator: Arc::clone(&self.inner.authenticator),
+                prefetch: Some(prefetch),
                 trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
             }),
         }
@@ -224,6 +262,20 @@ impl SubsonicState {
     /// registry the stream service reports into.
     pub fn activity(&self) -> &ActivityService {
         &self.inner.activity
+    }
+
+    /// Returns the prefetch scheduler, when the composition root built one.
+    ///
+    /// `getAlbum` records the listing it answered as the client's implied
+    /// queue, and `stream` notes the track it served, so the scheduler can
+    /// prefetch what the client is about to reach.
+    ///
+    /// # Returns
+    ///
+    /// The scheduler, or `None` for a state built without one, which records
+    /// and notes nothing.
+    pub fn prefetch(&self) -> Option<&Arc<PrefetchScheduler>> {
+        self.inner.prefetch.as_ref()
     }
 
     /// Returns the stream service.

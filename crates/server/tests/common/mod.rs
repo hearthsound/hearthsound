@@ -17,6 +17,7 @@ use hearthsound_auth::{ApiKeys, NewUser, Users};
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_server::{Server, Services};
 use tempfile::TempDir;
+use uuid::Uuid;
 
 /// The login name of the test account.
 pub const USERNAME: &str = "echo";
@@ -34,6 +35,8 @@ pub struct Fixture {
     pub services: Arc<Services>,
     /// The API key of the test account, usable as `/rest`'s `apiKey`.
     pub api_key: String,
+    /// The test account's id, which the ledger records as a requester.
+    pub user_id: Uuid,
     /// The HTTP client every test request goes through.
     pub client: reqwest::Client,
 }
@@ -66,6 +69,7 @@ impl Fixture {
             server,
             services,
             api_key,
+            user_id: user.id,
             client: reqwest::Client::new(),
         }
     }

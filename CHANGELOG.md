@@ -590,3 +590,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and every start and drop is published as a `queue.prefetch` event.
   `prefetch.enabled` off disables the whole scheduler, and an `x_` catalog item
   is materialized only when it is actually prefetched.
+- Listing and stream recording for the prefetch scheduler: `getAlbum` records the
+  ordered track ids it answers with as the implied queue of the requesting user
+  and `c` client instance - for a stored album as stored track ids and for an
+  `x_` catalog album as catalog ids - and `/rest/stream` notes the track it
+  served off the request path, so the scheduler can prefetch what the client is
+  about to reach. The server builds the scheduler in `Services::build` and hands
+  it to the `/rest` state, and the reload path reconciles the acquisition ledger
+  after an external write, so a cancellation written by a command line stops the
+  worker that is still serving that acquisition. A new `album-catalog` fixture
+  plugin answers a five-track album, which is what the full-stack test of the
+  prefetch needs.
