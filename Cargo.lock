@@ -1572,6 +1572,7 @@ dependencies = [
  "hearthsound-library",
  "hearthsound-plugin-host",
  "hearthsound-server",
+ "hearthsound-test-support",
  "rpassword",
  "serde_json",
  "tempfile",

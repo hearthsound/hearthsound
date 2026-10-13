@@ -6,6 +6,9 @@
 //! that `main` renders as a message and an exit code.
 
 pub mod admin;
+pub mod layers;
 pub mod migrate;
+pub mod plugins;
+pub mod providers;
 pub mod scan;
 pub mod serve;

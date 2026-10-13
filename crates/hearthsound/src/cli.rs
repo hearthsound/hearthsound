@@ -46,6 +46,12 @@ pub enum Command {
     Scan(ScanArgs),
     /// Manage accounts, credentials, and library folders.
     Admin(AdminArgs),
+    /// Install plugins and list what is installed.
+    Plugins(PluginsArgs),
+    /// Configure provider instances and list them.
+    Providers(ProvidersArgs),
+    /// Assign provider instances to the layers they take part in.
+    Layers(LayersArgs),
     // The acquisition commands (`acquisitions list` and `acquisitions cancel`)
     // are registered here once the acquisition orchestrator exists.
 }
@@ -135,4 +141,102 @@ pub struct AddFolderArgs {
     /// The folder's display name. Defaults to the directory's file name.
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
+}
+
+/// The arguments of `plugins`.
+#[derive(Debug, Args)]
+pub struct PluginsArgs {
+    /// The plugin command to run.
+    #[command(subcommand)]
+    pub command: PluginsCommand,
+}
+
+/// Every command under `plugins`.
+#[derive(Debug, Subcommand)]
+pub enum PluginsCommand {
+    /// Install a `.hsplugin` archive and enable it.
+    Install(InstallPluginArgs),
+    /// List the installed plugins.
+    List,
+}
+
+/// The arguments of `plugins install`.
+#[derive(Debug, Args)]
+pub struct InstallPluginArgs {
+    /// The `.hsplugin` archive to install.
+    #[arg(value_name = "FILE")]
+    pub file: PathBuf,
+    /// Record the plugin as shipped with the server rather than sideloaded.
+    #[arg(long)]
+    pub bundled: bool,
+}
+
+/// The arguments of `providers`.
+#[derive(Debug, Args)]
+pub struct ProvidersArgs {
+    /// The provider command to run.
+    #[command(subcommand)]
+    pub command: ProvidersCommand,
+}
+
+/// Every command under `providers`.
+#[derive(Debug, Subcommand)]
+pub enum ProvidersCommand {
+    /// Configure a provider instance from an installed plugin.
+    Add(AddProviderArgs),
+    /// List the configured provider instances.
+    List,
+}
+
+/// The arguments of `providers add`.
+#[derive(Debug, Args)]
+pub struct AddProviderArgs {
+    /// The id of the installed plugin the instance is configured from.
+    #[arg(long, value_name = "ID")]
+    pub plugin: String,
+    /// The instance slug, `^[a-z0-9]{2,24}$`, unique and immutable.
+    #[arg(long, value_name = "SLUG")]
+    pub slug: String,
+    /// The plugin's server-scoped configuration, as a JSON object.
+    ///
+    /// The bootstrap configuration file stays `--config`; this flag carries the
+    /// configuration the plugin itself is given.
+    #[arg(long = "plugin-config", value_name = "JSON")]
+    pub server_config: String,
+    /// The name shown in the admin UI. Defaults to the slug.
+    #[arg(long, value_name = "NAME")]
+    pub display_name: Option<String>,
+    /// A directory the instance may reach, written `<id>=<path>:<mode>` with a
+    /// mode of `move`, `copy`, or `link`. May be given more than once.
+    #[arg(long = "import-root", value_name = "ID=PATH:MODE")]
+    pub import_roots: Vec<String>,
+}
+
+/// The arguments of `layers`.
+#[derive(Debug, Args)]
+pub struct LayersArgs {
+    /// The layer command to run.
+    #[command(subcommand)]
+    pub command: LayersCommand,
+}
+
+/// Every command under `layers`.
+#[derive(Debug, Subcommand)]
+pub enum LayersCommand {
+    /// Replace the instances of one layer, first is primary.
+    Set(SetLayerArgs),
+    /// List the instances of every layer.
+    List,
+}
+
+/// The arguments of `layers set`.
+#[derive(Debug, Args)]
+pub struct SetLayerArgs {
+    /// The layer to assign: `catalog`, `metadata`, `artwork`, `acquisition`,
+    /// `verification`, `scrobble`, `discovery`, `lyrics`, or `playlist-import`.
+    #[arg(value_name = "LAYER")]
+    pub layer: String,
+    /// The instance slugs of the layer, in priority order.
+    #[arg(value_name = "SLUG", num_args = 1..)]
+    pub slugs: Vec<String>,
 }

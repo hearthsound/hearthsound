@@ -21,6 +21,8 @@ use hearthsound_config::secret::{SecretBox, SecretKey};
 use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingSources, SettingsRegistry};
 use hearthsound_db::{Database, MIGRATOR, MigrationOutcome};
+use hearthsound_plugin_host::instances::InstanceService;
+use hearthsound_plugin_host::{PluginHost, PluginRepository};
 
 /// Creates the directory tree, opens the database, and migrates it.
 ///
@@ -63,6 +65,8 @@ pub async fn open_database(
 
 /// The database, settings, and secret key of one data-writing command.
 pub struct Context {
+    /// The resolved bootstrap configuration.
+    config: BootstrapConfig,
     /// The open, migrated database.
     database: Arc<Database>,
     /// The runtime settings service.
@@ -102,6 +106,7 @@ impl Context {
             .secret_box();
 
         Ok(Context {
+            config,
             database: Arc::new(database),
             settings,
             secret_box,
@@ -121,5 +126,49 @@ impl Context {
     /// Returns the secret box of the secret key file.
     pub fn secret_box(&self) -> &SecretBox {
         &self.secret_box
+    }
+
+    /// Builds a plugin host over the data directory's plugin tree.
+    ///
+    /// The host is built on demand because only the plugin and provider commands
+    /// need the wasmtime engine. It is not shared with a running server: a
+    /// command-line process has its own engine, and the two only meet in the
+    /// database and the installed plugin files.
+    ///
+    /// # Returns
+    ///
+    /// The host, rooted at `<data>/plugins`, using the settings snapshot loaded
+    /// by [`Context::open`] to validate manifests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the wasmtime engine or the host linker cannot be
+    /// built.
+    pub fn plugin_host(&self) -> anyhow::Result<Arc<PluginHost>> {
+        let host = PluginHost::new(
+            self.config.paths.plugins.clone(),
+            self.settings.current(),
+            Arc::clone(&self.database),
+        )
+        .context("could not build the plugin host")?;
+        Ok(Arc::new(host))
+    }
+
+    /// Builds the provider-instance service over a fresh plugin host.
+    ///
+    /// # Returns
+    ///
+    /// The service, whose plugin tables live in this context's database and
+    /// whose components load from `<data>/plugins`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Context::plugin_host`].
+    pub fn instances(&self) -> anyhow::Result<InstanceService> {
+        Ok(InstanceService::new(
+            self.plugin_host()?,
+            PluginRepository::new(&self.database),
+            self.secret_box.clone(),
+        ))
     }
 }

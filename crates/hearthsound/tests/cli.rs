@@ -469,3 +469,123 @@ fn bootstrap_config(sandbox: &Sandbox) -> hearthsound_config::bootstrap::Bootstr
     )
     .unwrap()
 }
+
+/// The plugin, provider, and layer commands configure a catalog provider.
+#[test]
+fn plugins_providers_and_layers_configure_the_hello_fixture() {
+    let sandbox = Sandbox::new("");
+    let archive = hearthsound_test_support::fixture_plugin(hearthsound_test_support::HELLO_CATALOG);
+    let downloads = sandbox.data().join("downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+
+    let installed = succeeded(&sandbox.run(&["plugins", "install", archive.to_str().unwrap()]));
+    assert!(
+        installed.contains("installed com.example.hello-catalog 0.1.0 (sideload)"),
+        "{installed}"
+    );
+    assert!(installed.contains("provides: catalog"), "{installed}");
+
+    let listed = succeeded(&sandbox.run(&["plugins", "list"]));
+    assert!(
+        listed.contains("com.example.hello-catalog 0.1.0"),
+        "{listed}"
+    );
+
+    let added = succeeded(&sandbox.run(&[
+        "providers",
+        "add",
+        "--plugin",
+        "com.example.hello-catalog",
+        "--slug",
+        "hello",
+        "--plugin-config",
+        "{}",
+        "--display-name",
+        "Hello",
+        "--import-root",
+        &format!("downloads={}:move", downloads.display()),
+    ]));
+    assert!(
+        added
+            .contains("configured provider instance `hello` from plugin com.example.hello-catalog"),
+        "{added}"
+    );
+    assert!(added.contains("import root: downloads"), "{added}");
+
+    let providers = succeeded(&sandbox.run(&["providers", "list"]));
+    assert!(
+        providers.contains("hello from com.example.hello-catalog"),
+        "{providers}"
+    );
+    assert!(providers.contains("(move)"), "{providers}");
+
+    let before = succeeded(&sandbox.run(&["layers", "list"]));
+    assert!(before.contains("catalog: (none)"), "{before}");
+
+    let assigned = succeeded(&sandbox.run(&["layers", "set", "catalog", "hello"]));
+    assert!(
+        assigned.contains("assigned hello to the catalog layer"),
+        "{assigned}"
+    );
+
+    let after = succeeded(&sandbox.run(&["layers", "list"]));
+    assert!(after.contains("catalog: hello"), "{after}");
+}
+
+/// `plugins install --bundled` records the plugin as shipped with the server.
+#[test]
+fn plugins_install_can_record_a_bundled_plugin() {
+    let sandbox = Sandbox::new("");
+    let archive =
+        hearthsound_test_support::fixture_plugin(hearthsound_test_support::ACQUISITION_FIXTURE);
+
+    let installed =
+        succeeded(&sandbox.run(&["plugins", "install", archive.to_str().unwrap(), "--bundled"]));
+    assert!(installed.contains("(bundled)"), "{installed}");
+
+    let listed = succeeded(&sandbox.run(&["plugins", "list"]));
+    assert!(listed.contains("(bundled)"), "{listed}");
+}
+
+/// `layers set` refuses a layer name that does not exist.
+#[test]
+fn layers_set_refuses_an_unknown_layer() {
+    let sandbox = Sandbox::new("");
+
+    let output = sandbox.run(&["layers", "set", "bogus", "hello"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("is not a layer name"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+/// `providers add` refuses an import root that is not `<id>=<path>:<mode>`.
+#[test]
+fn providers_add_refuses_a_malformed_import_root() {
+    let sandbox = Sandbox::new("");
+    let archive = hearthsound_test_support::fixture_plugin(hearthsound_test_support::HELLO_CATALOG);
+    succeeded(&sandbox.run(&["plugins", "install", archive.to_str().unwrap()]));
+
+    let output = sandbox.run(&[
+        "providers",
+        "add",
+        "--plugin",
+        "com.example.hello-catalog",
+        "--slug",
+        "hello",
+        "--plugin-config",
+        "{}",
+        "--import-root",
+        "/downloads:move",
+    ]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("is not `<id>=<path>:<mode>`"),
+        "{}",
+        stderr(&output)
+    );
+}

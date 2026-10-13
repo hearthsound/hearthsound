@@ -309,3 +309,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `add-folder` with exactly one of `--owner <user>` and `--generic`, applying the
   association through the library layer so the folder's tracks are pinned to its
   owner in the same transaction as the ownership column.
+- The `plugins`, `providers`, and `layers` commands: `plugins install <file>
+  [--bundled]` installs an archive, records the manifest's requested permissions
+  as the approved set, enables the plugin, and prints its id, version, api,
+  provided layers, and each permission with its risk label, `plugins list` lists
+  what is installed, `providers add --plugin <id> --slug <s> --plugin-config
+  <json> [--display-name <n>] [--import-root <id>=<path>:<mode>]` validates,
+  seals, and stores an instance (printing the plugin's own problems when it
+  rejects the configuration) and `providers list` lists the instances, and
+  `layers set <layer> <slug>...` replaces a layer's ordered instances while
+  `layers list` shows every layer.

@@ -62,5 +62,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Migrate => commands::migrate::run(config).await,
         Command::Scan(args) => commands::scan::run(config, args).await,
         Command::Admin(args) => commands::admin::run(config, &env, args).await,
+        Command::Plugins(args) => commands::plugins::run(config, &env, args).await,
+        Command::Providers(args) => commands::providers::run(config, &env, args).await,
+        Command::Layers(args) => commands::layers::run(config, &env, args).await,
     }
 }
