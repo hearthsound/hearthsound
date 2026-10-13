@@ -1,0 +1,23 @@
+package hearthsound:plugin@0.1.0;
+
+interface acquisition {
+  use types.{id-pair, provider-error};
+  enum granularity { track, album }
+  record capabilities { granularities: list<granularity>, progressive: bool }
+  record wanted-track { title: string, artists: list<string>, track-number: option<u16>, disc-number: option<u16>, duration-ms: option<u32>, isrc: option<string>, ids: list<id-pair> }
+  record query { granularity: granularity, album: option<string>, album-artist: option<string>, year: option<u16>, tracks: list<wanted-track>, preferred-formats: list<string> }
+  record candidate-file { name: string, size: option<u64>, format: option<string>, bitrate-kbps: option<u32>, sample-rate: option<u32>, bit-depth: option<u8>, duration-ms: option<u32>, track-index: option<u32> }
+  record source-info { key: string, speed-bps: option<u64>, queue-length: option<u32>, free-slot: option<bool> }
+  record candidate { token: string, title: string, path: string, files: list<candidate-file>, source: source-info }
+  variant search-state { running(list<candidate>), complete(list<candidate>) }
+  record output-file { root: string, path: string, track-index: option<u32> }
+  record progress { bytes: u64, total-bytes: option<u64>, speed-bps: option<u64> }
+  variant download-state { queued(option<u32>), running(progress), complete(list<output-file>), failed(string) }
+  get-capabilities: func() -> capabilities;
+  start-search: func(q: query) -> result<string, provider-error>;
+  poll-search: func(search-token: string) -> result<search-state, provider-error>;
+  cancel-search: func(search-token: string);
+  start-download: func(candidate-token: string, files: list<u32>) -> result<string, provider-error>;
+  poll-download: func(download-token: string) -> result<download-state, provider-error>;
+  cancel-download: func(download-token: string);
+}

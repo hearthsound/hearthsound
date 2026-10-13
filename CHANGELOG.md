@@ -19,3 +19,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `hearthsound` binary that reports its version.
 - `xtask` maintenance binary with a `sync-wit` command that copies the
   WebAssembly interface files from the plugin SDK and verifies them.
+- The `hearthsound:plugin@0.1.0` WebAssembly interface files, synced from the
+  plugin SDK.

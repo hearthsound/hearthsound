@@ -1,0 +1,7 @@
+package hearthsound:plugin@0.1.0;
+
+interface lifecycle {
+  use types.{provider-error};
+  validate-config: func(server-config: string) -> result<_, list<string>>;
+  health: func() -> result<string, provider-error>;
+}

@@ -1,0 +1,14 @@
+package hearthsound:plugin@0.1.0;
+
+interface catalog {
+  use types.{track, album, album-ref, artist, entity-kind, provider-error};
+  record search-query { text: string, kinds: list<entity-kind>, limit: u32, offset: u32 }
+  record search-results { tracks: list<track>, albums: list<album-ref>, artists: list<artist> }
+  search: func(query: search-query) -> result<search-results, provider-error>;
+  get-track: func(id: string) -> result<track, provider-error>;
+  get-album: func(id: string) -> result<album, provider-error>;
+  get-artist: func(id: string) -> result<artist, provider-error>;
+  artist-albums: func(id: string, limit: u32, offset: u32) -> result<list<album-ref>, provider-error>;
+  artist-top-tracks: func(id: string, limit: u32) -> result<list<track>, provider-error>;
+  lookup-isrc: func(isrc: string) -> result<list<track>, provider-error>;
+}

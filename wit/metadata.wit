@@ -1,0 +1,10 @@
+package hearthsound:plugin@0.1.0;
+
+interface metadata {
+  use types.{id-pair, artist-credit, album, provider-error};
+  record recording-hint { title: string, artists: list<string>, album: option<string>, duration-ms: option<u32>, isrc: option<string> }
+  record release-summary { ids: list<id-pair>, title: string, date: option<string>, track-count: option<u32> }
+  record recording-match { ids: list<id-pair>, title: string, artists: list<artist-credit>, duration-ms: option<u32>, releases: list<release-summary>, score: f32 }
+  resolve-recording: func(hint: recording-hint) -> result<list<recording-match>, provider-error>;
+  get-release: func(ids: list<id-pair>) -> result<album, provider-error>;
+}

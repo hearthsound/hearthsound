@@ -1,0 +1,31 @@
+package hearthsound:plugin@0.1.0;
+
+interface host-log {
+  enum level { trace, debug, info, warn, error }
+  log: func(level: level, message: string);
+}
+
+interface host-http {
+  record request { method: string, url: string, headers: list<tuple<string, string>>, body: option<list<u8>>, timeout-ms: option<u32> }
+  record response { status: u16, headers: list<tuple<string, string>>, body: list<u8> }
+  variant http-error { denied(string), timeout, body-too-large, network(string) }
+  send: func(req: request) -> result<response, http-error>;
+}
+
+interface host-kv {
+  get: func(key: string) -> option<list<u8>>;
+  set: func(key: string, value: list<u8>, ttl-ms: option<u64>) -> result<_, string>;
+  delete: func(key: string);
+}
+
+interface host-config {
+  /// JSON of this provider instance's server-scoped config, secrets decrypted.
+  server-config: func() -> string;
+}
+
+interface host-files {
+  record file-stat { size: u64, modified-ms: u64, is-dir: bool }
+  /// root: an import-root id granted to this instance, or "staging".
+  stat: func(root: string, path: string) -> option<file-stat>;
+  list-dir: func(root: string, path: string) -> result<list<string>, string>;
+}
