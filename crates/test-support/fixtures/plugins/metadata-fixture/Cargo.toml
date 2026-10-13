@@ -1,0 +1,18 @@
+[package]
+name = "metadata-fixture"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+description = "A metadata plugin that resolves recordings from a configured table"
+repository = "https://github.com/hearthsound/hearthsound"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+hearthsound-plugin = { git = "https://github.com/hearthsound/plugin-sdk", tag = "v0.1.1" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[workspace]

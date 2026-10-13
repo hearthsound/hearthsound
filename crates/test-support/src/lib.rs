@@ -56,3 +56,12 @@ pub const HELLO_CATALOG: &str = "com.example.hello-catalog-0.1.0.hsplugin";
 
 /// The archive file name of the spin catalog fixture.
 pub const SPIN_CATALOG: &str = "com.example.spin-catalog-0.1.0.hsplugin";
+
+/// The archive file name of the HTTP catalog fixture.
+pub const HTTP_CATALOG: &str = "com.example.http-catalog-0.1.0.hsplugin";
+
+/// The archive file name of the metadata fixture.
+pub const METADATA_FIXTURE: &str = "com.example.metadata-fixture-0.1.0.hsplugin";
+
+/// The archive file name of the acquisition fixture.
+pub const ACQUISITION_FIXTURE: &str = "com.example.acquisition-fixture-0.1.0.hsplugin";

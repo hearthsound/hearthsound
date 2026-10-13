@@ -151,3 +151,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under the import roots an instance grants plus the call's staging root, with
   absolute paths, `..` components and symlinks escaping a root refused by
   canonicalizing the path and checking containment.
+- Fixture plugins for the metadata and acquisition provider worlds, and one
+  whose catalog search performs an outbound `host-http` request, all built from
+  plugin SDK 0.1.1 by `cargo xtask fixtures`; the metadata fixture resolves
+  recordings from a configured table and the acquisition fixture simulates a
+  downloader through `host-kv` and `host-files`, with scenarios for empty
+  searches, download failures, stalled progress and unknown tokens.
