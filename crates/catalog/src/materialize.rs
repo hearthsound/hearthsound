@@ -768,7 +768,7 @@ fn display_artist(credits: &[ProviderCredit]) -> Option<String> {
 /// # Returns
 ///
 /// The first non-empty value in that namespace, or `None`.
-fn canonical_id<'a>(ids: &'a [ExternalId], namespace: &str) -> Option<&'a str> {
+pub(crate) fn canonical_id<'a>(ids: &'a [ExternalId], namespace: &str) -> Option<&'a str> {
     ids.iter()
         .find(|id| id.namespace == namespace && !id.value.is_empty())
         .map(|id| id.value.as_str())

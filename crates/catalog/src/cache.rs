@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hearthsound_core::EntityKind;
-use hearthsound_core::providers::CatalogQuery;
+use hearthsound_core::providers::{CatalogQuery, RecordingHint};
 use hearthsound_db::Database;
 use moka::future::Cache as MemoryCache;
 use serde::Serialize;
@@ -161,6 +161,64 @@ impl RequestKey {
     /// - `isrc`: the International Standard Recording Code.
     pub fn isrc(isrc: &str) -> RequestKey {
         RequestKey(format!("isrc|value={}", encode(isrc)))
+    }
+
+    /// Builds the key of a recording-hint resolution request.
+    ///
+    /// Every part of the hint is part of the key, because two hints that differ
+    /// in any of them are two different questions; a hint the caller left out is
+    /// written as a dash, which no length-prefixed value can produce.
+    ///
+    /// # Parameters
+    ///
+    /// - `hint`: the identity the caller knows about the recording.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_catalog::cache::RequestKey;
+    /// use hearthsound_core::providers::RecordingHint;
+    ///
+    /// let hint = RecordingHint {
+    ///     title: "Cafe del Mar".to_owned(),
+    ///     artists: vec!["Energy 52".to_owned()],
+    ///     album: None,
+    ///     duration_ms: None,
+    ///     isrc: None,
+    /// };
+    /// assert_eq!(
+    ///     RequestKey::recording_hint(&hint).as_str(),
+    ///     "recording-hint|title=12:Cafe del Mar|artists=9:Energy 52,|album=-|duration=-|isrc=-"
+    /// );
+    /// ```
+    pub fn recording_hint(hint: &RecordingHint) -> RequestKey {
+        let mut artists = String::new();
+        for artist in &hint.artists {
+            artists.push_str(&encode(artist));
+            artists.push(',');
+        }
+        RequestKey(format!(
+            "recording-hint|title={}|artists={artists}|album={}|duration={}|isrc={}",
+            encode(&hint.title),
+            optional(hint.album.as_deref()),
+            hint.duration_ms
+                .map(|millis| millis.to_string())
+                .unwrap_or_else(|| "-".to_owned()),
+            optional(hint.isrc.as_deref()),
+        ))
+    }
+
+    /// Builds the key of a resolution request made by ISRC.
+    ///
+    /// The namespace differs from [`RequestKey::isrc`], which keys a catalog
+    /// layer's ISRC lookup: one instance can serve both layers, and the two
+    /// answers are not interchangeable.
+    ///
+    /// # Parameters
+    ///
+    /// - `isrc`: the normalized International Standard Recording Code.
+    pub fn recording_isrc(isrc: &str) -> RequestKey {
+        RequestKey(format!("recording-isrc|value={}", encode(isrc)))
     }
 
     /// Returns the key as the string a cache row stores.
@@ -451,6 +509,23 @@ fn decode<T: DeserializeOwned>(key: &RequestKey, json: &str) -> Option<T> {
 /// The argument's byte length, a colon, and the argument.
 fn encode(value: &str) -> String {
     format!("{}:{value}", value.len())
+}
+
+/// Encodes an optional argument, marking its absence.
+///
+/// # Parameters
+///
+/// - `value`: the argument, or `None` when the caller left it out.
+///
+/// # Returns
+///
+/// [`encode`] of the value, or a dash. An encoded value always starts with a
+/// digit, so a dash can only mean "no value".
+fn optional(value: Option<&str>) -> String {
+    match value {
+        Some(value) => encode(value),
+        None => "-".to_owned(),
+    }
 }
 
 /// Returns the literal an entity kind is written as in a request key.

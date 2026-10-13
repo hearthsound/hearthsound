@@ -58,6 +58,7 @@ pub mod aliases;
 pub mod cache;
 pub mod dedupe;
 mod error;
+mod identity;
 mod materialize;
 mod service;
 mod wire;
@@ -65,6 +66,7 @@ mod wire;
 pub use cache::{ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
 pub use dedupe::{DURATION_TOLERANCE_MS, DedupedCatalog, LocalTrackHit, MaterializedEntity};
 pub use error::CatalogError;
+pub use identity::{IDENTITY_MATCH_THRESHOLD, IdentityRequest, ResolvedRecording};
 pub use materialize::{MaterializedAlbum, ProviderAlias};
 pub use service::{
     CatalogAlbumRefResult, CatalogAlbumResult, CatalogArtistResult, CatalogSearch, CatalogService,

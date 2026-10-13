@@ -573,6 +573,43 @@ pub async fn set_track_availability(
     Ok(affected > 0)
 }
 
+/// Writes a track's MusicBrainz recording id.
+///
+/// Identity resolution learns the canonical recording id after the track row
+/// exists, so it needs a setter narrower than [`update_track`], which rewrites
+/// every mutable column and the track's credits with it.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `track_id`: the track to update.
+/// - `mbid`: the MusicBrainz recording id.
+///
+/// # Returns
+///
+/// `true` when a row was updated, `false` when the track does not exist.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when the update fails.
+pub async fn set_track_mb_recording_id(
+    conn: &mut SqliteConnection,
+    track_id: EntityId,
+    mbid: &str,
+) -> Result<bool, LibraryError> {
+    let now = now_millis();
+    let affected = sqlx::query!(
+        "UPDATE tracks SET mb_recording_id = ?, updated_at = ? WHERE id = ?",
+        mbid,
+        now,
+        entity_key(track_id),
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
+}
+
 /// Deletes a track and everything that hangs off it.
 ///
 /// The `ON DELETE CASCADE` clauses remove the track's credits, genres,

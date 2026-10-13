@@ -471,6 +471,7 @@ pub async fn count_rows(database: &Database, table: &str) -> i64 {
         "albums" => "SELECT COUNT(*) FROM albums",
         "artists" => "SELECT COUNT(*) FROM artists",
         "external_ids" => "SELECT COUNT(*) FROM external_ids",
+        "catalog_cache" => "SELECT COUNT(*) FROM catalog_cache",
         "artwork_cache" => "SELECT COUNT(*) FROM artwork_cache",
         other => panic!("the harness does not know the table `{other}`"),
     };

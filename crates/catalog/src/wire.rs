@@ -16,7 +16,7 @@
 
 use hearthsound_core::providers::{
     ArtistCredit, CatalogAlbum, CatalogAlbumRef, CatalogArtist, CatalogResults, CatalogTrack,
-    ExternalId, Image,
+    ExternalId, Image, RecordingMatch, ReleaseSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -179,6 +179,53 @@ pub(crate) struct WireAlbumRefs(Vec<WireAlbumRef>);
 /// JSON array of [`WireTrack`] objects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct WireTracks(Vec<WireTrack>);
+
+/// The stored form of a [`ReleaseSummary`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireReleaseSummary {
+    /// The release's canonical identifiers.
+    #[serde(default)]
+    pub ids: Vec<WireExternalId>,
+    /// The release title.
+    pub title: String,
+    /// The release date, when known.
+    #[serde(default)]
+    pub date: Option<String>,
+    /// The number of tracks on the release, when known.
+    #[serde(default)]
+    pub track_count: Option<u32>,
+}
+
+/// The stored form of a [`RecordingMatch`].
+///
+/// The match carries a score, so this mirror is the one stored shape that is
+/// compared with `PartialEq` rather than `Eq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WireRecordingMatch {
+    /// The recording's canonical identifiers.
+    #[serde(default)]
+    pub ids: Vec<WireExternalId>,
+    /// The recording title.
+    pub title: String,
+    /// The recording's artists.
+    #[serde(default)]
+    pub artists: Vec<WireArtistCredit>,
+    /// The recording duration in milliseconds, when known.
+    #[serde(default)]
+    pub duration_ms: Option<u32>,
+    /// The releases the recording appears on.
+    #[serde(default)]
+    pub releases: Vec<WireReleaseSummary>,
+    /// The provider's confidence in the match.
+    pub score: f32,
+}
+
+/// The stored form of the recordings one resolution answered with.
+///
+/// A newtype for the same reason as [`WireAlbumRefs`]; a stored answer is a
+/// JSON array of [`WireRecordingMatch`] objects.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WireRecordingMatches(Vec<WireRecordingMatch>);
 
 impl From<&Vec<CatalogAlbumRef>> for WireAlbumRefs {
     /// Copies an album listing into its stored form.
@@ -415,6 +462,80 @@ impl From<WireResults> for CatalogResults {
                 .collect(),
             artists: value.artists.into_iter().map(CatalogArtist::from).collect(),
         }
+    }
+}
+
+impl From<&ReleaseSummary> for WireReleaseSummary {
+    /// Copies a release summary into its stored form.
+    fn from(value: &ReleaseSummary) -> WireReleaseSummary {
+        WireReleaseSummary {
+            ids: value.ids.iter().map(WireExternalId::from).collect(),
+            title: value.title.clone(),
+            date: value.date.clone(),
+            track_count: value.track_count,
+        }
+    }
+}
+
+impl From<WireReleaseSummary> for ReleaseSummary {
+    /// Rebuilds a release summary from its stored form.
+    fn from(value: WireReleaseSummary) -> ReleaseSummary {
+        ReleaseSummary {
+            ids: value.ids.into_iter().map(ExternalId::from).collect(),
+            title: value.title,
+            date: value.date,
+            track_count: value.track_count,
+        }
+    }
+}
+
+impl From<&RecordingMatch> for WireRecordingMatch {
+    /// Copies a recording match into its stored form.
+    fn from(value: &RecordingMatch) -> WireRecordingMatch {
+        WireRecordingMatch {
+            ids: value.ids.iter().map(WireExternalId::from).collect(),
+            title: value.title.clone(),
+            artists: value.artists.iter().map(WireArtistCredit::from).collect(),
+            duration_ms: value.duration_ms,
+            releases: value
+                .releases
+                .iter()
+                .map(WireReleaseSummary::from)
+                .collect(),
+            score: value.score,
+        }
+    }
+}
+
+impl From<WireRecordingMatch> for RecordingMatch {
+    /// Rebuilds a recording match from its stored form.
+    fn from(value: WireRecordingMatch) -> RecordingMatch {
+        RecordingMatch {
+            ids: value.ids.into_iter().map(ExternalId::from).collect(),
+            title: value.title,
+            artists: value.artists.into_iter().map(ArtistCredit::from).collect(),
+            duration_ms: value.duration_ms,
+            releases: value
+                .releases
+                .into_iter()
+                .map(ReleaseSummary::from)
+                .collect(),
+            score: value.score,
+        }
+    }
+}
+
+impl From<&Vec<RecordingMatch>> for WireRecordingMatches {
+    /// Copies a resolution answer into its stored form.
+    fn from(value: &Vec<RecordingMatch>) -> WireRecordingMatches {
+        WireRecordingMatches(value.iter().map(WireRecordingMatch::from).collect())
+    }
+}
+
+impl From<WireRecordingMatches> for Vec<RecordingMatch> {
+    /// Rebuilds a resolution answer from its stored form.
+    fn from(value: WireRecordingMatches) -> Vec<RecordingMatch> {
+        value.0.into_iter().map(RecordingMatch::from).collect()
     }
 }
 

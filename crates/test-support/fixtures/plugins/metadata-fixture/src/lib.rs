@@ -20,6 +20,9 @@ const RECORDING_NAMESPACE: &str = "mb-recording";
 /// The namespace of a MusicBrainz release identifier.
 const RELEASE_NAMESPACE: &str = "mb-release";
 
+/// The namespace of a MusicBrainz artist identifier.
+const ARTIST_NAMESPACE: &str = "mb-artist";
+
 /// The plugin implementation.
 struct MetadataFixture;
 
@@ -46,6 +49,9 @@ struct Recording {
     isrc: Option<String>,
     /// The recording's MusicBrainz id.
     mbid: String,
+    /// The MusicBrainz artist id of the recording's first credited artist.
+    #[serde(default)]
+    artist_mbid: Option<String>,
     /// The confidence the fixture reports for a match.
     #[serde(default = "default_score")]
     score: f32,
@@ -116,13 +122,27 @@ fn release_summary(release: &Release) -> ReleaseSummary {
 }
 
 /// Builds the artist credits of a recording.
+///
+/// The first credited artist carries the configured MusicBrainz artist id, so a
+/// test can exercise the `mb-artist` alias a resolution records.
+///
+/// # Parameters
+///
+/// - `recording`: the configured recording.
 fn credits(recording: &Recording) -> Vec<ArtistCredit> {
     recording
         .artists
         .iter()
-        .map(|name| ArtistCredit {
+        .enumerate()
+        .map(|(position, name)| ArtistCredit {
             name: name.clone(),
-            ids: vec![],
+            ids: match (&recording.artist_mbid, position) {
+                (Some(mbid), 0) => vec![IdPair {
+                    namespace: ARTIST_NAMESPACE.to_string(),
+                    value: mbid.clone(),
+                }],
+                _ => vec![],
+            },
         })
         .collect()
 }

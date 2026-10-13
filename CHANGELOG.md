@@ -387,3 +387,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `entity_by_alias` read the alias table back, so a caller can reach the
   instance that issued an entity and the row an identifier names. `ArtistInput`
   gained an `origin` so a catalog artist is not written as a local one.
+- Identity resolution through the metadata layer: a track's recording is resolved
+  by ISRC or by a recording hint, following the layer policy (the first instance
+  whose best match scores at least `IDENTITY_MATCH_THRESHOLD`, otherwise the
+  best score across instances, never a merge of two instances' answers), cached
+  in `catalog_cache` per metadata instance and request for `ENTITY_CACHE_TTL`.
+  `resolve_track_identity` applies the answer in one short transaction: the
+  track's `mb_recording_id` through the library's `set_track_mb_recording_id`,
+  and the `mb-recording`, `mb-release`, `mb-release-group` and `mb-artist`
+  aliases of the canonical identifiers it learned.

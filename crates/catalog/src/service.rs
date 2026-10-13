@@ -208,6 +208,15 @@ impl CatalogService {
         self.inner.settings.current()
     }
 
+    /// Returns the two-level response cache.
+    ///
+    /// The cache is shared by every call this service makes, so a layer
+    /// implemented in another module of this crate resolves through the same two
+    /// tiers.
+    pub(crate) fn cache(&self) -> &Cache {
+        &self.inner.cache
+    }
+
     /// Looks up one track.
     ///
     /// The call is routed to the instance named by `id`, and to that instance
@@ -632,7 +641,7 @@ impl CatalogService {
     ///
     /// Returns the mapped provider failure, and [`CatalogError::Unavailable`]
     /// when the deadline passed before the instance answered.
-    fn finish<T>(
+    pub(crate) fn finish<T>(
         &self,
         slug: &Slug,
         operation: &'static str,
