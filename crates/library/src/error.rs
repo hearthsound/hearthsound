@@ -67,4 +67,14 @@ pub enum LibraryError {
         #[source]
         source: std::io::Error,
     },
+    /// A media probe or picture extraction failed.
+    #[error(transparent)]
+    Media(#[from] hearthsound_media::MediaError),
+    /// A stored JSON column could not be decoded, or a value could not be
+    /// encoded.
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+    /// A blocking task could not be joined.
+    #[error("background task failed: {0}")]
+    Join(#[from] tokio::task::JoinError),
 }

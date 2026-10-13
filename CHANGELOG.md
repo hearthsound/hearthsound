@@ -224,3 +224,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   optional owner. Every write takes a connection or transaction so a caller can
   keep several writes atomic, and the pool-level facade offers the same
   operations one short transaction each.
+- The library scanner: a walk that recognises audio extensions and never
+  follows a symbolic link, probes each file with the media crate outside any
+  write transaction, and indexes its tags into artists, albums, tracks, and
+  folder media files in short write transactions. A rescan skips files whose
+  size and modification time match, refreshes a file whose probe columns
+  changed, removes the rows of files that vanished (deleting a locally created
+  track that lost its last file, demoting a catalog track to remote), records
+  the scan time, pins the tracks of an owned folder with the `folder` reason in
+  the same transaction, and publishes `scan.progress` and `library.changed`
+  events. A `library.scan` job handler runs a folder or the whole scan set, and
+  a cover art lookup reads a track's preferred file for an embedded picture or
+  a sidecar image beside it.

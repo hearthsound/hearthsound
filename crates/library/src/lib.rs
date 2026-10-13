@@ -12,6 +12,11 @@
 //! transaction; the [`LibraryRepository`] facade is the pool-level convenience
 //! over the same functions.
 //!
+//! On top of the repository sit the folder scanner ([`scan`]), which indexes a
+//! scanned folder's tags and keeps the rows in step with the files on disk, and
+//! the cover art lookup ([`artwork`]), which answers what image belongs to a
+//! local entity.
+//!
 //! Two rules shape the write API:
 //!
 //! - Hearthsound never writes into a scanned folder, so a folder row is
@@ -57,8 +62,10 @@ pub use repository::LibraryRepository;
 
 pub mod albums;
 pub mod artists;
+pub mod artwork;
 pub mod folders;
 pub mod media_files;
+pub mod scan;
 pub mod tracks;
 
 /// Returns the current time in unix milliseconds.

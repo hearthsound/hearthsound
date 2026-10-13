@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT pin_reasons FROM track_retention WHERE track_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "pin_reasons",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "track_retention",
+            "name": "pin_reasons"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "620ba985fba3ac657e160015bef31f91f884d1e99e19fae7701a85e6beb70608"
+}

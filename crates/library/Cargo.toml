@@ -24,7 +24,7 @@ thiserror.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["fs", "rt", "sync"] }
 tracing.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 hearthsound-test-support = { path = "../test-support" }
