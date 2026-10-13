@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use config::{Config, Environment, File, FileFormat};
 use serde::Deserialize;
 
-use crate::SettingSources;
+use crate::{SettingSources, split_list};
 
 /// The root of the environment variable namespace used by the loader.
 ///
@@ -650,17 +650,6 @@ struct RawWeb {
 /// string, so `a,b` is accepted for them.
 #[derive(Debug, Clone, Default)]
 struct StringList(Vec<String>);
-
-/// Splits a comma-separated list, trimming whitespace and dropping empty
-/// entries, so `a, b,` yields `["a", "b"]`.
-fn split_list(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
 
 impl<'de> Deserialize<'de> for StringList {
     fn deserialize<D>(deserializer: D) -> Result<StringList, D::Error>

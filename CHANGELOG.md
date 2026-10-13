@@ -52,3 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keys loaded from an optional TOML file and `HEARTHSOUND__` environment
   variables, with `<data>` substitution, the XDG data directory default, and
   the derived data and storage directories.
+- The runtime settings reference: every library, storage, acquisition, prefetch,
+  stream, search, Subsonic, privacy, plugin, upload, user, and auth setting with
+  its default, its constraint, a typed key, and a flag marking the two settings
+  a user may override.
