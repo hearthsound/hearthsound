@@ -12,9 +12,12 @@ workspace = true
 
 [dependencies]
 argon2.workspace = true
+data-encoding.workspace = true
 hearthsound-config = { path = "../config" }
 hearthsound-core = { path = "../core" }
 hearthsound-db = { path = "../db" }
+rand.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 time.workspace = true

@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT k.id AS key_id, u.id AS user_id, u.username, u.is_admin,\n                    u.can_acquire, u.can_upload, u.can_download\n             FROM api_keys k JOIN users u ON u.id = k.user_id\n             WHERE k.key_hash = ? AND k.revoked_at IS NULL AND u.disabled_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "key_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "user_id",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "username",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "username"
+          }
+        }
+      },
+      {
+        "name": "is_admin",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "is_admin"
+          }
+        }
+      },
+      {
+        "name": "can_acquire",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "can_acquire"
+          }
+        }
+      },
+      {
+        "name": "can_upload",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "can_upload"
+          }
+        }
+      },
+      {
+        "name": "can_download",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "can_download"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ea86d26eedea281d006038d252017dff845a8c9d46a91f550abb5ac2e8ec893e"
+}

@@ -1292,9 +1292,12 @@ name = "hearthsound-auth"
 version = "0.1.0-alpha.0"
 dependencies = [
  "argon2",
+ "data-encoding",
  "hearthsound-config",
  "hearthsound-core",
  "hearthsound-db",
+ "rand",
+ "sha2 0.11.1",
  "sqlx",
  "tempfile",
  "thiserror 2.0.21",

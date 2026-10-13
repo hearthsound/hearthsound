@@ -9,6 +9,8 @@
 //!
 //! - an account password is stored as an Argon2id hash and never reversibly
 //!   ([`hash_password`], [`verify_password`], [`Users`]);
+//! - an API key is shown once, stored as its SHA-256 hash and a short prefix,
+//!   and revoked per key ([`ApiKeys`]);
 //! - a setting a user may override shadows the server value for that user only
 //!   ([`UserSettings`]).
 //!
@@ -17,11 +19,13 @@
 //! environment or a config file itself.
 #![forbid(unsafe_code)]
 
+mod api_key;
 mod error;
 mod password;
 mod user;
 mod user_settings;
 
+pub use api_key::{API_KEY_PREFIX, ApiKey, ApiKeyOwner, ApiKeys, GeneratedApiKey};
 pub use error::AuthError;
 pub use password::{hash_password, verify_password};
 pub use user::{NewUser, Permission, UnknownPermission, User, UserPermissions, Users};

@@ -92,3 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from `users.default_permissions`, lookup by id or username, disabling, and
   listing, plus per-user setting overrides that reject unknown, server-only, or
   badly typed keys.
+- API keys: `hs_` plus the lowercase base32 encoding of 32 random bytes, stored
+  as their SHA-256 hash with a short prefix, resolved to their owner with
+  malformed, unknown, revoked, and disabled-account keys failing alike, and
+  revocable per key.
