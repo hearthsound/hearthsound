@@ -74,6 +74,9 @@ pub enum LibraryError {
     /// encoded.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    /// An import path template could not be read, parsed, or rendered.
+    #[error(transparent)]
+    Naming(#[from] crate::naming::NamingTemplateError),
     /// A blocking task could not be joined.
     #[error("background task failed: {0}")]
     Join(#[from] tokio::task::JoinError),

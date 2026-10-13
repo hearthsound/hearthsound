@@ -236,3 +236,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   events. A `library.scan` job handler runs a folder or the whole scan set, and
   a cover art lookup reads a track's preferred file for an embedded picture or
   a sidecar image beside it.
+- The import path template: parsing and rendering `library.naming_template` with
+  the `album_artist`, `album`, `year`, `disc_prefix`, `track`, `title`, and
+  `ext` tokens, `:NN` zero padding, `[...]` optional groups dropped when any
+  token inside them is empty, and a `disc_prefix` that only appears on a
+  multi-disc release. Every rendered component is sanitized for the filesystem
+  (reserved and control characters become `_`, trailing dots and spaces are
+  trimmed, the component is capped at 200 bytes without splitting a UTF-8
+  sequence, Windows device names are prefixed with `_`), empty components are
+  dropped, and a component that would be `..` is rejected.
