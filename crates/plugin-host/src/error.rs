@@ -70,6 +70,9 @@ pub enum InstallError {
         /// The plugin version.
         version: String,
     },
+    /// The component does not type-check against the host's world.
+    #[error("the component is incompatible with this host: {0}")]
+    Incompatible(String),
 }
 
 /// An error from setting up or configuring the plugin host itself.

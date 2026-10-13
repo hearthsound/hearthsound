@@ -26,3 +26,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plugin manifest parsing and validation.
 - Installation and validation of `.hsplugin` archives, keeping a precompiled
   component for fast loading.
+- Plugin instance state with a sandboxed WASI context, deny-by-default host
+  imports, and a rate limited log sink.

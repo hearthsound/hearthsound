@@ -23,9 +23,11 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing.workspace = true
 uuid.workspace = true
 wasmtime.workspace = true
+wasmtime-wasi.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
 hearthsound-test-support = { path = "../test-support" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing-subscriber.workspace = true

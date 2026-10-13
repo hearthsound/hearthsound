@@ -13,12 +13,15 @@ use std::sync::Arc;
 use hearthsound_config::SettingsStore;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use wasmtime::{Engine, component::Component};
+use wasmtime::Engine;
+use wasmtime::component::{Component, HasSelf, Linker};
 
 use crate::archive::PluginArchive;
+use crate::bindings::{self, CatalogProviderPre};
 use crate::engine::PluginEngine;
 use crate::error::{HostError, InstallError};
 use crate::manifest::{Manifest, ManifestError, SUPPORTED_API};
+use crate::state::InstanceState;
 use crate::validate;
 
 /// An installed plugin, ready to be instantiated.
@@ -52,16 +55,19 @@ impl InstalledPlugin {
     }
 }
 
-/// Owns the wasmtime engine and the directory plugins are installed into.
-#[derive(Debug)]
+/// Owns the wasmtime engine, the host linker, and the plugin directory.
 pub struct PluginHost {
     engine: PluginEngine,
+    linker: Linker<InstanceState>,
     plugins_dir: PathBuf,
     settings: Arc<SettingsStore>,
 }
 
 impl PluginHost {
     /// Creates a host rooted at `plugins_dir`.
+    ///
+    /// The linker is built once here: the WASI preview 2 interfaces and the
+    /// catalog provider world, both backed by [`InstanceState`].
     ///
     /// # Parameters
     ///
@@ -82,8 +88,15 @@ impl PluginHost {
         settings: Arc<SettingsStore>,
     ) -> Result<PluginHost, HostError> {
         let engine = PluginEngine::new()?;
+
+        let mut linker = Linker::new(engine.engine());
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(HostError::Engine)?;
+        bindings::CatalogProvider::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+            .map_err(HostError::Engine)?;
+
         Ok(PluginHost {
             engine,
+            linker,
             plugins_dir,
             settings,
         })
@@ -108,16 +121,18 @@ impl PluginHost {
     ///
     /// Returns [`InstallError`] when the archive cannot be read, its manifest
     /// is invalid, its component fails to compile or breaks the import and
-    /// export rules, or the same version is already installed.
+    /// export rules, it does not type-check against the host's world, or the
+    /// same version is already installed.
     pub async fn install(&self, archive: &Path) -> Result<InstalledPlugin, InstallError> {
         let archive = archive.to_path_buf();
         let plugins_dir = self.plugins_dir.clone();
         let settings = Arc::clone(&self.settings);
         let engine = self.engine.engine().clone();
+        let linker = self.linker.clone();
         let failure_path = plugins_dir.clone();
 
         tokio::task::spawn_blocking(move || {
-            install_blocking(&engine, &plugins_dir, &settings, &archive)
+            install_blocking(&engine, &linker, &plugins_dir, &settings, &archive)
         })
         .await
         .map_err(|error| InstallError::Io {
@@ -150,11 +165,13 @@ impl PluginHost {
         let dir = self.plugins_dir.join(id).join(version.to_string());
         let settings = Arc::clone(&self.settings);
         let engine = self.engine.engine().clone();
+        let linker = self.linker.clone();
+        let failure_path = dir.clone();
 
-        tokio::task::spawn_blocking(move || load_blocking(&engine, &settings, dir))
+        tokio::task::spawn_blocking(move || load_blocking(&engine, &linker, &settings, dir))
             .await
             .map_err(|error| InstallError::Io {
-                path: self.plugins_dir.join(id),
+                path: failure_path,
                 source: std::io::Error::other(error),
             })?
     }
@@ -163,6 +180,7 @@ impl PluginHost {
 /// Installs an archive without touching the async runtime.
 fn install_blocking(
     engine: &Engine,
+    linker: &Linker<InstanceState>,
     plugins_dir: &Path,
     settings: &SettingsStore,
     archive_path: &Path,
@@ -186,6 +204,7 @@ fn install_blocking(
 
     let component = Component::new(engine, archive.wasm()).map_err(InstallError::Compile)?;
     validate::validate(&component, &manifest)?;
+    ensure_instantiable(linker, &component)?;
 
     let staging = plugins_dir.join(format!(".staging-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&staging).map_err(|source| InstallError::Io {
@@ -259,6 +278,7 @@ fn stage(
 /// Loads an installed plugin from its directory.
 fn load_blocking(
     engine: &Engine,
+    linker: &Linker<InstanceState>,
     settings: &SettingsStore,
     dir: PathBuf,
 ) -> Result<InstalledPlugin, InstallError> {
@@ -271,6 +291,7 @@ fn load_blocking(
 
     let component = load_component(engine, &dir.join("plugin.cwasm"), &dir.join("plugin.wasm"))?;
     validate::validate(&component, &manifest)?;
+    ensure_instantiable(linker, &component)?;
 
     let sha256 = std::fs::read(dir.join("plugin.wasm"))
         .map(|bytes| {
@@ -286,6 +307,22 @@ fn load_blocking(
         sha256,
         component,
     })
+}
+
+/// Checks that the host can instantiate the component.
+///
+/// This is the strongest validation available without running the guest: the
+/// linker resolves every import and the world's types must match exactly.
+fn ensure_instantiable(
+    linker: &Linker<InstanceState>,
+    component: &Component,
+) -> Result<(), InstallError> {
+    let pre = linker
+        .instantiate_pre(component)
+        .map_err(|error| InstallError::Incompatible(format!("{error:#}")))?;
+    CatalogProviderPre::new(pre)
+        .map_err(|error| InstallError::Incompatible(format!("{error:#}")))?;
+    Ok(())
 }
 
 /// Loads a precompiled component, recompiling when the artifact is unusable.
