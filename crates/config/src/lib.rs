@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bootstrap;
+pub mod settings;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -21,7 +22,11 @@ const ENV_PREFIX: &str = "HEARTHSOUND__";
 ///
 /// Values are untyped at rest; a [`SettingKind`] says which variant is
 /// acceptable for a given setting.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// The JSON representation derived here is the one stored in the `settings`
+/// table: a boolean, a number, a string, or an array of strings.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(untagged)]
 pub enum SettingValue {
     /// A boolean value.
     Bool(bool),
@@ -76,6 +81,69 @@ impl SettingValue {
                 },
             },
         }
+    }
+    /// Renders the value as the JSON text stored in the `settings` table.
+    ///
+    /// # Returns
+    ///
+    /// A JSON document: `true`, a number, a string, or an array of strings. The
+    /// representation round-trips through [`SettingValue::from_json`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_config::SettingValue;
+    ///
+    /// assert_eq!(SettingValue::Bool(false).to_json(), "false");
+    /// assert_eq!(SettingValue::Float(0.8).to_json(), "0.8");
+    /// assert_eq!(
+    ///     SettingValue::StringList(vec!["acquire".to_owned()]).to_json(),
+    ///     r#"["acquire"]"#
+    /// );
+    /// ```
+    pub fn to_json(&self) -> String {
+        match self {
+            SettingValue::Bool(value) => value.to_string(),
+            SettingValue::Integer(value) => value.to_string(),
+            SettingValue::Float(value) => serde_json::Value::from(*value).to_string(),
+            SettingValue::String(value) => serde_json::Value::String(value.clone()).to_string(),
+            SettingValue::StringList(values) => serde_json::Value::from(values.clone()).to_string(),
+        }
+    }
+
+    /// Parses a value from the JSON text stored in the `settings` table.
+    ///
+    /// # Parameters
+    ///
+    /// - `key`: the dotted setting key, used in the error.
+    /// - `text`: the stored JSON document.
+    ///
+    /// # Returns
+    ///
+    /// The parsed value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidValue`] with the database origin when the
+    /// text is not valid JSON, or holds something other than a boolean, number,
+    /// string, or array of strings.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_config::SettingValue;
+    ///
+    /// let value = SettingValue::from_json("subsonic.token_auth", "true").unwrap();
+    /// assert_eq!(value, SettingValue::Bool(true));
+    /// assert!(SettingValue::from_json("subsonic.token_auth", "{}").is_err());
+    /// ```
+    pub fn from_json(key: &str, text: &str) -> Result<SettingValue, ConfigError> {
+        serde_json::from_str(text).map_err(|error| ConfigError::InvalidValue {
+            key: key.to_owned(),
+            origin: SettingSource::Database,
+            value: text.to_owned(),
+            reason: format!("expected a boolean, number, string, or list of strings: {error}"),
+        })
     }
 }
 
@@ -922,6 +990,8 @@ pub enum SettingSource {
     Environment,
     /// The configuration file's settings table.
     File,
+    /// The `settings` table of the database.
+    Database,
     /// The built-in default.
     Default,
 }
@@ -931,18 +1001,24 @@ impl fmt::Display for SettingSource {
         match self {
             SettingSource::Environment => f.write_str("the environment"),
             SettingSource::File => f.write_str("the config file"),
+            SettingSource::Database => f.write_str("the database"),
             SettingSource::Default => f.write_str("the built-in default"),
         }
     }
 }
 
 /// The raw sources resolution reads from.
+///
+/// The precedence is environment, then file, then database, then built-in
+/// default.
 #[derive(Debug, Clone, Default)]
 pub struct SettingSources {
     /// Environment variables, keyed by their full name.
     pub env: BTreeMap<String, String>,
     /// Configuration file values, keyed by dotted setting key.
     pub file: BTreeMap<String, toml::Value>,
+    /// Database values, keyed by dotted setting key.
+    pub database: BTreeMap<String, SettingValue>,
 }
 
 impl SettingSources {
@@ -975,7 +1051,11 @@ impl SettingSources {
         env: BTreeMap<String, String>,
         file: BTreeMap<String, toml::Value>,
     ) -> SettingSources {
-        SettingSources { env, file }
+        SettingSources {
+            env,
+            file,
+            database: BTreeMap::new(),
+        }
     }
 
     /// Collects the process environment.
@@ -993,17 +1073,18 @@ impl SettingSources {
         SettingSources {
             env,
             file: BTreeMap::new(),
+            database: BTreeMap::new(),
         }
     }
 }
 
 /// A resolved set of settings.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SettingsStore {
     values: BTreeMap<&'static str, StoredSetting>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct StoredSetting {
     value: SettingValue,
     source: SettingSource,
@@ -1056,6 +1137,8 @@ impl SettingsStore {
                 (value_from_env(def, raw), SettingSource::Environment)
             } else if let Some(raw) = sources.file.get(def.key) {
                 (value_from_toml(def.key, raw)?, SettingSource::File)
+            } else if let Some(value) = sources.database.get(def.key) {
+                (value.clone(), SettingSource::Database)
             } else {
                 (def.default.clone(), SettingSource::Default)
             };
@@ -1127,6 +1210,34 @@ impl SettingsStore {
     /// The source, or `None` when the key is not in this store.
     pub fn source(&self, key: &str) -> Option<SettingSource> {
         self.values.get(key).map(|stored| stored.source)
+    }
+
+    /// Returns the effective value of a setting.
+    ///
+    /// This is the untyped view used by admin listings; feature code reads typed
+    /// values through [`SettingsStore::get`].
+    ///
+    /// # Parameters
+    ///
+    /// - `key`: the dotted setting key.
+    ///
+    /// # Returns
+    ///
+    /// The resolved value, or `None` when the key is not in this store.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore, SettingValue, keys};
+    ///
+    /// let store = SettingsStore::resolve(&SettingsRegistry::builtin(), &SettingSources::default()).unwrap();
+    /// assert_eq!(
+    ///     store.value(keys::STREAM_PENDING_MODE.name()),
+    ///     Some(&SettingValue::String("pad".to_owned()))
+    /// );
+    /// ```
+    pub fn value(&self, key: &str) -> Option<&SettingValue> {
+        self.values.get(key).map(|stored| &stored.value)
     }
 }
 

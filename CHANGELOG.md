@@ -56,3 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stream, search, Subsonic, privacy, plugin, upload, user, and auth setting with
   its default, its constraint, a typed key, and a flag marking the two settings
   a user may override.
+- Runtime settings stored in the `settings` table, resolved as environment,
+  config file, database, then default, with a shared service that rejects
+  file-pinned and environment-overridden keys and notifies subscribers when the
+  resolved snapshot changes.

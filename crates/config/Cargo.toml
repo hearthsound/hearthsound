@@ -13,8 +13,16 @@ workspace = true
 [dependencies]
 config = { workspace = true, default-features = false, features = ["toml"] }
 serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 toml.workspace = true
+tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
+hearthsound-db = { path = "../db" }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
