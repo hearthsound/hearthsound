@@ -158,12 +158,12 @@ async fn registering_an_installed_plugin_records_its_manifest_and_permissions() 
     assert_eq!(registration.source, PluginSource::Sideload);
     assert_eq!(registration.provides, vec![Layer::Catalog]);
 
-    // The fixture reaches whatever host the administrator configured, which is
-    // the one permission it asks for and the only one that deserves a label.
+    // The fixture reaches whatever hosts the administrator configured (its API
+    // URL and its cover URL): one medium-risk permission listing both entries.
     assert_eq!(registration.requested.len(), 1);
     let permission = &registration.requested[0];
     assert_eq!(permission.scope, "http.hosts");
-    assert_eq!(permission.detail, "$config:url");
+    assert_eq!(permission.detail, "$config:url, $config:coverUrl");
     assert_eq!(permission.risk, Risk::Medium);
 
     let stored = env
