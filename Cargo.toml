@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = ["crates/core"]
+exclude = ["crates/test-support/fixtures"]
+
+[workspace.package]
+version = "0.1.0-alpha.0"
+edition = "2024"
+rust-version = "1.96"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/hearthsound/hearthsound"
+publish = false
+
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+clap = { version = "4.6.7", features = ["derive"] }
+jsonschema = { version = "0.58.6", default-features = false }
+semver = "1.0.28"
+serde = "1.0.229"
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+time = "0.3.55"
+tokio = "1.53.2"
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+uuid = { version = "1.28.0", features = ["v7"] }
+wasmtime = "49.0.2"
+wasmtime-wasi = "49.0.2"
+zip = { version = "9.0.2", default-features = false, features = ["deflate"] }
