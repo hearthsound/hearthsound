@@ -229,7 +229,7 @@ async fn a_claimed_acquisition_is_logged_at_every_state() {
     let id = started.acquisition_id().unwrap();
 
     env.start();
-    env.wait_for_state(id, AcquisitionState::Verifying).await;
+    env.wait_for_state(id, AcquisitionState::Completed).await;
 
     let log = env.log(id).await;
     let states: Vec<AcquisitionState> = log.iter().map(|row| row.state).collect();
@@ -245,7 +245,8 @@ async fn a_claimed_acquisition_is_logged_at_every_state() {
         states.contains(&AcquisitionState::Downloading),
         "{states:?}"
     );
-    assert_eq!(states.last(), Some(&AcquisitionState::Verifying));
+    assert!(states.contains(&AcquisitionState::Importing), "{states:?}");
+    assert_eq!(states.last(), Some(&AcquisitionState::Completed));
     assert!(
         log.iter()
             .filter_map(|row| row.message.as_deref())
@@ -326,24 +327,24 @@ async fn waiters_observe_the_acquisition_at_every_attach_point() {
     // channel follows the acquisition as the pipeline advances.
     let mut late = env.orchestrator.subscribe(id).unwrap();
     env.start();
-    env.wait_for_state(id, AcquisitionState::Verifying).await;
+    env.wait_for_state(id, AcquisitionState::Completed).await;
     tokio::time::timeout(std::time::Duration::from_secs(5), late.changed())
         .await
         .expect("the channel carries the pipeline's advance")
         .unwrap();
     let snapshot: AcquisitionProgress = late.borrow_and_update().clone();
-    assert_eq!(snapshot.state, AcquisitionState::Verifying);
+    assert_eq!(snapshot.state, AcquisitionState::Completed);
     assert_eq!(snapshot.priority, Priority::Play);
     assert_eq!(snapshot.acquisition_id, id);
     assert_eq!(snapshot.target_id, track.to_string());
     assert_eq!(snapshot.failure_reason, None);
     assert!(snapshot.file.is_some());
-    assert!(!snapshot.succeeded());
+    assert!(snapshot.succeeded());
     assert!(!snapshot.failed());
 
     // The ledger is the view a client without a subscription reads.
     let progress = env.orchestrator.progress_of(id).await.unwrap().unwrap();
-    assert_eq!(progress.state, AcquisitionState::Verifying);
+    assert_eq!(progress.state, AcquisitionState::Completed);
     assert_eq!(progress.priority, Priority::Play);
 
     // A track the process did not admit has no channel and no row.

@@ -99,7 +99,7 @@ async fn logged(env: &Env, id: Uuid, needle: &str) -> bool {
 }
 
 #[tokio::test]
-async fn a_completed_download_hands_stable_files_to_verification() {
+async fn a_completed_download_is_verified_and_imported() {
     let mut server_config = config(one_candidate(), "normal", 0, "downloads", ".flac");
     // Two running polls of half the file each, so the percentage the events
     // carry has to advance.
@@ -107,17 +107,16 @@ async fn a_completed_download_hands_stable_files_to_verification() {
     server_config["downloadBytesPerPoll"] = json!(2000);
     let env = Env::new(server_config, InstanceLimits::default(), &[]).await;
     let file = place_download(&env, "01 - Hello Song.flac").await;
-    let size = std::fs::metadata(&file).unwrap().len();
     let track = env.remote_track("Hello Song", "Hello Artist").await;
     let mut events = env.events.subscribe();
     let handle = request(&env, track, Priority::Play).await;
     let id = handle.id;
 
     env.start();
-    env.wait_for_state(id, AcquisitionState::Verifying).await;
+    env.wait_for_state(id, AcquisitionState::Completed).await;
 
     let row = env.acquisition(id).await;
-    assert_eq!(row.state, AcquisitionState::Verifying);
+    assert_eq!(row.state, AcquisitionState::Completed);
     assert_eq!(
         row.instance_id,
         Some(env.registry.instance(INSTANCE).unwrap().id())
@@ -125,6 +124,7 @@ async fn a_completed_download_hands_stable_files_to_verification() {
     assert_eq!(row.plugin_token.as_deref(), Some("download-1"));
     assert_eq!(row.attempts, 1);
     assert_eq!(row.failure_reason, None);
+    assert!(row.media_file_id.is_some());
     let candidate: serde_json::Value =
         serde_json::from_str(row.candidate.as_deref().unwrap()).unwrap();
     assert_eq!(candidate["token"], json!("cand-1"));
@@ -137,17 +137,21 @@ async fn a_completed_download_hands_stable_files_to_verification() {
     assert_eq!(progress["bytes"], json!(4000));
     assert_eq!(progress["totalBytes"], json!(4000));
 
-    // The files are resolved and stable, and the live channel carries the path a
-    // client waiting for audio reads.
+    // The live channel carries the final managed path a client waiting for
+    // audio reads, and the source file left the import root.
+    let destination = env
+        .cache_root
+        .join("Hello Artist/Hello Song album (1993)/01 - Hello Song.flac");
     let live = handle.snapshot();
-    assert_eq!(live.state, AcquisitionState::Verifying);
-    assert_eq!(live.file.as_deref(), Some(file.as_path()));
-    assert_eq!(std::fs::metadata(&file).unwrap().len(), size);
+    assert_eq!(live.state, AcquisitionState::Completed);
+    assert_eq!(live.file.as_deref(), Some(destination.as_path()));
+    assert!(destination.is_file());
+    assert!(!file.exists(), "a move import root drops the source file");
 
     // The ledger carries the state, the instance and the last percentage; the
     // resolved path is not stored.
     let snapshot = env.orchestrator.progress_of(id).await.unwrap().unwrap();
-    assert_eq!(snapshot.state, AcquisitionState::Verifying);
+    assert_eq!(snapshot.state, AcquisitionState::Completed);
     assert_eq!(snapshot.instance.as_deref(), Some(INSTANCE));
     assert_eq!(snapshot.percent, Some(100));
     assert_eq!(snapshot.file, None);
@@ -159,6 +163,8 @@ async fn a_completed_download_hands_stable_files_to_verification() {
         "{states:?}"
     );
     assert!(states.contains(&AcquisitionState::Verifying), "{states:?}");
+    assert!(states.contains(&AcquisitionState::Importing), "{states:?}");
+    assert_eq!(states.last(), Some(&AcquisitionState::Completed));
     assert!(
         logged(
             &env,
@@ -272,7 +278,7 @@ async fn a_lost_download_token_restarts_the_search() {
     assert_eq!(env.downloads_started(INSTANCE).await, 1);
     forget_downloads(&env).await;
 
-    env.wait_for_state(id, AcquisitionState::Verifying).await;
+    env.wait_for_state(id, AcquisitionState::Completed).await;
     assert_eq!(
         env.searches_started(INSTANCE).await,
         2,
@@ -301,13 +307,17 @@ async fn a_lost_download_token_restarts_the_search() {
 
 #[tokio::test]
 async fn an_interactive_request_preempts_a_bulk_download() {
-    let env = Env::new(
+    let env = Env::with_import_mode(
         config(one_candidate(), "normal", 0, "downloads", ".flac"),
         InstanceLimits {
             max_concurrent: 1,
             ..InstanceLimits::default()
         },
         &[],
+        // Both acquisitions import the same simulated download, so the root
+        // keeps it instead of the first import moving it away.
+        "copy",
+        false,
     )
     .await;
     place_download(&env, "01 - Hello Song.flac").await;
@@ -332,7 +342,7 @@ async fn an_interactive_request_preempts_a_bulk_download() {
     // A play request needs the slot the background run holds.
     let play_track = env.remote_track("Hello Song", "Hello Artist").await;
     let play_id = request(&env, play_track, Priority::Play).await.id;
-    env.wait_for_state(play_id, AcquisitionState::Verifying)
+    env.wait_for_state(play_id, AcquisitionState::Completed)
         .await;
     assert_eq!(
         env.downloads_started(INSTANCE).await,
@@ -340,12 +350,12 @@ async fn an_interactive_request_preempts_a_bulk_download() {
         "the preempted download was started again"
     );
 
-    // The preempted acquisition is not lost: it downloads again and reaches
-    // verification too.
-    env.wait_for_state(bulk_id, AcquisitionState::Verifying)
+    // The preempted acquisition is not lost: it downloads again and completes
+    // too.
+    env.wait_for_state(bulk_id, AcquisitionState::Completed)
         .await;
     assert!(logged(&env, bulk_id, "preempted by an interactive request").await);
     let bulk = env.acquisition(bulk_id).await;
-    assert_eq!(bulk.state, AcquisitionState::Verifying);
+    assert_eq!(bulk.state, AcquisitionState::Completed);
     assert_eq!(bulk.failure_reason, None);
 }

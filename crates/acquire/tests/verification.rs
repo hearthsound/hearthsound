@@ -116,10 +116,10 @@ async fn a_lossy_file_behind_a_lossless_claim_is_rejected_and_the_next_candidate
     let id = request(&env, track, Priority::Play).await.id;
 
     env.start();
-    env.wait_for_state(id, AcquisitionState::Verifying).await;
+    env.wait_for_state(id, AcquisitionState::Completed).await;
 
     let row = env.acquisition(id).await;
-    assert_eq!(row.state, AcquisitionState::Verifying);
+    assert_eq!(row.state, AcquisitionState::Completed);
     assert_eq!(row.failure_reason, None);
     assert_eq!(
         row.attempts, 2,
@@ -147,7 +147,7 @@ async fn a_lossy_file_behind_a_lossless_claim_is_rejected_and_the_next_candidate
 }
 
 #[tokio::test]
-async fn a_matching_file_passes_verification_and_leaves_the_track_acquiring() {
+async fn a_matching_file_passes_verification_and_is_imported() {
     let env = Env::new(
         config(one_candidate(), "normal", 0, "downloads", ".flac"),
         InstanceLimits::default(),
@@ -159,10 +159,10 @@ async fn a_matching_file_passes_verification_and_leaves_the_track_acquiring() {
     let id = request(&env, track, Priority::Play).await.id;
 
     env.start();
-    env.wait_for_state(id, AcquisitionState::Verifying).await;
+    env.wait_for_state(id, AcquisitionState::Completed).await;
 
     let row = env.acquisition(id).await;
-    assert_eq!(row.state, AcquisitionState::Verifying);
+    assert_eq!(row.state, AcquisitionState::Completed);
     assert_eq!(row.failure_reason, None);
-    assert_eq!(env.track(track).await.availability, Availability::Acquiring);
+    assert_eq!(env.track(track).await.availability, Availability::Cached);
 }

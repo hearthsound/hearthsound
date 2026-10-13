@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT storage FROM media_files WHERE track_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "storage",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "storage"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ad7da2d0c07a55f329aa8056b931fa958206d4383807014053321cecb57bedbc"
+}

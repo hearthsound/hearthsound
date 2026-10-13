@@ -409,7 +409,7 @@ impl AcquisitionOrchestrator {
                                 .hand_off_for_verification(row.id, instance, attempt, &resolved)
                                 .await?
                             {
-                                HandoffOutcome::Verified => {
+                                HandoffOutcome::Completed => {
                                     return Ok(DownloadOutcome::Ready);
                                 }
                                 HandoffOutcome::Rejected { reason, detail } => {

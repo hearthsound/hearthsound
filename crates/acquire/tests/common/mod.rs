@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use hearthsound_acquire::orchestrator::AcquisitionOrchestrator;
+use hearthsound_acquire::orchestrator::{AcquisitionOrchestrator, AcquisitionStorage};
 use hearthsound_catalog::CatalogService;
 use hearthsound_config::secret::{SecretBox, SecretKey};
 use hearthsound_config::settings::Settings;
@@ -21,7 +21,9 @@ use hearthsound_config::{SettingSources, SettingsRegistry};
 use hearthsound_core::events::{EventBus, EventEnvelope, ServerEvent};
 use hearthsound_core::{AcquisitionState, Availability, EntityId, Layer};
 use hearthsound_db::{Database, MIGRATOR};
-use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, Origin, Track, TrackInput};
+use hearthsound_library::{
+    AlbumInput, ArtistCredit, LibraryRepository, Origin, StorageRoots, Track, TrackInput,
+};
 use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::{
     InstanceService, InstanceSpec, PluginHost, PluginRepository, PluginSource, ProviderRegistry,
@@ -88,6 +90,10 @@ pub struct Env {
     pub downloads: PathBuf,
     /// The root of the staging tree, `<storage>/staging`.
     pub staging: PathBuf,
+    /// The managed permanent storage root, `<storage>/library`.
+    pub library_root: PathBuf,
+    /// The managed evictable storage root, `<storage>/cache`.
+    pub cache_root: PathBuf,
     /// The service under test.
     pub orchestrator: Arc<AcquisitionOrchestrator>,
 }
@@ -104,11 +110,45 @@ impl Env {
     ///   their full `HEARTHSOUND__...` name. They are the highest-precedence
     ///   source, which is how a test shortens a timeout or lowers a bound.
     pub async fn new(server_config: Value, limits: InstanceLimits, env: &[(&str, &str)]) -> Env {
+        Env::build(server_config, limits, env, "move", false).await
+    }
+
+    /// Builds an environment whose import root has a non-default mode.
+    ///
+    /// # Parameters
+    ///
+    /// - `server_config`: the fixture's server-scoped configuration.
+    /// - `limits`: the instance's concurrency and rate limits.
+    /// - `env`: extra environment variables for the settings layer.
+    /// - `mode`: the import root's post-import mode, `move`, `copy` or `link`.
+    /// - `read_only`: whether the import root is read-only.
+    pub async fn with_import_mode(
+        server_config: Value,
+        limits: InstanceLimits,
+        env: &[(&str, &str)],
+        mode: &str,
+        read_only: bool,
+    ) -> Env {
+        Env::build(server_config, limits, env, mode, read_only).await
+    }
+
+    /// Builds an environment with the given import-root mode.
+    async fn build(
+        server_config: Value,
+        limits: InstanceLimits,
+        env: &[(&str, &str)],
+        mode: &str,
+        read_only: bool,
+    ) -> Env {
         let dir = tempfile::tempdir().unwrap();
         let downloads = dir.path().join("downloads");
         std::fs::create_dir_all(&downloads).unwrap();
         let staging = dir.path().join("storage/staging");
         std::fs::create_dir_all(&staging).unwrap();
+        let library_root = dir.path().join("storage/library");
+        std::fs::create_dir_all(&library_root).unwrap();
+        let cache_root = dir.path().join("storage/cache");
+        std::fs::create_dir_all(&cache_root).unwrap();
 
         let database = Database::open(&dir.path().join("hearthsound.db"))
             .await
@@ -161,7 +201,7 @@ impl Env {
                 plugin_id: PLUGIN_ID.to_owned(),
                 display_name: "Acquisition fixture".to_owned(),
                 server_config,
-                host_config: host_config(&downloads, limits),
+                host_config: host_config_with(&downloads, limits, mode, read_only),
             })
             .await
             .unwrap();
@@ -186,7 +226,10 @@ impl Env {
             Arc::clone(&catalog),
             Arc::new(FfmpegRunner::new(None, 8)),
             Arc::clone(&events),
-            staging.clone(),
+            AcquisitionStorage::new(
+                staging.clone(),
+                StorageRoots::new(library_root.clone(), cache_root.clone()),
+            ),
         ));
 
         Env {
@@ -202,6 +245,8 @@ impl Env {
             library,
             downloads,
             staging,
+            library_root,
+            cache_root,
             orchestrator,
         }
     }
@@ -346,12 +391,12 @@ impl Env {
         availability: Availability,
         unavailable_until: Option<i64>,
     ) -> EntityId {
+        let mut album_input = AlbumInput::new(format!("{title} album"), Origin::Catalog);
+        album_input.year = Some(1993);
+        album_input.display_artist = Some(artist.to_owned());
         let album = self
             .library
-            .upsert_album(
-                &AlbumInput::new(format!("{title} album"), Origin::Catalog),
-                &[ArtistCredit::new(artist, "main")],
-            )
+            .upsert_album(&album_input, &[ArtistCredit::new(artist, "main")])
             .await
             .unwrap();
         let mut input = TrackInput::new(title, Origin::Catalog, availability);
@@ -500,13 +545,31 @@ impl Env {
 ///   root, in `move` mode.
 /// - `limits`: the instance's concurrency and rate limits.
 pub fn host_config(downloads: &Path, limits: InstanceLimits) -> Value {
+    host_config_with(downloads, limits, "move", false)
+}
+
+/// The host configuration of the fixture instance with a chosen import mode.
+///
+/// # Parameters
+///
+/// - `downloads`: the directory granted as the instance's `downloads` import
+///   root.
+/// - `limits`: the instance's concurrency and rate limits.
+/// - `mode`: the import root's post-import mode, `move`, `copy` or `link`.
+/// - `read_only`: whether the import root is read-only.
+pub fn host_config_with(
+    downloads: &Path,
+    limits: InstanceLimits,
+    mode: &str,
+    read_only: bool,
+) -> Value {
     json!({
         "importRoots": [
             {
                 "id": "downloads",
                 "path": downloads.to_string_lossy(),
-                "mode": "move",
-                "readOnly": false,
+                "mode": mode,
+                "readOnly": read_only,
             }
         ],
         "maxConcurrent": limits.max_concurrent,

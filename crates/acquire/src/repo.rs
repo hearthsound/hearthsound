@@ -469,6 +469,49 @@ pub async fn fail(
     .await
 }
 
+/// Completes an acquisition and records the media file it produced.
+///
+/// This is [`transition`] to [`AcquisitionState::Completed`] plus the
+/// `media_file_id` column, in one statement sequence, so the ledger never shows
+/// a completed acquisition without the file it imported.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `id`: the acquisition to complete.
+/// - `media_file_id`: the `media_files` row the import produced.
+/// - `message`: the free-text detail of the transition.
+///
+/// # Errors
+///
+/// Returns [`AcquireError::IllegalTransition`] when the current state has no
+/// edge to `completed` and [`AcquireError::UnknownAcquisition`] when the row is
+/// missing.
+pub async fn complete(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    media_file_id: Uuid,
+    message: Option<&str>,
+) -> Result<(), AcquireError> {
+    let from = state(conn, id).await?;
+    if !from.can_transition_to(AcquisitionState::Completed) {
+        return Err(AcquireError::IllegalTransition {
+            from,
+            to: AcquisitionState::Completed,
+        });
+    }
+    sqlx::query!(
+        "UPDATE acquisitions SET state = 'completed', media_file_id = ?, updated_at = ? \
+         WHERE id = ?",
+        media_file_id.as_bytes().to_vec(),
+        crate::now_millis(),
+        uuid_key(id),
+    )
+    .execute(&mut *conn)
+    .await?;
+    write_log(conn, id, AcquisitionState::Completed, message).await
+}
+
 /// Raises an acquisition's priority.
 ///
 /// The priority is only ever raised: a lower-urgency request whose track is
@@ -803,6 +846,23 @@ impl AcquisitionRepository {
     ) -> Result<(), AcquireError> {
         let mut tx = self.writer.begin().await?;
         fail(&mut tx, id, reason, detail).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Completes an acquisition in its own transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::IllegalTransition`] when the edge does not exist.
+    pub async fn complete(
+        &self,
+        id: Uuid,
+        media_file_id: Uuid,
+        message: Option<&str>,
+    ) -> Result<(), AcquireError> {
+        let mut tx = self.writer.begin().await?;
+        complete(&mut tx, id, media_file_id, message).await?;
         tx.commit().await?;
         Ok(())
     }

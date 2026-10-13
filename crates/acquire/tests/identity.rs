@@ -120,9 +120,9 @@ async fn an_unmatched_recording_leaves_the_track_and_the_acquisition_alone() {
     let id = request(&env, track, Priority::Play).await.id;
 
     env.start();
-    env.wait_for_state(id, AcquisitionState::Verifying).await;
+    env.wait_for_state(id, AcquisitionState::Completed).await;
     assert_eq!(env.track(track).await.mb_recording_id, None);
     let row = env.acquisition(id).await;
-    assert_eq!(row.state, AcquisitionState::Verifying);
+    assert_eq!(row.state, AcquisitionState::Completed);
     assert_eq!(row.failure_reason, None);
 }

@@ -14,6 +14,15 @@ pub enum AcquireError {
     /// A library read or write failed.
     #[error(transparent)]
     Library(#[from] hearthsound_library::LibraryError),
+    /// A media task failed.
+    #[error(transparent)]
+    Media(#[from] hearthsound_media::MediaError),
+    /// The import naming template could not be read or parsed.
+    #[error(transparent)]
+    NamingTemplate(#[from] hearthsound_library::naming::NamingTemplateError),
+    /// The import naming template could not be rendered.
+    #[error(transparent)]
+    Naming(#[from] hearthsound_library::naming::NamingError),
     /// A setting could not be read.
     #[error(transparent)]
     Config(#[from] hearthsound_config::ConfigError),
@@ -66,6 +75,12 @@ pub enum AcquireError {
     /// An acquisition id has no row.
     #[error("no acquisition with id `{0}`")]
     UnknownAcquisition(Uuid),
+    /// No free destination path could be found for an imported file.
+    #[error("no free import path could be found under `{path}`")]
+    ImportPath {
+        /// The destination path whose names are all taken.
+        path: PathBuf,
+    },
     /// The acquisition state machine forbids a transition that was attempted.
     #[error("an acquisition cannot move from `{from}` to `{to}`")]
     IllegalTransition {

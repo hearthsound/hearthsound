@@ -38,10 +38,11 @@ use hearthsound_config::settings::Settings;
 use hearthsound_core::events::{AcquisitionUpdated, EventBus, ServerEvent, TrackAvailability};
 use hearthsound_core::{
     AcquisitionState, Availability, EntityId, FailureReason, Granularity, IdPrefix, Priority,
-    new_uuid_v7,
+    QualityTier, new_uuid_v7,
 };
 use hearthsound_db::Database;
 use hearthsound_library::LibraryRepository;
+use hearthsound_library::StorageRoots;
 use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::ProviderRegistry;
 use tokio::sync::{Notify, watch};
@@ -378,6 +379,52 @@ impl AcquisitionProgress {
     }
 }
 
+/// The storage paths the acquisition pipeline writes under.
+///
+/// The composition root builds this from the bootstrap path configuration:
+/// `staging_root` is `paths.staging`, and `roots` holds `paths.library` and
+/// `paths.cache`.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::PathBuf;
+///
+/// use hearthsound_acquire::orchestrator::AcquisitionStorage;
+/// use hearthsound_library::StorageRoots;
+///
+/// let storage = AcquisitionStorage::new(
+///     PathBuf::from("/srv/storage/staging"),
+///     StorageRoots::new(
+///         PathBuf::from("/srv/storage/library"),
+///         PathBuf::from("/srv/storage/cache"),
+///     ),
+/// );
+/// assert_eq!(storage.staging_root, PathBuf::from("/srv/storage/staging"));
+/// ```
+#[derive(Debug, Clone)]
+pub struct AcquisitionStorage {
+    /// The root per-acquisition staging directories are created under.
+    pub staging_root: PathBuf,
+    /// The managed storage roots imported files land under.
+    pub roots: StorageRoots,
+}
+
+impl AcquisitionStorage {
+    /// Builds the storage paths.
+    ///
+    /// # Parameters
+    ///
+    /// - `staging_root`: the staging root, `paths.staging`.
+    /// - `roots`: the managed storage roots, `paths.library` and `paths.cache`.
+    pub fn new(staging_root: PathBuf, roots: StorageRoots) -> AcquisitionStorage {
+        AcquisitionStorage {
+            staging_root,
+            roots,
+        }
+    }
+}
+
 /// The acquisition orchestrator.
 ///
 /// One orchestrator is built by the composition root and shared through an
@@ -390,11 +437,12 @@ impl AcquisitionProgress {
 /// use std::path::PathBuf;
 /// use std::sync::Arc;
 ///
-/// use hearthsound_acquire::orchestrator::AcquisitionOrchestrator;
+/// use hearthsound_acquire::orchestrator::{AcquisitionOrchestrator, AcquisitionStorage};
 /// use hearthsound_catalog::CatalogService;
 /// use hearthsound_config::settings::Settings;
 /// use hearthsound_core::events::EventBus;
 /// use hearthsound_db::Database;
+/// use hearthsound_library::StorageRoots;
 /// use hearthsound_media::FfmpegRunner;
 /// use hearthsound_plugin_host::ProviderRegistry;
 ///
@@ -416,7 +464,13 @@ impl AcquisitionProgress {
 ///     catalog,
 ///     Arc::new(FfmpegRunner::new(None, 8)),
 ///     Arc::new(EventBus::new()),
-///     PathBuf::from("/srv/hearthsound/storage/staging"),
+///     AcquisitionStorage::new(
+///         PathBuf::from("/srv/hearthsound/storage/staging"),
+///         StorageRoots::new(
+///             PathBuf::from("/srv/hearthsound/storage/library"),
+///             PathBuf::from("/srv/hearthsound/storage/cache"),
+///         ),
+///     ),
 ///));
 /// orchestrator.start();
 /// # Ok(())
@@ -448,6 +502,8 @@ struct Inner {
     repository: AcquisitionRepository,
     /// The root of `<storage>/staging/`.
     staging_root: PathBuf,
+    /// The managed storage roots imported files land under.
+    storage_roots: StorageRoots,
     /// One channel per acquisition anyone is watching.
     waiters: Mutex<HashMap<Uuid, watch::Sender<AcquisitionProgress>>>,
     /// How many worker slots are in use.
@@ -477,8 +533,9 @@ impl AcquisitionOrchestrator {
     /// - `ffmpeg`: the media runner the verification stage drives.
     /// - `events`: the bus every state change and availability change is
     ///   published on.
-    /// - `staging_root`: the directory per-acquisition staging directories are
-    ///   created under, which is `paths.staging` - `<storage>/staging`.
+    /// - `storage`: the storage paths the pipeline writes under: the staging
+    ///   root per-acquisition directories are created in, and the managed
+    ///   library and cache roots the import stage puts files under.
     pub fn new(
         database: Arc<Database>,
         settings: Settings,
@@ -486,7 +543,7 @@ impl AcquisitionOrchestrator {
         catalog: Arc<CatalogService>,
         ffmpeg: Arc<FfmpegRunner>,
         events: Arc<EventBus>,
-        staging_root: PathBuf,
+        storage: AcquisitionStorage,
     ) -> AcquisitionOrchestrator {
         let library = LibraryRepository::new(&database);
         let repository = AcquisitionRepository::new(&database);
@@ -500,7 +557,8 @@ impl AcquisitionOrchestrator {
                 events,
                 library,
                 repository,
-                staging_root,
+                staging_root: storage.staging_root,
+                storage_roots: storage.roots,
                 waiters: Mutex::new(HashMap::new()),
                 running: AtomicUsize::new(0),
                 search_budgets: crate::budget::InstanceBudgets::new(),
@@ -564,6 +622,11 @@ impl AcquisitionOrchestrator {
     /// Returns the root per-acquisition staging directories are created under.
     pub fn staging_root(&self) -> &Path {
         &self.inner.staging_root
+    }
+
+    /// Returns the managed storage roots the import stage writes under.
+    pub fn storage_roots(&self) -> &StorageRoots {
+        &self.inner.storage_roots
     }
 
     /// Returns the staging directory of one acquisition.
@@ -729,7 +792,7 @@ impl AcquisitionOrchestrator {
             None,
         );
         self.announce(&progress);
-        self.publish_availability(track.id, Availability::Acquiring);
+        self.publish_availability(track.id, Availability::Acquiring, None);
         self.notify_work();
         Ok(AcquireOutcome::Started(handle))
     }
@@ -1029,7 +1092,7 @@ impl AcquisitionOrchestrator {
         progress.failure_reason = Some(reason);
         self.announce(&progress);
         if let Some(track_id) = row.track_id {
-            self.publish_availability(track_id, Availability::Unavailable);
+            self.publish_availability(track_id, Availability::Unavailable, None);
         }
         tracing::info!(
             acquisition = %id,
@@ -1122,13 +1185,20 @@ impl AcquisitionOrchestrator {
     ///
     /// - `track_id`: the track that changed.
     /// - `availability`: its new availability.
-    pub(crate) fn publish_availability(&self, track_id: EntityId, availability: Availability) {
+    /// - `quality`: the tier of the file the track is now served from, when a
+    ///   file produced the change.
+    pub(crate) fn publish_availability(
+        &self,
+        track_id: EntityId,
+        availability: Availability,
+        quality: Option<QualityTier>,
+    ) {
         self.inner
             .events
             .publish(ServerEvent::TrackAvailability(TrackAvailability {
                 track_id: track_id.to_string(),
                 availability,
-                quality: None,
+                quality,
             }));
     }
 

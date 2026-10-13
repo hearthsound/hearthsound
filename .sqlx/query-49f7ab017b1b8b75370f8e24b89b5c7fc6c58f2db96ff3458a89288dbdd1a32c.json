@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT storage, rel_path, quality_tier, acquisition_id FROM media_files WHERE track_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "storage",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "storage"
+          }
+        }
+      },
+      {
+        "name": "rel_path",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "rel_path"
+          }
+        }
+      },
+      {
+        "name": "quality_tier",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "quality_tier"
+          }
+        }
+      },
+      {
+        "name": "acquisition_id",
+        "ordinal": 3,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "acquisition_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "49f7ab017b1b8b75370f8e24b89b5c7fc6c58f2db96ff3458a89288dbdd1a32c"
+}

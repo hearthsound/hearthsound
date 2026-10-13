@@ -490,3 +490,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spawning the resolution for `play` requests so it never delays audio and
   awaiting it under the metadata instances' call deadline for every other
   priority, and never failing an acquisition because the resolution failed.
+- The acquisition import stage: a verified file is copied into the acquisition's
+  staging directory, tagged there with the track's title, artists, album, album
+  artist, track and disc numbers and totals, date, genres, ISRC and MusicBrainz
+  ids, plus `HEARTHSOUND_ACQUIRED_VIA`, and installed atomically - a rename on
+  one filesystem, otherwise a copy, an fsync and a rename - under
+  `<storage>/library` for a pinned track or `<storage>/cache` for an unpinned
+  one, named by `library.naming_template` with a deterministic ` (2)` collision
+  suffix that never overwrites another track's file. A sidecar cover named by
+  `library.cover_filename` is written only when the catalog instance that issued
+  the track permits its images to be stored, and `library.tags.embed_cover`
+  decides whether the picture is also embedded. A `move` import root loses the
+  file and its emptied parent directories, `copy` and `link` roots keep the
+  original, and a read-only root is never modified. One short transaction writes
+  the `media_files` row, ensures the track's `track_retention` row, sets the
+  track `local` or `cached`, and completes the acquisition with its
+  `media_file_id`; `track.availability`, `acquisition.updated` and
+  `library.changed` are published after it commits, and the acquisition's
+  progress carries the final managed path only then.
