@@ -26,7 +26,7 @@
 //! `ServerEvent::AcquisitionUpdated`, so a client that is not watching a
 //! specific acquisition still sees the state of the server.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -514,6 +514,14 @@ struct Inner {
     staging_root: PathBuf,
     /// The managed storage roots imported files land under.
     storage_roots: StorageRoots,
+    /// The import destinations this process has reserved but not stored yet.
+    ///
+    /// The filesystem alone cannot keep two imports apart: neither has written
+    /// its file when both look, so both see the same name free. A path stays
+    /// reserved from the moment an import picks it until that import's
+    /// transaction has committed or the import has given up, which is exactly
+    /// the window in which no file is there to be seen.
+    reserved_destinations: Mutex<HashSet<PathBuf>>,
     /// One channel per acquisition anyone is watching.
     waiters: Mutex<HashMap<Uuid, watch::Sender<AcquisitionProgress>>>,
     /// The acquisitions this process still has side effects for, and the signal
@@ -536,6 +544,25 @@ struct Inner {
     started: AtomicBool,
     /// Wakes the scheduler when there is work.
     notify: Notify,
+}
+
+/// An import destination one import holds until it commits or gives up.
+///
+/// The guard releases the path when it is dropped, so every way out of an
+/// import - the transaction committing, an error, a panic - frees the name for
+/// the next import.
+pub(crate) struct DestinationReservation<'a> {
+    /// The orchestrator whose reservation set holds the path.
+    orchestrator: &'a AcquisitionOrchestrator,
+    /// The absolute destination path that was reserved.
+    destination: PathBuf,
+}
+
+impl Drop for DestinationReservation<'_> {
+    /// Releases the reservation.
+    fn drop(&mut self) {
+        lock(&self.orchestrator.inner.reserved_destinations).remove(&self.destination);
+    }
 }
 
 impl AcquisitionOrchestrator {
@@ -579,6 +606,7 @@ impl AcquisitionOrchestrator {
                 repository,
                 staging_root: storage.staging_root,
                 storage_roots: storage.roots,
+                reserved_destinations: Mutex::new(HashSet::new()),
                 waiters: Mutex::new(HashMap::new()),
                 in_flight: Mutex::new(HashMap::new()),
                 running: AtomicUsize::new(0),
@@ -648,6 +676,35 @@ impl AcquisitionOrchestrator {
     /// Returns the managed storage roots the import stage writes under.
     pub fn storage_roots(&self) -> &StorageRoots {
         &self.inner.storage_roots
+    }
+
+    /// Reserves an import destination for the calling import.
+    ///
+    /// The check and the insertion happen under one lock, so two imports that
+    /// render the same relative path cannot both be handed it: the loser gets
+    /// `None` and walks on to the next collision suffix. The caller holds the
+    /// returned guard until its transaction has committed or its import has
+    /// failed.
+    ///
+    /// # Parameters
+    ///
+    /// - `destination`: the absolute destination path to reserve.
+    ///
+    /// # Returns
+    ///
+    /// `Some(reservation)` when the path was free, and `None` when another
+    /// import in this process already holds it.
+    pub(crate) fn try_reserve_destination(
+        &self,
+        destination: &Path,
+    ) -> Option<DestinationReservation<'_>> {
+        if !lock(&self.inner.reserved_destinations).insert(destination.to_path_buf()) {
+            return None;
+        }
+        Some(DestinationReservation {
+            orchestrator: self,
+            destination: destination.to_path_buf(),
+        })
     }
 
     /// Returns the staging directory of one acquisition.

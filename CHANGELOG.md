@@ -621,3 +621,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than upgrading a read snapshot the server's commit has already
   invalidated. The reload test no longer retries the cancellation it writes
   through a second connection.
+- Atomic import destinations, and a terminal failure for an import that fails:
+  the import stage reserves the absolute destination path it is about to write
+  in a process-wide set that is held until the import's transaction commits or
+  it gives up, and it still counts the filesystem's own answer, so two imports
+  of different tracks that render the same relative path can no longer both pick
+  it and no import writes to the file the other is about to place. Installing a
+  file hardlinks the tagged copy into place instead of renaming it over the
+  destination, so a name that turns out to be taken is left untouched; a
+  destination that a stored `media_files` row already holds is retried under the
+  next ` (n)` suffix, and the source file is still removed from a `move` import
+  root. An import that fails for any other reason now ends its acquisition
+  through the normal failure path - `failed` with `all-candidates-failed` and
+  the import error as the detail, and the track in cooldown - so no worker is
+  left holding a row in `importing`.

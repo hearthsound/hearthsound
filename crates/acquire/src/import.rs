@@ -23,7 +23,15 @@
 //! chooses, before one short transaction records the media file, the track's
 //! availability and the acquisition's completion. A failed download or a failed
 //! import therefore never leaves a partially named file in managed storage.
+//!
+//! The destination name is reserved before the file is written and held until
+//! the transaction has committed, because two imports that render the same
+//! relative path would otherwise both see it free and both choose it; a name a
+//! stored row already holds is left to that row and the next collision suffix is
+//! tried. An import that fails nonetheless ends the acquisition through the
+//! normal failure path, so nothing is left in `importing`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -36,7 +44,9 @@ use hearthsound_core::{
     ImportMode, PinReason, QualityTier, StorageClass,
 };
 use hearthsound_library::naming::{NamingContext, NamingTemplate};
-use hearthsound_library::{ManagedMediaFile, StorageRoots, Track, media_files, retention, tracks};
+use hearthsound_library::{
+    LibraryError, ManagedMediaFile, StorageRoots, Track, media_files, retention, tracks,
+};
 use hearthsound_media::{
     Artwork, Codec, ProbeResult, probe, verify_decodes, write_sidecar_cover, write_tags,
 };
@@ -46,7 +56,7 @@ use uuid::Uuid;
 
 use crate::download::{ResolvedFile, STAGING_ROOT, StoredResolvedFile, stored_candidate};
 use crate::error::AcquireError;
-use crate::orchestrator::AcquisitionOrchestrator;
+use crate::orchestrator::{AcquisitionOrchestrator, DestinationReservation};
 use crate::profile;
 use crate::repo::{self, AcquisitionRow};
 
@@ -57,7 +67,11 @@ const DURATION_TOLERANCE_MS: i64 = 5_000;
 /// The acquisition's staging subdirectory the tagged copy is written in.
 const IMPORT_STAGING: &str = "import";
 
-/// How many ` (N)` collision suffixes are tried before an import gives up.
+/// How many names one import tries before it gives up.
+///
+/// The rendered name is the first, then the ` (N)` collision suffixes up to this
+/// many, and the same budget bounds how often an import retries after a name
+/// turns out to be stored already.
 const MAX_COLLISIONS: u32 = 10_000;
 
 /// What handing a completed candidate to this stage produced.
@@ -65,6 +79,9 @@ pub(crate) enum HandoffOutcome {
     /// The candidate passed verification and its file was imported, so the
     /// acquisition is `completed`.
     Completed,
+    /// The candidate passed verification but its file could not be imported,
+    /// so the acquisition was failed and the download stage is over.
+    ImportFailed,
     /// The candidate was rejected; the acquisition tries the next one, and
     /// fails with this reason when none is left.
     Rejected {
@@ -73,6 +90,14 @@ pub(crate) enum HandoffOutcome {
         /// What the check saw, for the ledger's `error_detail`.
         detail: Option<String>,
     },
+}
+
+/// What importing one verified file did.
+enum ImportOutcome {
+    /// The file reached managed storage and the acquisition is `completed`.
+    Imported,
+    /// The import failed; the acquisition is `failed` and the stage is over.
+    Failed,
 }
 
 /// A downloaded file that passed verification, with what the probe found.
@@ -264,8 +289,10 @@ impl AcquisitionOrchestrator {
     ///
     /// # Returns
     ///
-    /// [`HandoffOutcome::Completed`] when the file was imported, and
-    /// [`HandoffOutcome::Rejected`] with the reason otherwise.
+    /// [`HandoffOutcome::Completed`] when the file was imported,
+    /// [`HandoffOutcome::ImportFailed`] when the file could not be imported and
+    /// the acquisition was failed, and [`HandoffOutcome::Rejected`] with the
+    /// reason otherwise.
     ///
     /// # Errors
     ///
@@ -324,9 +351,13 @@ impl AcquisitionOrchestrator {
         progress.eta_secs = None;
         self.announce(&progress);
 
-        self.import_candidate(acquisition_id, instance, &verified, &row)
-            .await?;
-        Ok(HandoffOutcome::Completed)
+        match self
+            .import_candidate(acquisition_id, instance, &verified, &row)
+            .await?
+        {
+            ImportOutcome::Imported => Ok(HandoffOutcome::Completed),
+            ImportOutcome::Failed => Ok(HandoffOutcome::ImportFailed),
+        }
     }
 
     /// Verifies and imports the files of a download a previous process finished.
@@ -419,7 +450,11 @@ impl AcquisitionOrchestrator {
                     instance = instance.slug().as_str(),
                     "resuming the import of a verified download"
                 );
-                self.import_candidate(id, &instance, &verified, row).await
+                // An import that fails has already failed the acquisition, so
+                // either outcome leaves nothing more to do here.
+                self.import_candidate(id, &instance, &verified, row)
+                    .await
+                    .map(|_| ())
             }
             Err(rejection) => {
                 cleanup_rejected(&settled).await;
@@ -543,6 +578,13 @@ impl AcquisitionOrchestrator {
     /// retention row, set the track's availability and complete the acquisition;
     /// the events and the final path are published after it commits.
     ///
+    /// An import that fails leaves no way to finish the acquisition, so it is
+    /// failed here instead of being left in `importing`: the storage layer
+    /// refused the file this candidate verified as, which is the one thing the
+    /// download stage cannot answer by trying the next candidate. The reason is
+    /// `all-candidates-failed`, the literal that means the acquisition ended
+    /// without a file, and the detail carries what the import failed on.
+    ///
     /// # Parameters
     ///
     /// - `acquisition_id`: the acquisition being imported.
@@ -553,11 +595,70 @@ impl AcquisitionOrchestrator {
     ///   `importing` transition still has to be written: a row that a resume
     ///   found in `importing` is already there.
     ///
+    /// # Returns
+    ///
+    /// [`ImportOutcome::Imported`] when the file reached managed storage, and
+    /// [`ImportOutcome::Failed`] when the import failed and the acquisition was
+    /// failed instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error that stopped the import when the acquisition could not
+    /// be failed either, and the ledger error that stopped the failure.
+    async fn import_candidate(
+        &self,
+        acquisition_id: Uuid,
+        instance: &RegistryInstance,
+        verified: &[VerifiedFile],
+        row: &AcquisitionRow,
+    ) -> Result<ImportOutcome, AcquireError> {
+        match self
+            .import_verified_file(acquisition_id, instance, verified, row)
+            .await
+        {
+            Ok(()) => Ok(ImportOutcome::Imported),
+            Err(error) => {
+                let detail = format!("the import failed: {error}");
+                tracing::warn!(
+                    acquisition = %acquisition_id,
+                    %error,
+                    "the import of a verified file failed"
+                );
+                self.fail_acquisition(
+                    acquisition_id,
+                    FailureReason::AllCandidatesFailed,
+                    Some(&detail),
+                )
+                .await?;
+                Ok(ImportOutcome::Failed)
+            }
+        }
+    }
+
+    /// Imports the first verified file, reserving the name it lands under.
+    ///
+    /// The destination the naming template renders is reserved before anything
+    /// is written and the reservation is held until the transaction has
+    /// committed, so two imports that render the same relative path cannot both
+    /// pick it. A destination a stored row already holds - the one conflict the
+    /// reservation cannot see, because that row's file is gone from the
+    /// filesystem - is left to that row and the next collision suffix is tried.
+    ///
+    /// # Parameters
+    ///
+    /// - `acquisition_id`: the acquisition being imported.
+    /// - `instance`: the instance that served the download, for its slug and its
+    ///   import roots.
+    /// - `verified`: the verified files; the first one is imported.
+    /// - `row`: the acquisition's ledger row, whose state decides whether the
+    ///   `importing` transition still has to be written.
+    ///
     /// # Errors
     ///
     /// Returns the library, settings, filesystem or ledger error that stopped
-    /// the import.
-    async fn import_candidate(
+    /// the import, and [`AcquireError::ImportPath`] when every name under the
+    /// destination's directory is taken.
+    async fn import_verified_file(
         &self,
         acquisition_id: Uuid,
         instance: &RegistryInstance,
@@ -650,25 +751,13 @@ impl AcquisitionOrchestrator {
         } else {
             StorageClass::Cache
         };
-        let destination = free_destination(retention::import_destination(
-            pinned,
-            self.storage_roots(),
-            &relative,
-        ))
-        .await?;
-        let rel_path = relative_path(self.storage_roots(), storage, &destination);
+        let base = retention::import_destination(pinned, self.storage_roots(), &relative);
 
         // Work on a copy inside the acquisition's staging directory, so the
         // backend's own file is never written to and a crash cannot leave a
         // half-tagged file at the destination path.
         let staged_dir = self.staging_dir(acquisition_id).join(IMPORT_STAGING);
         create_dir_all(&staged_dir).await?;
-        let staged = staged_dir.join(
-            destination
-                .file_name()
-                .unwrap_or_else(|| relative.as_os_str()),
-        );
-        copy_file(&verified.file.absolute_path, &staged).await?;
 
         let cover = self.cover_art(track_id, track.album_id).await;
         let tags = hearthsound_media::TrackTags {
@@ -702,110 +791,184 @@ impl AcquisitionOrchestrator {
             acquired_via: Some(instance.slug().clone()),
             ..Default::default()
         };
-        write_tags(
-            &staged,
-            &tags,
-            if embed_cover { cover.as_ref() } else { None },
-        )
-        .await?;
 
-        let link = import_root(instance, &verified.file)
-            .is_some_and(|root| !root.read_only && root.mode == ImportMode::Link);
-        install(&staged, &destination, link).await?;
+        // The names this import has already lost: one another import in this
+        // process reserved, one a file already holds, and one a stored row
+        // holds while its file is gone. Every lost name moves the import to the
+        // next collision suffix, which is what keeps the retry from picking the
+        // same name again.
+        let mut taken: HashSet<PathBuf> = HashSet::new();
+        for _ in 0..MAX_COLLISIONS {
+            let (destination, reservation) = self.reserve_destination(&base, &mut taken).await?;
+            let rel_path = relative_path(self.storage_roots(), storage, &destination);
+            let staged = staged_dir.join(
+                destination
+                    .file_name()
+                    .unwrap_or_else(|| relative.as_os_str()),
+            );
+            copy_file(&verified.file.absolute_path, &staged).await?;
+            write_tags(
+                &staged,
+                &tags,
+                if embed_cover { cover.as_ref() } else { None },
+            )
+            .await?;
+            match install(&staged, &destination).await? {
+                Installed::Placed => {}
+                Installed::Taken => {
+                    taken.insert(destination);
+                    continue;
+                }
+            }
 
-        if let Some(artwork) = &cover
-            && let Some(parent) = destination.parent()
-        {
-            write_sidecar_cover(parent, &cover_filename, artwork).await?;
+            if let Some(artwork) = &cover
+                && let Some(parent) = destination.parent()
+            {
+                write_sidecar_cover(parent, &cover_filename, artwork).await?;
+            }
+
+            let metadata =
+                tokio::fs::metadata(&destination)
+                    .await
+                    .map_err(|source| AcquireError::Io {
+                        path: destination.clone(),
+                        source,
+                    })?;
+            let size = metadata.len();
+            let mtime_ms = mtime_millis(&metadata);
+            let tier = quality_tier_of(&destination, &verified.probe);
+            let availability = if pinned {
+                Availability::Local
+            } else {
+                Availability::Cached
+            };
+
+            let mut tx = self.database().writer().begin().await?;
+            let inserted = media_files::insert_managed_media_file(
+                &mut tx,
+                &ManagedMediaFile {
+                    track_id,
+                    storage,
+                    rel_path: rel_path.clone(),
+                    size: i64::try_from(size).unwrap_or(i64::MAX),
+                    mtime_ms,
+                    format: Some(verified.probe.container.as_str().to_owned()),
+                    codec: Some(verified.probe.codec.as_str().to_owned()),
+                    bitrate_kbps: verified.probe.bitrate_kbps.map(i64::from),
+                    sample_rate: verified.probe.sample_rate.map(i64::from),
+                    bit_depth: verified.probe.bit_depth.map(i64::from),
+                    channels: verified.probe.channels.map(i64::from),
+                    duration_ms: i64::try_from(verified.probe.duration_ms).ok(),
+                    lossless: Some(verified.probe.lossless),
+                    quality_tier: tier,
+                    replaygain: None,
+                    has_embedded_art: Some(verified.probe.has_embedded_art),
+                    uploaded_by: None,
+                    acquisition_id: Some(acquisition_id),
+                },
+            )
+            .await;
+            let media_file_id = match inserted {
+                Ok(media_file_id) => media_file_id,
+                Err(error) if is_stored_path_conflict(&error) => {
+                    // A stored row already names this path while no file is there
+                    // to be seen, so the name belongs to that row: this import
+                    // takes its own file away again and tries the next suffix.
+                    let _ = tx.rollback().await;
+                    let _ = tokio::fs::remove_file(&destination).await;
+                    taken.insert(destination);
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            // A track with no retention row would be invisible to the eviction
+            // query, which joins `track_retention`; the row is created by the first
+            // pin write, so an unpinned track gets an empty one here.
+            if !pinned {
+                retention::add_pin_reason(&mut tx, track_id, PinReason::Admin).await?;
+                retention::remove_pin_reason(&mut tx, track_id, PinReason::Admin).await?;
+            }
+            tracks::set_track_availability(&mut tx, track_id, availability, None).await?;
+            repo::complete(
+                &mut tx,
+                acquisition_id,
+                media_file_id,
+                Some("the file was imported into managed storage"),
+            )
+            .await?;
+            tx.commit().await?;
+            drop(reservation);
+
+            let mut progress = self.progress_of_row(row, row.priority);
+            progress.state = AcquisitionState::Completed;
+            progress.instance = Some(instance.slug().as_str().to_owned());
+            progress.percent = None;
+            progress.eta_secs = None;
+            progress.file = Some(destination.clone());
+            self.announce(&progress);
+            self.publish_availability(track_id, availability, tier);
+            self.events()
+                .publish(ServerEvent::LibraryChanged(LibraryChanged {
+                    entity_kind: EntityKind::Track,
+                    entity_id: track_id.to_string(),
+                    change: LibraryChange::Added,
+                }));
+            tracing::info!(
+                acquisition = %acquisition_id,
+                track = %track_id,
+                instance = instance.slug().as_str(),
+                storage = storage.as_str(),
+                rel_path = rel_path.as_str(),
+                source_root = verified.file.root.as_str(),
+                source_path = verified.file.path.as_str(),
+                source_bytes = verified.file.size,
+                "imported the acquired file"
+            );
+
+            post_import(instance, &verified.file).await;
+            let _ = tokio::fs::remove_dir_all(self.staging_dir(acquisition_id)).await;
+            return Ok(());
         }
 
-        let metadata =
-            tokio::fs::metadata(&destination)
-                .await
-                .map_err(|source| AcquireError::Io {
-                    path: destination.clone(),
-                    source,
-                })?;
-        let size = metadata.len();
-        let mtime_ms = mtime_millis(&metadata);
-        let tier = quality_tier_of(&destination, &verified.probe);
-        let availability = if pinned {
-            Availability::Local
-        } else {
-            Availability::Cached
-        };
+        Err(AcquireError::ImportPath { path: base })
+    }
 
-        let mut tx = self.database().writer().begin().await?;
-        let media_file_id = media_files::insert_managed_media_file(
-            &mut tx,
-            &ManagedMediaFile {
-                track_id,
-                storage,
-                rel_path: rel_path.clone(),
-                size: i64::try_from(size).unwrap_or(i64::MAX),
-                mtime_ms,
-                format: Some(verified.probe.container.as_str().to_owned()),
-                codec: Some(verified.probe.codec.as_str().to_owned()),
-                bitrate_kbps: verified.probe.bitrate_kbps.map(i64::from),
-                sample_rate: verified.probe.sample_rate.map(i64::from),
-                bit_depth: verified.probe.bit_depth.map(i64::from),
-                channels: verified.probe.channels.map(i64::from),
-                duration_ms: i64::try_from(verified.probe.duration_ms).ok(),
-                lossless: Some(verified.probe.lossless),
-                quality_tier: tier,
-                replaygain: None,
-                has_embedded_art: Some(verified.probe.has_embedded_art),
-                uploaded_by: None,
-                acquisition_id: Some(acquisition_id),
-            },
-        )
-        .await?;
-        // A track with no retention row would be invisible to the eviction
-        // query, which joins `track_retention`; the row is created by the first
-        // pin write, so an unpinned track gets an empty one here.
-        if !pinned {
-            retention::add_pin_reason(&mut tx, track_id, PinReason::Admin).await?;
-            retention::remove_pin_reason(&mut tx, track_id, PinReason::Admin).await?;
+    /// Reserves the next free destination for a rendered relative path.
+    ///
+    /// The rendered name is offered first, then its ` (N)` collision suffixes,
+    /// and a name is taken only when no file holds it and no other import in
+    /// this process has reserved it. The reservation is what makes the choice
+    /// atomic: an import that loses a name to another import walks on to the
+    /// next one instead of writing to the same path.
+    ///
+    /// # Parameters
+    ///
+    /// - `base`: the absolute destination path the naming template rendered.
+    /// - `taken`: the names this import has already lost, which are skipped even
+    ///   when nothing holds them.
+    ///
+    /// # Returns
+    ///
+    /// The reserved destination and the guard that releases it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::ImportPath`] when every name is taken, and the
+    /// filesystem error when a path cannot be stat-ed.
+    async fn reserve_destination(
+        &self,
+        base: &Path,
+        taken: &mut HashSet<PathBuf>,
+    ) -> Result<(PathBuf, DestinationReservation<'_>), AcquireError> {
+        loop {
+            let candidate = free_destination(base, taken).await?;
+            match self.try_reserve_destination(&candidate) {
+                Some(reservation) => return Ok((candidate, reservation)),
+                None => {
+                    taken.insert(candidate);
+                }
+            }
         }
-        tracks::set_track_availability(&mut tx, track_id, availability, None).await?;
-        repo::complete(
-            &mut tx,
-            acquisition_id,
-            media_file_id,
-            Some("the file was imported into managed storage"),
-        )
-        .await?;
-        tx.commit().await?;
-
-        let mut progress = self.progress_of_row(row, row.priority);
-        progress.state = AcquisitionState::Completed;
-        progress.instance = Some(instance.slug().as_str().to_owned());
-        progress.percent = None;
-        progress.eta_secs = None;
-        progress.file = Some(destination.clone());
-        self.announce(&progress);
-        self.publish_availability(track_id, availability, tier);
-        self.events()
-            .publish(ServerEvent::LibraryChanged(LibraryChanged {
-                entity_kind: EntityKind::Track,
-                entity_id: track_id.to_string(),
-                change: LibraryChange::Added,
-            }));
-        tracing::info!(
-            acquisition = %acquisition_id,
-            track = %track_id,
-            instance = instance.slug().as_str(),
-            storage = storage.as_str(),
-            rel_path = rel_path.as_str(),
-            source_root = verified.file.root.as_str(),
-            source_path = verified.file.path.as_str(),
-            source_bytes = verified.file.size,
-            "imported the acquired file"
-        );
-
-        post_import(instance, &verified.file).await;
-        let _ = tokio::fs::remove_dir_all(self.staging_dir(acquisition_id)).await;
-        Ok(())
     }
 
     /// What the issuing catalog instance adds to a stored album row's import.
@@ -1054,15 +1217,19 @@ fn quality_tier_of(destination: &Path, probe: &ProbeResult) -> Option<QualityTie
     profile::quality_tier(&candidate)
 }
 
-/// Returns the destination path after resolving a name collision.
+/// Returns the first name for a rendered destination that nothing holds.
 ///
-/// A name another file already holds gets a deterministic ` (2)`, ` (3)`, ...
+/// The rendered name comes first, then a deterministic ` (2)`, ` (3)`, ...
 /// suffix inserted before the extension, so an import never overwrites the file
-/// of another track.
+/// of another track. A name counts as held when a file already exists at it or
+/// when this import has already lost it.
 ///
 /// # Parameters
 ///
 /// - `destination`: the path the naming template rendered.
+/// - `taken`: the names this import has already lost; they are skipped even
+///   when no file is there, which is what keeps a retry from picking the same
+///   name again.
 ///
 /// # Returns
 ///
@@ -1072,9 +1239,12 @@ fn quality_tier_of(destination: &Path, probe: &ProbeResult) -> Option<QualityTie
 ///
 /// Returns [`AcquireError::ImportPath`] when every suffix is taken, and the
 /// filesystem error when a path cannot be stat-ed.
-async fn free_destination(destination: PathBuf) -> Result<PathBuf, AcquireError> {
-    if !path_exists(&destination).await? {
-        return Ok(destination);
+async fn free_destination(
+    destination: &Path,
+    taken: &HashSet<PathBuf>,
+) -> Result<PathBuf, AcquireError> {
+    if !taken.contains(destination) && !path_exists(destination).await? {
+        return Ok(destination.to_path_buf());
     }
     let parent = destination
         .parent()
@@ -1092,11 +1262,34 @@ async fn free_destination(destination: PathBuf) -> Result<PathBuf, AcquireError>
         .unwrap_or_default();
     for suffix in 2..=MAX_COLLISIONS {
         let candidate = parent.join(format!("{stem} ({suffix}){extension}"));
-        if !path_exists(&candidate).await? {
+        if !taken.contains(&candidate) && !path_exists(&candidate).await? {
             return Ok(candidate);
         }
     }
-    Err(AcquireError::ImportPath { path: destination })
+    Err(AcquireError::ImportPath {
+        path: destination.to_path_buf(),
+    })
+}
+
+/// Returns whether a media file insert lost its path to a stored row.
+///
+/// SQLite reports the violated index in the message rather than in a field, so
+/// the message is what identifies the conflict as one of the `media_files` path
+/// indexes; a unique violation from anywhere else in the statement is a real
+/// error and is not retried.
+///
+/// # Parameters
+///
+/// - `error`: the error the media file insert returned.
+///
+/// # Returns
+///
+/// `true` when the error is a unique-index conflict on a `media_files` path.
+fn is_stored_path_conflict(error: &LibraryError) -> bool {
+    let LibraryError::Database(sqlx::Error::Database(database)) = error else {
+        return false;
+    };
+    database.is_unique_violation() && database.message().contains("media_files")
 }
 
 /// Returns whether a path exists.
@@ -1130,42 +1323,56 @@ fn relative_path(roots: &StorageRoots, storage: StorageClass, destination: &Path
         .into_owned()
 }
 
-/// Installs a tagged staged file at its destination.
+/// What installing a tagged staged file at its destination did.
+enum Installed {
+    /// The file is at the destination.
+    Placed,
+    /// The destination already held a file, which was left untouched.
+    Taken,
+}
+
+/// Installs a tagged staged file at its destination without replacing a file.
 ///
-/// A `link` root's file is hardlinked when the filesystem supports it and copied
-/// otherwise; every other file is renamed, which is atomic on one filesystem,
-/// and copied, fsynced and renamed when the staging directory and the destination
-/// are on different mounts.
+/// The staged file is hardlinked into place - the one install primitive that is
+/// both atomic and refuses a name that is taken - and the staged copy is removed
+/// afterwards, which is what a move would have done. A filesystem without hard
+/// links gets a durable copy instead, and a name that turns out to be taken is
+/// reported so the caller can reserve the next collision suffix rather than
+/// overwrite the file that holds it.
 ///
 /// # Parameters
 ///
 /// - `staged`: the tagged file in the acquisition's staging directory.
 /// - `destination`: the final managed path.
-/// - `link`: whether the file should be hardlinked rather than moved.
+///
+/// # Returns
+///
+/// [`Installed::Placed`] when the file is at the destination, and
+/// [`Installed::Taken`] when a file already held the name.
 ///
 /// # Errors
 ///
-/// Returns [`AcquireError::Io`] when a step fails.
-async fn install(staged: &Path, destination: &Path, link: bool) -> Result<(), AcquireError> {
+/// Returns [`AcquireError::Io`] when a step fails for another reason.
+async fn install(staged: &Path, destination: &Path) -> Result<Installed, AcquireError> {
     if let Some(parent) = destination.parent() {
         create_dir_all(parent).await?;
     }
-    if link && tokio::fs::hard_link(staged, destination).await.is_ok() {
-        let _ = tokio::fs::remove_file(staged).await;
-        return Ok(());
-    }
-    match tokio::fs::rename(staged, destination).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
-            copy_durable(staged, destination).await?;
+    match tokio::fs::hard_link(staged, destination).await {
+        Ok(()) => {
             let _ = tokio::fs::remove_file(staged).await;
-            Ok(())
+            return Ok(Installed::Placed);
         }
-        Err(source) => Err(AcquireError::Io {
-            path: destination.to_path_buf(),
-            source,
-        }),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Ok(Installed::Taken);
+        }
+        Err(_) => {}
     }
+    if path_exists(destination).await? {
+        return Ok(Installed::Taken);
+    }
+    copy_durable(staged, destination).await?;
+    let _ = tokio::fs::remove_file(staged).await;
+    Ok(Installed::Placed)
 }
 
 /// Copies a file durably to a destination on another filesystem.

@@ -5,14 +5,15 @@
 
 mod common;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use common::{Env, InstanceLimits, config, has_availability_event, one_candidate};
 use hearthsound_acquire::orchestrator::{AcquireRequest, AcquisitionHandle};
 use hearthsound_core::events::{LibraryChange, ServerEvent};
 use hearthsound_core::{
-    AcquisitionState, Availability, CatalogId, EntityId, EntityKind, PinReason, Priority, Slug,
-    StorageClass,
+    AcquisitionState, Availability, CatalogId, EntityId, EntityKind, FailureReason, PinReason,
+    Priority, Slug, StorageClass,
 };
 use hearthsound_media::{Container, probe};
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
@@ -418,4 +419,124 @@ async fn an_album_without_an_artist_takes_the_track_artist() {
     let probed = probe(&env.cache_root.join(&stored)).await.unwrap();
     assert_eq!(probed.tags.album_artist.as_deref(), Some("Solo Artist"));
     assert_eq!(probed.tags.artists, ["Solo Artist"]);
+}
+
+/// How many imports the concurrency test runs at once.
+const CONCURRENT_IMPORTS: usize = 8;
+
+/// Concurrent imports that render one name all land on their own file.
+///
+/// The naming template renders the same relative path for every track here, and
+/// the whole batch starts together, so a filesystem check alone hands several
+/// imports the same name: all of them see it free before any of them has
+/// written a file. The import that loses the race then hits the unique index on
+/// `media_files (storage, rel_path)` and, before this was fixed, its acquisition
+/// was left in `importing` with nothing left to move it. Each import reserves
+/// its destination, so the batch ends with one file and one row per track.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_imports_of_one_name_all_land() {
+    // A `copy` import root, because the fixture serves one file in the root to
+    // every download: a `move` root would have the first import delete it under
+    // the others' copies, which is a different failure than the one under test.
+    let env = Env::with_import_mode(
+        config(one_candidate(), "normal", 0, "downloads", ".flac"),
+        InstanceLimits {
+            max_concurrent: CONCURRENT_IMPORTS as u32,
+            max_concurrent_searches: CONCURRENT_IMPORTS as u32,
+            searches_per_hour: 1000,
+        },
+        &[("HEARTHSOUND__ACQUISITION__MAX_CONCURRENT", "8")],
+        "copy",
+        false,
+    )
+    .await;
+    place(&env, "01 - Hello Song.flac").await;
+
+    // Every track renders `Hello Artist/Hello Song album (1993)/01 - Hello
+    // Song.flac`, and every acquisition is admitted before the first worker
+    // starts, so all of them reach the import stage together.
+    let mut tracks = Vec::with_capacity(CONCURRENT_IMPORTS);
+    let mut ids = Vec::with_capacity(CONCURRENT_IMPORTS);
+    for _ in 0..CONCURRENT_IMPORTS {
+        let track = env.remote_track("Hello Song", "Hello Artist").await;
+        ids.push(request(&env, track, Priority::Play).await.id);
+        tracks.push(track);
+    }
+
+    env.start();
+    for id in &ids {
+        let row = env.wait_for_terminal(*id).await;
+        assert_eq!(row.state, AcquisitionState::Completed, "acquisition {id}");
+        assert!(
+            row.media_file_id.is_some(),
+            "acquisition {id} imported its file"
+        );
+    }
+
+    let mut paths = HashSet::new();
+    for track in &tracks {
+        let stored: String = sqlx::query_scalar!(
+            "SELECT rel_path FROM media_files WHERE track_id = ?",
+            track.uuid().as_bytes().to_vec(),
+        )
+        .fetch_one(env.database.readers())
+        .await
+        .unwrap();
+        assert_eq!(
+            env.track(*track).await.availability,
+            Availability::Cached,
+            "the track of `{stored}` is cached"
+        );
+        assert!(
+            env.cache_root.join(&stored).is_file(),
+            "`{stored}` holds the file of its track"
+        );
+        assert!(paths.insert(stored.clone()), "`{stored}` was taken twice");
+    }
+    assert_eq!(paths.len(), CONCURRENT_IMPORTS, "one file per import");
+}
+
+/// An import that cannot write its destination fails the acquisition.
+///
+/// The import stage returns its error to the pipeline, which has no way to move
+/// a row in `importing`: only a restart picks one up again. The import therefore
+/// ends the acquisition through the normal failure path, so the row is terminal,
+/// the track cools down and the staging directory is gone.
+#[tokio::test]
+async fn a_failed_import_fails_the_acquisition() {
+    let env = Env::new(
+        config(one_candidate(), "normal", 0, "downloads", ".flac"),
+        InstanceLimits::default(),
+        &[],
+    )
+    .await;
+    place(&env, "01 - Hello Song.flac").await;
+    // A cache root that is a file rather than a directory, so no import can
+    // create its destination under it.
+    std::fs::remove_dir_all(&env.cache_root).unwrap();
+    std::fs::write(&env.cache_root, b"not a directory").unwrap();
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    let id = request(&env, track, Priority::Play).await.id;
+
+    env.start();
+    let row = env.wait_for_terminal(id).await;
+
+    assert_eq!(row.state, AcquisitionState::Failed);
+    assert_eq!(row.failure_reason, Some(FailureReason::AllCandidatesFailed));
+    assert!(
+        row.error_detail
+            .as_deref()
+            .is_some_and(|detail| detail.starts_with("the import failed:")),
+        "the detail carries the import error: {:?}",
+        row.error_detail
+    );
+    assert_eq!(
+        env.track(track).await.availability,
+        Availability::Unavailable,
+        "a failed import puts the track into cooldown"
+    );
+    assert!(
+        !env.orchestrator.staging_dir(id).exists(),
+        "the staging directory is removed"
+    );
 }

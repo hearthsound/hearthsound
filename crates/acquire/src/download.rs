@@ -729,6 +729,11 @@ impl AcquisitionOrchestrator {
                             HandoffOutcome::Completed => {
                                 Ok(AttemptVerdict::Done(DownloadOutcome::Ready))
                             }
+                            // The import failed the acquisition, so there is no
+                            // candidate left to try and nothing more to do.
+                            HandoffOutcome::ImportFailed => {
+                                Ok(AttemptVerdict::Done(DownloadOutcome::Stopped))
+                            }
                             HandoffOutcome::Rejected { reason, detail } => {
                                 Ok(AttemptVerdict::Next(Some((reason, detail))))
                             }
