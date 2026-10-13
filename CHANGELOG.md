@@ -178,3 +178,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Development compose stack under `dev/`: the server image built from this
   repository plus slskd 0.26.1, a config file with the container bootstrap
   paths, and the gitignored runtime directories the stack mounts.
+- The `hearthsound-api-subsonic` crate with the Subsonic response envelope: one
+  ordered value model rendered to both JSON and XML, the fixed envelope fields,
+  the error member with its optional `helpUrl`, and format selection with XML
+  as the protocol default.

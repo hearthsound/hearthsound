@@ -1,0 +1,5 @@
+---
+source: crates/api-subsonic/tests/envelope.rs
+expression: "response.render(ResponseFormat::Json)"
+---
+{"subsonic-response":{"status":"failed","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.0-alpha.0","openSubsonic":true,"error":{"code":44,"message":"Invalid API key."}}}
