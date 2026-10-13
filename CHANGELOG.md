@@ -35,3 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   jobs, caches, and a shared full-text search index kept in step by triggers.
 - `PRAGMA data_version` watching, notifying the running server when another
   connection such as a CLI command writes to the database.
+- The client id codec: UUIDv7 generation, materialized `<prefix>_<26 character
+  Crockford base32>` ids for entities, and `x_<slug>_<kind>_<payload>` ids for
+  catalog entities, both parsed by one entry point that dispatches on the form.
