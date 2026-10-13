@@ -67,3 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and parent directory heuristics that recover Soulseek tags, and the weighted
   match score with its duration reject window and its alternate-version
   qualifier penalty.
+- Quality tier assignment from a candidate file's format, bitrate, bit depth
+  and sample rate, including the V0 boundary for VBR MP3, and the
+  `lossless-preferred` and `compact` quality profiles with their preference
+  order, minimum tier and cutoff tier.

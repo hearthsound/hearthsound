@@ -16,8 +16,6 @@
 //!   for;
 //! - [`profile`] assigns a quality tier to a file from its raw attributes and
 //!   holds the named quality profiles that say which tiers are acceptable;
-//! - [`select`] estimates each candidate's ETA and produces the ordered list of
-//!   candidates one acquisition should try.
 //!
 //! Every threshold and limit is a parameter the composition root reads from the
 //! settings registry; this crate never reads settings itself.
@@ -27,4 +25,5 @@ mod brackets;
 
 pub mod normalize;
 pub mod path;
+pub mod profile;
 pub mod score;
