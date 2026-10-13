@@ -23,3 +23,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plugin SDK.
 - Fixture plugins and the `xtask fixtures` command that packs them into
   `.hsplugin` archives.
+- Plugin manifest parsing and validation.
