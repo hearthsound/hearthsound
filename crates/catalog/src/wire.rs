@@ -1,0 +1,497 @@
+//! The stored form of a provider response.
+//!
+//! `catalog_cache.response` holds JSON, and the core provider records are
+//! deliberately plain data with no serialization of their own. This module is
+//! the translation layer between the two: one mirror per record the cache
+//! stores, with a conversion in each direction.
+//!
+//! The mirror is a storage contract, not an API: field names are the Rust names
+//! written in snake case, only the fields a record cannot do without are
+//! required, and every other field is defaulted when it is absent. A row written
+//! by one version of the server therefore stays readable by the next one even
+//! when a record grows a field. A row that no longer deserializes at all -
+//! because a field changed type, or the payload is not the shape it claims - is
+//! treated as a cache miss by [`crate::cache::Cache`], so an upgrade costs a
+//! provider call, never a failure.
+
+use hearthsound_core::providers::{
+    ArtistCredit, CatalogAlbum, CatalogAlbumRef, CatalogArtist, CatalogResults, CatalogTrack,
+    ExternalId, Image,
+};
+use serde::{Deserialize, Serialize};
+
+/// The stored form of an [`ExternalId`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireExternalId {
+    /// The identifier's namespace.
+    pub namespace: String,
+    /// The identifier's value within its namespace.
+    pub value: String,
+}
+
+/// The stored form of an [`ArtistCredit`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireArtistCredit {
+    /// The credited artist's name.
+    pub name: String,
+    /// The artist's external identifiers.
+    #[serde(default)]
+    pub ids: Vec<WireExternalId>,
+}
+
+/// The stored form of an [`Image`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireImage {
+    /// The image URL.
+    pub url: String,
+    /// The image width in pixels, when known.
+    #[serde(default)]
+    pub width: Option<u32>,
+    /// The image height in pixels, when known.
+    #[serde(default)]
+    pub height: Option<u32>,
+}
+
+/// The stored form of a [`CatalogAlbumRef`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireAlbumRef {
+    /// The provider-local album identifier.
+    pub id: String,
+    /// The album title.
+    pub title: String,
+    /// The album's artists.
+    #[serde(default)]
+    pub artists: Vec<WireArtistCredit>,
+    /// The release year, when known.
+    #[serde(default)]
+    pub year: Option<u16>,
+    /// The cover images.
+    #[serde(default)]
+    pub images: Vec<WireImage>,
+}
+
+/// The stored form of a [`CatalogTrack`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireTrack {
+    /// The provider-local track identifier.
+    pub id: String,
+    /// The track title.
+    pub title: String,
+    /// The track's artists.
+    #[serde(default)]
+    pub artists: Vec<WireArtistCredit>,
+    /// The album the track belongs to, when known.
+    #[serde(default)]
+    pub album: Option<WireAlbumRef>,
+    /// The duration in milliseconds, when known.
+    #[serde(default)]
+    pub duration_ms: Option<u32>,
+    /// The disc number, when known.
+    #[serde(default)]
+    pub disc_number: Option<u16>,
+    /// The track number, when known.
+    #[serde(default)]
+    pub track_number: Option<u16>,
+    /// The International Standard Recording Code, when known.
+    #[serde(default)]
+    pub isrc: Option<String>,
+    /// Whether the track is explicit, when the provider says so.
+    #[serde(default)]
+    pub explicit: Option<bool>,
+    /// The track's external identifiers.
+    #[serde(default)]
+    pub ids: Vec<WireExternalId>,
+}
+
+/// The stored form of a [`CatalogAlbum`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireAlbum {
+    /// The provider-local album identifier.
+    pub id: String,
+    /// The album title.
+    pub title: String,
+    /// The album's artists.
+    #[serde(default)]
+    pub artists: Vec<WireArtistCredit>,
+    /// The release date, when known.
+    #[serde(default)]
+    pub release_date: Option<String>,
+    /// The release type, when known.
+    #[serde(default)]
+    pub album_type: Option<String>,
+    /// The release UPC, when known.
+    #[serde(default)]
+    pub upc: Option<String>,
+    /// The album's genres.
+    #[serde(default)]
+    pub genres: Vec<String>,
+    /// The cover images.
+    #[serde(default)]
+    pub images: Vec<WireImage>,
+    /// The album's tracks, in playing order.
+    #[serde(default)]
+    pub tracks: Vec<WireTrack>,
+    /// The album's external identifiers.
+    #[serde(default)]
+    pub ids: Vec<WireExternalId>,
+}
+
+/// The stored form of a [`CatalogArtist`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireArtist {
+    /// The provider-local artist identifier.
+    pub id: String,
+    /// The artist's display name.
+    pub name: String,
+    /// Images of the artist.
+    #[serde(default)]
+    pub images: Vec<WireImage>,
+    /// The artist's external identifiers.
+    #[serde(default)]
+    pub ids: Vec<WireExternalId>,
+}
+
+/// The stored form of a [`CatalogResults`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireResults {
+    /// The matching tracks.
+    #[serde(default)]
+    pub tracks: Vec<WireTrack>,
+    /// The matching albums.
+    #[serde(default)]
+    pub albums: Vec<WireAlbumRef>,
+    /// The matching artists.
+    #[serde(default)]
+    pub artists: Vec<WireArtist>,
+}
+
+/// The stored form of a list of album references.
+///
+/// A newtype because the cache needs a `From` conversion in both directions for
+/// the whole list, and a bare `Vec` is a foreign type. Serde writes a newtype
+/// as the value it wraps, so a stored listing is still a JSON array.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireAlbumRefs(Vec<WireAlbumRef>);
+
+/// The stored form of a list of tracks.
+///
+/// A newtype for the same reason as [`WireAlbumRefs`]; a stored listing is a
+/// JSON array of [`WireTrack`] objects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireTracks(Vec<WireTrack>);
+
+impl From<&Vec<CatalogAlbumRef>> for WireAlbumRefs {
+    /// Copies an album listing into its stored form.
+    fn from(value: &Vec<CatalogAlbumRef>) -> WireAlbumRefs {
+        WireAlbumRefs(value.iter().map(WireAlbumRef::from).collect())
+    }
+}
+
+impl From<WireAlbumRefs> for Vec<CatalogAlbumRef> {
+    /// Rebuilds an album listing from its stored form.
+    fn from(value: WireAlbumRefs) -> Vec<CatalogAlbumRef> {
+        value.0.into_iter().map(CatalogAlbumRef::from).collect()
+    }
+}
+
+impl From<&Vec<CatalogTrack>> for WireTracks {
+    /// Copies a track listing into its stored form.
+    fn from(value: &Vec<CatalogTrack>) -> WireTracks {
+        WireTracks(value.iter().map(WireTrack::from).collect())
+    }
+}
+
+impl From<WireTracks> for Vec<CatalogTrack> {
+    /// Rebuilds a track listing from its stored form.
+    fn from(value: WireTracks) -> Vec<CatalogTrack> {
+        value.0.into_iter().map(CatalogTrack::from).collect()
+    }
+}
+
+impl From<&ExternalId> for WireExternalId {
+    /// Copies an external identifier into its stored form.
+    fn from(value: &ExternalId) -> WireExternalId {
+        WireExternalId {
+            namespace: value.namespace.clone(),
+            value: value.value.clone(),
+        }
+    }
+}
+
+impl From<WireExternalId> for ExternalId {
+    /// Rebuilds an external identifier from its stored form.
+    fn from(value: WireExternalId) -> ExternalId {
+        ExternalId {
+            namespace: value.namespace,
+            value: value.value,
+        }
+    }
+}
+
+impl From<&ArtistCredit> for WireArtistCredit {
+    /// Copies an artist credit into its stored form.
+    fn from(value: &ArtistCredit) -> WireArtistCredit {
+        WireArtistCredit {
+            name: value.name.clone(),
+            ids: value.ids.iter().map(WireExternalId::from).collect(),
+        }
+    }
+}
+
+impl From<WireArtistCredit> for ArtistCredit {
+    /// Rebuilds an artist credit from its stored form.
+    fn from(value: WireArtistCredit) -> ArtistCredit {
+        ArtistCredit {
+            name: value.name,
+            ids: value.ids.into_iter().map(ExternalId::from).collect(),
+        }
+    }
+}
+
+impl From<&Image> for WireImage {
+    /// Copies an image into its stored form.
+    fn from(value: &Image) -> WireImage {
+        WireImage {
+            url: value.url.clone(),
+            width: value.width,
+            height: value.height,
+        }
+    }
+}
+
+impl From<WireImage> for Image {
+    /// Rebuilds an image from its stored form.
+    fn from(value: WireImage) -> Image {
+        Image {
+            url: value.url,
+            width: value.width,
+            height: value.height,
+        }
+    }
+}
+
+impl From<&CatalogAlbumRef> for WireAlbumRef {
+    /// Copies an album reference into its stored form.
+    fn from(value: &CatalogAlbumRef) -> WireAlbumRef {
+        WireAlbumRef {
+            id: value.id.clone(),
+            title: value.title.clone(),
+            artists: value.artists.iter().map(WireArtistCredit::from).collect(),
+            year: value.year,
+            images: value.images.iter().map(WireImage::from).collect(),
+        }
+    }
+}
+
+impl From<WireAlbumRef> for CatalogAlbumRef {
+    /// Rebuilds an album reference from its stored form.
+    fn from(value: WireAlbumRef) -> CatalogAlbumRef {
+        CatalogAlbumRef {
+            id: value.id,
+            title: value.title,
+            artists: value.artists.into_iter().map(ArtistCredit::from).collect(),
+            year: value.year,
+            images: value.images.into_iter().map(Image::from).collect(),
+        }
+    }
+}
+
+impl From<&CatalogTrack> for WireTrack {
+    /// Copies a track into its stored form.
+    fn from(value: &CatalogTrack) -> WireTrack {
+        WireTrack {
+            id: value.id.clone(),
+            title: value.title.clone(),
+            artists: value.artists.iter().map(WireArtistCredit::from).collect(),
+            album: value.album.as_ref().map(WireAlbumRef::from),
+            duration_ms: value.duration_ms,
+            disc_number: value.disc_number,
+            track_number: value.track_number,
+            isrc: value.isrc.clone(),
+            explicit: value.explicit,
+            ids: value.ids.iter().map(WireExternalId::from).collect(),
+        }
+    }
+}
+
+impl From<WireTrack> for CatalogTrack {
+    /// Rebuilds a track from its stored form.
+    fn from(value: WireTrack) -> CatalogTrack {
+        CatalogTrack {
+            id: value.id,
+            title: value.title,
+            artists: value.artists.into_iter().map(ArtistCredit::from).collect(),
+            album: value.album.map(CatalogAlbumRef::from),
+            duration_ms: value.duration_ms,
+            disc_number: value.disc_number,
+            track_number: value.track_number,
+            isrc: value.isrc,
+            explicit: value.explicit,
+            ids: value.ids.into_iter().map(ExternalId::from).collect(),
+        }
+    }
+}
+
+impl From<&CatalogAlbum> for WireAlbum {
+    /// Copies an album and its tracklist into their stored form.
+    fn from(value: &CatalogAlbum) -> WireAlbum {
+        WireAlbum {
+            id: value.id.clone(),
+            title: value.title.clone(),
+            artists: value.artists.iter().map(WireArtistCredit::from).collect(),
+            release_date: value.release_date.clone(),
+            album_type: value.album_type.clone(),
+            upc: value.upc.clone(),
+            genres: value.genres.clone(),
+            images: value.images.iter().map(WireImage::from).collect(),
+            tracks: value.tracks.iter().map(WireTrack::from).collect(),
+            ids: value.ids.iter().map(WireExternalId::from).collect(),
+        }
+    }
+}
+
+impl From<WireAlbum> for CatalogAlbum {
+    /// Rebuilds an album and its tracklist from their stored form.
+    fn from(value: WireAlbum) -> CatalogAlbum {
+        CatalogAlbum {
+            id: value.id,
+            title: value.title,
+            artists: value.artists.into_iter().map(ArtistCredit::from).collect(),
+            release_date: value.release_date,
+            album_type: value.album_type,
+            upc: value.upc,
+            genres: value.genres,
+            images: value.images.into_iter().map(Image::from).collect(),
+            tracks: value.tracks.into_iter().map(CatalogTrack::from).collect(),
+            ids: value.ids.into_iter().map(ExternalId::from).collect(),
+        }
+    }
+}
+
+impl From<&CatalogArtist> for WireArtist {
+    /// Copies an artist into its stored form.
+    fn from(value: &CatalogArtist) -> WireArtist {
+        WireArtist {
+            id: value.id.clone(),
+            name: value.name.clone(),
+            images: value.images.iter().map(WireImage::from).collect(),
+            ids: value.ids.iter().map(WireExternalId::from).collect(),
+        }
+    }
+}
+
+impl From<WireArtist> for CatalogArtist {
+    /// Rebuilds an artist from its stored form.
+    fn from(value: WireArtist) -> CatalogArtist {
+        CatalogArtist {
+            id: value.id,
+            name: value.name,
+            images: value.images.into_iter().map(Image::from).collect(),
+            ids: value.ids.into_iter().map(ExternalId::from).collect(),
+        }
+    }
+}
+
+impl From<&CatalogResults> for WireResults {
+    /// Copies a search result into its stored form.
+    fn from(value: &CatalogResults) -> WireResults {
+        WireResults {
+            tracks: value.tracks.iter().map(WireTrack::from).collect(),
+            albums: value.albums.iter().map(WireAlbumRef::from).collect(),
+            artists: value.artists.iter().map(WireArtist::from).collect(),
+        }
+    }
+}
+
+impl From<WireResults> for CatalogResults {
+    /// Rebuilds a search result from its stored form.
+    fn from(value: WireResults) -> CatalogResults {
+        CatalogResults {
+            tracks: value.tracks.into_iter().map(CatalogTrack::from).collect(),
+            albums: value
+                .albums
+                .into_iter()
+                .map(CatalogAlbumRef::from)
+                .collect(),
+            artists: value.artists.into_iter().map(CatalogArtist::from).collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stored search payload as the table holds it, with the fields a track
+    /// cannot do without.
+    const STORED: &str = r#"{"tracks":[{"id":"remote-1","title":"Remote Song",
+        "artists":[{"name":"Remote Artist"}],"duration_ms":1000,
+        "isrc":"USRC17607839"}],"albums":[],"artists":[]}"#;
+
+    #[test]
+    fn a_stored_payload_round_trips() {
+        let results = CatalogResults {
+            tracks: vec![CatalogTrack {
+                id: "t1".to_owned(),
+                title: "Title".to_owned(),
+                artists: vec![ArtistCredit {
+                    name: "Artist".to_owned(),
+                    ids: vec![ExternalId {
+                        namespace: "deezer".to_owned(),
+                        value: "1".to_owned(),
+                    }],
+                }],
+                album: Some(CatalogAlbumRef {
+                    id: "a1".to_owned(),
+                    title: "Album".to_owned(),
+                    artists: Vec::new(),
+                    year: Some(2026),
+                    images: vec![Image {
+                        url: "https://example.invalid/cover.jpg".to_owned(),
+                        width: Some(500),
+                        height: Some(500),
+                    }],
+                }),
+                duration_ms: Some(1_000),
+                disc_number: Some(1),
+                track_number: Some(2),
+                isrc: Some("USRC17607839".to_owned()),
+                explicit: Some(false),
+                ids: Vec::new(),
+            }],
+            albums: vec![CatalogAlbumRef {
+                id: "a1".to_owned(),
+                title: "Album".to_owned(),
+                artists: Vec::new(),
+                year: None,
+                images: Vec::new(),
+            }],
+            artists: vec![CatalogArtist {
+                id: "ar1".to_owned(),
+                name: "Artist".to_owned(),
+                images: Vec::new(),
+                ids: Vec::new(),
+            }],
+        };
+
+        let json = serde_json::to_string(&WireResults::from(&results)).unwrap();
+        let decoded = WireResults::deserialize(&mut serde_json::Deserializer::from_str(&json))
+            .unwrap()
+            .into();
+
+        assert_eq!(results, decoded);
+    }
+
+    #[test]
+    fn a_stored_payload_that_omits_optional_fields_still_decodes() {
+        let decoded = serde_json::from_str::<WireResults>(STORED).unwrap();
+        let results: CatalogResults = decoded.into();
+
+        assert_eq!(results.tracks.len(), 1);
+        assert_eq!(results.tracks[0].title, "Remote Song");
+        assert_eq!(results.tracks[0].artists[0].name, "Remote Artist");
+        assert_eq!(results.tracks[0].duration_ms, Some(1_000));
+        assert_eq!(results.tracks[0].album, None);
+        assert!(results.tracks[0].ids.is_empty());
+    }
+}

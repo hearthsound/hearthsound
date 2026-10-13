@@ -15,15 +15,18 @@ hearthsound-config = { path = "../config" }
 hearthsound-core = { path = "../core" }
 hearthsound-db = { path = "../db" }
 hearthsound-plugin-host = { path = "../plugin-host" }
+moka.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 hearthsound-test-support = { path = "../test-support" }
-serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 wiremock.workspace = true

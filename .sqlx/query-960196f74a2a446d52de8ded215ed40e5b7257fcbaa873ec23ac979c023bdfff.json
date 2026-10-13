@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO catalog_cache (instance_id, request_key, response, fetched_at, expires_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (instance_id, request_key) DO UPDATE SET response = excluded.response, fetched_at = excluded.fetched_at, expires_at = excluded.expires_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "960196f74a2a446d52de8ded215ed40e5b7257fcbaa873ec23ac979c023bdfff"
+}

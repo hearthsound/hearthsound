@@ -336,3 +336,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `x_<slug>_<kind>_<payload>` id, and provider failures map to typed not-found,
   unavailable, rate-limited (with the retry delay), unauthorized, invalid
   configuration, and internal errors.
+- A two-level cache of catalog provider responses: an in-memory tier and the
+  `catalog_cache` table, both keyed by provider instance and a canonical request
+  key so two instances never share an answer. Search answers are cached for five
+  minutes (`SEARCH_CACHE_TTL`) and entity lookups for six hours
+  (`ENTITY_CACHE_TTL`), a stale row is ignored rather than served, failures are
+  never cached, a row whose stored JSON no longer decodes is a miss, and
+  `sweep_expired_cache` deletes rows whose lifetime ran out.

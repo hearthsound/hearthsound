@@ -1,209 +1,28 @@
 //! Integration tests for the catalog service over the fixture plugins.
 //!
 //! Every test builds a real plugin host, registry, instance service and
-//! database in a temporary directory, installs fixture plugins, and drives the
-//! service the way the API layer will. Nothing here reaches the network: the
-//! `hello-catalog` fixture answers in process, and `http-catalog` talks to a
-//! local wiremock server.
+//! database in a temporary directory through [`common::Env`], installs fixture
+//! plugins, and drives the service the way the API layer will. Nothing here
+//! reaches the network: the `hello-catalog` fixture answers in process, and
+//! `http-catalog` talks to a local wiremock server.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::Path;
-use std::sync::Arc;
+mod common;
+
 use std::time::{Duration, Instant};
 
-use hearthsound_catalog::{CatalogError, CatalogService};
-use hearthsound_config::secret::{SecretBox, SecretKey};
-use hearthsound_config::settings::Settings;
-use hearthsound_config::{SettingSources, SettingValue, SettingsRegistry, keys};
-use hearthsound_core::providers::CatalogQuery;
-use hearthsound_core::{CatalogId, EntityKind, Layer, Slug};
-use hearthsound_db::{Database, MIGRATOR};
-use hearthsound_plugin_host::{
-    InstanceService, InstanceSpec, PluginHost, PluginRepository, PluginSource, ProviderRegistry,
+use common::{
+    Env, HELLO_CATALOG_ID, HTTP_CATALOG_ID, SPIN_CATALOG_ID, catalog_endpoint, catalog_id, query,
+    setting_keys as keys,
 };
-use hearthsound_test_support::{HELLO_CATALOG, HTTP_CATALOG, SPIN_CATALOG, fixture_plugin};
-use serde_json::{Value, json};
+use hearthsound_catalog::CatalogError;
+use hearthsound_config::SettingValue;
+use hearthsound_core::{EntityKind, Layer, Slug};
+use hearthsound_test_support::{HELLO_CATALOG, HTTP_CATALOG, SPIN_CATALOG};
+use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-
-/// The plugin id of the hello catalog fixture.
-const HELLO_CATALOG_ID: &str = "com.example.hello-catalog";
-
-/// The plugin id of the HTTP catalog fixture.
-const HTTP_CATALOG_ID: &str = "com.example.http-catalog";
-
-/// The plugin id of the spin catalog fixture.
-const SPIN_CATALOG_ID: &str = "com.example.spin-catalog";
-
-/// Opens a migrated temporary database for a test.
-async fn database(dir: &Path) -> Arc<Database> {
-    let database = Database::open(&dir.join("hearthsound.db")).await.unwrap();
-    MIGRATOR.run(database.writer()).await.unwrap();
-    Arc::new(database)
-}
-
-/// One test's host, database, settings and provider registry.
-struct Env {
-    /// Kept alive so the plugin directory outlives the host.
-    _dir: tempfile::TempDir,
-    /// The plugin host the fixtures are installed into.
-    host: Arc<PluginHost>,
-    /// The plugin tables.
-    repository: PluginRepository,
-    /// The secret box instance configurations are sealed with.
-    secrets: SecretBox,
-    /// The settings service the service under test reads.
-    settings: Settings,
-    /// The migrated database.
-    database: Arc<Database>,
-    /// The provider registry the service resolves instances through.
-    registry: Arc<ProviderRegistry>,
-}
-
-impl Env {
-    /// Builds an environment over a fresh temporary directory.
-    async fn new() -> Env {
-        let dir = tempfile::tempdir().unwrap();
-        let database = database(dir.path()).await;
-        let settings = Settings::load(
-            database.writer().clone(),
-            SettingsRegistry::builtin(),
-            SettingSources::default(),
-        )
-        .await
-        .unwrap();
-        let host = Arc::new(
-            PluginHost::new(
-                dir.path().join("plugins"),
-                settings.current(),
-                Arc::clone(&database),
-            )
-            .unwrap(),
-        );
-        let secrets = SecretKey::generate().secret_box();
-        let repository = PluginRepository::new(&database);
-        let registry = Arc::new(ProviderRegistry::new(
-            Arc::clone(&host),
-            repository.clone(),
-            secrets.clone(),
-        ));
-        Env {
-            _dir: dir,
-            host,
-            repository,
-            secrets,
-            settings,
-            database,
-            registry,
-        }
-    }
-
-    /// Builds the service under test.
-    fn service(&self) -> CatalogService {
-        CatalogService::new(
-            Arc::clone(&self.registry),
-            Arc::clone(&self.database),
-            self.settings.clone(),
-        )
-    }
-
-    /// Builds the instance service over this environment.
-    fn instances(&self) -> InstanceService {
-        InstanceService::new(
-            Arc::clone(&self.host),
-            self.repository.clone(),
-            self.secrets.clone(),
-        )
-    }
-
-    /// Installs a fixture plugin, returning its plugin id.
-    async fn install(&self, archive: &str) -> String {
-        let installed = self.host.install(&fixture_plugin(archive)).await.unwrap();
-        self.repository
-            .register_installed(&installed, PluginSource::Sideload)
-            .await
-            .unwrap()
-            .id
-    }
-
-    /// Installs a fixture plugin and configures one instance of it.
-    ///
-    /// # Parameters
-    ///
-    /// - `slug`: the instance slug.
-    /// - `archive`: the fixture archive file name.
-    /// - `plugin_id`: the fixture's plugin id.
-    /// - `config`: the instance's server-scoped configuration.
-    async fn instance(&self, slug: &str, archive: &str, plugin_id: &str, config: Value) {
-        self.install(archive).await;
-        self.instances()
-            .create(&InstanceSpec {
-                slug: slug.to_owned(),
-                plugin_id: plugin_id.to_owned(),
-                display_name: format!("{slug} display"),
-                server_config: config,
-                host_config: Value::Null,
-            })
-            .await
-            .unwrap();
-    }
-
-    /// Assigns the given instances to a layer, in order, and rebuilds.
-    async fn assign(&self, layer: Layer, slugs: &[&str]) {
-        let slugs: Vec<String> = slugs.iter().map(|slug| (*slug).to_owned()).collect();
-        self.instances().set_layer(layer, &slugs).await.unwrap();
-        self.registry.rebuild().await.unwrap();
-    }
-
-    /// Writes a setting and republishes the snapshot.
-    async fn set(&self, key: &str, value: SettingValue) {
-        self.settings.set(key, value, None).await.unwrap();
-    }
-}
-
-/// Builds a catalog search query for one text.
-fn query(text: &str) -> CatalogQuery {
-    CatalogQuery {
-        text: text.to_owned(),
-        kinds: vec![EntityKind::Track, EntityKind::Album, EntityKind::Artist],
-        limit: 10,
-        offset: 0,
-    }
-}
-
-/// Builds a catalog id for a slug and provider id.
-fn catalog_id(slug: &str, kind: EntityKind, provider_id: &str) -> CatalogId {
-    CatalogId::new(Slug::new(slug).unwrap(), kind, provider_id).unwrap()
-}
-
-/// Serves one JSON search response from a wiremock endpoint.
-///
-/// # Returns
-///
-/// The server, kept alive by the caller, and the URL to configure an instance
-/// with.
-async fn catalog_endpoint(
-    status: u16,
-    body: &str,
-    delay: Option<Duration>,
-) -> (MockServer, String) {
-    let server = MockServer::start().await;
-    let mut template = ResponseTemplate::new(status);
-    if status < 300 {
-        template = template.set_body_string(body);
-    }
-    if let Some(delay) = delay {
-        template = template.set_delay(delay);
-    }
-    Mock::given(method("GET"))
-        .and(path("/search"))
-        .respond_with(template)
-        .mount(&server)
-        .await;
-    let url = format!("{}/search", server.uri());
-    (server, url)
-}
 
 #[tokio::test]
 async fn search_returns_the_primary_instances_results_with_their_ids() {

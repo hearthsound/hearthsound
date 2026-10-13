@@ -29,7 +29,9 @@ use hearthsound_db::Database;
 use hearthsound_plugin_host::{ProviderRegistry, RegistryInstance};
 use tokio::time::error::Elapsed;
 
+use crate::cache::{Cache, ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
 use crate::error::CatalogError;
+use crate::wire::{WireAlbum, WireAlbumRefs, WireArtist, WireResults, WireTrack, WireTracks};
 
 /// A track a catalog provider returned, with the id that names it.
 ///
@@ -152,6 +154,8 @@ struct Inner {
     database: Arc<Database>,
     /// The settings service, read once per call.
     settings: Settings,
+    /// The two-level cache of provider responses.
+    cache: Cache,
 }
 
 impl CatalogService {
@@ -170,11 +174,13 @@ impl CatalogService {
         database: Arc<Database>,
         settings: Settings,
     ) -> CatalogService {
+        let cache = Cache::new(Arc::clone(&database));
         CatalogService {
             inner: Arc::new(Inner {
                 registry,
                 database,
                 settings,
+                cache,
             }),
         }
     }
@@ -226,8 +232,20 @@ impl CatalogService {
         let instance = self.instance_for(id.slug())?;
         let provider = Self::catalog_provider(&instance)?;
         let timeout = catalog_timeout(&self.settings_snapshot())?;
-        let outcome = tokio::time::timeout(timeout, provider.track(id.provider_id())).await;
-        let track = self.finish(id.slug(), "track", outcome)?;
+        let track = self
+            .inner
+            .cache
+            .through::<CatalogTrack, WireTrack, _>(
+                instance.id(),
+                &RequestKey::track(id.provider_id()),
+                ENTITY_CACHE_TTL,
+                async {
+                    let outcome =
+                        tokio::time::timeout(timeout, provider.track(id.provider_id())).await;
+                    self.finish(id.slug(), "track", outcome)
+                },
+            )
+            .await?;
         track_result(id.slug(), track)
     }
 
@@ -252,8 +270,20 @@ impl CatalogService {
         let instance = self.instance_for(id.slug())?;
         let provider = Self::catalog_provider(&instance)?;
         let timeout = catalog_timeout(&self.settings_snapshot())?;
-        let outcome = tokio::time::timeout(timeout, provider.album(id.provider_id())).await;
-        let album = self.finish(id.slug(), "album", outcome)?;
+        let album = self
+            .inner
+            .cache
+            .through::<CatalogAlbum, WireAlbum, _>(
+                instance.id(),
+                &RequestKey::album(id.provider_id()),
+                ENTITY_CACHE_TTL,
+                async {
+                    let outcome =
+                        tokio::time::timeout(timeout, provider.album(id.provider_id())).await;
+                    self.finish(id.slug(), "album", outcome)
+                },
+            )
+            .await?;
         Ok(CatalogAlbumResult {
             id: catalog_id(id.slug(), EntityKind::Album, &album.id)?,
             album,
@@ -276,8 +306,20 @@ impl CatalogService {
         let instance = self.instance_for(id.slug())?;
         let provider = Self::catalog_provider(&instance)?;
         let timeout = catalog_timeout(&self.settings_snapshot())?;
-        let outcome = tokio::time::timeout(timeout, provider.artist(id.provider_id())).await;
-        let artist = self.finish(id.slug(), "artist", outcome)?;
+        let artist = self
+            .inner
+            .cache
+            .through::<CatalogArtist, WireArtist, _>(
+                instance.id(),
+                &RequestKey::artist(id.provider_id()),
+                ENTITY_CACHE_TTL,
+                async {
+                    let outcome =
+                        tokio::time::timeout(timeout, provider.artist(id.provider_id())).await;
+                    self.finish(id.slug(), "artist", outcome)
+                },
+            )
+            .await?;
         Ok(CatalogArtistResult {
             id: catalog_id(id.slug(), EntityKind::Artist, &artist.id)?,
             artist,
@@ -307,12 +349,23 @@ impl CatalogService {
         let instance = self.instance_for(id.slug())?;
         let provider = Self::catalog_provider(&instance)?;
         let timeout = catalog_timeout(&self.settings_snapshot())?;
-        let outcome = tokio::time::timeout(
-            timeout,
-            provider.artist_albums(id.provider_id(), limit, offset),
-        )
-        .await;
-        let albums = self.finish(id.slug(), "artist-albums", outcome)?;
+        let albums = self
+            .inner
+            .cache
+            .through::<Vec<CatalogAlbumRef>, WireAlbumRefs, _>(
+                instance.id(),
+                &RequestKey::artist_albums(id.provider_id(), limit, offset),
+                ENTITY_CACHE_TTL,
+                async {
+                    let outcome = tokio::time::timeout(
+                        timeout,
+                        provider.artist_albums(id.provider_id(), limit, offset),
+                    )
+                    .await;
+                    self.finish(id.slug(), "artist-albums", outcome)
+                },
+            )
+            .await?;
         albums
             .into_iter()
             .map(|album| album_ref_result(id.slug(), album))
@@ -340,10 +393,23 @@ impl CatalogService {
         let instance = self.instance_for(id.slug())?;
         let provider = Self::catalog_provider(&instance)?;
         let timeout = catalog_timeout(&self.settings_snapshot())?;
-        let outcome =
-            tokio::time::timeout(timeout, provider.artist_top_tracks(id.provider_id(), limit))
-                .await;
-        let tracks = self.finish(id.slug(), "artist-top-tracks", outcome)?;
+        let tracks = self
+            .inner
+            .cache
+            .through::<Vec<CatalogTrack>, WireTracks, _>(
+                instance.id(),
+                &RequestKey::artist_top_tracks(id.provider_id(), limit),
+                ENTITY_CACHE_TTL,
+                async {
+                    let outcome = tokio::time::timeout(
+                        timeout,
+                        provider.artist_top_tracks(id.provider_id(), limit),
+                    )
+                    .await;
+                    self.finish(id.slug(), "artist-top-tracks", outcome)
+                },
+            )
+            .await?;
         tracks
             .into_iter()
             .map(|track| track_result(id.slug(), track))
@@ -380,8 +446,21 @@ impl CatalogService {
             let Some(provider) = instance.catalog() else {
                 continue;
             };
-            let outcome = tokio::time::timeout(timeout, provider.lookup_isrc(isrc)).await;
-            match self.finish(instance.slug(), "lookup-isrc", outcome) {
+            let outcome = self
+                .inner
+                .cache
+                .through::<Vec<CatalogTrack>, WireTracks, _>(
+                    instance.id(),
+                    &RequestKey::isrc(isrc),
+                    ENTITY_CACHE_TTL,
+                    async {
+                        let outcome =
+                            tokio::time::timeout(timeout, provider.lookup_isrc(isrc)).await;
+                        self.finish(instance.slug(), "lookup-isrc", outcome)
+                    },
+                )
+                .await;
+            match outcome {
                 Ok(tracks) => {
                     let mut results = Vec::with_capacity(tracks.len());
                     for track in tracks {
@@ -448,8 +527,20 @@ impl CatalogService {
             let Some(provider) = instance.catalog() else {
                 continue;
             };
-            let outcome = tokio::time::timeout(timeout, provider.search(&query)).await;
-            match self.finish(instance.slug(), "search", outcome) {
+            let outcome = self
+                .inner
+                .cache
+                .through::<CatalogResults, WireResults, _>(
+                    instance.id(),
+                    &RequestKey::search(&query),
+                    SEARCH_CACHE_TTL,
+                    async {
+                        let outcome = tokio::time::timeout(timeout, provider.search(&query)).await;
+                        self.finish(instance.slug(), "search", outcome)
+                    },
+                )
+                .await;
+            match outcome {
                 Ok(results) => return search_result(instance.slug(), results),
                 Err(error) => failure = Some(error),
             }
@@ -459,6 +550,23 @@ impl CatalogService {
             Some(error) => Err(error),
             None => Ok(CatalogSearch::default()),
         }
+    }
+
+    /// Deletes the expired rows of the persistent cache tier.
+    ///
+    /// A stale row is ignored when it is read, so sweeping is housekeeping: it
+    /// keeps the table from growing without bound. The composition root calls
+    /// this from a scheduled job; nothing in a request path depends on it.
+    ///
+    /// # Returns
+    ///
+    /// The number of rows deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::Database`] when the delete fails.
+    pub async fn sweep_expired_cache(&self) -> Result<u64, CatalogError> {
+        self.inner.cache.sweep().await
     }
 
     /// Returns the registry entry a catalog id names.

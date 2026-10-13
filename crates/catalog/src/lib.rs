@@ -54,9 +54,12 @@
 //! ```
 #![forbid(unsafe_code)]
 
+pub mod cache;
 mod error;
 mod service;
+mod wire;
 
+pub use cache::{ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
 pub use error::CatalogError;
 pub use service::{
     CatalogAlbumRefResult, CatalogAlbumResult, CatalogArtistResult, CatalogSearch, CatalogService,
