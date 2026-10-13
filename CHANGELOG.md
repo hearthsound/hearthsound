@@ -601,3 +601,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worker that is still serving that acquisition. A new `album-catalog` fixture
   plugin answers a five-track album, which is what the full-stack test of the
   prefetch needs.
+- Importing a catalog track derives its album totals and its album artist from
+  the album the issuing instance lists instead of from the stored rows alone: a
+  lone streamed track of a fourteen-track album is tagged `TRACKTOTAL=14` rather
+  than `1`, and a track of a multi-disc album is tagged with the track count of
+  its own disc, gets the disc prefix its release needs and carries the release's
+  disc count. An album whose materialized row names no artist - the album
+  reference a provider embeds in a track may omit it, as Deezer's does - is named
+  and tagged with the artist the catalog album credits or, when it credits none,
+  with the track's own artist, so the file lands under an artist directory with
+  an `albumartist` tag instead of directly in the storage root. A catalog album
+  that cannot be read leaves the totals empty rather than failing an import whose
+  file verified.

@@ -11,7 +11,8 @@ use common::{Env, InstanceLimits, config, has_availability_event, one_candidate}
 use hearthsound_acquire::orchestrator::{AcquireRequest, AcquisitionHandle};
 use hearthsound_core::events::{LibraryChange, ServerEvent};
 use hearthsound_core::{
-    AcquisitionState, Availability, EntityId, PinReason, Priority, StorageClass,
+    AcquisitionState, Availability, CatalogId, EntityId, EntityKind, PinReason, Priority, Slug,
+    StorageClass,
 };
 use hearthsound_media::{Container, probe};
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
@@ -266,4 +267,155 @@ async fn a_name_collision_does_not_overwrite_another_file() {
         stored,
         "Hello Artist/Hello Song album (1993)/01 - Hello Song (2).flac"
     );
+}
+
+/// The number the catalog fixture's album holds.
+const CATALOG_ALBUM_TRACKS: u8 = 5;
+
+/// Returns the catalog id of one track of the album catalog fixture.
+///
+/// # Parameters
+///
+/// - `number`: the track number within the album, one-based.
+fn catalog_track(number: u8) -> CatalogId {
+    CatalogId::new(
+        Slug::new(common::CATALOG_INSTANCE).unwrap(),
+        EntityKind::Track,
+        format!("album-catalog-track-{number}"),
+    )
+    .unwrap()
+}
+
+/// The candidate the acquisition fixture serves for the fixture's third track.
+fn catalog_candidate() -> serde_json::Value {
+    serde_json::json!([{
+        "token": "cand-1",
+        "title": "Fixture Song 3",
+        "path": "Fixture Artist/Fixture Album/03 - Fixture Song 3.flac",
+        "files": [{
+            "name": "03 - Fixture Song 3.flac",
+            "size": 4000,
+            "format": "flac",
+            "bitrateKbps": 900,
+            "sampleRate": 44100,
+            "bitDepth": 16,
+            "durationMs": 180_000,
+            "trackIndex": 0,
+        }],
+        "source": { "key": "peer-1", "speedBps": 1250000, "queueLength": 0, "freeSlot": true },
+    }])
+}
+
+/// A lone catalog track is tagged with its album's real totals.
+///
+/// The third track of the fixture's five-track album is materialized on its own,
+/// so the album row holds one track of five; the import has to read the album's
+/// tracklist from the instance that issued it rather than count the stored rows,
+/// or the file would claim to be the only track of its album.
+#[tokio::test]
+async fn a_lone_catalog_track_is_tagged_with_its_album_total() {
+    let env = Env::new(
+        config(catalog_candidate(), "normal", 0, "downloads", ".flac"),
+        InstanceLimits::default(),
+        &[],
+    )
+    .await;
+    env.add_catalog_instance().await;
+    AudioFixture::new(AudioFormat::Flac)
+        .seconds(180.0)
+        .file_name("03 - Fixture Song 3.flac".to_owned())
+        .write_into(&env.downloads)
+        .await
+        .unwrap();
+    let track = env
+        .catalog
+        .materialize_track(&catalog_track(3))
+        .await
+        .unwrap();
+    let id = request(&env, track, Priority::Play).await.id;
+
+    env.start();
+    env.wait_for_state(id, AcquisitionState::Completed).await;
+
+    let stored: String = sqlx::query_scalar!(
+        "SELECT rel_path FROM media_files WHERE track_id = ?",
+        track.uuid().as_bytes().to_vec(),
+    )
+    .fetch_one(env.database.readers())
+    .await
+    .unwrap();
+    assert_eq!(
+        stored, "Fixture Artist/Fixture Album (2026)/03 - Fixture Song 3.flac",
+        "a single-disc album renders no disc prefix"
+    );
+    let probed = probe(&env.cache_root.join(&stored)).await.unwrap();
+    assert_eq!(probed.tags.track_number, Some(3));
+    assert_eq!(
+        probed.tags.track_total,
+        Some(u32::from(CATALOG_ALBUM_TRACKS)),
+        "the file carries the album's own track count, not the stored rows'"
+    );
+    assert_eq!(probed.tags.disc_number, Some(1));
+    assert_eq!(probed.tags.disc_total, None, "a single-disc album has none");
+    assert_eq!(probed.tags.album_artist.as_deref(), Some("Fixture Artist"));
+    assert_eq!(probed.tags.album.as_deref(), Some("Fixture Album"));
+}
+
+/// An album nobody credited is named and tagged with the track's own artist.
+///
+/// This is the live case: a track materialized from an album reference that
+/// carries no artist leaves an album with no album artist, and the imported file
+/// still has to land under an artist's directory and carry an `albumartist` tag.
+#[tokio::test]
+async fn an_album_without_an_artist_takes_the_track_artist() {
+    let env = Env::new(
+        config(
+            serde_json::json!([{
+                "token": "cand-1",
+                "title": "Solo Song",
+                "path": "Solo Artist/Solo Song album/01 - Solo Song.flac",
+                "files": [{
+                    "name": "01 - Solo Song.flac",
+                    "size": 4000,
+                    "format": "flac",
+                    "bitrateKbps": 900,
+                    "sampleRate": 44100,
+                    "bitDepth": 16,
+                    "durationMs": 200,
+                    "trackIndex": 0,
+                }],
+                "source": { "key": "peer-1", "speedBps": 1250000, "queueLength": 0, "freeSlot": true },
+            }]),
+            "normal",
+            0,
+            "downloads",
+            ".flac",
+        ),
+        InstanceLimits::default(),
+        &[],
+    )
+    .await;
+    place(&env, "01 - Solo Song.flac").await;
+    let track = env
+        .add_track_without_album_artist("Solo Song", "Solo Artist")
+        .await;
+    let id = request(&env, track, Priority::Play).await.id;
+
+    env.start();
+    env.wait_for_state(id, AcquisitionState::Completed).await;
+
+    let stored: String = sqlx::query_scalar!(
+        "SELECT rel_path FROM media_files WHERE track_id = ?",
+        track.uuid().as_bytes().to_vec(),
+    )
+    .fetch_one(env.database.readers())
+    .await
+    .unwrap();
+    assert_eq!(
+        stored, "Solo Artist/Solo Song album/01 - Solo Song.flac",
+        "the album artist directory comes from the track's artist"
+    );
+    let probed = probe(&env.cache_root.join(&stored)).await.unwrap();
+    assert_eq!(probed.tags.album_artist.as_deref(), Some("Solo Artist"));
+    assert_eq!(probed.tags.artists, ["Solo Artist"]);
 }

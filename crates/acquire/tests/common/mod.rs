@@ -30,7 +30,9 @@ use hearthsound_plugin_host::{
     InstanceService, InstanceSpec, PluginHost, PluginRepository, PluginSource, ProviderRegistry,
 };
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
-use hearthsound_test_support::{ACQUISITION_FIXTURE, METADATA_FIXTURE, fixture_plugin};
+use hearthsound_test_support::{
+    ACQUISITION_FIXTURE, ALBUM_CATALOG, METADATA_FIXTURE, fixture_plugin,
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -39,6 +41,12 @@ pub const PLUGIN_ID: &str = "com.example.acquisition-fixture";
 
 /// The plugin id of the metadata fixture.
 pub const METADATA_PLUGIN_ID: &str = "com.example.metadata-fixture";
+
+/// The plugin id of the album catalog fixture.
+pub const CATALOG_PLUGIN_ID: &str = "com.example.album-catalog";
+
+/// The slug of the album catalog fixture instance.
+pub const CATALOG_INSTANCE: &str = "album";
 
 /// The slug of the fixture instance every test configures first.
 pub const INSTANCE: &str = "acq";
@@ -514,6 +522,83 @@ impl Env {
             .await
             .unwrap();
         id
+    }
+
+    /// Installs the album catalog fixture and makes it the catalog layer.
+    ///
+    /// The fixture answers one album of five tracks, so a test can materialize
+    /// a single track of a longer release - the state a client's stream of one
+    /// catalog track leaves behind - by asking for one of its provider ids.
+    ///
+    /// # Returns
+    ///
+    /// The instance id.
+    pub async fn add_catalog_instance(&self) -> Uuid {
+        let installed = self
+            .host
+            .install(&fixture_plugin(ALBUM_CATALOG))
+            .await
+            .unwrap();
+        self.repository
+            .register_installed(&installed, PluginSource::Sideload)
+            .await
+            .unwrap();
+        let service = InstanceService::new(
+            Arc::clone(&self.host),
+            self.repository.clone(),
+            self.secrets.clone(),
+        );
+        let view = service
+            .create(&InstanceSpec {
+                slug: CATALOG_INSTANCE.to_owned(),
+                plugin_id: CATALOG_PLUGIN_ID.to_owned(),
+                display_name: "Album catalog".to_owned(),
+                server_config: json!({}),
+                host_config: host_config(&self.downloads, InstanceLimits::default()),
+            })
+            .await
+            .unwrap();
+        service
+            .set_layer(Layer::Catalog, &[CATALOG_INSTANCE.to_owned()])
+            .await
+            .unwrap();
+        self.registry.rebuild().await.unwrap();
+        view.id
+    }
+
+    /// Inserts an album that names no artist and one track of it.
+    ///
+    /// This is what a provider whose track-embedded album object carries no
+    /// artist leaves in the library: the album row has no display artist and
+    /// stores no credit, while the track does name one. Only the track's own
+    /// artist can then name the album in a file name or an `albumartist` tag.
+    ///
+    /// # Parameters
+    ///
+    /// - `title`: the track title; the album is titled `{title} album`.
+    /// - `artist`: the track's own artist.
+    ///
+    /// # Returns
+    ///
+    /// The inserted track's id.
+    pub async fn add_track_without_album_artist(&self, title: &str, artist: &str) -> EntityId {
+        let album = self
+            .library
+            .upsert_album(
+                &AlbumInput::new(format!("{title} album"), Origin::Catalog),
+                &[],
+            )
+            .await
+            .unwrap();
+        let mut input = TrackInput::new(title, Origin::Catalog, Availability::Remote);
+        input.album_id = Some(album);
+        input.display_artist = Some(artist.to_owned());
+        input.track_number = Some(1);
+        input.duration_ms = Some(200);
+        self.library
+            .insert_track(&input, &[ArtistCredit::new(artist, "main")], &[])
+            .await
+            .unwrap()
     }
 
     /// Starts the scheduler.
