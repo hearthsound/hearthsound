@@ -14,6 +14,7 @@
 //! exceeds its deadline is logged and the next one is tried, because a user is
 //! better served by the fallback's results than by an empty list.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -133,7 +134,7 @@ impl CatalogSearch {
 /// #     database: Arc<hearthsound_db::Database>,
 /// #     settings: hearthsound_config::settings::Settings,
 /// # ) -> Result<(), Box<dyn std::error::Error>> {
-/// let catalog = CatalogService::new(registry, database, settings);
+/// let catalog = CatalogService::new(registry, database, settings, "/srv/hearthsound/artwork");
 /// let id = CatalogId::new(Slug::new("deezer").unwrap(), EntityKind::Track, "3135556")?;
 /// let track = catalog.track(&id).await?;
 /// println!("{}", track.track.title);
@@ -156,6 +157,8 @@ struct Inner {
     settings: Settings,
     /// The two-level cache of provider responses.
     cache: Cache,
+    /// The directory cached cover images are written to.
+    artwork_dir: PathBuf,
 }
 
 impl CatalogService {
@@ -169,10 +172,13 @@ impl CatalogService {
     ///   `catalog_cache` in it.
     /// - `settings`: the settings service; every call reads its current
     ///   snapshot so a change takes effect without a restart.
+    /// - `artwork_dir`: the directory cached cover images are written to, which
+    ///   is `<data>/artwork/` of the server's paths.
     pub fn new(
         registry: Arc<ProviderRegistry>,
         database: Arc<Database>,
         settings: Settings,
+        artwork_dir: impl Into<PathBuf>,
     ) -> CatalogService {
         let cache = Cache::new(Arc::clone(&database));
         CatalogService {
@@ -181,6 +187,7 @@ impl CatalogService {
                 database,
                 settings,
                 cache,
+                artwork_dir: artwork_dir.into(),
             }),
         }
     }
@@ -215,6 +222,11 @@ impl CatalogService {
     /// tiers.
     pub(crate) fn cache(&self) -> &Cache {
         &self.inner.cache
+    }
+
+    /// Returns the directory cached cover images are written to.
+    pub(crate) fn artwork_dir(&self) -> &Path {
+        &self.inner.artwork_dir
     }
 
     /// Looks up one track.

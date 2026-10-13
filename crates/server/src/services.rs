@@ -197,6 +197,7 @@ impl Services {
             Arc::clone(&registry),
             Arc::clone(&database),
             settings.clone(),
+            config.paths.artwork.clone(),
         ));
 
         let ffmpeg = Arc::new(FfmpegRunner::new(

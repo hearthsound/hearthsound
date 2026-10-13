@@ -1,25 +1,39 @@
-//! HTTP catalog: a fixture plugin whose search goes out over `host-http`.
+//! HTTP catalog: a fixture plugin whose search and track lookup go out over
+//! `host-http`.
 //!
 //! The plugin appends the search text as a `q` query parameter to the endpoint
 //! in its server configuration, performs a `GET`, and maps the JSON array the
-//! endpoint returns into catalog tracks. It exists to prove that a guest can
-//! reach a host the administrator approved, and that every other host is denied.
+//! endpoint returns into catalog tracks. `get-track` asks the same endpoint for
+//! one identifier. It exists to prove that a guest can reach a host the
+//! administrator approved, and that every other host is denied.
+//!
+//! Its manifest declares `catalog.imageCachePolicy: no-store`, so it is also
+//! the fixture that proves a catalog image is proxied without being stored.
 
 use hearthsound_plugin::catalog_provider::exports::hearthsound::plugin::catalog::{
     SearchQuery, SearchResults,
 };
 use hearthsound_plugin::catalog_provider::exports::hearthsound::plugin::{catalog, lifecycle};
-use hearthsound_plugin::types::{ArtistCredit, EntityKind, IdPair, ProviderError, Track};
+use hearthsound_plugin::types::{
+    AlbumRef, ArtistCredit, EntityKind, IdPair, Image, ProviderError, Track,
+};
 use serde::Deserialize;
 
 /// The plugin implementation.
 struct HttpCatalog;
 
+/// The album title every remote track is attributed to.
+const ALBUM: &str = "Remote Album";
+
 /// Server-scoped configuration of the plugin.
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Config {
-    /// The absolute URL the search request is sent to.
+    /// The absolute URL the catalog requests are sent to.
     url: String,
+    /// The cover image URL every track carries, when configured.
+    #[serde(default)]
+    cover_url: Option<String>,
 }
 
 /// One track as the endpoint reports it.
@@ -74,13 +88,35 @@ fn encode(text: &str) -> String {
     encoded
 }
 
+/// Asks the configured endpoint for one query.
+///
+/// # Parameters
+///
+/// - `text`: the query text.
+///
+/// # Returns
+///
+/// The tracks the endpoint reported.
+///
+/// # Errors
+///
+/// Returns the failure of the outbound request, or of decoding its body.
+fn fetch(text: &str) -> Result<Vec<RemoteTrack>, ProviderError> {
+    let config = config()?;
+    let url = format!("{}?q={}", config.url, encode(text));
+    hearthsound_plugin::info!("searching {url}");
+
+    let request = hearthsound_plugin::http::get(&url);
+    hearthsound_plugin::http::send_json(&request)
+}
+
 /// Maps one remote track into a catalog track.
 ///
 /// # Parameters
 ///
 /// - `remote`: the track the endpoint returned.
-/// - `album`: the album title every remote track is attributed to.
-fn to_track(remote: RemoteTrack, album: &str) -> Track {
+/// - `cover_url`: the configured cover image URL, when there is one.
+fn to_track(remote: RemoteTrack, cover_url: Option<&str>) -> Track {
     let artists: Vec<ArtistCredit> = remote
         .artists
         .into_iter()
@@ -90,12 +126,23 @@ fn to_track(remote: RemoteTrack, album: &str) -> Track {
         id: remote.id.clone(),
         title: remote.title,
         artists: artists.clone(),
-        album: Some(hearthsound_plugin::types::AlbumRef {
-            id: format!("{album}-1"),
-            title: album.to_string(),
+        album: Some(AlbumRef {
+            id: format!("{ALBUM}-1"),
+            title: ALBUM.to_string(),
             artists,
             year: None,
-            images: vec![],
+            // The fixture reports no dimensions, which is legitimate: a
+            // provider that does not describe its images leaves the caller to
+            // pick between urls it cannot compare.
+            images: cover_url
+                .map(|url| {
+                    vec![Image {
+                        url: url.to_string(),
+                        width: None,
+                        height: None,
+                    }]
+                })
+                .unwrap_or_default(),
         }),
         duration_ms: remote.duration_ms,
         disc_number: None,
@@ -129,15 +176,11 @@ impl lifecycle::Guest for HttpCatalog {
 impl catalog::Guest for HttpCatalog {
     fn search(query: SearchQuery) -> Result<SearchResults, ProviderError> {
         let config = config()?;
-        let url = format!("{}?q={}", config.url, encode(&query.text));
-        hearthsound_plugin::info!("searching {url}");
+        let cover_url = config.cover_url.clone();
 
-        let request = hearthsound_plugin::http::get(&url);
-        let remote: Vec<RemoteTrack> = hearthsound_plugin::http::send_json(&request)?;
-
-        let tracks: Vec<Track> = remote
+        let tracks: Vec<Track> = fetch(&query.text)?
             .into_iter()
-            .map(|track| to_track(track, "Remote Album"))
+            .map(|track| to_track(track, cover_url.as_deref()))
             .collect();
 
         Ok(SearchResults {
@@ -151,8 +194,15 @@ impl catalog::Guest for HttpCatalog {
         })
     }
 
-    fn get_track(_id: String) -> Result<Track, ProviderError> {
-        Err(ProviderError::NotFound)
+    fn get_track(id: String) -> Result<Track, ProviderError> {
+        let config = config()?;
+        let cover_url = config.cover_url.clone();
+
+        fetch(&id)?
+            .into_iter()
+            .find(|track| track.id == id)
+            .map(|track| to_track(track, cover_url.as_deref()))
+            .ok_or(ProviderError::NotFound)
     }
 
     fn get_album(_id: String) -> Result<hearthsound_plugin::types::Album, ProviderError> {
@@ -167,7 +217,7 @@ impl catalog::Guest for HttpCatalog {
         _id: String,
         _limit: u32,
         _offset: u32,
-    ) -> Result<Vec<hearthsound_plugin::types::AlbumRef>, ProviderError> {
+    ) -> Result<Vec<AlbumRef>, ProviderError> {
         Err(ProviderError::NotFound)
     }
 

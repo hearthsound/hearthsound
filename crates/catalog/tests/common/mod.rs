@@ -51,6 +51,8 @@ pub async fn database(dir: &Path) -> Arc<Database> {
 pub struct Env {
     /// Kept alive so the plugin directory outlives the host.
     _dir: tempfile::TempDir,
+    /// The artwork cache directory the service under test writes to.
+    artwork: std::path::PathBuf,
     /// The plugin host the fixtures are installed into.
     pub host: Arc<PluginHost>,
     /// The plugin tables.
@@ -92,8 +94,10 @@ impl Env {
             repository.clone(),
             secrets.clone(),
         ));
+        let artwork = dir.path().join("artwork");
         Env {
             _dir: dir,
+            artwork,
             host,
             repository,
             secrets,
@@ -109,7 +113,27 @@ impl Env {
             Arc::clone(&self.registry),
             Arc::clone(&self.database),
             self.settings.clone(),
+            self.artwork.clone(),
         )
+    }
+
+    /// Returns the directory cached cover images are written to.
+    pub fn artwork_dir(&self) -> &std::path::Path {
+        &self.artwork
+    }
+
+    /// Lists the file names of the artwork cache directory.
+    pub fn artwork_files(&self) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(&self.artwork)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
     }
 
     /// Builds the instance service over this environment.

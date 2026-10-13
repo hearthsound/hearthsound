@@ -132,6 +132,7 @@ impl Fixture {
             Arc::clone(&registry),
             Arc::clone(&database),
             settings.clone(),
+            dir.path().join("artwork"),
         ));
         let activity = Arc::new(ActivityService::new(&database));
         let state = SubsonicState::new(

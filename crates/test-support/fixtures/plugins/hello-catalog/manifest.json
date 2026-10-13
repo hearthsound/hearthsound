@@ -20,7 +20,11 @@
         "properties": {
           "greeting": { "type": "string", "title": "Greeting", "default": "Hello" },
           "isrc": { "type": "string", "title": "ISRC" },
-          "coverUrl": { "type": "string", "format": "uri", "title": "Cover URL template" }
+          "coverUrl": {
+            "type": "string",
+            "title": "Cover URL template",
+            "description": "An absolute URL with a {size} placeholder, replaced by 250, 500 and 1000."
+          }
         }
       },
       "uiSchema": {

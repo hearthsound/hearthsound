@@ -10,7 +10,10 @@
   "api": "hearthsound:plugin@0.1.0",
   "provides": ["catalog"],
   "permissions": {
-    "http": { "hosts": ["$config:url"], "maxBodyBytes": 1048576 }
+    "http": {
+      "hosts": ["$config:url", "$config:coverUrl"],
+      "maxBodyBytes": 1048576
+    }
   },
   "config": {
     "server": {
@@ -19,12 +22,16 @@
         "type": "object",
         "required": ["url"],
         "properties": {
-          "url": { "type": "string", "format": "uri", "title": "Search endpoint", "writeOnly": true }
+          "url": { "type": "string", "format": "uri", "title": "Search endpoint", "writeOnly": true },
+          "coverUrl": { "type": "string", "format": "uri", "title": "Cover image URL" }
         }
       },
       "uiSchema": {
         "type": "VerticalLayout",
-        "elements": [{ "type": "Control", "scope": "#/properties/url" }]
+        "elements": [
+          { "type": "Control", "scope": "#/properties/url" },
+          { "type": "Control", "scope": "#/properties/coverUrl" }
+        ]
       }
     },
     "user": null

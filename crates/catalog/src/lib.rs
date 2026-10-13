@@ -37,7 +37,7 @@
 //! #     database: Arc<hearthsound_db::Database>,
 //! #     settings: hearthsound_config::settings::Settings,
 //! # ) -> Result<(), Box<dyn std::error::Error>> {
-//! let catalog = CatalogService::new(registry, database, settings);
+//! let catalog = CatalogService::new(registry, database, settings, "/srv/hearthsound/artwork");
 //! let results = catalog
 //!     .search(&CatalogQuery {
 //!         text: "Energy 52".to_owned(),
@@ -55,6 +55,7 @@
 #![forbid(unsafe_code)]
 
 pub mod aliases;
+pub mod artwork;
 pub mod cache;
 pub mod dedupe;
 mod error;
@@ -63,6 +64,7 @@ mod materialize;
 mod service;
 mod wire;
 
+pub use artwork::{CoverArt, CoverArtRequest};
 pub use cache::{ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
 pub use dedupe::{DURATION_TOLERANCE_MS, DedupedCatalog, LocalTrackHit, MaterializedEntity};
 pub use error::CatalogError;

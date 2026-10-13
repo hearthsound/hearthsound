@@ -396,3 +396,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   track's `mb_recording_id` through the library's `set_track_mb_recording_id`,
   and the `mb-recording`, `mb-release`, `mb-release-group` and `mb-artist`
   aliases of the canonical identifiers it learned.
+- Catalog cover art served through the issuing instance: a catalog id, or a
+  stored entity whose `p:<slug>` alias names the instance that issued it,
+  resolves to the images its provider describes, the smallest one at least as
+  large as the requested size is fetched through the instance's HTTP grant
+  (`ProviderRegistry::fetch_image`), and an instance whose manifest declares
+  `catalog.imageCachePolicy: cache` has the bytes written under `<data>/artwork/`
+  and indexed in `artwork_cache` while one that declares `no-store` is proxied
+  without writing anything. A row whose file is gone is a miss rather than a
+  failure, and the result carries the image's MIME type and bytes.
