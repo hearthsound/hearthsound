@@ -343,3 +343,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`ENTITY_CACHE_TTL`), a stale row is ignored rather than served, failures are
   never cached, a row whose stored JSON no longer decodes is a miss, and
   `sweep_expired_cache` deletes rows whose lifetime ran out.
+- Deduplication of catalog results against local ones: a catalog track is
+  dropped and reported with the stored track's id when it matches a local hit by
+  ISRC, when an alias in `external_ids` already resolves it (the provider's
+  `p:<slug>` id or a stored `isrc`), or when its normalized title and artist
+  match a local track within three seconds of duration
+  (`DURATION_TOLERANCE_MS`). Albums and artists are reported when they are
+  already materialized but never dropped, and the alias lookups run once per
+  instance and entity kind through the `external_ids` table.

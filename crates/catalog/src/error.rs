@@ -71,9 +71,21 @@ pub enum CatalogError {
         /// The slug of the instance that returned the entity.
         instance: String,
     },
+    /// A stored identifier of the alias table is not a UUID.
+    ///
+    /// Every `external_ids.entity_id` is a 16-byte UUIDv7, so this means the row
+    /// was written by something other than this server.
+    #[error("a stored external id is not a UUID")]
+    CorruptAlias,
     /// A setting could not be read.
     #[error(transparent)]
     Setting(#[from] hearthsound_config::ConfigError),
+    /// A value could not be encoded as JSON.
+    ///
+    /// The alias lookups send a page of values as a JSON array, so this is a
+    /// failure of encoding a request, never of decoding a provider's answer.
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
     /// The database rejected a read or a write.
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -141,7 +153,11 @@ impl CatalogError {
     /// ```
     pub fn instance(&self) -> Option<&str> {
         match self {
-            CatalogError::NotFound | CatalogError::Setting(_) | CatalogError::Database(_) => None,
+            CatalogError::NotFound
+            | CatalogError::CorruptAlias
+            | CatalogError::Setting(_)
+            | CatalogError::Json(_)
+            | CatalogError::Database(_) => None,
             CatalogError::Unavailable { instance }
             | CatalogError::RateLimited { instance, .. }
             | CatalogError::Unauthorized { instance }

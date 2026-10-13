@@ -11,10 +11,11 @@ mod common;
 
 use common::{
     Env, HELLO_CATALOG_ID, HTTP_CATALOG_ID, cache_row_lifetime, catalog_endpoint, catalog_id,
-    count_cache_rows, http_config, now_millis, query, setting_keys, write_cache_row,
+    count_cache_rows, http_config, now_millis, query, write_cache_row,
 };
 use hearthsound_catalog::{ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
 use hearthsound_config::SettingValue;
+use hearthsound_config::keys as setting_keys;
 use hearthsound_core::{EntityKind, Layer};
 use hearthsound_test_support::{HELLO_CATALOG, HTTP_CATALOG};
 use wiremock::MockServer;

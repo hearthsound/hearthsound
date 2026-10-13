@@ -14,10 +14,10 @@ use std::time::{Duration, Instant};
 
 use common::{
     Env, HELLO_CATALOG_ID, HTTP_CATALOG_ID, SPIN_CATALOG_ID, catalog_endpoint, catalog_id, query,
-    setting_keys as keys,
 };
 use hearthsound_catalog::CatalogError;
 use hearthsound_config::SettingValue;
+use hearthsound_config::keys;
 use hearthsound_core::{EntityKind, Layer, Slug};
 use hearthsound_test_support::{HELLO_CATALOG, HTTP_CATALOG, SPIN_CATALOG};
 use serde_json::json;

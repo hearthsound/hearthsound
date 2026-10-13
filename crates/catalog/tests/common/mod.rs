@@ -314,5 +314,105 @@ pub fn now_millis() -> i64 {
     (nanos / 1_000_000) as i64
 }
 
-/// The setting keys a test writes.
-pub use hearthsound_config::keys as setting_keys;
+/// Inserts a stored track row directly, for a test that needs a local hit.
+///
+/// # Parameters
+///
+/// - `database`: the database to write.
+/// - `title`: the track title.
+/// - `isrc`: the track's ISRC, when it has one.
+/// - `duration_ms`: the track duration in milliseconds, when known.
+///
+/// # Returns
+///
+/// The client id of the inserted row.
+pub async fn insert_local_track(
+    database: &Database,
+    title: &str,
+    isrc: Option<&str>,
+    duration_ms: Option<i64>,
+) -> hearthsound_core::EntityId {
+    let id = uuid::Uuid::now_v7();
+    let now = now_millis();
+    sqlx::query(
+        "INSERT INTO tracks (id, album_id, title, sort_title, display_artist, disc_number, \
+                             track_number, duration_ms, isrc, mb_recording_id, explicit, origin, \
+                             availability, unavailable_until, created_at, updated_at) \
+         VALUES (?, NULL, ?, ?, NULL, NULL, NULL, ?, ?, NULL, NULL, 'local', 'local', NULL, ?, ?)",
+    )
+    .bind(id.as_bytes().as_slice())
+    .bind(title)
+    .bind(title.to_lowercase())
+    .bind(duration_ms)
+    .bind(isrc)
+    .bind(now)
+    .bind(now)
+    .execute(database.writer())
+    .await
+    .unwrap();
+    hearthsound_core::EntityId::from_uuid(hearthsound_core::IdPrefix::Track, id)
+}
+
+/// Inserts a stored album row directly, for a test that needs a stored entity.
+///
+/// # Parameters
+///
+/// - `database`: the database to write.
+/// - `title`: the album title.
+///
+/// # Returns
+///
+/// The client id of the inserted row.
+pub async fn insert_local_album(database: &Database, title: &str) -> hearthsound_core::EntityId {
+    let id = uuid::Uuid::now_v7();
+    let now = now_millis();
+    sqlx::query(
+        "INSERT INTO albums (id, title, sort_title, display_artist, year, release_date, \
+                             album_type, mb_release_id, mb_release_group_id, upc, origin, \
+                             created_at, updated_at) \
+         VALUES (?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'local', ?, ?)",
+    )
+    .bind(id.as_bytes().as_slice())
+    .bind(title)
+    .bind(title.to_lowercase())
+    .bind(now)
+    .bind(now)
+    .execute(database.writer())
+    .await
+    .unwrap();
+    hearthsound_core::EntityId::from_uuid(hearthsound_core::IdPrefix::Album, id)
+}
+
+/// Writes one row of the alias table directly.
+///
+/// # Parameters
+///
+/// - `database`: the database to write.
+/// - `namespace`: the alias namespace, for example `p:hello`.
+/// - `kind`: the entity kind the alias names.
+/// - `value`: the alias value.
+/// - `entity`: the row the alias points at.
+pub async fn write_alias(
+    database: &Database,
+    namespace: &str,
+    kind: hearthsound_core::EntityKind,
+    value: &str,
+    entity: hearthsound_core::EntityId,
+) {
+    let kind = match kind {
+        hearthsound_core::EntityKind::Track => "track",
+        hearthsound_core::EntityKind::Album => "album",
+        hearthsound_core::EntityKind::Artist => "artist",
+        hearthsound_core::EntityKind::Playlist => "playlist",
+    };
+    sqlx::query(
+        "INSERT INTO external_ids (namespace, value, entity_kind, entity_id) VALUES (?, ?, ?, ?)",
+    )
+    .bind(namespace)
+    .bind(value)
+    .bind(kind)
+    .bind(entity.uuid().as_bytes().as_slice())
+    .execute(database.writer())
+    .await
+    .unwrap();
+}
