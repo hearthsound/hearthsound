@@ -296,6 +296,7 @@ mod tests {
         let capture = Capture::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(capture.clone())
+            .with_ansi(false)
             .with_max_level(tracing::Level::TRACE)
             .finish();
         let sink = sink();
@@ -315,6 +316,7 @@ mod tests {
         tracing::subscriber::with_default(
             tracing_subscriber::fmt()
                 .with_writer(capture.clone())
+                .with_ansi(false)
                 .finish(),
             || {
                 sink.write(Level::Info, "line");

@@ -48,6 +48,7 @@ async fn a_search_logs_its_query() {
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(capture.clone())
+        .with_ansi(false)
         .with_max_level(tracing::Level::TRACE)
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
