@@ -254,7 +254,8 @@ impl SettingDef {
     /// ```
     /// use hearthsound_config::{SettingValue, SettingsRegistry, keys};
     ///
-    /// let def = SettingsRegistry::builtin().def(keys::SUBSONIC_TOKEN_AUTH.name()).unwrap();
+    /// let registry = SettingsRegistry::builtin();
+    /// let def = registry.def(keys::SUBSONIC_TOKEN_AUTH.name()).unwrap();
     /// assert!(def.validate(&SettingValue::Bool(false)).is_ok());
     /// assert!(def.validate(&SettingValue::String("nope".to_owned())).is_err());
     /// ```
