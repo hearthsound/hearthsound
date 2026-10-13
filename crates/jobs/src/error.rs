@@ -1,5 +1,7 @@
 //! The error type of the job queue, runner, and scheduler.
 
+use croner::errors::CronError;
+
 /// An error from the job queue, the job runner, or the cron scheduler.
 #[derive(Debug, thiserror::Error)]
 pub enum JobsError {
@@ -30,5 +32,15 @@ pub enum JobsError {
     InvalidId {
         /// The table the id was read from.
         table: &'static str,
+    },
+
+    /// A cron expression could not be parsed or could not be resolved.
+    #[error("invalid cron expression `{expression}`: {source}")]
+    Cron {
+        /// The expression as it is stored in the schedule.
+        expression: String,
+        /// The parser or search error.
+        #[source]
+        source: CronError,
     },
 }

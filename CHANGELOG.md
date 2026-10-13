@@ -82,3 +82,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   local enqueue and poll otherwise, a heartbeat that extends a long handler's
   claim, retries driven by the queue's policy, an immediate failure for a kind
   with no handler, and a shutdown that waits for in-flight handlers.
+- The cron scheduler on the `schedules` table: system and per-user schedules
+  with a cron expression, a payload, and a persisted next fire time; an
+  idempotent upsert keyed by owner and kind; fire times computed in server-local
+  time; and a tick loop that enqueues the schedules that are due, advances them
+  in the same transaction, and skips the runs missed during downtime.

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE schedules SET next_run_at = ?, last_run_at = ?\n                 WHERE id = ? AND next_run_at = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "ce0eeb357bdbddabde533e41477e3f02a5f6e3d56182ade1c1c522c5585ae95d"
+}
