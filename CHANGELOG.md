@@ -168,3 +168,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session per user and track, taking its answer either from a flag a raw file
   stream sets as it writes bytes or from a probe such as the pending PCM bus's
   audio-delivered handle.
+- `bundled-plugins.lock`, pinning the released first-party plugin archives, and
+  the `xtask fetch-plugins` command that downloads each pinned archive and
+  verifies its SHA-256 before writing it.

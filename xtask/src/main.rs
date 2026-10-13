@@ -9,12 +9,26 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{ArgGroup, Args, Parser, Subcommand};
+use sha2::{Digest, Sha256};
 
 /// The repository the WebAssembly interface files are owned by.
 const PLUGIN_SDK_URL: &str = "https://github.com/hearthsound/plugin-sdk";
+
+/// The lock file that pins the bundled first-party plugins.
+const BUNDLED_PLUGINS_LOCK: &str = "bundled-plugins.lock";
+
+/// Where `fetch-plugins` writes the archives unless `--out` overrides it.
+const DEFAULT_BUNDLED_PLUGINS_DIR: &str = "target/bundled-plugins";
+
+/// The largest plugin archive `fetch-plugins` accepts, in bytes.
+const MAX_PLUGIN_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// How long one plugin download may take in total.
+const PLUGIN_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Parser)]
 #[command(name = "xtask", about = "Repository maintenance tasks")]
@@ -29,6 +43,18 @@ enum Task {
     SyncWit(SyncWitArgs),
     /// Build every fixture plugin into a `.hsplugin` archive.
     Fixtures,
+    /// Download the bundled plugins pinned in `bundled-plugins.lock`.
+    FetchPlugins(FetchPluginsArgs),
+}
+
+/// Arguments of the `fetch-plugins` task.
+#[derive(Debug, Args)]
+struct FetchPluginsArgs {
+    /// Directory the plugin archives are written to.
+    ///
+    /// Defaults to `target/bundled-plugins` in the repository root.
+    #[arg(long, value_name = "DIR")]
+    out: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -49,6 +75,7 @@ fn main() -> Result<()> {
     match cli.command {
         Task::SyncWit(args) => sync_wit(args),
         Task::Fixtures => fixtures(),
+        Task::FetchPlugins(args) => fetch_plugins(args),
     }
 }
 
@@ -295,4 +322,132 @@ fn fixtures() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The contents of `bundled-plugins.lock`.
+#[derive(Debug, serde::Deserialize)]
+struct BundledPlugins {
+    /// One entry per bundled archive, in lock file order.
+    #[serde(default)]
+    plugin: Vec<BundledPlugin>,
+}
+
+/// One plugin pinned in `bundled-plugins.lock`.
+#[derive(Debug, serde::Deserialize)]
+struct BundledPlugin {
+    /// The plugin id from its manifest, for example `app.hearthsound.slskd`.
+    id: String,
+    /// The released plugin version; the release tag is `v<version>`.
+    version: String,
+    /// Direct download URL of the `.hsplugin` archive.
+    url: String,
+    /// Lowercase hex SHA-256 of the archive.
+    sha256: String,
+}
+
+/// Downloads every plugin pinned in `bundled-plugins.lock`.
+///
+/// Archives land in `args.out`, or in `target/bundled-plugins` under the
+/// repository root when it is absent. A download is only written to its final
+/// path after its SHA-256 matched the lock file, so an interrupted or tampered
+/// download never leaves a usable archive behind. An archive that is already
+/// present with the pinned digest is left untouched.
+///
+/// Fails when the lock file cannot be read or parsed, when a download fails,
+/// when a digest does not match, or when an archive exceeds
+/// [`MAX_PLUGIN_ARCHIVE_BYTES`].
+fn fetch_plugins(args: FetchPluginsArgs) -> Result<()> {
+    let root = repo_root()?;
+    let lock_path = root.join(BUNDLED_PLUGINS_LOCK);
+    let raw = fs::read_to_string(&lock_path)
+        .with_context(|| format!("reading {}", lock_path.display()))?;
+    let lock: BundledPlugins =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", lock_path.display()))?;
+    if lock.plugin.is_empty() {
+        bail!("{} pins no plugins", lock_path.display());
+    }
+
+    let out_dir = match args.out {
+        Some(out) => out,
+        None => root.join(DEFAULT_BUNDLED_PLUGINS_DIR),
+    };
+    fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .user_agent(concat!("hearthsound-xtask/", env!("CARGO_PKG_VERSION")))
+            .timeout_global(Some(PLUGIN_DOWNLOAD_TIMEOUT))
+            .build(),
+    );
+
+    for plugin in &lock.plugin {
+        fetch_plugin(&agent, plugin, &out_dir)?;
+    }
+
+    Ok(())
+}
+
+/// Downloads one pinned archive into `out_dir`, verifying its digest first.
+///
+/// Returns an error when the pinned `sha256` is not 32 bytes of lowercase hex,
+/// when the download fails, or when the downloaded bytes hash to something
+/// other than the pinned digest. A present archive whose digest differs is
+/// refetched and replaced.
+fn fetch_plugin(agent: &ureq::Agent, plugin: &BundledPlugin, out_dir: &Path) -> Result<()> {
+    let expected = data_encoding::HEXLOWER
+        .decode(plugin.sha256.as_bytes())
+        .with_context(|| format!("{}: `sha256` is not lowercase hex", plugin.id))?;
+    if expected.len() != 32 {
+        bail!(
+            "{}: `sha256` decodes to {} bytes, expected 32",
+            plugin.id,
+            expected.len()
+        );
+    }
+
+    let target = out_dir.join(format!("{}-{}.hsplugin", plugin.id, plugin.version));
+    if target.is_file() {
+        let existing =
+            fs::read(&target).with_context(|| format!("reading {}", target.display()))?;
+        if Sha256::digest(&existing).as_slice() == expected.as_slice() {
+            println!("{} (up to date)", target.display());
+            return Ok(());
+        }
+        println!("{} (digest differs, refetching)", target.display());
+    }
+
+    let bytes = download(agent, &plugin.url)?;
+    let found = Sha256::digest(&bytes);
+    if found.as_slice() != expected.as_slice() {
+        bail!(
+            "{}: sha256 mismatch: the lock file pins {}, the download is {}",
+            plugin.url,
+            plugin.sha256,
+            data_encoding::HEXLOWER.encode(found.as_slice())
+        );
+    }
+
+    let mut file = tempfile::NamedTempFile::new_in(out_dir)
+        .with_context(|| format!("creating a temporary file in {}", out_dir.display()))?;
+    file.write_all(&bytes)
+        .with_context(|| format!("writing {}", target.display()))?;
+    file.persist(&target)
+        .with_context(|| format!("moving the download to {}", target.display()))?;
+    println!("{}", target.display());
+
+    Ok(())
+}
+
+/// Fetches `url` and returns its body, rejecting oversized responses.
+fn download(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>> {
+    let mut response = agent
+        .get(url)
+        .call()
+        .with_context(|| format!("downloading {url}"))?;
+    response
+        .body_mut()
+        .with_config()
+        .limit(MAX_PLUGIN_ARCHIVE_BYTES)
+        .read_to_vec()
+        .with_context(|| format!("reading the body of {url}"))
 }

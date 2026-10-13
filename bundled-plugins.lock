@@ -1,0 +1,36 @@
+# Bundled first-party plugins.
+#
+# Every released first-party plugin the server ships with is pinned here so a
+# build never depends on a mutable download location. The pins are consumed by
+# `cargo xtask fetch-plugins [--out <dir>]`, which downloads each archive into
+# `target/bundled-plugins/` by default, verifies its `sha256` before writing it,
+# and skips an archive that is already present with the pinned digest.
+#
+# Format: one `[[plugin]]` table per archive, with
+#
+#   id      reverse-DNS plugin id, as it appears in the plugin's manifest
+#   version released plugin version; the release tag is `v<version>`
+#   url     direct download URL of the `.hsplugin` release asset
+#   sha256  lowercase hex SHA-256 of that asset, checked on every download
+#
+# The file name an archive is written under is `<id>-<version>.hsplugin`.
+# Update a pin only together with a release whose digest was computed from the
+# published asset.
+
+[[plugin]]
+id = "app.hearthsound.deezer"
+version = "0.1.0"
+url = "https://github.com/hearthsound/plugin-deezer/releases/download/v0.1.0/app.hearthsound.deezer-0.1.0.hsplugin"
+sha256 = "5a670940da95a50c30623bc1e88b9328e55053f616605b0c8f802927b215ae59"
+
+[[plugin]]
+id = "app.hearthsound.musicbrainz"
+version = "0.1.0"
+url = "https://github.com/hearthsound/plugin-musicbrainz/releases/download/v0.1.0/app.hearthsound.musicbrainz-0.1.0.hsplugin"
+sha256 = "805f3383a68e6126618339461de990eb7c116845b4edde406c50e1845864a632"
+
+[[plugin]]
+id = "app.hearthsound.slskd"
+version = "0.1.0"
+url = "https://github.com/hearthsound/plugin-slskd/releases/download/v0.1.0/app.hearthsound.slskd-0.1.0.hsplugin"
+sha256 = "53ca1ab8f0f8af760259f7d391b40f5b8f443ac32ca8e62035b18beb080c90c2"
