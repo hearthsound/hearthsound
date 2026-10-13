@@ -182,3 +182,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ordered value model rendered to both JSON and XML, the fixed envelope fields,
   the error member with its optional `helpUrl`, and format selection with XML
   as the protocol default.
+- Authentication for the `/rest` surface: query string and form post
+  parameters, credentials resolved into a principal with the errors the base
+  protocol defines, a trusted-proxy list deciding which client address a
+  forwarding header is believed from, and two extractors so a binary endpoint
+  answers a failed check with an HTTP status code instead of an error envelope.
+  Endpoints are registered at both `/rest/<name>` and `/rest/<name>.view`, and
+  an endpoint this server does not implement answers error 70.

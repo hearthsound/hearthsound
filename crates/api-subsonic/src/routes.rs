@@ -1,0 +1,106 @@
+//! The `/rest` router and the endpoint registration helper.
+//!
+//! Every endpoint is registered at both `/rest/<name>` and `/rest/<name>.view`,
+//! for GET and for POST with an `application/x-www-form-urlencoded` body. The
+//! two paths reach the same handler, because the `.view` suffix is what older
+//! clients append and the base protocol defines the two as equivalent.
+//!
+//! Anything under `/rest/` that no endpoint matched, including the endpoint
+//! families this server never implements (podcast, internet radio, share,
+//! video, and chat), is answered with Subsonic error 70 rather than a stub or a
+//! bare HTTP 404, so a client is never told a feature it cannot have exists.
+
+use axum::Router;
+use axum::handler::Handler;
+use axum::routing::get;
+
+use crate::params::Params;
+use crate::response::{Encoded, Response, SubsonicError};
+use crate::state::SubsonicState;
+
+/// The path that answers every `/rest` request no endpoint matched.
+///
+/// This is a route rather than a router fallback so that it survives the router
+/// being merged into a larger application.
+const NOT_FOUND_PATH: &str = "/rest/{*rest}";
+
+/// Registers an endpoint at `/rest/<name>` and `/rest/<name>.view`.
+///
+/// Both paths accept GET and POST, so a client can pass the arguments in the
+/// query string or in an `application/x-www-form-urlencoded` body (the
+/// `formPost` extension). The handler is cloned for each of the four
+/// registrations, which is free for a function item.
+///
+/// # Parameters
+///
+/// - `router`: the router to add the endpoint to.
+/// - `name`: the endpoint name, without a leading slash and without the `.view`
+///   suffix.
+/// - `handler`: the endpoint's handler.
+///
+/// # Returns
+///
+/// The router, with the endpoint registered.
+///
+/// # Examples
+///
+/// ```
+/// use axum::Router;
+/// use hearthsound_api_subsonic::{Call, Encoded, Response, SubsonicState, register};
+///
+/// async fn pong(call: Call) -> Encoded {
+///     call.encode(Response::ok())
+/// }
+///
+/// let router: Router<SubsonicState> = register(Router::new(), "ping", pong);
+/// # let _ = router;
+/// ```
+pub fn register<H, T>(
+    router: Router<SubsonicState>,
+    name: &str,
+    handler: H,
+) -> Router<SubsonicState>
+where
+    H: Handler<T, SubsonicState>,
+    T: 'static,
+{
+    let route = format!("/rest/{name}");
+    let view = format!("/rest/{name}.view");
+    router
+        .route(&route, get(handler.clone()).post(handler.clone()))
+        .route(&view, get(handler.clone()).post(handler))
+}
+
+/// Builds every route of the `/rest` surface, without its state.
+///
+/// Register new endpoints here, with [`register`], before the catch-all route.
+///
+/// # Returns
+///
+/// The router, which the composition root mounts with
+/// [`router`](crate::router).
+pub fn routes() -> Router<SubsonicState> {
+    Router::new().route(NOT_FOUND_PATH, get(not_found).post(not_found))
+}
+
+/// Builds the `/rest` router with its state.
+///
+/// # Parameters
+///
+/// - `state`: the shared services every endpoint uses.
+///
+/// # Returns
+///
+/// The router, serving every path under `/rest/`.
+pub fn router(state: SubsonicState) -> Router {
+    routes().with_state(state)
+}
+
+/// Answers an endpoint this server does not implement.
+///
+/// The handler takes no credentials: there is nothing to authorize, and a
+/// client that asks for a feature this server has not got is told so whether or
+/// not it authenticated.
+async fn not_found(params: Params) -> Encoded {
+    params.encode(Response::failed(SubsonicError::not_found()))
+}
