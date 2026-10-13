@@ -370,7 +370,7 @@ pub(crate) fn transcode_args(request: &TranscodeRequest) -> Vec<OsString> {
 pub(crate) fn chunk_stream(
     mut process: crate::ffmpeg::FfmpegProcess,
     mut stdout: tokio::process::ChildStdout,
-    path: PathBuf,
+    label: PathBuf,
 ) -> AudioStream {
     let (sender, receiver) = mpsc::channel::<Result<Bytes, MediaError>>(CHUNK_QUEUE);
     let program = process.program().to_owned();
@@ -389,7 +389,11 @@ pub(crate) fn chunk_stream(
                     }
                 }
                 Err(source) => {
-                    let _ = sender.send(Err(MediaError::io(&path, source))).await;
+                    let _ = sender
+                        .send(Err(MediaError::Stream {
+                            message: source.to_string(),
+                        }))
+                        .await;
                     let _ = process.kill();
                     break;
                 }
@@ -403,7 +407,7 @@ pub(crate) fn chunk_stream(
                 let _ = sender
                     .send(Err(MediaError::Process {
                         program,
-                        args: path.display().to_string(),
+                        args: label.display().to_string(),
                         message: format!("ffmpeg exited with {status}"),
                     }))
                     .await;

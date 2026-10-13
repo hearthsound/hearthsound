@@ -42,9 +42,17 @@ const DEFAULT_BINARY: &str = "ffmpeg";
 /// One runner serves the whole process: it owns the concurrency budget, so
 /// transcodes and PCM decoders of pending streams compete for the same slots,
 /// and it can be resized when the operator changes
-/// `stream.max_concurrent_transcodes`.
-#[derive(Debug)]
+/// `stream.max_concurrent_transcodes`. Cloning a runner shares the budget, which
+/// is how a task that outlives its caller - the feeder of a pending stream -
+/// keeps spending from the same pool.
+#[derive(Debug, Clone)]
 pub struct FfmpegRunner {
+    inner: Arc<FfmpegRunnerInner>,
+}
+
+/// The shared state behind a runner.
+#[derive(Debug)]
+struct FfmpegRunnerInner {
     binary: PathBuf,
     permits: Arc<Semaphore>,
     max_concurrent: AtomicUsize,
@@ -72,26 +80,28 @@ impl FfmpegRunner {
     pub fn new(binary: Option<PathBuf>, max_concurrent: usize) -> FfmpegRunner {
         let cap = max_concurrent.max(1);
         FfmpegRunner {
-            binary: binary.unwrap_or_else(|| PathBuf::from(DEFAULT_BINARY)),
-            permits: Arc::new(Semaphore::new(cap)),
-            max_concurrent: AtomicUsize::new(cap),
-            in_flight: Arc::new(AtomicUsize::new(0)),
+            inner: Arc::new(FfmpegRunnerInner {
+                binary: binary.unwrap_or_else(|| PathBuf::from(DEFAULT_BINARY)),
+                permits: Arc::new(Semaphore::new(cap)),
+                max_concurrent: AtomicUsize::new(cap),
+                in_flight: Arc::new(AtomicUsize::new(0)),
+            }),
         }
     }
 
     /// Returns the ffmpeg binary the runner executes.
     pub fn binary(&self) -> &Path {
-        &self.binary
+        &self.inner.binary
     }
 
     /// Returns the number of children that may run at once.
     pub fn max_concurrent(&self) -> usize {
-        self.max_concurrent.load(Ordering::SeqCst)
+        self.inner.max_concurrent.load(Ordering::SeqCst)
     }
 
     /// Returns the number of children running right now.
     pub fn in_flight(&self) -> usize {
-        self.in_flight.load(Ordering::SeqCst)
+        self.inner.in_flight.load(Ordering::SeqCst)
     }
 
     /// Changes the concurrency cap.
@@ -105,11 +115,11 @@ impl FfmpegRunner {
     /// - `max_concurrent`: the new cap; values below one are treated as one.
     pub fn set_max_concurrent(&self, max_concurrent: usize) {
         let cap = max_concurrent.max(1);
-        let previous = self.max_concurrent.swap(cap, Ordering::SeqCst);
+        let previous = self.inner.max_concurrent.swap(cap, Ordering::SeqCst);
         if cap > previous {
-            self.permits.add_permits(cap - previous);
+            self.inner.permits.add_permits(cap - previous);
         } else if cap < previous {
-            self.permits.forget_permits(previous - cap);
+            self.inner.permits.forget_permits(previous - cap);
         }
     }
 
@@ -136,7 +146,7 @@ impl FfmpegRunner {
         let args: Vec<OsString> = args.into_iter().collect();
         let guard = self.acquire(&args).await?;
         let program = self.binary_display();
-        let output = Command::new(&self.binary)
+        let output = Command::new(&self.inner.binary)
             .args(&args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -189,7 +199,7 @@ impl FfmpegRunner {
         let args: Vec<OsString> = args.into_iter().collect();
         let guard = self.acquire(&args).await?;
         let program = self.binary_display();
-        let mut child = Command::new(&self.binary)
+        let mut child = Command::new(&self.inner.binary)
             .args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -242,26 +252,24 @@ impl FfmpegRunner {
     /// Returns [`MediaError::Process`] when the semaphore is closed, which only
     /// happens when the runner is dropped.
     async fn acquire(&self, args: &[OsString]) -> Result<PermitGuard, MediaError> {
-        let permit =
-            self.permits
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| MediaError::Process {
-                    program: self.binary_display(),
-                    args: join_args(args),
-                    message: "the ffmpeg concurrency budget was closed".to_owned(),
-                })?;
-        self.in_flight.fetch_add(1, Ordering::SeqCst);
+        let permit = Arc::clone(&self.inner.permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| MediaError::Process {
+                program: self.binary_display(),
+                args: join_args(args),
+                message: "the ffmpeg concurrency budget was closed".to_owned(),
+            })?;
+        self.inner.in_flight.fetch_add(1, Ordering::SeqCst);
         Ok(PermitGuard {
             _permit: permit,
-            in_flight: Arc::clone(&self.in_flight),
+            in_flight: Arc::clone(&self.inner.in_flight),
         })
     }
 
     /// Renders the binary path for a log line or an error message.
     fn binary_display(&self) -> String {
-        self.binary.display().to_string()
+        self.inner.binary.display().to_string()
     }
 }
 

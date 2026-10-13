@@ -44,6 +44,18 @@ pub enum MediaError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// Reading an ffmpeg child's output failed.
+    #[error("reading an ffmpeg stream failed: {message}")]
+    Stream {
+        /// What the reader reported.
+        message: String,
+    },
+    /// A pending stream ended before a command reached it.
+    #[error("the pending stream ended before it could {action}")]
+    PendingEnded {
+        /// What the caller tried to do, for example `switch to a file`.
+        action: &'static str,
+    },
     /// An ffmpeg process could not be started or exited with a failure.
     #[error("{program} {args} failed: {message}")]
     Process {

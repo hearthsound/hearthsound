@@ -131,3 +131,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flushing so the first bytes arrive immediately, an encoded-length estimate for
   `estimateContentLength`, a bounded queue so a stalled client cannot grow a
   buffer, and a failure reported on the stream rather than as a truncated body.
+- The pending PCM bus: one encoder that reads s16le 44100 Hz stereo PCM and
+  produces the requested format, fed by a two second silence burst, then silence
+  paced at the bus rate, then a decoder that pipes the finished file into the
+  same encoder with no gap. The stream ends when the song ends, one second after
+  a reported failure, or when the wait elapses; it reports whether any file
+  audio was delivered, and dropping it kills both processes and releases their
+  permits.
