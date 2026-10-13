@@ -11,11 +11,14 @@
 #
 # slskd 0.26.1 is pinned because the plugin needs the 0.26.0 batch download API
 # and refuses to enable against anything older, checked through
-# `GET /api/v0/application/`. Setting slskd up is a one-time manual step:
+# `GET /api/v0/application/version`. Setting slskd up is a one-time manual step:
 #
-#   - Create `dev/.env` (never committed) holding `SLSKD_API_KEY=<32 characters>`.
-#     The plugin instance is configured with the same key. The plugin needs the
-#     `readwrite` role, which the primary key supplied this way carries.
+#   - Create `dev/.env` (never committed) holding
+#     `SLSKD_SLSK_USERNAME=<soulseek user>`, `SLSKD_SLSK_PASSWORD=<password>`
+#     and `SLSKD_API_KEY=role=readwrite;<16 to 255 characters>`. The plugin
+#     instance is configured with the key part after the last `;`. Use a
+#     Soulseek account no other client is signed in with: the server
+#     disconnects the older session when the same account logs in twice.
 #   - Sign in at http://localhost:5030 and set
 #     `transfers.download.destination.permissions.mode` to a mode with execute
 #     bits, for example `777`. The mode covers directories too, and without
@@ -32,7 +35,7 @@
 #     hearthsound plugins install /usr/share/hearthsound/plugins/app.hearthsound.slskd-0.1.0.hsplugin
 #   docker compose -f dev/compose.yml exec hearthsound \
 #     hearthsound providers add --plugin app.hearthsound.slskd --slug slskd \
-#       --config '{"url":"http://slskd:5030","apiKey":"<key>","importRoot":"slskd-downloads"}' \
+#       --plugin-config '{"url":"http://slskd:5030","apiKey":"<key>","importRoot":"slskd-downloads"}' \
 #       --import-root slskd-downloads=/imports/slskd:move
 #
 # `importRoot` is the id of the import root granted by `--import-root`, not a
@@ -72,6 +75,10 @@ services:
 
   slskd:
     image: slskd/slskd:0.26.1
+    # The same uid and gid as the server image's `hearthsound` user, so the
+    # files slskd downloads into the shared import root are owned by the
+    # server, which removes them after a `move` import.
+    user: "1000:1000"
     ports:
       - "5030:5030"
     env_file:
