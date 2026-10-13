@@ -41,3 +41,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Availability, acquisition state with its transition table, acquisition
   priority, failure reason, pin reason, granularity, quality tier, import mode,
   and storage class literals, each serialized as its exact wire string.
+- Metadata and acquisition provider records mirroring the plugin interfaces,
+  the `MetadataProvider` and `AcquisitionProvider` traits, and the per-job
+  staging context acquisition calls carry.
