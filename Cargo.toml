@@ -6,6 +6,7 @@ members = [
     "crates/core",
     "crates/db",
     "crates/hearthsound",
+    "crates/jobs",
     "crates/plugin-host",
     "crates/test-support",
     "xtask",

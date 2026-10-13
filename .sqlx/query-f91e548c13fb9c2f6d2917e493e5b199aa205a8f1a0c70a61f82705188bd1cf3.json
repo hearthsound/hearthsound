@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs\n                     SET state = 'ready', run_at = ?, locked_until = NULL, last_error = ?,\n                         updated_at = ?\n                     WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "f91e548c13fb9c2f6d2917e493e5b199aa205a8f1a0c70a61f82705188bd1cf3"
+}

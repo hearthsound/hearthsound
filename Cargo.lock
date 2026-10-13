@@ -1202,6 +1202,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "hearthsound-jobs"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "hearthsound-core",
+ "hearthsound-db",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "hearthsound-plugin-host"
 version = "0.1.0-alpha.0"
 dependencies = [

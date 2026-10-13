@@ -74,3 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ETA-based candidate selection: the download estimate from size, source speed
   and queue length, the interactive and background ordering rules, the attempt
   list cap, and the `no-candidates` and `no-acceptable-quality` outcomes.
+- The persistent job queue on the `jobs` table: enqueue, a single-statement
+  claim of the most urgent due job that also reclaims jobs whose worker died,
+  lock heartbeats, completion, retry with a fixed backoff schedule, a dead
+  state that keeps the last error, cancellation, and listing by state.
