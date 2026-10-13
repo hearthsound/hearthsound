@@ -19,10 +19,11 @@ use wasmtime::Engine;
 use wasmtime::component::{Component, HasSelf, Linker};
 
 use crate::archive::PluginArchive;
-use crate::bindings::{self, CatalogProviderPre};
+use crate::bindings::{CatalogProviderPre, imports};
 use crate::catalog::WasmCatalogProvider;
 use crate::engine::PluginEngine;
 use crate::error::{HostError, InstallError};
+use crate::files::FileAccess;
 use crate::http::{HttpClient, HttpGrant};
 use crate::instance::InstanceConfig;
 use crate::kv::KvStore;
@@ -99,7 +100,7 @@ impl PluginHost {
 
         let mut linker = Linker::new(engine.engine());
         wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(HostError::Engine)?;
-        bindings::CatalogProvider::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+        imports::HostImports::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
             .map_err(HostError::Engine)?;
 
         Ok(PluginHost {
@@ -223,6 +224,11 @@ impl PluginHost {
             .map_err(|error| HostError::Http(error.to_string()))?,
         );
 
+        let files = Arc::new(FileAccess::new(
+            &instance.host_config,
+            instance.permissions.files.as_ref(),
+        ));
+
         let kv = Arc::new(KvStore::from_permission(
             self.database.writer().clone(),
             instance.id,
@@ -240,6 +246,7 @@ impl PluginHost {
                 log,
                 http,
                 kv,
+                files,
                 memory_mb: manifest.resources.memory_mb,
                 max_instances: manifest.resources.max_instances,
                 call_timeout_ms: manifest.resources.call_timeout_ms,

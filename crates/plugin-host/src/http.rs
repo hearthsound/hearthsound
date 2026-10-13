@@ -781,6 +781,7 @@ mod enforcement {
 
     use super::*;
     use crate::bindings::hearthsound::plugin::host_http;
+    use crate::files::FileAccess;
     use crate::kv::KvStore;
     use crate::log::LogSink;
     use crate::state::InstanceState;
@@ -795,10 +796,11 @@ mod enforcement {
         let log = Arc::new(LogSink::new("com.example.probe".to_owned(), slug.clone()));
         let kv = Arc::new(KvStore::new(
             sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap(),
-            crate::kv::KvStore::new_instance_id(),
+            KvStore::new_instance_id(),
             crate::kv::DEFAULT_QUOTA_BYTES,
         ));
-        InstanceState::new(slug, Arc::from(server_config), log, 64, http, kv)
+        let files = Arc::new(FileAccess::default());
+        InstanceState::new(slug, Arc::from(server_config), log, 64, http, kv, files)
     }
 
     /// The permission that reaches a local test server through `$config:baseUrl`.

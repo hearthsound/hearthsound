@@ -6,11 +6,12 @@
 //! its outbound HTTP client.
 //!
 //! The host imports check the instance's approved permissions themselves, never
-//! the call site: `host-http` consults the instance's HTTP client, and the
-//! key-value imports report that no quota is approved until the store is backed
-//! by the database. Denying inside the import is what makes a plugin's declared
-//! permissions meaningful even before the approval UI exists.
+//! the call site: `host-http` consults the instance's HTTP client, `host-kv`
+//! the instance's store, and `host-files` the roots the instance grants. Denying
+//! inside the import is what makes a plugin's declared permissions meaningful
+//! even before the approval UI exists.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -19,7 +20,10 @@ use wasmtime::component::ResourceTable;
 use wasmtime::{StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-use crate::bindings::hearthsound::plugin::{host_config, host_http, host_kv, host_log, types};
+use crate::bindings::hearthsound::plugin::{
+    host_config, host_files, host_http, host_kv, host_log, types,
+};
+use crate::files::{self, FileAccess, STAGING_ROOT};
 use crate::http::{HttpClient, HttpError, HttpRequest};
 use crate::kv::KvStore;
 use crate::log::{GuestOutput, LogSink};
@@ -34,6 +38,8 @@ pub struct InstanceState {
     slug: Slug,
     http: Arc<HttpClient>,
     kv: Arc<KvStore>,
+    files: Arc<FileAccess>,
+    staging: Option<PathBuf>,
     deadline: Option<Instant>,
 }
 
@@ -50,6 +56,7 @@ impl InstanceState {
     /// - `http`: the instance's outbound HTTP client. Every `host-http` call
     ///   goes through it, so its grant is the only host allowlist that applies.
     /// - `kv`: the instance's persistent key-value store.
+    /// - `files`: the import roots the instance grants.
     pub fn new(
         slug: Slug,
         server_config: Arc<str>,
@@ -57,6 +64,7 @@ impl InstanceState {
         memory_mb: u32,
         http: Arc<HttpClient>,
         kv: Arc<KvStore>,
+        files: Arc<FileAccess>,
     ) -> InstanceState {
         let mut builder = WasiCtxBuilder::new();
         builder.stdout(GuestOutput::new(Arc::clone(&log), host_log::Level::Info));
@@ -78,6 +86,8 @@ impl InstanceState {
             slug,
             http,
             kv,
+            files,
+            staging: None,
             deadline: None,
         }
     }
@@ -105,6 +115,37 @@ impl InstanceState {
     /// Returns the instance's key-value store.
     pub fn kv(&self) -> &Arc<KvStore> {
         &self.kv
+    }
+
+    /// Returns the import roots the instance grants.
+    pub fn files(&self) -> &Arc<FileAccess> {
+        &self.files
+    }
+
+    /// Sets the staging root of the acquisition call about to run.
+    ///
+    /// The staging directory belongs to one call, so it is set before the call
+    /// and cleared after it; `host-files` resolves the reserved root name
+    /// `staging` to it.
+    ///
+    /// # Parameters
+    ///
+    /// - `staging`: the call's staging directory, or `None` to clear it.
+    pub fn set_staging(&mut self, staging: Option<PathBuf>) {
+        self.staging = staging;
+    }
+
+    /// Returns the directory a root name resolves to, when the instance grants
+    /// it.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: the root a plugin named: [`STAGING_ROOT`] or an import-root id.
+    fn root_dir(&self, name: &str) -> Option<PathBuf> {
+        if name == STAGING_ROOT {
+            return self.staging.clone();
+        }
+        self.files.root(name).map(Path::to_path_buf)
     }
 
     /// Marks the start of a guest call and the instant it must be finished by.
@@ -141,6 +182,59 @@ impl WasiView for InstanceState {
 }
 
 impl types::Host for InstanceState {}
+
+impl host_files::Host for InstanceState {
+    async fn stat(
+        &mut self,
+        root: String,
+        path: String,
+    ) -> wasmtime::Result<Option<host_files::FileStat>> {
+        let Some(dir) = self.root_dir(&root) else {
+            tracing::debug!(
+                target: "hearthsound::plugin",
+                instance = %self.slug,
+                root = %root,
+                "host-files: the root is not granted",
+            );
+            return Ok(None);
+        };
+        Ok(match files::stat(&dir, &path).await {
+            Ok(Some(stat)) => Some(host_files::FileStat {
+                size: stat.size,
+                modified_ms: stat.modified_ms,
+                is_dir: stat.is_dir,
+            }),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::debug!(
+                    target: "hearthsound::plugin",
+                    instance = %self.slug,
+                    root = %root,
+                    path = %path,
+                    error = %error,
+                    "host-files stat refused",
+                );
+                None
+            }
+        })
+    }
+
+    async fn list_dir(
+        &mut self,
+        root: String,
+        path: String,
+    ) -> wasmtime::Result<Result<Vec<String>, String>> {
+        let Some(dir) = self.root_dir(&root) else {
+            return Ok(Err(format!(
+                "no import root `{root}` is granted to this instance"
+            )));
+        };
+        Ok(match files::list_dir(&dir, &path).await {
+            Ok(entries) => Ok(entries),
+            Err(error) => Err(error.reason()),
+        })
+    }
+}
 
 impl host_log::Host for InstanceState {
     async fn log(&mut self, level: host_log::Level, message: String) -> wasmtime::Result<()> {

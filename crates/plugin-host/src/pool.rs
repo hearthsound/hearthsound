@@ -20,6 +20,7 @@ use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
 use crate::bindings::{CatalogProvider, CatalogProviderPre};
+use crate::files::FileAccess;
 use crate::http::HttpClient;
 use crate::kv::KvStore;
 use crate::log::LogSink;
@@ -59,6 +60,8 @@ pub(crate) struct PoolConfig {
     pub http: Arc<HttpClient>,
     /// The instance's persistent key-value store.
     pub kv: Arc<KvStore>,
+    /// The import roots the instance grants.
+    pub files: Arc<FileAccess>,
     /// The instance's memory ceiling in megabytes.
     pub memory_mb: u32,
     /// How many stores may exist at once.
@@ -86,6 +89,7 @@ struct PoolInner {
     log: Arc<LogSink>,
     http: Arc<HttpClient>,
     kv: Arc<KvStore>,
+    files: Arc<FileAccess>,
     memory_mb: u32,
 }
 
@@ -129,6 +133,7 @@ impl StorePool {
                 log: config.log,
                 http: config.http,
                 kv: config.kv,
+                files: config.files,
                 memory_mb: config.memory_mb,
             }),
         })
@@ -220,6 +225,7 @@ impl StorePool {
                 inner.memory_mb,
                 Arc::clone(&inner.http),
                 Arc::clone(&inner.kv),
+                Arc::clone(&inner.files),
             ),
         );
         store.limiter(|state| state.limits());
