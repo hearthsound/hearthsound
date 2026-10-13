@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM plugin_kv WHERE expires_at IS NOT NULL AND expires_at <= ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "516a8282e94d601f9495905937dc058467c753fa9872d0fd7ef0558f54fdacc0"
+}

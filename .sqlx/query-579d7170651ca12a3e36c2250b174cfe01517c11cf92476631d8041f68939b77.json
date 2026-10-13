@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO plugin_kv (instance_id, key, value, expires_at)\n             VALUES (?, ?, ?, ?)\n             ON CONFLICT(instance_id, key) DO UPDATE SET\n               value = excluded.value,\n               expires_at = excluded.expires_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "579d7170651ca12a3e36c2250b174cfe01517c11cf92476631d8041f68939b77"
+}

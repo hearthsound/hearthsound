@@ -21,6 +21,7 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::bindings::hearthsound::plugin::{host_config, host_http, host_kv, host_log, types};
 use crate::http::{HttpClient, HttpError, HttpRequest};
+use crate::kv::KvStore;
 use crate::log::{GuestOutput, LogSink};
 
 /// The state behind one plugin instance's store.
@@ -32,6 +33,7 @@ pub struct InstanceState {
     server_config: Arc<str>,
     slug: Slug,
     http: Arc<HttpClient>,
+    kv: Arc<KvStore>,
     deadline: Option<Instant>,
 }
 
@@ -47,12 +49,14 @@ impl InstanceState {
     /// - `memory_mb`: the instance's memory ceiling in megabytes.
     /// - `http`: the instance's outbound HTTP client. Every `host-http` call
     ///   goes through it, so its grant is the only host allowlist that applies.
+    /// - `kv`: the instance's persistent key-value store.
     pub fn new(
         slug: Slug,
         server_config: Arc<str>,
         log: Arc<LogSink>,
         memory_mb: u32,
         http: Arc<HttpClient>,
+        kv: Arc<KvStore>,
     ) -> InstanceState {
         let mut builder = WasiCtxBuilder::new();
         builder.stdout(GuestOutput::new(Arc::clone(&log), host_log::Level::Info));
@@ -73,6 +77,7 @@ impl InstanceState {
             server_config,
             slug,
             http,
+            kv,
             deadline: None,
         }
     }
@@ -95,6 +100,11 @@ impl InstanceState {
     /// Returns the instance's HTTP client.
     pub fn http(&self) -> &Arc<HttpClient> {
         &self.http
+    }
+
+    /// Returns the instance's key-value store.
+    pub fn kv(&self) -> &Arc<KvStore> {
+        &self.kv
     }
 
     /// Marks the start of a guest call and the instant it must be finished by.
@@ -180,23 +190,46 @@ fn to_wit_error(error: HttpError) -> host_http::HttpError {
 }
 
 impl host_kv::Host for InstanceState {
-    async fn get(&mut self, _key: String) -> wasmtime::Result<Option<Vec<u8>>> {
-        Ok(None)
+    async fn get(&mut self, key: String) -> wasmtime::Result<Option<Vec<u8>>> {
+        match self.kv.get(&key).await {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                // The interface has no error channel on a read, so a storage
+                // failure is reported as a miss and logged instead.
+                tracing::error!(
+                    target: "hearthsound::plugin",
+                    instance = %self.slug,
+                    key = %key,
+                    error = %error,
+                    "host-kv read failed",
+                );
+                Ok(None)
+            }
+        }
     }
 
     async fn set(
         &mut self,
-        _key: String,
-        _value: Vec<u8>,
-        _ttl_ms: Option<u64>,
+        key: String,
+        value: Vec<u8>,
+        ttl_ms: Option<u64>,
     ) -> wasmtime::Result<Result<(), String>> {
-        Ok(Err(format!(
-            "host-kv: no storage quota is approved for instance `{}`",
-            self.slug
-        )))
+        Ok(match self.kv.set(&key, &value, ttl_ms).await {
+            Ok(()) => Ok(()),
+            Err(error) => Err(error.reason()),
+        })
     }
 
-    async fn delete(&mut self, _key: String) -> wasmtime::Result<()> {
+    async fn delete(&mut self, key: String) -> wasmtime::Result<()> {
+        if let Err(error) = self.kv.delete(&key).await {
+            tracing::error!(
+                target: "hearthsound::plugin",
+                instance = %self.slug,
+                key = %key,
+                error = %error,
+                "host-kv delete failed",
+            );
+        }
         Ok(())
     }
 }

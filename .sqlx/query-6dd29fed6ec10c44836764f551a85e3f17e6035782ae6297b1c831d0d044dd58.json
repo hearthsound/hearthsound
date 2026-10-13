@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM plugin_kv WHERE instance_id = ? AND key = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "6dd29fed6ec10c44836764f551a85e3f17e6035782ae6297b1c831d0d044dd58"
+}

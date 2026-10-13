@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore};
+use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_plugin_host::{InstallError, PluginHost};
 use hearthsound_test_support::{HELLO_CATALOG, fixture_plugin, workspace_root};
 
@@ -24,8 +25,15 @@ fn hello_manifest_path() -> std::path::PathBuf {
 }
 
 /// Builds a host over a fresh temp directory.
-fn host(dir: &Path) -> PluginHost {
-    PluginHost::new(dir.join("plugins"), settings()).unwrap()
+async fn host(dir: &Path) -> PluginHost {
+    PluginHost::new(dir.join("plugins"), settings(), database(dir).await).unwrap()
+}
+
+/// Opens a migrated temporary database for a test.
+async fn database(dir: &Path) -> Arc<Database> {
+    let database = Database::open(&dir.join("hearthsound.db")).await.unwrap();
+    MIGRATOR.run(database.writer()).await.unwrap();
+    Arc::new(database)
 }
 
 /// Reads an entry out of an archive.
@@ -65,7 +73,7 @@ fn archive_with_manifest(archive: &Path, edit: impl FnOnce(&mut serde_json::Valu
 #[tokio::test]
 async fn installs_the_hello_fixture() {
     let dir = tempfile::tempdir().unwrap();
-    let host = host(dir.path());
+    let host = host(dir.path()).await;
 
     let installed = host.install(&fixture_plugin(HELLO_CATALOG)).await.unwrap();
 
@@ -78,7 +86,7 @@ async fn installs_the_hello_fixture() {
 #[tokio::test]
 async fn a_second_install_of_the_same_version_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let host = host(dir.path());
+    let host = host(dir.path()).await;
     host.install(&fixture_plugin(HELLO_CATALOG)).await.unwrap();
 
     let error = host
@@ -95,7 +103,7 @@ async fn a_second_install_of_the_same_version_is_rejected() {
 #[tokio::test]
 async fn an_archive_without_a_component_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let host = host(dir.path());
+    let host = host(dir.path()).await;
     let manifest = std::fs::read(hello_manifest_path()).unwrap();
     let archive = dir.path().join("no-wasm.hsplugin");
     write_archive(&archive, &manifest, None);
@@ -111,7 +119,7 @@ async fn an_archive_without_a_component_is_rejected() {
 #[tokio::test]
 async fn a_manifest_promising_metadata_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let host = host(dir.path());
+    let host = host(dir.path()).await;
     let archive = dir.path().join("metadata.hsplugin");
     archive_with_manifest(&archive, |manifest| {
         manifest["provides"] = serde_json::json!(["metadata"]);
@@ -131,7 +139,7 @@ async fn a_manifest_promising_metadata_is_rejected() {
 #[tokio::test]
 async fn an_unsupported_api_version_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let host = host(dir.path());
+    let host = host(dir.path()).await;
     let archive = dir.path().join("api.hsplugin");
     archive_with_manifest(&archive, |manifest| {
         manifest["api"] = serde_json::json!("hearthsound:plugin@0.2.0");
@@ -148,7 +156,7 @@ async fn an_unsupported_api_version_is_rejected() {
 #[tokio::test]
 async fn a_corrupt_precompiled_artifact_is_recompiled() {
     let dir = tempfile::tempdir().unwrap();
-    let host = host(dir.path());
+    let host = host(dir.path()).await;
     let installed = host.install(&fixture_plugin(HELLO_CATALOG)).await.unwrap();
     let plugin_dir = installed.dir().to_path_buf();
     drop(installed);

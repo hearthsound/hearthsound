@@ -3,13 +3,23 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::Write;
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore};
 use hearthsound_core::providers::{CatalogProvider, CatalogQuery};
 use hearthsound_core::{EntityKind, Slug};
+use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_plugin_host::{InstanceConfig, PluginHost};
 use hearthsound_test_support::{HELLO_CATALOG, fixture_plugin};
+
+/// Opens a migrated temporary database for a test.
+async fn database(dir: &Path) -> Arc<Database> {
+    let database = Database::open(&dir.join("hearthsound.db")).await.unwrap();
+    MIGRATOR.run(database.writer()).await.unwrap();
+    Arc::new(database)
+}
+
 use tracing_subscriber::fmt::MakeWriter;
 
 /// A writer that appends everything written to a shared buffer.
@@ -57,7 +67,12 @@ async fn a_search_logs_its_query() {
     let settings = Arc::new(
         SettingsStore::resolve(&SettingsRegistry::builtin(), &SettingSources::default()).unwrap(),
     );
-    let host = PluginHost::new(dir.path().join("plugins"), settings).unwrap();
+    let host = PluginHost::new(
+        dir.path().join("plugins"),
+        settings,
+        database(dir.path()).await,
+    )
+    .unwrap();
     let installed = host.install(&fixture_plugin(HELLO_CATALOG)).await.unwrap();
 
     let provider: Arc<dyn CatalogProvider> = host

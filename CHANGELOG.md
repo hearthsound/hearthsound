@@ -143,3 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy enforced on the addresses the connection uses, request timeouts
   clamped to the call deadline, re-checked redirects, a streaming response body
   cap, a default User-Agent, and a per-instance rate limiter.
+- The `host-kv` import backed by the `plugin_kv` table: per-instance reads and
+  writes with a 256 KiB per-value cap, an approved total quota that fails a
+  write instead of evicting, read-time TTL expiry, and a sweep the server
+  schedules to reclaim expired rows.

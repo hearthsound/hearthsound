@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use hearthsound_config::SettingsStore;
 use hearthsound_core::providers::CatalogProvider;
+use hearthsound_db::Database;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use wasmtime::Engine;
@@ -24,6 +25,7 @@ use crate::engine::PluginEngine;
 use crate::error::{HostError, InstallError};
 use crate::http::{HttpClient, HttpGrant};
 use crate::instance::InstanceConfig;
+use crate::kv::KvStore;
 use crate::log::LogSink;
 use crate::manifest::{Manifest, ManifestError, SUPPORTED_API};
 use crate::pool::{PoolConfig, StorePool};
@@ -67,6 +69,7 @@ pub struct PluginHost {
     linker: Linker<InstanceState>,
     plugins_dir: PathBuf,
     settings: Arc<SettingsStore>,
+    database: Arc<Database>,
 }
 
 impl PluginHost {
@@ -80,6 +83,8 @@ impl PluginHost {
     /// - `plugins_dir`: the directory plugin installs live under. It is created
     ///   when a plugin is installed, not here.
     /// - `settings`: the resolved settings, used to validate manifests.
+    /// - `database`: the open database, used for the per-instance key-value
+    ///   store and for loading instances.
     ///
     /// # Errors
     ///
@@ -88,6 +93,7 @@ impl PluginHost {
     pub fn new(
         plugins_dir: PathBuf,
         settings: Arc<SettingsStore>,
+        database: Arc<Database>,
     ) -> Result<PluginHost, HostError> {
         let engine = PluginEngine::new()?;
 
@@ -101,6 +107,7 @@ impl PluginHost {
             linker,
             plugins_dir,
             settings,
+            database,
         })
     }
 
@@ -216,6 +223,12 @@ impl PluginHost {
             .map_err(|error| HostError::Http(error.to_string()))?,
         );
 
+        let kv = Arc::new(KvStore::from_permission(
+            self.database.writer().clone(),
+            instance.id,
+            instance.permissions.kv.as_ref(),
+        ));
+
         let pool = StorePool::new(
             self.engine.engine(),
             &self.linker,
@@ -226,6 +239,7 @@ impl PluginHost {
                 server_config: Arc::from(instance.server_config.as_str()),
                 log,
                 http,
+                kv,
                 memory_mb: manifest.resources.memory_mb,
                 max_instances: manifest.resources.max_instances,
                 call_timeout_ms: manifest.resources.call_timeout_ms,

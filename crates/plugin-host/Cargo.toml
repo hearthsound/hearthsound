@@ -15,12 +15,14 @@ async-trait.workspace = true
 governor.workspace = true
 hearthsound-config = { path = "../config" }
 hearthsound-core = { path = "../core" }
+hearthsound-db = { path = "../db" }
 jsonschema.workspace = true
 reqwest.workspace = true
 semver = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

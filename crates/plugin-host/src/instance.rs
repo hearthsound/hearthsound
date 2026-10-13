@@ -11,8 +11,9 @@
 
 use std::path::PathBuf;
 
-use hearthsound_core::{ImportMode, Slug};
+use hearthsound_core::{ImportMode, Slug, new_uuid_v7};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::manifest::Permissions;
 
@@ -28,6 +29,9 @@ const DEFAULT_SEARCHES_PER_HOUR: u32 = 120;
 /// the plugin's.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InstanceConfig {
+    /// The instance's database id, the key its `plugin_kv` rows and its event
+    /// payloads use.
+    pub id: Uuid,
     /// The instance slug, unique among the server's provider instances.
     pub slug: Slug,
     /// The server-scoped configuration as JSON text, with secrets decrypted.
@@ -60,11 +64,22 @@ impl InstanceConfig {
     /// ```
     pub fn new(slug: Slug) -> InstanceConfig {
         InstanceConfig {
+            id: new_uuid_v7(),
             slug,
             server_config: "{}".to_owned(),
             permissions: Permissions::default(),
             host_config: InstanceHostConfig::default(),
         }
+    }
+
+    /// Sets the instance's database id.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the id from `provider_instances.id`.
+    pub fn with_id(mut self, id: Uuid) -> InstanceConfig {
+        self.id = id;
+        self
     }
 
     /// Sets the server-scoped configuration.

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT value, expires_at FROM plugin_kv WHERE instance_id = ? AND key = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "value",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "plugin_kv",
+            "name": "value"
+          }
+        }
+      },
+      {
+        "name": "expires_at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "plugin_kv",
+            "name": "expires_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "3f5e70d832e0816e7366b02f19eabbeb1cd70e3a2c155eddc02861b9be61e2d7"
+}
