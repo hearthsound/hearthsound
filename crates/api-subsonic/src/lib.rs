@@ -76,6 +76,15 @@
 //! | `getOpenSubsonicExtensions` | public, no credentials; advertises `apiKeyAuthentication` 1 and `formPost` 1 |
 //! | `tokenInfo` | the user an API key belongs to |
 //! | `getMusicFolders` | the personal library, and the server unless `privacy.server_browse` is disabled |
+//! | `getArtists` | the artist index over the accessible scope |
+//! | `getArtist` | one artist with its albums |
+//! | `getAlbum` | one album with its songs |
+//! | `getSong` | one song |
+//! | `getAlbumList2` | the albums in scope, ordered by `newest`, `alphabeticalByName`, or `random` |
+//!
+//! The browse endpoints share one scope rule: an explicit `musicFolderId` of
+//! `1` is the requesting user's personal library and of `2` the server-wide
+//! view, and a request without one reads the user's `subsonic.default_scope`.
 //!
 //! Every other path under `/rest/`, including the endpoint families this server
 //! never implements (podcast, internet radio, share, video, and chat), answers
@@ -113,17 +122,21 @@
 #![forbid(unsafe_code)]
 
 mod auth;
+mod browse;
 mod endpoints;
 mod params;
+mod projection;
 mod render;
 mod response;
 mod routes;
+mod scope;
 mod state;
 mod value;
 
 pub use auth::{BinaryCall, Call, InvalidProxy, TrustedProxies, forbidden};
 pub use endpoints::{
-    get_license, get_music_folders, get_open_subsonic_extensions, ping, token_info,
+    get_album, get_album_list_2, get_artist, get_artists, get_license, get_music_folders,
+    get_open_subsonic_extensions, get_song, ping, token_info,
 };
 pub use params::{MAX_FORM_BODY_BYTES, Params, ParamsRejection};
 pub use response::{

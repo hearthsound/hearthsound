@@ -14,12 +14,15 @@ workspace = true
 axum.workspace = true
 hearthsound-auth = { path = "../auth" }
 hearthsound-config = { path = "../config" }
+hearthsound-core = { path = "../core" }
 hearthsound-db = { path = "../db" }
+hearthsound-library = { path = "../library" }
 thiserror.workspace = true
+time = { workspace = true, features = ["formatting"] }
 tracing.workspace = true
 
 [dev-dependencies]
-insta.workspace = true
+insta = { workspace = true, features = ["filters"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tower = { workspace = true, features = ["util"] }

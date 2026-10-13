@@ -9,7 +9,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use hearthsound_auth::{Authenticator, Principal, ResolveError, SubsonicCredentials};
+use hearthsound_auth::{Authenticator, Principal, ResolveError, SubsonicCredentials, UserSettings};
 use hearthsound_config::SettingsStore;
 use hearthsound_config::settings::Settings;
 use hearthsound_db::Database;
@@ -33,6 +33,8 @@ struct Inner {
     database: Arc<Database>,
     /// The settings service, which resolves the tunables of a response.
     settings: Settings,
+    /// The per-user setting overrides browse scope resolution reads.
+    user_settings: UserSettings,
     /// The credential resolver.
     authenticator: Arc<Authenticator>,
     /// The proxies whose forwarding headers are trusted.
@@ -59,10 +61,12 @@ impl SubsonicState {
         settings: Settings,
         authenticator: Arc<Authenticator>,
     ) -> SubsonicState {
+        let user_settings = UserSettings::new(&database, settings.registry().clone());
         SubsonicState {
             inner: Arc::new(Inner {
                 database,
                 settings,
+                user_settings,
                 authenticator,
                 trusted_proxies: Arc::new(TrustedProxies::default()),
             }),
@@ -85,6 +89,7 @@ impl SubsonicState {
             inner: Arc::new(Inner {
                 database: Arc::clone(&self.inner.database),
                 settings: self.inner.settings.clone(),
+                user_settings: self.inner.user_settings.clone(),
                 authenticator: Arc::clone(&self.inner.authenticator),
                 trusted_proxies: Arc::new(trusted_proxies),
             }),
@@ -113,6 +118,15 @@ impl SubsonicState {
     /// last change.
     pub fn settings_snapshot(&self) -> Arc<SettingsStore> {
         self.inner.settings.current()
+    }
+
+    /// Returns the per-user setting overrides.
+    ///
+    /// A browse request reads the user's `subsonic.default_scope` override
+    /// through this repository, falling back to the server-wide value of that
+    /// setting when the user has none.
+    pub fn user_settings(&self) -> &UserSettings {
+        &self.inner.user_settings
     }
 
     /// Returns the credential resolver.

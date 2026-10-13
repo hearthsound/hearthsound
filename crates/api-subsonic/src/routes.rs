@@ -91,6 +91,11 @@ pub fn routes() -> Router<SubsonicState> {
     );
     let router = register(router, "tokenInfo", endpoints::token_info);
     let router = register(router, "getMusicFolders", endpoints::get_music_folders);
+    let router = register(router, "getArtists", endpoints::get_artists);
+    let router = register(router, "getArtist", endpoints::get_artist);
+    let router = register(router, "getAlbum", endpoints::get_album);
+    let router = register(router, "getSong", endpoints::get_song);
+    let router = register(router, "getAlbumList2", endpoints::get_album_list_2);
     router.route(NOT_FOUND_PATH, get(not_found).post(not_found))
 }
 

@@ -7,6 +7,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 #![allow(dead_code)]
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
@@ -17,6 +18,7 @@ use hearthsound_api_subsonic::SubsonicState;
 use hearthsound_auth::{ApiKeys, AppPasswords, Authenticator, NewUser, Users};
 use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingSources, SettingValue, SettingsRegistry, keys};
+use hearthsound_core::{EntityId, IdPrefix};
 use hearthsound_db::{Database, MIGRATOR};
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -27,6 +29,20 @@ pub const USERNAME: &str = "echo";
 /// The account password of the test account.
 pub const ACCOUNT_PASSWORD: &str = "hunter2";
 
+/// The filters that make a seeded response stable across runs.
+///
+/// A seeded row's `created` timestamp is the moment the test inserted it, so it
+/// differs from run to run; the filter replaces it with a fixed marker.
+/// Everything else in a snapshot is exactly what the endpoint computed, because
+/// the seeded client ids are replaced by name through
+/// [`seed::Seeded::stabilize`].
+pub const SNAPSHOT_FILTERS: [(&str, &str); 1] = [(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})",
+    "TIMESTAMP",
+)];
+
+pub mod seed;
+
 /// A migrated temporary database with one account and its credentials.
 pub struct Fixture {
     /// Keeps the temporary directory alive.
@@ -35,6 +51,8 @@ pub struct Fixture {
     pub database: Arc<Database>,
     /// The settings service, which a test changes to arrange its case.
     pub settings: Settings,
+    /// The test account's client id, `us_<...>`.
+    pub user_id: EntityId,
     /// An API key of the test account.
     pub api_key: String,
     /// An app password of the test account.
@@ -86,6 +104,7 @@ impl Fixture {
             _dir: dir,
             database,
             settings,
+            user_id: EntityId::from_uuid(IdPrefix::User, user.id),
             api_key,
             app_password,
             state,
@@ -95,6 +114,24 @@ impl Fixture {
     /// Returns the `/rest` router under test.
     pub fn app(&self) -> Router {
         hearthsound_api_subsonic::router(self.state.clone())
+    }
+
+    /// Creates a directory inside the fixture's temporary directory.
+    ///
+    /// A test that seeds library folders needs a path that exists and is a
+    /// directory, because adding a folder canonicalizes it.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: the directory's name.
+    ///
+    /// # Returns
+    ///
+    /// The absolute path of the created directory.
+    pub fn subdir(&self, name: &str) -> PathBuf {
+        let path = self._dir.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        path
     }
 
     /// Creates a second account with the given permissions and returns an API

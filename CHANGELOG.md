@@ -264,3 +264,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   view ready for the Subsonic projection (album, artists, genres, and the
   preferred file's suffix, content type, size, bitrate, duration, and relative
   path), the preferred file's absolute path, and a last-accessed touch.
+- The browse endpoints of the Subsonic surface: `getArtists`, an artist index
+  grouped by the first letter of the article-stripped sort name and reporting
+  the `The El La Los Las Le Les` ignored articles; `getArtist`, one artist with
+  its albums; `getAlbum`, one album with its songs; `getSong`, one song; and
+  `getAlbumList2`, the albums in scope ordered `newest`, `alphabeticalByName`,
+  or `random` with a size capped at 500 and an offset. An explicit
+  `musicFolderId` selects the personal library (`1`) or the server-wide view
+  (`2`, empty while `privacy.server_browse` is disabled), and a request without
+  one follows the user's `subsonic.default_scope` override. The projections
+  emit every base protocol field plus the OpenSubsonic additions with an empty
+  or default value when the server has none, name the album as `coverArt` when
+  the track's file carries embedded art and the track itself otherwise, and a
+  malformed, unknown, out-of-scope, or catalog id is answered with error 70.
