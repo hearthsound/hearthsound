@@ -3,22 +3,35 @@
 //! This crate holds the vocabulary every other crate speaks: the [`Layer`] enum
 //! naming every pluggable behavior, [`EntityKind`] naming the catalog entities,
 //! the shared [`ProviderError`], the [`Slug`] identifier used for provider
-//! instances, the client id codec in [`id`], and the provider traits and
-//! WebAssembly interface records in [`providers`]. It deliberately depends on
-//! almost nothing so every other crate can depend on it without pulling in a
-//! runtime.
+//! instances, the client id codec in [`id`], the availability, acquisition,
+//! quality and storage literals, and the provider traits and WebAssembly
+//! interface records in [`providers`]. It deliberately depends on almost
+//! nothing so every other crate can depend on it without pulling in a runtime.
 #![forbid(unsafe_code)]
 
+mod acquisition;
+mod availability;
 mod error;
 mod id;
 mod kind;
 mod layer;
+mod quality;
 mod slug;
+mod storage;
 
 pub mod providers;
 
+pub use acquisition::{
+    AcquisitionState, FailureReason, Granularity, Priority, UnknownAcquisitionState,
+    UnknownFailureReason, UnknownGranularity, UnknownPriority,
+};
+pub use availability::{Availability, UnknownAvailability};
 pub use error::ProviderError;
 pub use id::{CatalogId, ClientId, EntityId, IdError, IdPrefix, new_uuid_v7};
 pub use kind::EntityKind;
 pub use layer::{Layer, UnknownLayer};
+pub use quality::{QualityTier, UnknownQualityTier};
 pub use slug::{InvalidSlug, Slug};
+pub use storage::{
+    ImportMode, PinReason, StorageClass, UnknownImportMode, UnknownPinReason, UnknownStorageClass,
+};

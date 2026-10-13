@@ -38,3 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The client id codec: UUIDv7 generation, materialized `<prefix>_<26 character
   Crockford base32>` ids for entities, and `x_<slug>_<kind>_<payload>` ids for
   catalog entities, both parsed by one entry point that dispatches on the form.
+- Availability, acquisition state with its transition table, acquisition
+  priority, failure reason, pin reason, granularity, quality tier, import mode,
+  and storage class literals, each serialized as its exact wire string.
