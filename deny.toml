@@ -1,6 +1,11 @@
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+  # `paste` is unmaintained and has no successor release; it reaches the tree
+  # only through `lofty`, the tag reader and writer. Revisit when lofty drops it.
+  { id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro used only by lofty; no fixed release exists" },
+]
 
 [licenses]
 version = 2
@@ -22,6 +27,12 @@ allow = [
   "GPL-3.0-or-later",
   "LGPL-2.1-or-later",
   "LGPL-3.0-or-later",
+]
+# The Mozilla CA bundle crates are data licensed CDLA-Permissive-2.0. They are
+# allowed by name only, so the license does not become acceptable for code.
+exceptions = [
+  { crate = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
+  { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 [bans]
