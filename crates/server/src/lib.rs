@@ -13,6 +13,13 @@
 //! client lands). [`hearthsound_api_subsonic`] owns `/rest`; this crate only
 //! wires it to the services and adds the request-tracing layer.
 //!
+//! While it runs, the server watches `PRAGMA data_version` for commits made by
+//! another connection, because a command-line command writes the database
+//! directly rather than talking to the running process. A detected commit
+//! reloads the runtime settings, rebuilds the provider registry from the plugin
+//! tables, and reapplies the settings the services cache, so a command-line
+//! change takes effect within about a second without a restart.
+//!
 //! # Where later wiring goes
 //!
 //! [`Services::build`] is the one place every service is constructed, so the
@@ -44,6 +51,7 @@ mod error;
 pub mod http;
 pub mod jobs;
 pub mod paths;
+mod reload;
 mod server;
 mod services;
 

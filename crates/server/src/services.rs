@@ -407,7 +407,7 @@ fn bundled_migration_version() -> i64 {
 /// # Errors
 ///
 /// Returns [`ServerError::Setting`] when the setting is missing or negative.
-fn login_rate_limit_per_minute(settings: &SettingsStore) -> Result<u32, ServerError> {
+pub(crate) fn login_rate_limit_per_minute(settings: &SettingsStore) -> Result<u32, ServerError> {
     let per_minute = settings.get(keys::AUTH_LOGIN_RATE_LIMIT_PER_MINUTE)?;
     u32::try_from(per_minute).map_err(|_| {
         ServerError::Setting(hearthsound_config::ConfigError::InvalidValue {
@@ -426,7 +426,7 @@ fn login_rate_limit_per_minute(settings: &SettingsStore) -> Result<u32, ServerEr
 /// # Errors
 ///
 /// Returns [`ServerError::Setting`] when the setting is missing or not positive.
-fn max_concurrent_transcodes(settings: &SettingsStore) -> Result<usize, ServerError> {
+pub(crate) fn max_concurrent_transcodes(settings: &SettingsStore) -> Result<usize, ServerError> {
     let cap = settings.get(keys::STREAM_MAX_CONCURRENT_TRANSCODES)?;
     usize::try_from(cap)
         .ok()
@@ -448,7 +448,7 @@ fn max_concurrent_transcodes(settings: &SettingsStore) -> Result<usize, ServerEr
 /// A skipped instance is a warning rather than an error: it stays configured and
 /// the next rebuild tries it again, so a server whose plugin is temporarily
 /// unloadable still serves everything else.
-fn log_rebuild(report: &hearthsound_plugin_host::RegistryReport) {
+pub(crate) fn log_rebuild(report: &hearthsound_plugin_host::RegistryReport) {
     tracing::info!(
         instances = report.instances,
         "rebuilt the provider registry"

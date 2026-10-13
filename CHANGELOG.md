@@ -291,3 +291,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runner, and the scheduler on `SIGINT` or `SIGTERM`.
 - The schema version accessor on the database layer, reporting the migration
   version a database file is actually at.
+- The external-change worker of the running server: it polls `PRAGMA
+  data_version`, and a commit made by another connection reloads the runtime
+  settings, rebuilds the provider registry from the plugin tables, and
+  reapplies the settings the services cache, so a command-line change such as a
+  new layer assignment takes effect within about a second without a restart.

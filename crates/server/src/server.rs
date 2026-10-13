@@ -197,6 +197,11 @@ impl Server {
 
 /// Spawns the job runner, the scheduler, and the data-version watcher.
 ///
+/// The watcher is what makes a command-line write take effect on a running
+/// server: it polls `PRAGMA data_version` and reloads the settings and the
+/// provider registry when another connection commits (see
+/// [`Services::watch_external_changes`](crate::Services::watch_external_changes)).
+///
 /// # Parameters
 ///
 /// - `services`: the composed services.
@@ -214,7 +219,10 @@ fn spawn_workers(services: &Arc<Services>, shutdown: Shutdown) -> Vec<JoinHandle
     let scheduler_shutdown = shutdown.clone();
     let scheduler_task = tokio::spawn(async move { scheduler.run(scheduler_shutdown).await });
 
-    vec![runner_task, scheduler_task]
+    let watcher = Arc::clone(services);
+    let watcher_task = tokio::spawn(async move { watcher.watch_external_changes(shutdown).await });
+
+    vec![runner_task, scheduler_task, watcher_task]
 }
 
 /// Waits for `SIGINT` or `SIGTERM`.

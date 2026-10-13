@@ -44,7 +44,6 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let config = write_config(dir.path(), None);
         let services = Services::build(config, &BTreeMap::new()).await.unwrap();
-
         let user = Users::new(services.database())
             .create(
                 &services.settings().current(),
