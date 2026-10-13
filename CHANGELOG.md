@@ -253,3 +253,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folder's owner re-pins or unpins every track of the folder in one transaction,
   and a helper answers whether a track is pinned so an import lands under
   `<storage>/library` when it is and under `<storage>/cache` when it is not.
+- The browse and search queries over the personal and server scopes: the
+  personal library as the union of saved and uploaded tracks, likes, permanent
+  playlists, and folder-owned content, with albums and artists following by
+  containment; the server scope as everything stored, permanent content only,
+  or nothing per `privacy.server_browse`. The queries return an artist index
+  with album counts, artist and album details, album lists ordered newest,
+  alphabetically, or at random with a size and offset, a local full-text search
+  over the shared index with a sanitized prefix query per entity kind, a track
+  view ready for the Subsonic projection (album, artists, genres, and the
+  preferred file's suffix, content type, size, bitrate, duration, and relative
+  path), the preferred file's absolute path, and a last-accessed touch.

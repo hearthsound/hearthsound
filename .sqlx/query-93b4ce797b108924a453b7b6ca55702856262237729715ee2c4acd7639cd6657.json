@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH scope_tracks(track_id) AS ( SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'track' UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'track' AND value = 'like' UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id WHERE p.owner_user_id = ? AND p.is_temporary = 0 UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id WHERE mf.storage = 'folder' AND lf.owner_user_id = ? ) SELECT EXISTS ( SELECT 1 FROM artists ar WHERE ar.id = ? AND (ar.id IN (SELECT ta.artist_id FROM track_artists ta JOIN scope_tracks st ON st.track_id = ta.track_id) OR ar.id IN (SELECT aa.artist_id FROM album_artists aa WHERE aa.album_id IN ( SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id)) OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ? AND entity_kind = 'artist' AND entity_id = ar.id) OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'artist' AND value = 'like' AND entity_id = ar.id)))",
+  "describe": {
+    "columns": [
+      {
+        "name": "EXISTS ( SELECT 1 FROM artists ar WHERE ar.id = ? AND (ar.id IN (SELECT ta.artist_id FROM track_artists ta JOIN scope_tracks st ON st.track_id = ta.track_id) OR ar.id IN (SELECT aa.artist_id FROM album_artists aa WHERE aa.album_id IN ( SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id)) OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ? AND entity_kind = 'artist' AND entity_id = ar.id) OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'artist' AND value = 'like' AND entity_id = ar.id)))",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "93b4ce797b108924a453b7b6ca55702856262237729715ee2c4acd7639cd6657"
+}

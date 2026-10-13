@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH scope_tracks(track_id) AS (SELECT id FROM tracks WHERE availability IN (?, ?)) SELECT EXISTS ( SELECT 1 FROM albums al WHERE al.id = ? AND al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id))",
+  "describe": {
+    "columns": [
+      {
+        "name": "EXISTS ( SELECT 1 FROM albums al WHERE al.id = ? AND al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id))",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dbf31288e95c27face6090e67602dd4dbc93ec63f12cad6b393eb1009e352c22"
+}

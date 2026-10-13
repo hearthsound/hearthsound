@@ -22,20 +22,20 @@ use crate::now_millis;
 
 /// One row of the `albums` table as it is stored.
 #[derive(sqlx::FromRow)]
-struct AlbumRow {
-    id: Vec<u8>,
-    title: String,
-    sort_title: String,
-    display_artist: Option<String>,
-    year: Option<i64>,
-    release_date: Option<String>,
-    album_type: Option<String>,
-    mb_release_id: Option<String>,
-    mb_release_group_id: Option<String>,
-    upc: Option<String>,
-    origin: String,
-    created_at: i64,
-    updated_at: i64,
+pub(crate) struct AlbumRow {
+    pub(crate) id: Vec<u8>,
+    pub(crate) title: String,
+    pub(crate) sort_title: String,
+    pub(crate) display_artist: Option<String>,
+    pub(crate) year: Option<i64>,
+    pub(crate) release_date: Option<String>,
+    pub(crate) album_type: Option<String>,
+    pub(crate) mb_release_id: Option<String>,
+    pub(crate) mb_release_group_id: Option<String>,
+    pub(crate) upc: Option<String>,
+    pub(crate) origin: String,
+    pub(crate) created_at: i64,
+    pub(crate) updated_at: i64,
 }
 
 impl AlbumRow {
@@ -46,7 +46,7 @@ impl AlbumRow {
     /// Returns [`LibraryError::CorruptId`] when the primary key is not 16 bytes
     /// and [`LibraryError::Origin`] when the `origin` column is not a known
     /// literal.
-    fn into_album(self) -> Result<Album, LibraryError> {
+    pub(crate) fn into_album(self) -> Result<Album, LibraryError> {
         Ok(Album {
             id: decode_entity(IdPrefix::Album, &self.id)?,
             title: self.title,

@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH scope_tracks(track_id) AS (SELECT id FROM tracks WHERE availability IN (?, ?)) SELECT EXISTS (SELECT 1 FROM scope_tracks WHERE track_id = ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "EXISTS (SELECT 1 FROM scope_tracks WHERE track_id = ?)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c5f8af053f338fb644b0861ffde9efe485f05d11177b6664ba5d745fea9837c9"
+}

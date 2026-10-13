@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH scope_tracks(track_id) AS (SELECT id FROM tracks WHERE availability IN (?, ?)) SELECT ar.id FROM search_fts JOIN artists ar ON ar.rowid = search_fts.rowid / 4 WHERE search_fts MATCH ? AND search_fts.rowid % 4 = 3 AND (ar.id IN (SELECT ta.artist_id FROM track_artists ta JOIN scope_tracks st ON st.track_id = ta.track_id) OR ar.id IN (SELECT aa.artist_id FROM album_artists aa WHERE aa.album_id IN ( SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id))) ORDER BY rank LIMIT ? OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "be55885c261dd152d44540bac274f12ac603f66c8c2a370320c1929dafb1162a"
+}

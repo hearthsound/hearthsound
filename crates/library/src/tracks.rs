@@ -28,23 +28,23 @@ use crate::now_millis;
 
 /// One row of the `tracks` table as it is stored.
 #[derive(sqlx::FromRow)]
-struct TrackRow {
-    id: Vec<u8>,
-    album_id: Option<Vec<u8>>,
-    title: String,
-    sort_title: String,
-    display_artist: Option<String>,
-    disc_number: Option<i64>,
-    track_number: Option<i64>,
-    duration_ms: Option<i64>,
-    isrc: Option<String>,
-    mb_recording_id: Option<String>,
-    explicit: Option<i64>,
-    origin: String,
-    availability: String,
-    unavailable_until: Option<i64>,
-    created_at: i64,
-    updated_at: i64,
+pub(crate) struct TrackRow {
+    pub(crate) id: Vec<u8>,
+    pub(crate) album_id: Option<Vec<u8>>,
+    pub(crate) title: String,
+    pub(crate) sort_title: String,
+    pub(crate) display_artist: Option<String>,
+    pub(crate) disc_number: Option<i64>,
+    pub(crate) track_number: Option<i64>,
+    pub(crate) duration_ms: Option<i64>,
+    pub(crate) isrc: Option<String>,
+    pub(crate) mb_recording_id: Option<String>,
+    pub(crate) explicit: Option<i64>,
+    pub(crate) origin: String,
+    pub(crate) availability: String,
+    pub(crate) unavailable_until: Option<i64>,
+    pub(crate) created_at: i64,
+    pub(crate) updated_at: i64,
 }
 
 impl TrackRow {
@@ -55,7 +55,7 @@ impl TrackRow {
     /// Returns [`LibraryError::CorruptId`] when a primary key is not 16 bytes,
     /// [`LibraryError::Origin`] when the `origin` column is unknown, and
     /// [`LibraryError::UnknownLiteral`] when `availability` is unknown.
-    fn into_track(self) -> Result<Track, LibraryError> {
+    pub(crate) fn into_track(self) -> Result<Track, LibraryError> {
         let album_id = match self.album_id.as_deref() {
             Some(bytes) => Some(decode_entity(IdPrefix::Album, bytes)?),
             None => None,

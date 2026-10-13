@@ -1,0 +1,105 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH scope_tracks(track_id) AS ( SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'track' UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'track' AND value = 'like' UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id WHERE p.owner_user_id = ? AND p.is_temporary = 0 UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id WHERE mf.storage = 'folder' AND lf.owner_user_id = ? ) SELECT ar.id, ar.name, ar.sort_name, ar.mb_artist_id, ar.origin, ar.created_at, ar.updated_at, (SELECT COUNT(DISTINCT al.id) FROM albums al JOIN album_artists aa ON aa.album_id = al.id AND aa.artist_id = ar.id JOIN tracks t ON t.album_id = al.id JOIN scope_tracks st ON st.track_id = t.id) AS album_count FROM artists ar WHERE ar.id IN (SELECT ta.artist_id FROM track_artists ta JOIN scope_tracks st ON st.track_id = ta.track_id) OR ar.id IN (SELECT aa.artist_id FROM album_artists aa WHERE aa.album_id IN ( SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id)) OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ? AND entity_kind = 'artist' AND entity_id = ar.id) OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'artist' AND value = 'like' AND entity_id = ar.id) ORDER BY ar.sort_name, ar.id LIMIT ? OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "sort_name",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "sort_name"
+          }
+        }
+      },
+      {
+        "name": "mb_artist_id",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "mb_artist_id"
+          }
+        }
+      },
+      {
+        "name": "origin",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "origin"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "name": "album_count",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "7120712bf975469c77b5f35cbf7f26933d37aca9260e964971f47d2405dc5cf1"
+}

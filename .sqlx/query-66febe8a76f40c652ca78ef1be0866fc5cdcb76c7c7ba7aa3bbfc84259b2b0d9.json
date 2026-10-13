@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH scope_tracks(track_id) AS (SELECT id FROM tracks WHERE availability IN (?, ?)) SELECT EXISTS ( SELECT 1 FROM artists ar WHERE ar.id = ? AND (ar.id IN (SELECT ta.artist_id FROM track_artists ta JOIN scope_tracks st ON st.track_id = ta.track_id) OR ar.id IN (SELECT aa.artist_id FROM album_artists aa WHERE aa.album_id IN ( SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id))))",
+  "describe": {
+    "columns": [
+      {
+        "name": "EXISTS ( SELECT 1 FROM artists ar WHERE ar.id = ? AND (ar.id IN (SELECT ta.artist_id FROM track_artists ta JOIN scope_tracks st ON st.track_id = ta.track_id) OR ar.id IN (SELECT aa.artist_id FROM album_artists aa WHERE aa.album_id IN ( SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id))))",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "66febe8a76f40c652ca78ef1be0866fc5cdcb76c7c7ba7aa3bbfc84259b2b0d9"
+}

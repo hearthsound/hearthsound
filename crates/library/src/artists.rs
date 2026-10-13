@@ -19,14 +19,14 @@ use crate::now_millis;
 
 /// One row of the `artists` table as it is stored.
 #[derive(sqlx::FromRow)]
-struct ArtistRow {
-    id: Vec<u8>,
-    name: String,
-    sort_name: String,
-    mb_artist_id: Option<String>,
-    origin: String,
-    created_at: i64,
-    updated_at: i64,
+pub(crate) struct ArtistRow {
+    pub(crate) id: Vec<u8>,
+    pub(crate) name: String,
+    pub(crate) sort_name: String,
+    pub(crate) mb_artist_id: Option<String>,
+    pub(crate) origin: String,
+    pub(crate) created_at: i64,
+    pub(crate) updated_at: i64,
 }
 
 impl ArtistRow {
@@ -37,7 +37,7 @@ impl ArtistRow {
     /// Returns [`LibraryError::CorruptId`] when the primary key is not 16 bytes
     /// and [`LibraryError::Origin`] when the `origin` column is not a known
     /// literal.
-    fn into_artist(self) -> Result<Artist, LibraryError> {
+    pub(crate) fn into_artist(self) -> Result<Artist, LibraryError> {
         Ok(Artist {
             id: decode_entity(IdPrefix::Artist, &self.id)?,
             name: self.name,

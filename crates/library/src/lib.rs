@@ -66,6 +66,7 @@ pub mod artwork;
 pub mod folders;
 pub mod media_files;
 pub mod naming;
+pub mod query;
 pub mod retention;
 pub mod scan;
 pub mod tracks;

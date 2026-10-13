@@ -34,30 +34,30 @@ use crate::now_millis;
 
 /// One row of the `media_files` table as it is stored.
 #[derive(sqlx::FromRow)]
-struct MediaFileRow {
-    id: Vec<u8>,
-    track_id: Vec<u8>,
-    storage: String,
-    folder_id: Option<Vec<u8>>,
-    rel_path: String,
-    size: i64,
-    mtime_ms: i64,
-    format: Option<String>,
-    codec: Option<String>,
-    bitrate_kbps: Option<i64>,
-    sample_rate: Option<i64>,
-    bit_depth: Option<i64>,
-    channels: Option<i64>,
-    duration_ms: Option<i64>,
-    lossless: Option<i64>,
-    quality_tier: Option<String>,
-    replaygain: Option<String>,
-    has_embedded_art: Option<i64>,
-    added_at: i64,
-    last_accessed_at: Option<i64>,
-    uploaded_by: Option<Vec<u8>>,
-    acquisition_id: Option<Vec<u8>>,
-    is_preferred: i64,
+pub(crate) struct MediaFileRow {
+    pub(crate) id: Vec<u8>,
+    pub(crate) track_id: Vec<u8>,
+    pub(crate) storage: String,
+    pub(crate) folder_id: Option<Vec<u8>>,
+    pub(crate) rel_path: String,
+    pub(crate) size: i64,
+    pub(crate) mtime_ms: i64,
+    pub(crate) format: Option<String>,
+    pub(crate) codec: Option<String>,
+    pub(crate) bitrate_kbps: Option<i64>,
+    pub(crate) sample_rate: Option<i64>,
+    pub(crate) bit_depth: Option<i64>,
+    pub(crate) channels: Option<i64>,
+    pub(crate) duration_ms: Option<i64>,
+    pub(crate) lossless: Option<i64>,
+    pub(crate) quality_tier: Option<String>,
+    pub(crate) replaygain: Option<String>,
+    pub(crate) has_embedded_art: Option<i64>,
+    pub(crate) added_at: i64,
+    pub(crate) last_accessed_at: Option<i64>,
+    pub(crate) uploaded_by: Option<Vec<u8>>,
+    pub(crate) acquisition_id: Option<Vec<u8>>,
+    pub(crate) is_preferred: i64,
 }
 
 impl MediaFileRow {
@@ -68,7 +68,7 @@ impl MediaFileRow {
     /// Returns [`LibraryError::CorruptId`] when an id is not 16 bytes and
     /// [`LibraryError::UnknownLiteral`] when `storage` or `quality_tier` is
     /// unknown.
-    fn into_media_file(self) -> Result<MediaFile, LibraryError> {
+    pub(crate) fn into_media_file(self) -> Result<MediaFile, LibraryError> {
         let storage =
             self.storage
                 .parse::<StorageClass>()
