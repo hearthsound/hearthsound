@@ -63,3 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The AES-256-GCM secret box and the secret key file, read from
   `HEARTHSOUND_SECRET_KEY` or created on first use with 32 random bytes and
   owner-only permissions.
+- The `hearthsound-acquire` crate with candidate normalization, the file name
+  and parent directory heuristics that recover Soulseek tags, and the weighted
+  match score with its duration reject window and its alternate-version
+  qualifier penalty.
