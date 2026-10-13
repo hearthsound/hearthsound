@@ -414,3 +414,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the first body frame sets and records the file's last access on a detached
   write; an id that names no track, a catalog id, or a track with no file yet is
   answered with `404` through the documented pending extension point.
+- `/rest/stream` transcodes: `format=mp3`, `format=opus`, and `format=aac`
+  encode the stored file through ffmpeg, a `maxBitRate` below the file's own
+  bitrate caps the output (mp3 when no format is named), `timeOffset` starts the
+  stream that far in, and `estimateContentLength` answers with an estimated
+  `Content-Length` instead of a chunked body. A transcode carries no validators
+  and no ranges (`Accept-Ranges: none`), an unknown format is a bad request, and
+  a request the stored file already satisfies - no format, `format=raw`, a cap
+  the file fits, or the file's own format - is served straight from disk.

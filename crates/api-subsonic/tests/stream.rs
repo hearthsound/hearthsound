@@ -44,14 +44,29 @@ impl Streamed {
     }
 }
 
-/// Builds a fixture with one track and one real mp3 file behind it.
-async fn streamed() -> Streamed {
+/// Builds a fixture with one track and one real file behind it.
+///
+/// # Parameters
+///
+/// - `format`: the audio format to generate.
+/// - `seconds`: the file's duration.
+/// - `container`: the container literal a probe would record for the file.
+/// - `codec`: the codec literal a probe would record for the file.
+/// - `bitrate_kbps`: the bitrate a probe would record for the file.
+async fn streamed_as(
+    format: AudioFormat,
+    seconds: f64,
+    container: &str,
+    codec: &str,
+    bitrate_kbps: u32,
+) -> Streamed {
     let fixture = Fixture::new().await;
     let owned = fixture.subdir("owned");
-    let path = AudioFixture::new(AudioFormat::Mp3Cbr)
-        .seconds(1.0)
-        .bitrate_kbps(Some(128))
-        .file_name("streamed.mp3")
+    let name = format!("streamed.{}", format.extension());
+    let path = AudioFixture::new(format)
+        .seconds(seconds)
+        .bitrate_kbps(Some(bitrate_kbps))
+        .file_name(name.clone())
         .write_into(&owned)
         .await
         .unwrap();
@@ -76,7 +91,7 @@ async fn streamed() -> Streamed {
     input.display_artist = Some("Echo".to_owned());
     input.track_number = Some(1);
     input.disc_number = Some(1);
-    input.duration_ms = Some(1_000);
+    input.duration_ms = Some((seconds * 1000.0) as i64);
     let track = library
         .insert_track(&input, std::slice::from_ref(&credit), &[])
         .await
@@ -86,7 +101,7 @@ async fn streamed() -> Streamed {
             track,
             &ScannedMediaFile {
                 folder_id: folder.id,
-                rel_path: "streamed.mp3".to_owned(),
+                rel_path: name,
                 size: metadata.len() as i64,
                 mtime_ms: metadata
                     .modified()
@@ -94,13 +109,13 @@ async fn streamed() -> Streamed {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_millis() as i64,
-                format: Some("mpeg".to_owned()),
-                codec: Some("mp3".to_owned()),
-                bitrate_kbps: Some(128),
+                format: Some(container.to_owned()),
+                codec: Some(codec.to_owned()),
+                bitrate_kbps: Some(i64::from(bitrate_kbps)),
                 sample_rate: Some(44_100),
                 bit_depth: None,
                 channels: Some(2),
-                duration_ms: Some(1_000),
+                duration_ms: Some((seconds * 1000.0) as i64),
                 lossless: Some(false),
                 has_embedded_art: Some(false),
             },
@@ -114,6 +129,51 @@ async fn streamed() -> Streamed {
         path,
         bytes,
     }
+}
+
+/// Builds a fixture with one track whose file is a one second 128 kbit/s mp3.
+async fn streamed() -> Streamed {
+    streamed_as(AudioFormat::Mp3Cbr, 1.0, "mpeg", "mp3", 128).await
+}
+
+/// Reads one ffprobe field of a container or its streams.
+///
+/// # Parameters
+///
+/// - `path`: the file to inspect.
+/// - `section`: `format` or `stream`.
+/// - `field`: the field name, for example `duration`.
+async fn ffprobe(path: &std::path::Path, section: &str, field: &str) -> Option<String> {
+    let output = tokio::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            &format!("{section}={field}"),
+            "-of",
+            "default=nw=1",
+        ])
+        .arg(path)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{field}=")))
+        .map(str::to_owned)
+}
+
+/// Writes one response body into a temporary file and returns the path.
+///
+/// The directory is returned so the caller keeps it alive.
+fn write_body(bytes: &[u8], name: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(name);
+    std::fs::write(&path, bytes).unwrap();
+    (dir, path)
 }
 
 /// Returns a header of a response as text.
@@ -473,5 +533,219 @@ async fn stream_answers_a_track_without_a_file_with_404() {
     .await;
 
     assert_eq!(probe.status, StatusCode::NOT_FOUND);
+    assert!(probe.bytes.is_empty());
+}
+
+#[tokio::test]
+async fn stream_transcodes_to_the_requested_format() {
+    let streamed = streamed_as(AudioFormat::Flac, 2.0, "flac", "flac", 1012).await;
+    let app = streamed.fixture.app();
+
+    let probe = request(
+        &app,
+        Method::GET,
+        &format!("{}&format=mp3", streamed.uri()),
+        // A range is not honored for a transcode: the whole stream is sent.
+        &[("Range", "bytes=0-99")],
+    )
+    .await;
+
+    assert_eq!(probe.status, StatusCode::OK);
+    assert_eq!(header_of(&probe, header::CONTENT_TYPE), "audio/mpeg");
+    assert_eq!(header_of(&probe, header::ACCEPT_RANGES), "none");
+    assert!(!probe.headers.contains_key(header::CONTENT_LENGTH));
+
+    let (_dir, path) = write_body(&probe.bytes, "transcoded.mp3");
+    assert_eq!(
+        ffprobe(&path, "stream", "codec_name").await.as_deref(),
+        Some("mp3")
+    );
+    let duration: f64 = ffprobe(&path, "format", "duration")
+        .await
+        .expect("ffprobe reports a duration")
+        .parse()
+        .unwrap();
+    assert!(
+        (1.7..=2.3).contains(&duration),
+        "the transcode produced {duration}s from a two second file"
+    );
+}
+
+#[tokio::test]
+async fn stream_transcodes_a_bitrate_cap_without_a_format() {
+    let streamed = streamed().await;
+    let app = streamed.fixture.app();
+
+    let probe = request(
+        &app,
+        Method::GET,
+        &format!("{}&maxBitRate=64", streamed.uri()),
+        &[],
+    )
+    .await;
+
+    assert_eq!(probe.status, StatusCode::OK);
+    assert_eq!(header_of(&probe, header::CONTENT_TYPE), "audio/mpeg");
+    assert_eq!(header_of(&probe, header::ACCEPT_RANGES), "none");
+
+    let (_dir, path) = write_body(&probe.bytes, "capped.mp3");
+    let bitrate: f64 = ffprobe(&path, "format", "bit_rate")
+        .await
+        .expect("ffprobe reports a bitrate")
+        .parse()
+        .unwrap();
+    assert!(
+        bitrate < 100_000.0,
+        "the cap of 64 kbit/s produced {bitrate} bit/s from a 128 kbit/s file"
+    );
+}
+
+#[tokio::test]
+async fn stream_transcodes_a_time_offset() {
+    let streamed = streamed_as(AudioFormat::Flac, 3.0, "flac", "flac", 1012).await;
+    let app = streamed.fixture.app();
+
+    let probe = request(
+        &app,
+        Method::GET,
+        &format!("{}&format=mp3&timeOffset=2", streamed.uri()),
+        &[],
+    )
+    .await;
+
+    assert_eq!(probe.status, StatusCode::OK);
+    let (_dir, path) = write_body(&probe.bytes, "offset.mp3");
+    let duration: f64 = ffprobe(&path, "format", "duration")
+        .await
+        .expect("ffprobe reports a duration")
+        .parse()
+        .unwrap();
+    assert!(
+        (0.6..=1.4).contains(&duration),
+        "an offset of two seconds left {duration}s of a three second file"
+    );
+}
+
+#[tokio::test]
+async fn stream_sets_an_estimated_length() {
+    let streamed = streamed_as(AudioFormat::Flac, 2.0, "flac", "flac", 1012).await;
+    let app = streamed.fixture.app();
+
+    let probe = request(
+        &app,
+        Method::GET,
+        &format!("{}&format=mp3&estimateContentLength=true", streamed.uri()),
+        &[],
+    )
+    .await;
+
+    assert_eq!(probe.status, StatusCode::OK);
+    // Two seconds at the mp3 default of 320 kbit/s.
+    assert_eq!(header_of(&probe, header::CONTENT_LENGTH), "80000");
+}
+
+#[tokio::test]
+async fn stream_serves_the_file_while_the_cap_is_not_below_the_bitrate() {
+    let streamed = streamed().await;
+    let app = streamed.fixture.app();
+
+    let probe = request(
+        &app,
+        Method::GET,
+        &format!("{}&maxBitRate=192", streamed.uri()),
+        &[],
+    )
+    .await;
+
+    assert_eq!(probe.status, StatusCode::OK);
+    assert_eq!(probe.bytes, streamed.bytes);
+    assert_eq!(header_of(&probe, header::ACCEPT_RANGES), "bytes");
+}
+
+#[tokio::test]
+async fn stream_serves_the_file_for_raw() {
+    let streamed = streamed().await;
+    let app = streamed.fixture.app();
+
+    let probe = request(
+        &app,
+        Method::GET,
+        &format!("{}&format=raw&maxBitRate=64", streamed.uri()),
+        &[],
+    )
+    .await;
+
+    assert_eq!(probe.status, StatusCode::OK);
+    assert_eq!(probe.bytes, streamed.bytes);
+    assert_eq!(header_of(&probe, header::ACCEPT_RANGES), "bytes");
+}
+
+#[tokio::test]
+async fn stream_requires_a_format_the_server_can_encode() {
+    let streamed = streamed().await;
+    let app = streamed.fixture.app();
+
+    let probe = request(
+        &app,
+        Method::GET,
+        &format!("{}&format=flac", streamed.uri()),
+        &[],
+    )
+    .await;
+
+    assert_eq!(probe.status, StatusCode::BAD_REQUEST);
+    assert!(probe.bytes.is_empty());
+}
+
+#[tokio::test]
+async fn stream_requires_a_numeric_bitrate_cap() {
+    let streamed = streamed().await;
+    let app = streamed.fixture.app();
+
+    let probe = request(
+        &app,
+        Method::GET,
+        &format!("{}&maxBitRate=lots", streamed.uri()),
+        &[],
+    )
+    .await;
+
+    assert_eq!(probe.status, StatusCode::BAD_REQUEST);
+    assert!(probe.bytes.is_empty());
+}
+
+#[tokio::test]
+async fn stream_rejects_an_unusable_time_offset() {
+    let streamed = streamed().await;
+    let app = streamed.fixture.app();
+
+    let probe = request(
+        &app,
+        Method::GET,
+        &format!("{}&timeOffset=-3", streamed.uri()),
+        &[],
+    )
+    .await;
+
+    assert_eq!(probe.status, StatusCode::BAD_REQUEST);
+    assert!(probe.bytes.is_empty());
+}
+
+#[tokio::test]
+async fn stream_answers_a_transcode_head_without_starting_ffmpeg() {
+    let streamed = streamed_as(AudioFormat::Flac, 2.0, "flac", "flac", 1012).await;
+    let app = streamed.fixture.app();
+
+    let probe = request(
+        &app,
+        Method::HEAD,
+        &format!("{}&format=opus", streamed.uri()),
+        &[],
+    )
+    .await;
+
+    assert_eq!(probe.status, StatusCode::OK);
+    assert_eq!(header_of(&probe, header::CONTENT_TYPE), "audio/ogg");
+    assert_eq!(header_of(&probe, header::ACCEPT_RANGES), "none");
     assert!(probe.bytes.is_empty());
 }

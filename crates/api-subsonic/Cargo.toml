@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 axum.workspace = true
+bytes.workspace = true
 futures-util.workspace = true
 hearthsound-activity = { path = "../activity" }
 hearthsound-auth = { path = "../auth" }
@@ -35,5 +36,5 @@ hearthsound-test-support = { path = "../test-support" }
 insta = { workspace = true, features = ["filters"] }
 serde_json.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "process", "rt-multi-thread", "time"] }
 tower = { workspace = true, features = ["util"] }

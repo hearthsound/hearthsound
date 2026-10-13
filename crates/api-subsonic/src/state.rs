@@ -88,7 +88,12 @@ impl SubsonicState {
         roots: StorageRoots,
     ) -> SubsonicState {
         let user_settings = UserSettings::new(&database, settings.registry().clone());
-        let stream = StreamService::new(Arc::clone(&database), roots, activity.sessions().clone());
+        let stream = StreamService::new(
+            Arc::clone(&database),
+            roots,
+            Arc::clone(&ffmpeg),
+            activity.sessions().clone(),
+        );
         SubsonicState {
             inner: Arc::new(Inner {
                 database,

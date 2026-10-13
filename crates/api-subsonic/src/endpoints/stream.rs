@@ -4,29 +4,36 @@
 //! so it takes a [`BinaryCall`](crate::BinaryCall) and maps every failure onto
 //! an HTTP status code. The bytes come from
 //! [`StreamService`](crate::StreamService), which owns the file lookup, the
-//! range and validator handling, and the stream session the scrobble guard
-//! reads; this module only reads the request's parameters and the head.
+//! transcode, the range and validator handling, and the stream session the
+//! scrobble guard reads; this module only reads the request's parameters and
+//! the head.
 //!
-//! The `id` is the only parameter this endpoint needs today. A request without
-//! one is a bad request, and an id that names no stored track is a missing
-//! resource; neither is answered with a Subsonic envelope, because a client
+//! The parameters this endpoint reads are `id`, `format`, `maxBitRate`,
+//! `timeOffset`, and `estimateContentLength`. A value it cannot make sense of -
+//! a missing id, an unknown format, a cap or an offset that is not a number -
+//! is a bad request rather than a Subsonic error envelope, because a client
 //! that treats any 200 body as audio would play the error document.
+
+use std::time::Duration;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use hearthsound_media::TranscodeFormat;
 
 use crate::auth::BinaryCall;
-use crate::stream::StreamRequest;
+use crate::stream::{StreamFormat, StreamRequest};
 
 /// Answers `stream`: the track's audio bytes.
 ///
 /// # Parameters
 ///
-/// - `call`: the authenticated call. `id` names the track; the request's method
-///   and headers carry the `Range` and conditional-request headers a seeking
-///   client sends. `maxBitRate`, `format`, `timeOffset`, and
-///   `estimateContentLength` are not read yet, so every request serves the
-///   stored file as it is.
+/// - `call`: the authenticated call. `id` names the track; `format` asks for a
+///   transcode format (`mp3`, `opus`, `aac`) or for `raw`, the stored file
+///   untouched; `maxBitRate` caps the bitrate in kbit/s and its `0` means no
+///   cap; `timeOffset` starts the stream that many seconds in;
+///   `estimateContentLength` asks for a length on a transcode. The request's
+///   method and headers carry the `Range` and conditional-request headers a
+///   seeking client sends.
 ///
 /// # Returns
 ///
@@ -38,12 +45,28 @@ pub async fn stream(call: BinaryCall) -> Response {
         tracing::debug!("a stream request carried no id");
         return StatusCode::BAD_REQUEST.into_response();
     };
+    let format = match read_format(&call) {
+        Ok(format) => format,
+        Err(()) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let max_bitrate_kbps = match read_max_bitrate(&call) {
+        Ok(max_bitrate_kbps) => max_bitrate_kbps,
+        Err(()) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let offset = match read_offset(&call) {
+        Ok(offset) => offset,
+        Err(()) => return StatusCode::BAD_REQUEST.into_response(),
+    };
     let request = StreamRequest {
         id: id.to_owned(),
         user_id: call.principal().user_id.uuid(),
         client: call.client_name().map(str::to_owned),
         method: call.method().clone(),
         headers: call.headers().clone(),
+        format,
+        max_bitrate_kbps,
+        offset,
+        estimate_content_length: flag(&call, "estimateContentLength"),
     };
     match call.state().stream().serve(&request).await {
         Ok(response) => response,
@@ -57,4 +80,120 @@ pub async fn stream(call: BinaryCall) -> Response {
             status.into_response()
         }
     }
+}
+
+/// Reads the `format` parameter.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+///
+/// # Returns
+///
+/// [`StreamFormat::Raw`] for `format=raw`, the named format for one the server
+/// can encode, and [`StreamFormat::Unspecified`] when the parameter is absent
+/// or empty.
+///
+/// # Errors
+///
+/// Returns `Err(())` for a format the server cannot encode, which the caller
+/// answers as a bad request.
+fn read_format(call: &BinaryCall) -> Result<StreamFormat, ()> {
+    let Some(value) = call.get("format").map(str::trim) else {
+        return Ok(StreamFormat::Unspecified);
+    };
+    match value {
+        "" => Ok(StreamFormat::Unspecified),
+        "raw" => Ok(StreamFormat::Raw),
+        name => match name.parse::<TranscodeFormat>() {
+            Ok(format) => Ok(StreamFormat::Transcode(format)),
+            Err(error) => {
+                tracing::debug!(value = name, %error, "a stream request named a format the server cannot encode");
+                Err(())
+            }
+        },
+    }
+}
+
+/// Reads the `maxBitRate` parameter.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+///
+/// # Returns
+///
+/// The cap in kbit/s, or `None` when the parameter is absent, empty, or `0`,
+/// which the protocol defines as no limit.
+///
+/// # Errors
+///
+/// Returns `Err(())` for a value that is not a bitrate.
+fn read_max_bitrate(call: &BinaryCall) -> Result<Option<u32>, ()> {
+    let Some(value) = call.get("maxBitRate").map(str::trim) else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+    match value.parse::<u32>() {
+        Ok(0) => Ok(None),
+        Ok(kbps) => Ok(Some(kbps)),
+        Err(error) => {
+            tracing::debug!(value, %error, "a stream request carried a non-numeric bitrate cap");
+            Err(())
+        }
+    }
+}
+
+/// Reads the `timeOffset` parameter.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+///
+/// # Returns
+///
+/// The start offset, or `None` when the parameter is absent or empty.
+///
+/// # Errors
+///
+/// Returns `Err(())` for a value that is not a number of seconds, including a
+/// negative one.
+fn read_offset(call: &BinaryCall) -> Result<Option<Duration>, ()> {
+    let Some(value) = call.get("timeOffset").map(str::trim) else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+    match value
+        .parse::<f64>()
+        .ok()
+        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+    {
+        Some(offset) => Ok(Some(offset)),
+        None => {
+            tracing::debug!(value, "a stream request carried an unusable time offset");
+            Err(())
+        }
+    }
+}
+
+/// Reads a boolean parameter, which a client writes as `true` or `1`.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `name`: the parameter name.
+///
+/// # Returns
+///
+/// `true` for `true` and `1` in any letter case, `false` for everything else,
+/// including an absent parameter.
+fn flag(call: &BinaryCall, name: &str) -> bool {
+    matches!(
+        call.get(name).map(|value| value.trim().to_ascii_lowercase()),
+        Some(value) if value == "true" || value == "1"
+    )
 }

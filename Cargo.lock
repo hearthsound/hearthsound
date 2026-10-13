@@ -1639,6 +1639,7 @@ name = "hearthsound-api-subsonic"
 version = "0.1.0-alpha.0"
 dependencies = [
  "axum",
+ "bytes",
  "futures-util",
  "hearthsound-activity",
  "hearthsound-auth",

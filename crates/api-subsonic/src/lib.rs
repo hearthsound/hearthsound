@@ -82,7 +82,7 @@
 //! | `getSong` | one song |
 //! | `getAlbumList2` | the albums in scope, ordered by `newest`, `alphabeticalByName`, or `random` |
 //! | `search3` | local matches first, then catalog matches when `search.catalog.enabled` |
-//! | `stream` | the track's media bytes, with ranges, validators, and conditional requests |
+//! | `stream` | the track's media bytes: the stored file with ranges and validators, or a transcode |
 //! | `scrobble` | records a play for a stored track; now-playing is accepted and discarded |
 //!
 //! The browse endpoints share one scope rule: an explicit `musicFolderId` of
@@ -158,5 +158,5 @@ pub use response::{
 };
 pub use routes::{register, router, routes};
 pub use state::SubsonicState;
-pub use stream::{StreamError, StreamRequest, StreamService};
+pub use stream::{StreamError, StreamFormat, StreamRequest, StreamService};
 pub use value::{Array, Object, Value};

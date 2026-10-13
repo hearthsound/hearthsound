@@ -7,14 +7,24 @@
 //! `Content-Range`, `ETag` and `Last-Modified`, `If-None-Match`,
 //! `If-Modified-Since`, `If-Range`, `HEAD`, and the codec's content type.
 //!
-//! The bytes themselves come from tower-http's `ServeFile`, which opens the
-//! file, answers a single range with `206`, answers an unsatisfiable range with
+//! # Two deliveries
+//!
+//! A request that can be answered with the stored file is served straight from
+//! disk. The bytes come from tower-http's `ServeFile`, which opens the file,
+//! answers a single range with `206`, answers an unsatisfiable range with
 //! `416`, and never materializes the whole file in memory. Everything that is
 //! not a plain range - the validators and the conditional requests built on
 //! them - is decided here, because the `ETag` is derived from the stored media
 //! file (its size, its modification time, and its id) rather than from the path
 //! alone, so a client that replaces a file revalidates instead of playing a
 //! stale cache entry.
+//!
+//! A request that asks for another format, for a bitrate cap below the file's
+//! own, or for an offset into the track is answered by one ffmpeg process
+//! instead. A transcode is not the stored representation, so it carries no
+//! validators and no ranges: it is answered with `200`, `Accept-Ranges: none`,
+//! and the encoded bytes as they are produced, chunked unless
+//! `estimateContentLength` asked for a length.
 //!
 //! # A stream is a session
 //!
@@ -39,19 +49,20 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::body::{Body, BodyDataStream};
+use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use axum::response::Response;
-use futures_util::StreamExt;
+use bytes::Bytes;
+use futures_util::{TryStream, TryStreamExt};
 use hearthsound_activity::{AudioDelivered, StreamSessions};
 use hearthsound_core::{ClientId, EntityId, IdPrefix};
 use hearthsound_db::Database;
 use hearthsound_library::query::{self, PreferredFile};
 use hearthsound_library::{LibraryError, MediaFile, StorageRoots, tracks};
+use hearthsound_media::{FfmpegRunner, TranscodeFormat, TranscodeRequest, estimate_content_length};
 use tower_http::services::ServeFile;
-use tower_http::services::fs::ServeFileSystemResponseBody;
 use uuid::Uuid;
 
 /// One `/rest/stream` request, after the endpoint read its parameters.
@@ -74,6 +85,33 @@ pub struct StreamRequest {
     pub method: Method,
     /// The request's headers.
     pub headers: HeaderMap,
+    /// What the `format` parameter asked for.
+    pub format: StreamFormat,
+    /// The `maxBitRate` parameter in kbit/s, when it asks for a cap. Zero, the
+    /// protocol's "no limit", is read as no cap at all.
+    pub max_bitrate_kbps: Option<u32>,
+    /// The `timeOffset` parameter: how far into the track the stream starts.
+    pub offset: Option<Duration>,
+    /// Whether `estimateContentLength` asked for an estimated `Content-Length`
+    /// on a transcode rather than no length at all.
+    pub estimate_content_length: bool,
+}
+
+/// What the `format` parameter asked for.
+///
+/// A client either leaves the format to the server, asks for the stored file
+/// untouched, or names a format to transcode to. The three are distinct because
+/// `raw` overrides a bitrate cap, while an absent format does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamFormat {
+    /// The parameter was absent or empty, so the server picks: the stored file
+    /// unless a bitrate cap or an offset needs ffmpeg.
+    Unspecified,
+    /// `format=raw`: the stored file, never a transcode, whatever else the
+    /// request carries.
+    Raw,
+    /// A format to transcode to.
+    Transcode(TranscodeFormat),
 }
 
 /// Why a stream could not be served.
@@ -133,11 +171,13 @@ impl StreamError {
 /// use hearthsound_activity::StreamSessions;
 /// use hearthsound_db::Database;
 /// use hearthsound_library::StorageRoots;
+/// use hearthsound_media::FfmpegRunner;
 ///
-/// # async fn example(database: Arc<Database>) {
+/// # async fn example(database: Arc<Database>, ffmpeg: Arc<FfmpegRunner>) {
 /// let service = hearthsound_api_subsonic::StreamService::new(
 ///     database,
 ///     StorageRoots::new(Path::new("/srv/library"), Path::new("/srv/cache")),
+///     ffmpeg,
 ///     StreamSessions::new(),
 /// );
 /// # let _ = service;
@@ -149,6 +189,8 @@ pub struct StreamService {
     database: Arc<Database>,
     /// The managed storage roots a file's path resolves against.
     roots: StorageRoots,
+    /// The ffmpeg runner a transcode runs through.
+    ffmpeg: Arc<FfmpegRunner>,
     /// The stream sessions an active stream is registered in.
     sessions: StreamSessions,
 }
@@ -163,6 +205,8 @@ impl StreamService {
     /// - `roots`: the managed storage roots a `library` or `cache` file
     ///   resolves against; a file inside a library folder resolves against the
     ///   folder's own path.
+    /// - `ffmpeg`: the runner a transcode runs through, shared with the
+    ///   composition root so one cap covers every transcode the process runs.
     /// - `sessions`: the registry of stream sessions, which must be the same
     ///   registry the activity service reads, or the "no song audio delivered"
     ///   guard cannot see this stream. The composition root takes it from
@@ -170,11 +214,13 @@ impl StreamService {
     pub fn new(
         database: Arc<Database>,
         roots: StorageRoots,
+        ffmpeg: Arc<FfmpegRunner>,
         sessions: StreamSessions,
     ) -> StreamService {
         StreamService {
             database,
             roots,
+            ffmpeg,
             sessions,
         }
     }
@@ -246,7 +292,12 @@ impl StreamService {
         };
 
         match file {
-            Some(file) => self.serve_file(request, track, &file).await,
+            Some(file) => match delivery(request, &file.media_file) {
+                Delivery::File => self.serve_file(request, track, &file).await,
+                Delivery::Transcode(plan) => {
+                    self.serve_transcode(request, track, &file, &plan).await
+                }
+            },
             None if known => self.pending(request).await,
             None => {
                 tracing::debug!(track = %track, "a stream request named an unknown track");
@@ -372,11 +423,84 @@ impl StreamService {
                 delivered,
             );
             self.record_access(file.media_file.id);
-            delivered_body(body, flag)
+            delivered_body(Body::new(body).into_data_stream(), flag)
         } else {
             Body::new(body)
         };
         Ok(Response::from_parts(parts, body))
+    }
+
+    /// Serves the track's file through ffmpeg.
+    ///
+    /// A transcode is one ffmpeg process per request and its output does not
+    /// exist until that process runs, so the response has no validators and no
+    /// ranges: the client is told `Accept-Ranges: none` and receives the whole
+    /// stream from the start offset on. The encoder's output is chunked, unless
+    /// `estimateContentLength` asked for a length, which is an estimate of
+    /// duration times bitrate and not the exact size the encoder will produce.
+    ///
+    /// A `HEAD` request is answered from the request alone: the head of a
+    /// transcode is known without encoding anything, so no ffmpeg process is
+    /// started for it.
+    ///
+    /// # Parameters
+    ///
+    /// - `request`: the request, whose `estimateContentLength` decides whether
+    ///   the response carries a length.
+    /// - `track`: the track being streamed, for the stream session.
+    /// - `file`: the media file row and the path ffmpeg reads.
+    /// - `plan`: the format, the bitrate cap, and the start offset.
+    ///
+    /// # Errors
+    ///
+    /// Returns a server-side error when ffmpeg cannot be started or a header
+    /// cannot be built.
+    async fn serve_transcode(
+        &self,
+        request: &StreamRequest,
+        track: EntityId,
+        file: &PreferredFile,
+        plan: &TranscodePlan,
+    ) -> Result<Response, StreamError> {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::OK;
+        let headers = response.headers_mut();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(plan.format.content_type()),
+        );
+        headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("none"));
+        if request.estimate_content_length
+            && let Some(length) = estimated_length(file.media_file.duration_ms, plan)
+        {
+            headers.insert(
+                header::CONTENT_LENGTH,
+                HeaderValue::from_str(&length.to_string()).map_err(internal)?,
+            );
+        }
+        if request.method == Method::HEAD {
+            return Ok(response);
+        }
+
+        let mut transcode = TranscodeRequest::new(&file.absolute_path, plan.format);
+        if plan.max_bitrate_kbps.is_some() {
+            transcode = transcode.max_bitrate_kbps(plan.max_bitrate_kbps);
+        }
+        if let Some(offset) = plan.offset {
+            transcode = transcode.offset(offset);
+        }
+        let encoded = self.ffmpeg.transcode(&transcode).await.map_err(internal)?;
+
+        let (delivered, flag) = AudioDelivered::flag();
+        self.sessions.register(
+            request.user_id,
+            track.uuid(),
+            request.client.as_deref(),
+            delivered,
+        );
+        self.record_access(file.media_file.id);
+        *response.body_mut() = delivered_body(encoded, flag);
+        Ok(response)
     }
 
     /// Records that the file was just streamed.
@@ -405,25 +529,169 @@ impl StreamService {
     }
 }
 
-/// Wraps a body so that its first data frame marks the stream as audibly
+/// Wraps an encoded stream so that its first chunk marks the stream as audibly
 /// delivered.
 ///
 /// # Parameters
 ///
-/// - `body`: the body the file service produced.
+/// - `stream`: the encoded bytes, whether the file service produced them or an
+///   ffmpeg process did.
 /// - `flag`: the flag the registered stream session reads.
 ///
 /// # Returns
 ///
 /// The axum body the response carries.
-fn delivered_body(body: ServeFileSystemResponseBody, flag: Arc<AtomicBool>) -> Body {
-    let stream: BodyDataStream = Body::new(body).into_data_stream();
-    Body::from_stream(stream.map(move |frame| {
-        if frame.is_ok() {
-            flag.store(true, Ordering::SeqCst);
-        }
-        frame
+fn delivered_body<S, E>(stream: S, flag: Arc<AtomicBool>) -> Body
+where
+    S: TryStream<Ok = Bytes, Error = E> + Send + 'static,
+    E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
+{
+    Body::from_stream(stream.inspect_ok(move |_| {
+        flag.store(true, Ordering::SeqCst);
     }))
+}
+
+/// How one request is delivered.
+enum Delivery {
+    /// The stored file, byte for byte.
+    File,
+    /// A transcode of the stored file.
+    Transcode(TranscodePlan),
+}
+
+/// The transcode a request asked for.
+struct TranscodePlan {
+    /// The format to encode.
+    format: TranscodeFormat,
+    /// The bitrate cap in kbit/s, or `None` for the format's default.
+    max_bitrate_kbps: Option<u32>,
+    /// How far into the track the stream starts.
+    offset: Option<Duration>,
+}
+
+/// Decides whether a request is served from the file or through ffmpeg.
+///
+/// The stored file answers a request when it already is what the client asked
+/// for: no format and no cap, an explicit `format=raw`, a bitrate cap the file
+/// already fits, or the requested format with no offset. Everything else - a
+/// different format, a cap below the file's own bitrate, or an offset into the
+/// track - is transcoded. A request that names only a cap is transcoded to mp3,
+/// which is what the clients of this protocol expect of a server that caps the
+/// bitrate, and the same default the pending stream uses.
+///
+/// # Parameters
+///
+/// - `request`: the request's format, cap, and offset.
+/// - `file`: the media file the track resolved to.
+///
+/// # Returns
+///
+/// The delivery to serve.
+fn delivery(request: &StreamRequest, file: &MediaFile) -> Delivery {
+    match request.format {
+        // `format=raw` asks for the stored bytes; a cap alongside it cannot be
+        // honored without transcoding, and serving the file is what the format
+        // asks for.
+        StreamFormat::Raw => Delivery::File,
+        StreamFormat::Transcode(format) => {
+            let already = is_encoded_as(format, file)
+                && !cap_below_file(request.max_bitrate_kbps, file)
+                && request.offset.is_none();
+            if already {
+                Delivery::File
+            } else {
+                Delivery::Transcode(plan(format, request))
+            }
+        }
+        StreamFormat::Unspecified => {
+            if cap_below_file(request.max_bitrate_kbps, file) || request.offset.is_some() {
+                Delivery::Transcode(plan(TranscodeFormat::Mp3, request))
+            } else {
+                Delivery::File
+            }
+        }
+    }
+}
+
+/// Reports whether the file is already encoded in the format's codec.
+///
+/// # Parameters
+///
+/// - `format`: the format the client asked for.
+/// - `file`: the media file the track resolved to.
+///
+/// # Returns
+///
+/// `true` when the probe recorded the format's codec literal for the file.
+fn is_encoded_as(format: TranscodeFormat, file: &MediaFile) -> bool {
+    file.codec
+        .as_deref()
+        .is_some_and(|codec| codec.eq_ignore_ascii_case(format.as_str()))
+}
+
+/// Reports whether a bitrate cap is below what the file already is.
+///
+/// # Parameters
+///
+/// - `max_bitrate_kbps`: the request's cap, or `None` for no cap.
+/// - `file`: the media file the track resolved to.
+///
+/// # Returns
+///
+/// `true` when the cap is below the file's bitrate, and when the file's bitrate
+/// is unknown, because a file that cannot be shown to fit the cap is
+/// transcoded.
+fn cap_below_file(max_bitrate_kbps: Option<u32>, file: &MediaFile) -> bool {
+    let Some(cap) = max_bitrate_kbps else {
+        return false;
+    };
+    match file.bitrate_kbps.and_then(|kbps| u32::try_from(kbps).ok()) {
+        Some(bitrate) => cap < bitrate,
+        None => true,
+    }
+}
+
+/// Builds the transcode plan of a request.
+///
+/// # Parameters
+///
+/// - `format`: the format to encode.
+/// - `request`: the request supplying the cap and the offset.
+///
+/// # Returns
+///
+/// The plan to run.
+fn plan(format: TranscodeFormat, request: &StreamRequest) -> TranscodePlan {
+    TranscodePlan {
+        format,
+        max_bitrate_kbps: request.max_bitrate_kbps,
+        offset: request.offset,
+    }
+}
+
+/// Estimates the length of a transcode.
+///
+/// The estimate is the bitrate the encoder was asked for multiplied by the
+/// remaining duration, which is what `estimateContentLength` asks for; the
+/// exact length is only known once the encoder has finished.
+///
+/// # Parameters
+///
+/// - `duration_ms`: the file's duration, when the probe recorded one.
+/// - `plan`: the format, the cap, and the start offset.
+///
+/// # Returns
+///
+/// The estimated length in bytes, or `None` when the duration is unknown, in
+/// which case the response carries no length at all.
+fn estimated_length(duration_ms: Option<i64>, plan: &TranscodePlan) -> Option<u64> {
+    let duration = Duration::from_millis(u64::try_from(duration_ms?).ok()?);
+    let remaining = duration.saturating_sub(plan.offset.unwrap_or_default());
+    let bitrate_kbps = plan
+        .max_bitrate_kbps
+        .unwrap_or_else(|| plan.format.default_bitrate_kbps())
+        .max(8);
+    Some(estimate_content_length(remaining, bitrate_kbps))
 }
 
 /// The validators of one file response.
