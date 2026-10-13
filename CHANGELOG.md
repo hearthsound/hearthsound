@@ -175,3 +175,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned toolchain against the offline query data, then a `debian:trixie-slim`
   runtime image carrying ffmpeg, ca-certificates, curl, the fetched plugin
   archives, and a non-root `hearthsound` user with `/data` and `/storage`.
+- Development compose stack under `dev/`: the server image built from this
+  repository plus slskd 0.26.1, a config file with the container bootstrap
+  paths, and the gitignored runtime directories the stack mounts.

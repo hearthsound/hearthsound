@@ -1,0 +1,87 @@
+# Development stack: Hearthsound built from this repository, plus the slskd
+# acquisition backend it acquires through. Run it from the repository root:
+#
+#   docker compose -f dev/compose.yml up --build
+#
+# Volumes follow the operations guide (section 1.1): `dev/data`, `dev/storage`,
+# `dev/imports/slskd` and `dev/slskd` are runtime state next to this file and
+# are not committed. Bootstrap keys are given both here and in
+# `dev/hearthsound.toml`, which is mounted read-only as the config file; the
+# environment wins where they overlap (section 3.2).
+#
+# slskd 0.26.1 is pinned because the plugin needs the 0.26.0 batch download API
+# and refuses to enable against anything older, checked through
+# `GET /api/v0/application/`. Setting slskd up is a one-time manual step:
+#
+#   - Create `dev/.env` (never committed) holding `SLSKD_API_KEY=<32 characters>`.
+#     The plugin instance is configured with the same key. The plugin needs the
+#     `readwrite` role, which the primary key supplied this way carries.
+#   - Sign in at http://localhost:5030 and set
+#     `transfers.download.destination.permissions.mode` to a mode with execute
+#     bits, for example `777`. The mode covers directories too, and without
+#     execute bits the plugin cannot traverse into the completed download tree.
+#     slskd's own configuration can only be edited from a signed-in web session,
+#     not with an API key.
+#   - Share at least one folder. The Soulseek network bans non-sharers, so a
+#     non-sharing slskd is starved of results.
+#   - Keep `transfers.download.slots` generous.
+#
+# Then install the bundled plugin and register this stack's import root:
+#
+#   docker compose -f dev/compose.yml exec hearthsound \
+#     hearthsound plugins install /usr/share/hearthsound/plugins/app.hearthsound.slskd-0.1.0.hsplugin
+#   docker compose -f dev/compose.yml exec hearthsound \
+#     hearthsound providers add --plugin app.hearthsound.slskd --slug slskd \
+#       --config '{"url":"http://slskd:5030","apiKey":"<key>","importRoot":"slskd-downloads"}' \
+#       --import-root slskd-downloads=/imports/slskd:move
+#
+# `importRoot` is the id of the import root granted by `--import-root`, not a
+# path (the plugin's manifest calls it that way), and both containers must see
+# the same directory as slskd's downloads folder: the plugin enqueues transfers
+# relative to it, and the host imports from it in `move` mode, cleaning up the
+# emptied parent directories afterwards.
+
+name: hearthsound-dev
+
+services:
+  hearthsound:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "4327:4327"
+    command: ["serve", "--config", "/etc/hearthsound/hearthsound.toml"]
+    volumes:
+      - ./data:/data
+      - ./storage:/storage
+      - ./hearthsound.toml:/etc/hearthsound/hearthsound.toml:ro
+      # A scanned, pre-existing library folder. `HEARTHSOUND_MUSIC_DIR` overrides
+      # the default `dev/music`. The mount stays read-only: the server never
+      # writes into scanned folders.
+      - ${HEARTHSOUND_MUSIC_DIR:-./music}:/music:ro
+      # slskd's downloads folder, shared with the slskd service below and
+      # registered as the `slskd-downloads` import root.
+      - ./imports/slskd:/imports/slskd
+    environment:
+      HEARTHSOUND__SERVER__BIND: 0.0.0.0
+      HEARTHSOUND__PATHS__DATA: /data
+      HEARTHSOUND__PATHS__STORAGE: /storage
+      HEARTHSOUND__DATABASE__PATH: /data/hearthsound.db
+    depends_on:
+      - slskd
+
+  slskd:
+    image: slskd/slskd:0.26.1
+    ports:
+      - "5030:5030"
+    env_file:
+      # `dev/.env` carries `SLSKD_API_KEY`. It is optional so that a fresh
+      # checkout can start the stack and sign in before the key exists.
+      - path: .env
+        required: false
+    environment:
+      # slskd downloads into the folder Hearthsound imports from.
+      SLSKD_DOWNLOADS_DIR: /downloads
+    volumes:
+      - ./slskd:/app
+      - ./imports/slskd:/downloads

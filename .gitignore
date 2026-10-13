@@ -1,1 +1,9 @@
 /target
+
+# Development stack runtime state, created by `dev/compose.yml`.
+/dev/.env
+/dev/data/
+/dev/imports/
+/dev/music/
+/dev/slskd/
+/dev/storage/
