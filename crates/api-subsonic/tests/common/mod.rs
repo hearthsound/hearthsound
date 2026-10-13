@@ -23,6 +23,8 @@ use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingSources, SettingValue, SettingsRegistry, keys};
 use hearthsound_core::{EntityId, IdPrefix, Layer};
 use hearthsound_db::{Database, MIGRATOR};
+use hearthsound_library::StorageRoots;
+use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::{
     InstanceService, InstanceSpec, PluginHost, PluginRepository, PluginSource, ProviderRegistry,
 };
@@ -66,6 +68,8 @@ pub struct Fixture {
     pub app_password: String,
     /// The shared state the router is built with.
     pub state: SubsonicState,
+    /// The managed storage roots the state resolves stored files against.
+    pub roots: StorageRoots,
     /// The plugin host a fixture plugin is installed into.
     host: Arc<PluginHost>,
     /// The plugin tables an instance is configured in.
@@ -135,12 +139,19 @@ impl Fixture {
             dir.path().join("artwork"),
         ));
         let activity = Arc::new(ActivityService::new(&database));
+        let roots = StorageRoots::new(dir.path().join("library"), dir.path().join("cache"));
+        std::fs::create_dir_all(roots.library.as_path()).unwrap();
+        std::fs::create_dir_all(roots.cache.as_path()).unwrap();
+        std::fs::create_dir_all(dir.path().join("artwork")).unwrap();
+        let ffmpeg = Arc::new(FfmpegRunner::new(None, 2));
         let state = SubsonicState::new(
             Arc::clone(&database),
             settings.clone(),
             authenticator,
             catalog,
             activity,
+            ffmpeg,
+            roots.clone(),
         );
 
         Fixture {
@@ -151,6 +162,7 @@ impl Fixture {
             api_key,
             app_password,
             state,
+            roots,
             host,
             repository,
             secrets: secret_box,
@@ -195,6 +207,25 @@ impl Fixture {
             .await
             .unwrap();
         self.registry.rebuild().await.unwrap();
+    }
+
+    /// Returns the managed storage roots the state resolves files against.
+    pub fn storage_roots(&self) -> &StorageRoots {
+        &self.roots
+    }
+
+    /// Returns the managed library root a `library` file resolves against.
+    ///
+    /// The directory exists from [`Fixture::new`], so a test can write a file
+    /// into it and insert the matching row.
+    pub fn library_root(&self) -> PathBuf {
+        self.roots.library.clone()
+    }
+
+    /// Returns the artwork cache directory, which exists from
+    /// [`Fixture::new`].
+    pub fn artwork_dir(&self) -> PathBuf {
+        self._dir.path().join("artwork")
     }
 
     /// Returns the `/rest` router under test.
@@ -255,8 +286,13 @@ pub struct Probe {
     pub status: StatusCode,
     /// The response's head.
     pub headers: HeaderMap,
-    /// The response's body, decoded as UTF-8.
+    /// The response's body, decoded as UTF-8 with invalid sequences replaced.
+    ///
+    /// An envelope is always UTF-8; a binary body is read through
+    /// [`Probe::bytes`] instead, because decoding it as text would lose bytes.
     pub body: String,
+    /// The response's body, exactly as it was written.
+    pub bytes: Vec<u8>,
 }
 
 impl Probe {
@@ -268,7 +304,8 @@ impl Probe {
         Probe {
             status,
             headers,
-            body: String::from_utf8(bytes.to_vec()).unwrap(),
+            body: String::from_utf8_lossy(&bytes).into_owned(),
+            bytes: bytes.to_vec(),
         }
     }
 
@@ -282,7 +319,23 @@ impl Probe {
 
 /// Sends a GET request through a router.
 pub async fn get(app: &Router, uri: &str) -> Probe {
-    let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    request(app, Method::GET, uri, &[]).await
+}
+
+/// Sends a request with explicit method and headers through a router.
+///
+/// # Parameters
+///
+/// - `app`: the router under test.
+/// - `method`: the request method, `GET` or `HEAD`.
+/// - `uri`: the request target, including its query string.
+/// - `headers`: the request headers, for example `Range` or `If-None-Match`.
+pub async fn request(app: &Router, method: Method, uri: &str, headers: &[(&str, &str)]) -> Probe {
+    let mut builder = Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder.body(Body::empty()).unwrap();
     Probe::read(app.clone().oneshot(request).await.unwrap()).await
 }
 

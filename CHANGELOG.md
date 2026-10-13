@@ -405,3 +405,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and indexed in `artwork_cache` while one that declares `no-store` is proxied
   without writing anything. A row whose file is gone is a miss rather than a
   failure, and the result carries the image's MIME type and bytes.
+- `/rest/stream`: a stored track's preferred file is served with the HTTP
+  semantics a seeking client needs - `Accept-Ranges`, a single `Range` answered
+  with `206` and `Content-Range`, an unsatisfiable range answered with `416`, a
+  strong `ETag` and `Last-Modified`, `If-None-Match`, `If-Modified-Since` and
+  `If-Range`, `HEAD`, and the container's content type - and never a Subsonic
+  envelope. Serving bytes registers a stream session whose audio-delivered flag
+  the first body frame sets and records the file's last access on a detached
+  write; an id that names no track, a catalog id, or a track with no file yet is
+  answered with `404` through the documented pending extension point.

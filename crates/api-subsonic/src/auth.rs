@@ -22,6 +22,7 @@ use axum::extract::{FromRequest, Request};
 use axum::http::HeaderName;
 use axum::http::StatusCode;
 use axum::http::request::Parts;
+use axum::http::{HeaderMap, Method};
 use axum::response::{IntoResponse, Response as HttpResponse};
 use hearthsound_auth::Principal;
 
@@ -350,6 +351,12 @@ impl FromRequest<SubsonicState> for Call {
 ///
 /// A binary handler answers a permission refusal with [`forbidden`], and its own
 /// not-found and unavailable cases with the matching status code.
+///
+/// Unlike [`Call`], a binary call keeps the request's method and headers,
+/// because what these endpoints answer depends on them: `stream` serves
+/// `Range` requests and revalidates with the `If-*` headers, and `getCoverArt`
+/// revalidates the same way. A handler reads them with
+/// [`BinaryCall::method`] and [`BinaryCall::headers`].
 #[derive(Debug, Clone)]
 pub struct BinaryCall {
     /// The shared services.
@@ -358,6 +365,10 @@ pub struct BinaryCall {
     principal: Principal,
     /// The request's parameters.
     params: Params,
+    /// The request's method.
+    method: Method,
+    /// The request's headers.
+    headers: HeaderMap,
 }
 
 impl BinaryCall {
@@ -374,6 +385,23 @@ impl BinaryCall {
     /// Returns the request's parameters.
     pub fn params(&self) -> &Params {
         &self.params
+    }
+
+    /// Returns the request's method.
+    ///
+    /// A binary endpoint serves the same bytes for `GET` and `HEAD`; the method
+    /// tells it whether the body is wanted, which is what `stream` uses to
+    /// decide whether it starts a stream session.
+    pub fn method(&self) -> &Method {
+        &self.method
+    }
+
+    /// Returns the request's headers.
+    ///
+    /// The `Range` and `If-*` headers live here, so a binary endpoint reads its
+    /// conditional requests from the request rather than from the parameters.
+    pub fn headers(&self) -> &HeaderMap {
+        &self.headers
     }
 }
 
@@ -411,6 +439,8 @@ impl FromRequest<SubsonicState> for BinaryCall {
                 state: state.clone(),
                 principal,
                 params,
+                method: parts.method.clone(),
+                headers: parts.headers.clone(),
             }),
             Err(error) => Err(binary_rejection(&error)),
         }

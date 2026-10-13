@@ -15,9 +15,12 @@ use hearthsound_catalog::CatalogService;
 use hearthsound_config::SettingsStore;
 use hearthsound_config::settings::Settings;
 use hearthsound_db::Database;
+use hearthsound_library::StorageRoots;
+use hearthsound_media::FfmpegRunner;
 
 use crate::auth::TrustedProxies;
 use crate::response::SubsonicError;
+use crate::stream::StreamService;
 
 /// The services every `/rest` endpoint shares.
 ///
@@ -41,6 +44,10 @@ struct Inner {
     catalog: Arc<CatalogService>,
     /// The activity service, which `scrobble` records plays through.
     activity: Arc<ActivityService>,
+    /// The stream service, which `/rest/stream` serves bytes through.
+    stream: StreamService,
+    /// The ffmpeg process runner the transcode path uses.
+    ffmpeg: Arc<FfmpegRunner>,
     /// The credential resolver.
     authenticator: Arc<Authenticator>,
     /// The proxies whose forwarding headers are trusted.
@@ -60,6 +67,11 @@ impl SubsonicState {
     ///   built it over the same provider registry.
     /// - `activity`: the activity service, shared with the stream service so
     ///   the "no song audio delivered" guard reads the same session registry.
+    /// - `ffmpeg`: the ffmpeg process runner the stream service transcodes
+    ///   through, shared with the composition root so one concurrency cap
+    ///   covers every transcode the process runs.
+    /// - `roots`: the managed storage roots a media file's path resolves
+    ///   against.
     ///
     /// # Returns
     ///
@@ -72,8 +84,11 @@ impl SubsonicState {
         authenticator: Arc<Authenticator>,
         catalog: Arc<CatalogService>,
         activity: Arc<ActivityService>,
+        ffmpeg: Arc<FfmpegRunner>,
+        roots: StorageRoots,
     ) -> SubsonicState {
         let user_settings = UserSettings::new(&database, settings.registry().clone());
+        let stream = StreamService::new(Arc::clone(&database), roots, activity.sessions().clone());
         SubsonicState {
             inner: Arc::new(Inner {
                 database,
@@ -81,6 +96,8 @@ impl SubsonicState {
                 user_settings,
                 catalog,
                 activity,
+                stream,
+                ffmpeg,
                 authenticator,
                 trusted_proxies: Arc::new(TrustedProxies::default()),
             }),
@@ -106,6 +123,8 @@ impl SubsonicState {
                 user_settings: self.inner.user_settings.clone(),
                 catalog: Arc::clone(&self.inner.catalog),
                 activity: Arc::clone(&self.inner.activity),
+                stream: self.inner.stream.clone(),
+                ffmpeg: Arc::clone(&self.inner.ffmpeg),
                 authenticator: Arc::clone(&self.inner.authenticator),
                 trusted_proxies: Arc::new(trusted_proxies),
             }),
@@ -169,6 +188,32 @@ impl SubsonicState {
     /// registry the stream service reports into.
     pub fn activity(&self) -> &ActivityService {
         &self.inner.activity
+    }
+
+    /// Returns the stream service.
+    ///
+    /// `/rest/stream` serves the track's bytes through it, so the file lookup,
+    /// the range and validator handling, and the stream session all live behind
+    /// one service.
+    pub fn stream(&self) -> &StreamService {
+        &self.inner.stream
+    }
+
+    /// Returns the ffmpeg process runner.
+    ///
+    /// The stream service transcodes through it, and the composition root built
+    /// it with the `stream.max_concurrent_transcodes` cap.
+    pub fn ffmpeg(&self) -> &Arc<FfmpegRunner> {
+        &self.inner.ffmpeg
+    }
+
+    /// Returns the managed storage roots.
+    ///
+    /// A media file that is not inside a library folder resolves against one of
+    /// them, which is how the stream and artwork paths turn a stored relative
+    /// path into an absolute one.
+    pub fn storage_roots(&self) -> &StorageRoots {
+        self.inner.stream.roots()
     }
 
     /// Resolves a request's credentials into a principal.

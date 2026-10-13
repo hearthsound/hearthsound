@@ -14,8 +14,9 @@
 //!    registry (rebuilt from the plugin tables), and the catalog layer over
 //!    that registry;
 //! 6. build the ffmpeg runner capped by `stream.max_concurrent_transcodes`, the
-//!    library scanner, the job queue, the job runner with its handlers, and the
-//!    cron scheduler with the system schedules;
+//!    managed storage roots the stream and artwork paths resolve files against,
+//!    the library scanner, the job queue, the job runner with its handlers, and
+//!    the cron scheduler with the system schedules;
 //! 7. build the activity service and the trusted-proxy list.
 //!
 //! Every service is shared through an `Arc`, so a handler, a job, or an
@@ -58,6 +59,7 @@ use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_jobs::{
     JobQueue, JobRunner, JobRunnerOptions, QueueOptions, ScheduleSpec, Scheduler, SchedulerOptions,
 };
+use hearthsound_library::StorageRoots;
 use hearthsound_library::scan::{LibraryScanner, SCAN_JOB_KIND, ScanJobHandler};
 use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::instances::InstanceService;
@@ -102,6 +104,8 @@ pub struct Services {
     scheduler: Arc<Scheduler>,
     /// The activity service: play recording and stream sessions.
     activity: Arc<ActivityService>,
+    /// The managed storage roots a stored media file resolves against.
+    storage_roots: StorageRoots,
     /// The proxies whose forwarding headers are trusted.
     trusted_proxies: TrustedProxies,
 }
@@ -231,6 +235,8 @@ impl Services {
             .await?;
 
         let activity = Arc::new(ActivityService::new(&database));
+        let storage_roots =
+            StorageRoots::new(config.paths.library.clone(), config.paths.cache.clone());
         let trusted_proxies = TrustedProxies::parse(config.server.trusted_proxies.iter().cloned())?;
 
         tracing::info!(
@@ -255,6 +261,7 @@ impl Services {
             runner,
             scheduler,
             activity,
+            storage_roots,
             trusted_proxies,
         }))
     }
@@ -340,6 +347,15 @@ impl Services {
         &self.activity
     }
 
+    /// Returns the managed storage roots.
+    ///
+    /// A stored media file that is not inside a library folder resolves against
+    /// one of them; the stream and artwork paths turn a relative path into an
+    /// absolute one with them.
+    pub fn storage_roots(&self) -> &StorageRoots {
+        &self.storage_roots
+    }
+
     /// Returns the shared state of the `/rest` surface.
     pub fn subsonic_state(&self) -> SubsonicState {
         SubsonicState::new(
@@ -348,6 +364,8 @@ impl Services {
             Arc::clone(&self.authenticator),
             Arc::clone(&self.catalog),
             Arc::clone(&self.activity),
+            Arc::clone(&self.ffmpeg),
+            self.storage_roots.clone(),
         )
         .with_trusted_proxies(self.trusted_proxies.clone())
     }

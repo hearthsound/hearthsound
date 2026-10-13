@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 axum.workspace = true
+futures-util.workspace = true
 hearthsound-activity = { path = "../activity" }
 hearthsound-auth = { path = "../auth" }
 hearthsound-catalog = { path = "../catalog" }
@@ -19,9 +20,14 @@ hearthsound-config = { path = "../config" }
 hearthsound-core = { path = "../core" }
 hearthsound-db = { path = "../db" }
 hearthsound-library = { path = "../library" }
+hearthsound-media = { path = "../media" }
+httpdate.workspace = true
 thiserror.workspace = true
 time = { workspace = true, features = ["formatting"] }
+tokio = { workspace = true, features = ["fs", "rt"] }
+tower-http = { workspace = true, features = ["fs"] }
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 hearthsound-plugin-host = { path = "../plugin-host" }

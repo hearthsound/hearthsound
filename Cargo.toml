@@ -49,6 +49,7 @@ croner = "4.0.1"
 data-encoding = "2.11.1"
 governor = "0.10.4"
 futures-util = "0.3.34"
+httpdate = "1.0.3"
 jsonschema = { version = "0.58.6", default-features = false }
 insta = "1.49.0"
 md-5 = "0.11.0"
