@@ -329,7 +329,9 @@ async fn waiters_observe_the_acquisition_at_every_attach_point() {
     let mut late = env.orchestrator.subscribe(id).unwrap();
     env.start();
     env.wait_for_state(id, AcquisitionState::Completed).await;
-    tokio::time::timeout(std::time::Duration::from_secs(5), late.changed())
+    // The channel carries the same advance the ledger does, and it is written
+    // after the row, so a loaded machine can need longer than a fixed window.
+    tokio::time::timeout(common::WAIT_TIMEOUT, late.changed())
         .await
         .expect("the channel carries the pipeline's advance")
         .unwrap();

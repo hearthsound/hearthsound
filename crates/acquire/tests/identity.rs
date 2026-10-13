@@ -5,7 +5,7 @@
 
 mod common;
 
-use std::time::Duration;
+use std::time::Instant;
 
 use common::{Env, InstanceLimits, config, one_candidate};
 use hearthsound_acquire::orchestrator::{AcquireRequest, AcquisitionHandle};
@@ -38,14 +38,20 @@ async fn place(env: &Env) {
 }
 
 /// Waits until a track carries a MusicBrainz recording id.
+///
+/// # Returns
+///
+/// The id, or `None` when the track still has none after
+/// [`common::WAIT_TIMEOUT`].
 async fn wait_for_recording_id(env: &Env, track: EntityId) -> Option<String> {
-    for _ in 0..500 {
+    let deadline = Instant::now() + common::WAIT_TIMEOUT;
+    while Instant::now() < deadline {
         if let Some(id) = env.track(track).await.mb_recording_id {
             return Some(id);
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(common::WAIT_POLL_INTERVAL).await;
     }
-    None
+    env.track(track).await.mb_recording_id
 }
 
 #[tokio::test]
@@ -81,11 +87,13 @@ async fn a_bulk_acquisition_applies_the_resolved_recording_identity() {
     // The identity is applied before the search runs, so the acquisition is
     // already past `resolving`.
     let mut state = env.acquisition(id).await.state;
-    for _ in 0..500 {
-        if state != AcquisitionState::Queued && state != AcquisitionState::Resolving {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    let deadline = Instant::now() + common::WAIT_TIMEOUT;
+    while state == AcquisitionState::Queued || state == AcquisitionState::Resolving {
+        assert!(
+            Instant::now() < deadline,
+            "the acquisition stayed in {state}"
+        );
+        tokio::time::sleep(common::WAIT_POLL_INTERVAL).await;
         state = env.acquisition(id).await.state;
     }
     assert!(

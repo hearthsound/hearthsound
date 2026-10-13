@@ -753,42 +753,42 @@ impl Env {
     ///
     /// # Panics
     ///
-    /// Panics when the state is not reached within ten seconds, so a stuck
+    /// Panics when the state is not reached within [`WAIT_TIMEOUT`], so a stuck
     /// pipeline fails the test instead of hanging it.
     pub async fn wait_for_state(&self, id: Uuid, state: AcquisitionState) {
-        for _ in 0..1000 {
-            if self
-                .orchestrator
-                .repository()
-                .get(id)
-                .await
-                .unwrap()
-                .unwrap()
-                .state
-                == state
-            {
+        let deadline = Instant::now() + WAIT_TIMEOUT;
+        loop {
+            let row = self.acquisition(id).await;
+            if row.state == state {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            if Instant::now() >= deadline {
+                panic!(
+                    "acquisition {id} stayed in {} instead of reaching {state}",
+                    row.state
+                );
+            }
+            tokio::time::sleep(WAIT_POLL_INTERVAL).await;
         }
-        let row = self.acquisition(id).await;
-        panic!(
-            "acquisition {id} stayed in {} instead of reaching {state}",
-            row.state
-        );
     }
 
     /// Waits until an acquisition reaches a terminal state.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no terminal state is reached within [`WAIT_TIMEOUT`].
     pub async fn wait_for_terminal(&self, id: Uuid) -> hearthsound_acquire::repo::AcquisitionRow {
-        for _ in 0..3000 {
+        let deadline = Instant::now() + WAIT_TIMEOUT;
+        loop {
             let row = self.acquisition(id).await;
             if row.state.is_terminal() {
                 return row;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            if Instant::now() >= deadline {
+                panic!("acquisition {id} stayed in {}", row.state);
+            }
+            tokio::time::sleep(WAIT_POLL_INTERVAL).await;
         }
-        let row = self.acquisition(id).await;
-        panic!("acquisition {id} stayed in {}", row.state);
     }
 }
 

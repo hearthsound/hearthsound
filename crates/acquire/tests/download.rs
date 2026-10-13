@@ -10,7 +10,7 @@
 mod common;
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::Instant;
 
 use common::{Env, INSTANCE, InstanceLimits, candidate, config, one_candidate};
 use hearthsound_acquire::orchestrator::{AcquireRequest, AcquisitionHandle};
@@ -274,11 +274,13 @@ async fn a_lost_download_token_restarts_the_search() {
     env.start();
     // Wait until the download has started, then make the backend forget it, as
     // a backend restart would.
-    for _ in 0..500 {
-        if env.downloads_started(INSTANCE).await >= 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    let deadline = Instant::now() + common::WAIT_TIMEOUT;
+    while env.downloads_started(INSTANCE).await < 1 {
+        assert!(
+            Instant::now() < deadline,
+            "the instance never started a download"
+        );
+        tokio::time::sleep(common::WAIT_POLL_INTERVAL).await;
     }
     assert_eq!(env.downloads_started(INSTANCE).await, 1);
     forget_downloads(&env).await;
@@ -332,11 +334,13 @@ async fn an_interactive_request_preempts_a_bulk_download() {
     let bulk_track = env.remote_track("Hello Song", "Hello Artist").await;
     let bulk_id = request(&env, bulk_track, Priority::Background).await.id;
     env.start();
-    for _ in 0..500 {
-        if env.downloads_started(INSTANCE).await >= 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    let deadline = Instant::now() + common::WAIT_TIMEOUT;
+    while env.downloads_started(INSTANCE).await < 1 {
+        assert!(
+            Instant::now() < deadline,
+            "the instance never started a download"
+        );
+        tokio::time::sleep(common::WAIT_POLL_INTERVAL).await;
     }
     assert_eq!(env.downloads_started(INSTANCE).await, 1);
     assert_eq!(

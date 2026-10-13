@@ -8,7 +8,7 @@
 
 mod common;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{
     Env, INSTANCE, InstanceLimits, candidate, config, drain, has_acquisition_event,
@@ -35,9 +35,10 @@ async fn request(env: &Env, track: EntityId, priority: Priority) -> Uuid {
 ///
 /// # Panics
 ///
-/// Panics when the log entry does not appear within ten seconds.
+/// Panics when the log entry does not appear within [`common::WAIT_TIMEOUT`].
 async fn wait_for_search_result(env: &Env, id: Uuid) -> String {
-    for _ in 0..500 {
+    let deadline = Instant::now() + common::WAIT_TIMEOUT;
+    loop {
         let message = env
             .log(id)
             .await
@@ -47,9 +48,12 @@ async fn wait_for_search_result(env: &Env, id: Uuid) -> String {
         if let Some(message) = message {
             return message;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            Instant::now() < deadline,
+            "acquisition {id} never logged a search result"
+        );
+        tokio::time::sleep(common::WAIT_POLL_INTERVAL).await;
     }
-    panic!("acquisition {id} never logged a search result");
 }
 
 /// Returns the current time in unix milliseconds.
@@ -214,11 +218,13 @@ async fn a_search_slot_bounds_the_concurrent_searches_of_an_instance() {
         .await;
     env.wait_for_state(second_id, AcquisitionState::Searching)
         .await;
-    for _ in 0..500 {
-        if env.searches_started(INSTANCE).await >= 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+    let deadline = Instant::now() + common::WAIT_TIMEOUT;
+    while env.searches_started(INSTANCE).await < 1 {
+        assert!(
+            Instant::now() < deadline,
+            "the instance never started a search"
+        );
+        tokio::time::sleep(common::WAIT_POLL_INTERVAL).await;
     }
     assert_eq!(env.searches_started(INSTANCE).await, 1);
     tokio::time::sleep(Duration::from_millis(500)).await;

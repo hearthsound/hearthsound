@@ -12,7 +12,7 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::Instant;
 
 use common::{
     Env, INSTANCE, InstanceLimits, config, drain, has_acquisition_event, has_availability_event,
@@ -64,15 +64,19 @@ fn long_download() -> serde_json::Value {
 ///
 /// # Panics
 ///
-/// Panics when no download starts within twenty seconds.
+/// Panics when no download starts within [`common::WAIT_TIMEOUT`].
 async fn wait_for_download(env: &Env, id: Uuid) {
-    for _ in 0..1000 {
+    let deadline = Instant::now() + common::WAIT_TIMEOUT;
+    loop {
         if env.acquisition(id).await.plugin_token.is_some() {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            Instant::now() < deadline,
+            "acquisition {id} never started a download"
+        );
+        tokio::time::sleep(common::WAIT_POLL_INTERVAL).await;
     }
-    panic!("acquisition {id} never started a download");
 }
 
 /// Counts the downloads the fixture instance still holds.
