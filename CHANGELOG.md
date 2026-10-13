@@ -48,3 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with its exact type string and camelCase payload, and the event bus that
   sequences events, broadcasts them, and replays the last thousand to a
   reconnecting subscriber.
+- Bootstrap configuration: typed server, path, database, log, secret, and web
+  keys loaded from an optional TOML file and `HEARTHSOUND__` environment
+  variables, with `<data>` substitution, the XDG data directory default, and
+  the derived data and storage directories.

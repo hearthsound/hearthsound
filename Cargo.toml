@@ -30,6 +30,7 @@ expect_used = "deny"
 anyhow = "1.0.104"
 async-trait = "0.1.92"
 clap = { version = "4.6.7", features = ["derive"] }
+config = "0.15.27"
 jsonschema = { version = "0.58.6", default-features = false }
 semver = "1.0.28"
 serde = "1.0.229"

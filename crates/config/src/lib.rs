@@ -3,10 +3,12 @@
 //! Settings have three layers, resolved with a fixed precedence: environment
 //! variables, then values from the configuration file, then the built-in
 //! default. This crate owns the registry of known settings, the typed keys used
-//! to read them, and the resolution rules. Loading the TOML file itself is the
-//! job of a later component: callers hand this crate an already parsed map of
-//! file values.
+//! to read them, and the resolution rules; the [`bootstrap`] module loads the
+//! bootstrap keys and hands the file's `[settings]` table over as the file
+//! layer.
 #![forbid(unsafe_code)]
+
+pub mod bootstrap;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -296,6 +298,38 @@ pub struct SettingSources {
 }
 
 impl SettingSources {
+    /// Builds sources from an already read environment and file.
+    ///
+    /// # Parameters
+    ///
+    /// - `env`: environment variables keyed by their full name. Names outside
+    ///   the `HEARTHSOUND__` namespace are ignored during resolution.
+    /// - `file`: configuration file values keyed by dotted setting key, as
+    ///   produced by [`bootstrap::BootstrapConfig::settings`].
+    ///
+    /// # Returns
+    ///
+    /// The sources.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::BTreeMap;
+    /// use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore, keys};
+    ///
+    /// let mut file = BTreeMap::new();
+    /// file.insert("plugins.max_memory_mb".to_owned(), toml::Value::Integer(512));
+    /// let sources = SettingSources::new(BTreeMap::new(), file);
+    /// let store = SettingsStore::resolve(&SettingsRegistry::builtin(), &sources).unwrap();
+    /// assert_eq!(store.get(keys::PLUGINS_MAX_MEMORY_MB).unwrap(), 512);
+    /// ```
+    pub fn new(
+        env: BTreeMap<String, String>,
+        file: BTreeMap<String, toml::Value>,
+    ) -> SettingSources {
+        SettingSources { env, file }
+    }
+
     /// Collects the process environment.
     ///
     /// Only variables starting with `HEARTHSOUND__` are read; this is the only
