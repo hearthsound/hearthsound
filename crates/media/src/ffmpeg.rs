@@ -287,6 +287,11 @@ impl FfmpegProcess {
         self.pid
     }
 
+    /// Returns the ffmpeg binary the child runs.
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
     /// Takes the child's standard input.
     ///
     /// # Returns

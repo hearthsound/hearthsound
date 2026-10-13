@@ -4,8 +4,9 @@
 //! way in and out of the server: [`probe`] reads a file's container, codec,
 //! technical properties, and tags; [`verify_decodes`] proves that a file
 //! decodes from end to end; [`extract_picture`] pulls embedded art out;
-//! [`write_tags`] writes the server's tag set back into a file, and
-//! [`write_sidecar_cover`] writes cover art beside it.
+//! [`write_tags`] writes the server's tag set back into a file,
+//! [`write_sidecar_cover`] writes cover art beside it, and [`FfmpegRunner`]
+//! runs every ffmpeg child under one concurrency budget.
 //!
 //! The crate takes plain values - paths, caps, bitrates, durations - and never
 //! reads a setting itself; the composition root resolves settings and passes
@@ -36,6 +37,7 @@ mod error;
 pub mod ffmpeg;
 pub mod probe;
 pub mod tags;
+pub mod transcode;
 
 pub use error::MediaError;
 pub use ffmpeg::{FfmpegProcess, FfmpegRunner};
@@ -44,3 +46,7 @@ pub use probe::{
     verify_decodes,
 };
 pub use tags::{ACQUIRED_VIA_KEY, Artwork, TrackTags, write_sidecar_cover, write_tags};
+pub use transcode::{
+    AudioStream, TranscodeFormat, TranscodeRequest, TranscodeStream, UnknownTranscodeFormat,
+    estimate_content_length,
+};

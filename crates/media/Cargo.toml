@@ -11,6 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+bytes.workspace = true
+futures-util.workspace = true
 hearthsound-core = { path = "../core" }
 lofty.workspace = true
 symphonia.workspace = true

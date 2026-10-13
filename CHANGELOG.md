@@ -126,3 +126,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   straight to `tokio::process` without a shell, standard error forwarded to the
   debug log, and children killed when their handle is dropped. Verification
   decodes now run through the same budget.
+- Streaming transcodes: mp3 through `libmp3lame`, Opus in Ogg through
+  `libopus`, and AAC as ADTS, with a `maxBitRate` cap, a start offset, packet
+  flushing so the first bytes arrive immediately, an encoded-length estimate for
+  `estimateContentLength`, a bounded queue so a stalled client cannot grow a
+  buffer, and a failure reported on the stream rather than as a truncated body.
