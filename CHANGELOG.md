@@ -434,3 +434,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answered with 304, `size` is handed to the catalog image choice while local
   images are served unscaled, and a refusal is a real HTTP status - 400, 401,
   404, 500, or 503 with `Retry-After` - never a failure envelope.
+- `scrobble` resolving a catalog track id through the provider aliases: an `x_`
+  id whose entity the catalog layer materialized records the play of the stored
+  row it resolves to, while an entity that was never materialized is still
+  accepted and discarded.

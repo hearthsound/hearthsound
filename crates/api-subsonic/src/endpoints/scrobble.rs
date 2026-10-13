@@ -7,13 +7,17 @@
 //! guard, so a client that only ever heard silence padding while an acquisition
 //! failed does not create a false play.
 //!
-//! Only a stored track is recorded. An `x_` catalog id names an entity the
-//! server has not stored, so it is accepted and discarded, as is any other id
-//! that is not a stored track: a client's play history must reference a row the
-//! server has.
+//! Only a stored track is recorded. A catalog id (`x_`) names an entity the
+//! server may not have stored yet: the id is resolved through the provider
+//! aliases the catalog layer wrote when it materialized the entity, and is
+//! recorded when that resolution finds a row. An entity that was never
+//! materialized stays a catalog entity, so it is accepted and discarded, as is
+//! any other id that is not a stored track: a client's play history must
+//! reference a row the server has.
 
 use hearthsound_activity::Scrobble;
-use hearthsound_core::{ClientId, IdPrefix};
+use hearthsound_catalog::aliases::provider_namespace;
+use hearthsound_core::{ClientId, EntityId, EntityKind, IdPrefix};
 
 use crate::auth::Call;
 use crate::response::{Encoded, Response, SubsonicError};
@@ -51,35 +55,110 @@ pub async fn scrobble(call: Call) -> Encoded {
     let user_id = call.principal().user_id.uuid();
 
     for value in &ids {
-        let Ok(ClientId::Entity(id)) = ClientId::parse(value) else {
-            tracing::debug!(
-                id = value,
-                "a scrobble named an id that is not a stored entity; it was discarded"
-            );
-            continue;
+        let track_id = match resolve(&call, value).await {
+            Ok(Some(track_id)) => track_id,
+            Ok(None) => continue,
+            Err(()) => return call.encode(Response::failed(SubsonicError::generic())),
         };
-        if id.kind() != IdPrefix::Track {
-            tracing::debug!(
-                id = %id,
-                "a scrobble named a stored entity that is not a track; it was discarded"
-            );
-            continue;
-        }
         let scrobble = Scrobble {
             user_id,
-            track_id: id.uuid(),
+            track_id: track_id.uuid(),
             client: call.client_name(),
             submission,
             started_at,
             listened_ms: 0,
         };
         if let Err(error) = call.state().activity().scrobble(&scrobble).await {
-            tracing::error!(error = %error, track = %id, "could not record a play");
+            tracing::error!(error = %error, track = %track_id, "could not record a play");
             return call.encode(Response::failed(SubsonicError::generic()));
         }
     }
 
     call.encode(Response::ok())
+}
+
+/// Resolves one `id` of a scrobble into a stored track.
+///
+/// A stored track id names the track itself. A catalog id names an entity a
+/// provider knows; when the catalog layer has materialized it, the provider id
+/// is recorded under the `p:<slug>` namespace of its instance, and that alias is
+/// what turns the `x_` id into the stored track. Every other id is not a row the
+/// server can reference a play with.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, whose state holds the catalog layer.
+/// - `value`: the id the client sent.
+///
+/// # Returns
+///
+/// The stored track, or `None` when the id names no stored track, which the
+/// caller discards.
+///
+/// # Errors
+///
+/// Returns `Err(())` when the alias lookup itself fails, which is a failure of
+/// this server and is logged with its cause.
+async fn resolve(call: &Call, value: &str) -> Result<Option<EntityId>, ()> {
+    match ClientId::parse(value) {
+        Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::Track => Ok(Some(id)),
+        Ok(ClientId::Entity(id)) => {
+            tracing::debug!(
+                id = %id,
+                "a scrobble named a stored entity that is not a track; it was discarded"
+            );
+            Ok(None)
+        }
+        Ok(ClientId::Catalog(catalog)) if catalog.kind() == EntityKind::Track => {
+            let namespace = provider_namespace(catalog.slug());
+            match call
+                .state()
+                .catalog()
+                .entity_by_alias(&namespace, EntityKind::Track, catalog.provider_id())
+                .await
+            {
+                Ok(Some(entity)) if entity.kind() == IdPrefix::Track => {
+                    tracing::debug!(
+                        id = value,
+                        track = %entity,
+                        "a scrobble resolved a catalog id to a stored track"
+                    );
+                    Ok(Some(entity))
+                }
+                Ok(_) => {
+                    tracing::debug!(
+                        id = value,
+                        "a scrobble named a catalog track the server has not stored; it was \
+                         discarded"
+                    );
+                    Ok(None)
+                }
+                Err(error) => {
+                    tracing::error!(
+                        id = value,
+                        error = %error,
+                        "could not resolve a catalog id of a scrobble"
+                    );
+                    Err(())
+                }
+            }
+        }
+        Ok(ClientId::Catalog(catalog)) => {
+            tracing::debug!(
+                id = %catalog,
+                "a scrobble named a catalog entity that is not a track; it was discarded"
+            );
+            Ok(None)
+        }
+        Err(error) => {
+            tracing::debug!(
+                id = value,
+                error = %error,
+                "a scrobble named an id that is not a client id; it was discarded"
+            );
+            Ok(None)
+        }
+    }
 }
 
 /// Reads `submission`, which defaults to a play.

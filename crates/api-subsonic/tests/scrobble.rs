@@ -1,5 +1,5 @@
-//! Integration tests for `scrobble`: the play a stored track records, the
-//! ids that are accepted and discarded, and the "no song audio delivered"
+//! Integration tests for `scrobble`: the play a stored track records, the ids
+//! that are recorded, resolved, or discarded, and the "no song audio delivered"
 //! guard.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -57,7 +57,7 @@ async fn scrobble_records_a_play_for_a_stored_track() {
 }
 
 #[tokio::test]
-async fn scrobble_accepts_and_discards_a_catalog_id() {
+async fn scrobble_discards_an_unmaterialized_catalog_id() {
     let (fixture, seeded) = fixture().await;
     fixture.install_hello_catalog().await;
     let app = fixture.app();
@@ -83,6 +83,44 @@ async fn scrobble_accepts_and_discards_a_catalog_id() {
         .await
         .unwrap();
     assert_eq!(plays, 0);
+}
+
+#[tokio::test]
+async fn scrobble_records_a_play_for_a_materialized_catalog_id() {
+    let (fixture, _seeded) = fixture().await;
+    fixture.install_hello_catalog().await;
+    let id = CatalogId::new(
+        Slug::new("hello").unwrap(),
+        EntityKind::Track,
+        "hello-track-1",
+    )
+    .unwrap();
+    let stored = fixture
+        .state
+        .catalog()
+        .materialize_track(&id)
+        .await
+        .unwrap();
+    let app = fixture.app();
+
+    let probe = get(
+        &app,
+        &format!("/rest/scrobble?id={id}&apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_ok(&probe);
+
+    let plays = fixture
+        .state
+        .activity()
+        .plays()
+        .play_count(fixture.user_id.uuid(), stored.uuid())
+        .await
+        .unwrap();
+    assert_eq!(
+        plays, 1,
+        "a catalog id resolves through its provider alias to the stored track"
+    );
 }
 
 #[tokio::test]
