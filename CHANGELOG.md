@@ -115,3 +115,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   full tag set, and whether the file carries embedded art, plus embedded picture
   extraction and a full-decode verification that uses symphonia and falls back
   to an ffmpeg decode for the codecs symphonia lacks.
+- Writing the import tag set into audio files: title, artists, album, album
+  artist, track and disc numbers with totals, date, genres, ISRC, the Picard
+  MusicBrainz identifiers, the ReplayGain values, and the
+  `HEARTHSOUND_ACQUIRED_VIA` marker, each into the key its container uses
+  (Vorbis comments, ID3v2 `TXXX`, MP4 freeform atoms, or APE items), with
+  optional cover embedding and a sidecar cover writer.

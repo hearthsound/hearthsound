@@ -7,7 +7,12 @@
 //! probe result can be written back to another file without translation, and a
 //! round trip through a file is directly comparable.
 
+use std::path::{Path, PathBuf};
+
+use crate::error::MediaError;
 use hearthsound_core::Slug;
+use lofty::picture::{MimeType, Picture, PictureType};
+use lofty::tag::{ItemKey, ItemValue, Tag, TagItem, TagType};
 
 /// The tags of a track.
 ///
@@ -165,5 +170,296 @@ impl Artwork {
     /// Consumes the image and returns its bytes.
     pub fn into_data(self) -> Vec<u8> {
         self.data
+    }
+}
+
+/// The tag key the acquiring instance slug is written under.
+///
+/// The name is the server's own marker, so it is written as a custom key: a
+/// Vorbis comment for FLAC and Ogg, a `TXXX` frame with this description for
+/// ID3v2, a `----:com.apple.iTunes:HEARTHSOUND_ACQUIRED_VIA` freeform atom for
+/// MP4, and an APE item for WavPack.
+pub const ACQUIRED_VIA_KEY: &str = "HEARTHSOUND_ACQUIRED_VIA";
+
+/// The MP4 freeform mean the custom keys are written under.
+///
+/// MP4 has no place for arbitrary atoms, so taggers agree on the
+/// `com.apple.iTunes` mean; every reader that understands freeform atoms
+/// (including `lofty`) looks there.
+const MP4_FREEFORM_MEAN: &str = "com.apple.iTunes";
+
+/// Writes the tag set into an audio file.
+///
+/// The file's container decides where the tags land: Vorbis comments for FLAC
+/// and Ogg, ID3v2 for MPEG, AAC, WAV and AIFF, `ilst` for MP4, and an APE tag
+/// for WavPack, Monkey's Audio and Musepack. Writing replaces the values of the
+/// keys the set carries and leaves every other tag type in the file alone.
+///
+/// The work is blocking (`lofty` rewrites the file) and runs on a blocking
+/// thread.
+///
+/// # Parameters
+///
+/// - `path`: the file to tag; it must already exist in a supported container.
+/// - `tags`: the tags to write; empty fields are skipped.
+/// - `cover`: an optional cover to embed as a front cover picture.
+///
+/// # Returns
+///
+/// `Ok(())` once the file was rewritten.
+///
+/// # Errors
+///
+/// Returns [`MediaError::Io`] when the file cannot be read or written,
+/// [`MediaError::Tag`] when a tag cannot be encoded, and
+/// [`MediaError::Unsupported`] for a container the server does not tag.
+pub async fn write_tags(
+    path: &Path,
+    tags: &TrackTags,
+    cover: Option<&Artwork>,
+) -> Result<(), MediaError> {
+    let path = path.to_path_buf();
+    let tags = tags.clone();
+    let cover = cover.cloned();
+    tokio::task::spawn_blocking(move || write_tags_blocking(&path, &tags, cover.as_ref()))
+        .await
+        .map_err(MediaError::task_failed)?
+}
+
+/// Writes the tag set on the calling thread.
+///
+/// # Parameters
+///
+/// - `path`: the file to tag.
+/// - `tags`: the tags to write.
+/// - `cover`: an optional cover to embed.
+///
+/// # Errors
+///
+/// Returns the same errors as [`write_tags`].
+fn write_tags_blocking(
+    path: &Path,
+    tags: &TrackTags,
+    cover: Option<&Artwork>,
+) -> Result<(), MediaError> {
+    use lofty::ape::{ApeItem, ApeTag};
+    use lofty::config::WriteOptions;
+    use lofty::file::FileType;
+    use lofty::id3::v2::Id3v2Tag;
+    use lofty::mp4::{Atom, AtomData, AtomIdent, Ilst};
+    use lofty::ogg::tag::VorbisComments;
+    use lofty::prelude::TagExt;
+
+    let options = WriteOptions::default();
+    let file_type = crate::probe::detect_file_type(path)?;
+    match file_type {
+        FileType::Flac | FileType::Opus | FileType::Speex | FileType::Vorbis => {
+            let mut tag = VorbisComments::from(generic_tag(TagType::VorbisComments, tags, cover));
+            if let Some(slug) = &tags.acquired_via {
+                tag.insert(ACQUIRED_VIA_KEY.to_owned(), slug.as_str().to_owned());
+            }
+            tag.save_to_path(path, options)
+                .map_err(|source| MediaError::tag(path, source))
+        }
+        FileType::Mpeg | FileType::Aac | FileType::Wav | FileType::Aiff => {
+            let mut tag = Id3v2Tag::from(generic_tag(TagType::Id3v2, tags, cover));
+            if let Some(slug) = &tags.acquired_via {
+                tag.insert_user_text(ACQUIRED_VIA_KEY.to_owned(), slug.as_str().to_owned());
+            }
+            tag.save_to_path(path, options)
+                .map_err(|source| MediaError::tag(path, source))
+        }
+        FileType::Mp4 => {
+            let mut tag = Ilst::from(generic_tag(TagType::Mp4Ilst, tags, cover));
+            if let Some(slug) = &tags.acquired_via {
+                tag.insert(Atom::new(
+                    AtomIdent::Freeform {
+                        mean: MP4_FREEFORM_MEAN.into(),
+                        name: ACQUIRED_VIA_KEY.into(),
+                    },
+                    AtomData::UTF8(slug.as_str().to_owned()),
+                ));
+            }
+            tag.save_to_path(path, options)
+                .map_err(|source| MediaError::tag(path, source))
+        }
+        FileType::Ape | FileType::Mpc | FileType::WavPack => {
+            let mut tag = ApeTag::from(generic_tag(TagType::Ape, tags, cover));
+            if let Some(slug) = &tags.acquired_via {
+                let item = ApeItem::new(
+                    ACQUIRED_VIA_KEY.to_owned(),
+                    ItemValue::Text(slug.as_str().to_owned()),
+                )
+                .map_err(|source| MediaError::unsupported(path, source.to_string()))?;
+                tag.insert(item);
+            }
+            tag.save_to_path(path, options)
+                .map_err(|source| MediaError::tag(path, source))
+        }
+        _ => Err(MediaError::unsupported(
+            path,
+            format!("{file_type:?} files cannot be tagged"),
+        )),
+    }
+}
+
+/// Writes a cover image beside an audio file.
+///
+/// The import pipeline calls this with `library.cover_filename` (default
+/// `cover.jpg`) and the directory the audio file lands in.
+///
+/// # Parameters
+///
+/// - `dir`: the directory to write into; it must already exist.
+/// - `file_name`: the sidecar file name, including its extension.
+/// - `cover`: the image to write.
+///
+/// # Returns
+///
+/// The path of the written cover, which is `dir` joined with `file_name`.
+///
+/// # Errors
+///
+/// Returns [`MediaError::Io`] when the file cannot be written.
+pub async fn write_sidecar_cover(
+    dir: &Path,
+    file_name: &str,
+    cover: &Artwork,
+) -> Result<PathBuf, MediaError> {
+    let path = dir.join(file_name);
+    tokio::fs::write(&path, cover.data())
+        .await
+        .map_err(|source| MediaError::io(&path, source))?;
+    Ok(path)
+}
+
+/// Builds the generic tag set for a target tag type.
+///
+/// The generic [`Tag`] carries every field through `lofty`'s per-format key
+/// mapping, which is what turns the same `ItemKey`s into Vorbis comments, ID3v2
+/// frames, MP4 atoms, or APE items.
+///
+/// # Parameters
+///
+/// - `tag_type`: the tag type the file's container uses.
+/// - `tags`: the tags to write.
+/// - `cover`: an optional cover to embed.
+///
+/// # Returns
+///
+/// A tag holding one item per non-empty field, plus the cover.
+fn generic_tag(tag_type: TagType, tags: &TrackTags, cover: Option<&Artwork>) -> Tag {
+    let mut tag = Tag::new(tag_type);
+    set(&mut tag, ItemKey::TrackTitle, tags.title.as_deref());
+    if let Some(artist) = tags.artists.first() {
+        tag.insert_text(ItemKey::TrackArtist, artist.clone());
+    }
+    append(&mut tag, ItemKey::TrackArtists, &tags.artists);
+    set(&mut tag, ItemKey::AlbumTitle, tags.album.as_deref());
+    set(&mut tag, ItemKey::AlbumArtist, tags.album_artist.as_deref());
+    set_text(&mut tag, ItemKey::TrackNumber, tags.track_number);
+    set_text(&mut tag, ItemKey::TrackTotal, tags.track_total);
+    set_text(&mut tag, ItemKey::DiscNumber, tags.disc_number);
+    set_text(&mut tag, ItemKey::DiscTotal, tags.disc_total);
+    set(&mut tag, ItemKey::RecordingDate, tags.date.as_deref());
+    append(&mut tag, ItemKey::Genre, &tags.genres);
+    set(&mut tag, ItemKey::Isrc, tags.isrc.as_deref());
+    set(
+        &mut tag,
+        ItemKey::MusicBrainzRecordingId,
+        tags.mb_recording_id.as_deref(),
+    );
+    set(
+        &mut tag,
+        ItemKey::MusicBrainzReleaseId,
+        tags.mb_release_id.as_deref(),
+    );
+    set(
+        &mut tag,
+        ItemKey::MusicBrainzReleaseGroupId,
+        tags.mb_release_group_id.as_deref(),
+    );
+    set(
+        &mut tag,
+        ItemKey::MusicBrainzArtistId,
+        tags.mb_artist_id.as_deref(),
+    );
+    set(
+        &mut tag,
+        ItemKey::MusicBrainzReleaseArtistId,
+        tags.mb_album_artist_id.as_deref(),
+    );
+    set(
+        &mut tag,
+        ItemKey::ReplayGainTrackGain,
+        tags.replaygain_track_gain.as_deref(),
+    );
+    set(
+        &mut tag,
+        ItemKey::ReplayGainTrackPeak,
+        tags.replaygain_track_peak.as_deref(),
+    );
+    set(
+        &mut tag,
+        ItemKey::ReplayGainAlbumGain,
+        tags.replaygain_album_gain.as_deref(),
+    );
+    set(
+        &mut tag,
+        ItemKey::ReplayGainAlbumPeak,
+        tags.replaygain_album_peak.as_deref(),
+    );
+    if let Some(cover) = cover {
+        tag.push_picture(
+            Picture::unchecked(cover.data().to_vec())
+                .mime_type(MimeType::from_str(cover.mime_type()))
+                .pic_type(PictureType::CoverFront)
+                .build(),
+        );
+    }
+    tag
+}
+
+/// Sets one single-valued text tag, replacing any previous value.
+///
+/// # Parameters
+///
+/// - `tag`: the tag to write into.
+/// - `key`: the tag key.
+/// - `value`: the value, or `None` to leave the key untouched.
+fn set(tag: &mut Tag, key: ItemKey, value: Option<&str>) {
+    if let Some(value) = value.filter(|value| !value.is_empty()) {
+        tag.insert_text(key, value.to_owned());
+    }
+}
+
+/// Sets one single-valued numeric tag.
+///
+/// # Parameters
+///
+/// - `tag`: the tag to write into.
+/// - `key`: the tag key.
+/// - `value`: the value, or `None` to leave the key untouched.
+fn set_text(tag: &mut Tag, key: ItemKey, value: Option<u32>) {
+    if let Some(value) = value {
+        tag.insert_text(key, value.to_string());
+    }
+}
+
+/// Sets a multi-valued text tag, replacing any previous values.
+///
+/// # Parameters
+///
+/// - `tag`: the tag to write into.
+/// - `key`: the tag key.
+/// - `values`: the values; empty strings are skipped.
+fn append(tag: &mut Tag, key: ItemKey, values: &[String]) {
+    let values: Vec<&String> = values.iter().filter(|value| !value.is_empty()).collect();
+    if values.is_empty() {
+        return;
+    }
+    tag.remove_key(key);
+    for value in values {
+        tag.push(TagItem::new(key, ItemValue::Text(value.clone())));
     }
 }

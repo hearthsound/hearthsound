@@ -30,7 +30,7 @@ use lofty::config::ParseOptions;
 use lofty::file::{AudioFile, FileType, TaggedFile, TaggedFileExt};
 use lofty::mp4::{Mp4Codec, Mp4File};
 use lofty::prelude::Accessor;
-use lofty::probe::Probe as LoftyProbe;
+use lofty::probe::Probe;
 use lofty::tag::{ItemKey, Tag};
 
 use crate::error::MediaError;
@@ -579,10 +579,32 @@ async fn ffmpeg_decode(
 /// [`MediaError::Tag`] when it cannot be parsed, and
 /// [`MediaError::Unsupported`] when no format matches.
 fn read_tagged_file(path: &Path) -> Result<TaggedFile, MediaError> {
-    // The file is opened explicitly so that a missing or unreadable file is
-    // reported as an IO error rather than as a parse error.
+    open_probe(path)?.read().map_err(|source| {
+        if source.is_unknown_format() {
+            MediaError::unsupported(path, "no known container was detected")
+        } else {
+            MediaError::tag(path, source)
+        }
+    })
+}
+
+/// Opens an audio file and detects its container.
+///
+/// The file is opened explicitly so that a missing or unreadable file is
+/// reported as an IO error rather than as a parse error, and the container is
+/// detected from the file's content, not from its extension.
+///
+/// # Parameters
+///
+/// - `path`: the file to open.
+///
+/// # Errors
+///
+/// Returns [`MediaError::Io`] when the file cannot be read and
+/// [`MediaError::Unsupported`] when no known container was detected.
+pub(crate) fn open_probe(path: &Path) -> Result<Probe<BufReader<File>>, MediaError> {
     let file = File::open(path).map_err(|source| MediaError::io(path, source))?;
-    let probe = LoftyProbe::new(BufReader::new(file))
+    let probe = Probe::new(BufReader::new(file))
         .guess_file_type()
         .map_err(|source| MediaError::io(path, source))?;
     if probe.file_type().is_none() {
@@ -591,13 +613,23 @@ fn read_tagged_file(path: &Path) -> Result<TaggedFile, MediaError> {
             "no known container was detected",
         ));
     }
-    probe.read().map_err(|source| {
-        if source.is_unknown_format() {
-            MediaError::unsupported(path, "no known container was detected")
-        } else {
-            MediaError::tag(path, source)
-        }
-    })
+    Ok(probe)
+}
+
+/// Detects the container of an audio file.
+///
+/// # Parameters
+///
+/// - `path`: the file to inspect.
+///
+/// # Errors
+///
+/// Returns [`MediaError::Io`] when the file cannot be read and
+/// [`MediaError::Unsupported`] when no known container was detected.
+pub(crate) fn detect_file_type(path: &Path) -> Result<FileType, MediaError> {
+    open_probe(path)?
+        .file_type()
+        .ok_or_else(|| MediaError::unsupported(path, "no known container was detected"))
 }
 
 /// Resolves the codec of a file.

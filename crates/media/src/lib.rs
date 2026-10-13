@@ -3,8 +3,9 @@
 //! The crate owns everything that touches audio bytes or audio metadata on the
 //! way in and out of the server: [`probe`] reads a file's container, codec,
 //! technical properties, and tags; [`verify_decodes`] proves that a file
-//! decodes from end to end; [`extract_picture`] pulls embedded art out; the
-//! [`tags`] module reads and writes the server's tag set.
+//! decodes from end to end; [`extract_picture`] pulls embedded art out;
+//! [`write_tags`] writes the server's tag set back into a file, and
+//! [`write_sidecar_cover`] writes cover art beside it.
 //!
 //! The crate takes plain values - paths, caps, bitrates, durations - and never
 //! reads a setting itself; the composition root resolves settings and passes
@@ -37,4 +38,4 @@ pub use probe::{
     Codec, Container, DecodeBackend, DecodeReport, ProbeResult, extract_picture, probe,
     verify_decodes,
 };
-pub use tags::{Artwork, TrackTags};
+pub use tags::{ACQUIRED_VIA_KEY, Artwork, TrackTags, write_sidecar_cover, write_tags};
