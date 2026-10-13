@@ -189,3 +189,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers a failed check with an HTTP status code instead of an error envelope.
   Endpoints are registered at both `/rest/<name>` and `/rest/<name>.view`, and
   an endpoint this server does not implement answers error 70.
+- The first Subsonic endpoints: `ping`, `getLicense`,
+  `getOpenSubsonicExtensions` with the `apiKeyAuthentication` and `formPost`
+  extensions, `tokenInfo`, and `getMusicFolders` with the personal library and
+  the server browse folder, each snapshot tested in both encodings.

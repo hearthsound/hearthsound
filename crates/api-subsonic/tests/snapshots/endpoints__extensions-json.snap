@@ -1,0 +1,5 @@
+---
+source: crates/api-subsonic/tests/endpoints.rs
+expression: json.body
+---
+{"subsonic-response":{"status":"ok","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.0-alpha.0","openSubsonic":true,"openSubsonicExtensions":[{"name":"apiKeyAuthentication","versions":[1]},{"name":"formPost","versions":[1]}]}}

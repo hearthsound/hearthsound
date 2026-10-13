@@ -14,6 +14,7 @@ use axum::Router;
 use axum::handler::Handler;
 use axum::routing::get;
 
+use crate::endpoints;
 use crate::params::Params;
 use crate::response::{Encoded, Response, SubsonicError};
 use crate::state::SubsonicState;
@@ -80,7 +81,17 @@ where
 /// The router, which the composition root mounts with
 /// [`router`](crate::router).
 pub fn routes() -> Router<SubsonicState> {
-    Router::new().route(NOT_FOUND_PATH, get(not_found).post(not_found))
+    let router = Router::new();
+    let router = register(router, "ping", endpoints::ping);
+    let router = register(router, "getLicense", endpoints::get_license);
+    let router = register(
+        router,
+        "getOpenSubsonicExtensions",
+        endpoints::get_open_subsonic_extensions,
+    );
+    let router = register(router, "tokenInfo", endpoints::token_info);
+    let router = register(router, "getMusicFolders", endpoints::get_music_folders);
+    router.route(NOT_FOUND_PATH, get(not_found).post(not_found))
 }
 
 /// Builds the `/rest` router with its state.

@@ -7,3 +7,5 @@
 /dev/music/
 /dev/slskd/
 /dev/storage/
+# insta writes a rejected snapshot beside the accepted one; never commit it.
+*.snap.new
