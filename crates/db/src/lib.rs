@@ -27,11 +27,10 @@ pub const READER_CONNECTIONS: u32 = 4;
 /// transactions stay short and WAL checkpoint starvation is avoided.
 pub const WRITER_CONNECTIONS: u32 = 1;
 
-/// The migrations bundled into this crate.
+/// The migrations bundled into this crate: the server's schema.
 ///
-/// It is empty until the first table is introduced, which is why
-/// [`Database::migrate`] accepts an explicit migrator: tests and later crates
-/// can migrate with their own set.
+/// [`Database::migrate`] takes the migrator as a parameter so tests can apply
+/// a migration set of their own.
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 /// An open database with its writer and reader pools.
