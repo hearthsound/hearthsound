@@ -10,6 +10,7 @@ members = [
     "crates/db",
     "crates/hearthsound",
     "crates/jobs",
+    "crates/library",
     "crates/media",
     "crates/plugin-host",
     "crates/test-support",

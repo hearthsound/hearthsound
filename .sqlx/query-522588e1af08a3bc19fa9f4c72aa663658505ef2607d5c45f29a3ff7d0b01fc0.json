@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO track_genres (track_id, genre_id) VALUES (?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "522588e1af08a3bc19fa9f4c72aa663658505ef2607d5c45f29a3ff7d0b01fc0"
+}

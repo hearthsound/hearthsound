@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO tracks (id, album_id, title, sort_title, display_artist, disc_number, track_number, duration_ms, isrc, mb_recording_id, explicit, origin, availability, unavailable_until, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 16
+    },
+    "nullable": []
+  },
+  "hash": "f76e55c476721f4144eaf2cfe28b24948a6a47290b9ac9604b7916ca1701121b"
+}

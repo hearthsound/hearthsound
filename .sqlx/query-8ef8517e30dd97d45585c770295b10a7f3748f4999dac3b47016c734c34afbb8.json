@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE media_files SET size = ?, mtime_ms = ?, format = ?, codec = ?, bitrate_kbps = ?, sample_rate = ?, bit_depth = ?, channels = ?, duration_ms = ?, lossless = ?, has_embedded_art = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "8ef8517e30dd97d45585c770295b10a7f3748f4999dac3b47016c734c34afbb8"
+}

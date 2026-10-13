@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO library_folders (id, path, name, owner_user_id, watch, created_at) VALUES (?, ?, ?, ?, 1, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "c7ebfefe2ee6621007152e02ac6978ec1eb0352d468b53d2a067650533797348"
+}

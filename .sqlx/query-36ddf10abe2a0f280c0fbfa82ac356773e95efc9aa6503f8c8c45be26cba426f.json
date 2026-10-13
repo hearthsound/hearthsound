@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tracks SET availability = ?, unavailable_until = ?, updated_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "36ddf10abe2a0f280c0fbfa82ac356773e95efc9aa6503f8c8c45be26cba426f"
+}

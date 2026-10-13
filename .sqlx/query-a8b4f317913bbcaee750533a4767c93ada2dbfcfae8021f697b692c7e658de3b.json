@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE media_files SET is_preferred = 1 WHERE id = ( SELECT id FROM media_files WHERE track_id = ? ORDER BY CASE storage WHEN 'library' THEN 0 WHEN 'folder' THEN 1 ELSE 2 END, added_at DESC, id LIMIT 1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "a8b4f317913bbcaee750533a4767c93ada2dbfcfae8021f697b692c7e658de3b"
+}

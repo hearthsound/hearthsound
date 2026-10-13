@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT artist_id, position, role FROM album_artists WHERE album_id = ? ORDER BY position",
+  "describe": {
+    "columns": [
+      {
+        "name": "artist_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "album_artists",
+            "name": "artist_id"
+          }
+        }
+      },
+      {
+        "name": "position",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "album_artists",
+            "name": "position"
+          }
+        }
+      },
+      {
+        "name": "role",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "album_artists",
+            "name": "role"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4ca8bba2a4a979dae31237d1eaba65d0ca70023e841cdcf6d4121b1a81841607"
+}

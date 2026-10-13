@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE library_folders SET owner_user_id = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "0c0752998e89ee7e8ac60e4a103f3b1abd2dce4f59e992c3136812d7d47240ac"
+}

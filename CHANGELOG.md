@@ -214,3 +214,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for the plugin, and returns the status, content type and bytes together with
   the instance's `catalog.imageCachePolicy` so the caller decides whether to
   store them.
+- The `hearthsound-library` crate with the repository for the tables it owns:
+  artists deduped by MusicBrainz id and otherwise by case-insensitive name,
+  albums deduped by MusicBrainz release id and otherwise by folded title with
+  their primary artist, ordered album and track credits, case-folded genres,
+  tracks with their credits and genres, media files with the one preferred file
+  per track chosen by storage class (permanent managed, then folder, then
+  evictable cache), and library folders added by their canonical path with an
+  optional owner. Every write takes a connection or transaction so a caller can
+  keep several writes atomic, and the pool-level facade offers the same
+  operations one short transaction each.

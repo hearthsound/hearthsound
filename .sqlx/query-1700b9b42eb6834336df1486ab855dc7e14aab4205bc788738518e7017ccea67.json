@@ -1,0 +1,290 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, track_id, storage, folder_id, rel_path, size, mtime_ms, format, codec, bitrate_kbps, sample_rate, bit_depth, channels, duration_ms, lossless, quality_tier, replaygain, has_embedded_art, added_at, last_accessed_at, uploaded_by, acquisition_id, is_preferred FROM media_files WHERE track_id = ? AND is_preferred = 1 LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "track_id",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "track_id"
+          }
+        }
+      },
+      {
+        "name": "storage",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "storage"
+          }
+        }
+      },
+      {
+        "name": "folder_id",
+        "ordinal": 3,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "folder_id"
+          }
+        }
+      },
+      {
+        "name": "rel_path",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "rel_path"
+          }
+        }
+      },
+      {
+        "name": "size",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "size"
+          }
+        }
+      },
+      {
+        "name": "mtime_ms",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "mtime_ms"
+          }
+        }
+      },
+      {
+        "name": "format",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "format"
+          }
+        }
+      },
+      {
+        "name": "codec",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "codec"
+          }
+        }
+      },
+      {
+        "name": "bitrate_kbps",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "bitrate_kbps"
+          }
+        }
+      },
+      {
+        "name": "sample_rate",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "sample_rate"
+          }
+        }
+      },
+      {
+        "name": "bit_depth",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "bit_depth"
+          }
+        }
+      },
+      {
+        "name": "channels",
+        "ordinal": 12,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "channels"
+          }
+        }
+      },
+      {
+        "name": "duration_ms",
+        "ordinal": 13,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "duration_ms"
+          }
+        }
+      },
+      {
+        "name": "lossless",
+        "ordinal": 14,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "lossless"
+          }
+        }
+      },
+      {
+        "name": "quality_tier",
+        "ordinal": 15,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "quality_tier"
+          }
+        }
+      },
+      {
+        "name": "replaygain",
+        "ordinal": 16,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "replaygain"
+          }
+        }
+      },
+      {
+        "name": "has_embedded_art",
+        "ordinal": 17,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "has_embedded_art"
+          }
+        }
+      },
+      {
+        "name": "added_at",
+        "ordinal": 18,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "added_at"
+          }
+        }
+      },
+      {
+        "name": "last_accessed_at",
+        "ordinal": 19,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "last_accessed_at"
+          }
+        }
+      },
+      {
+        "name": "uploaded_by",
+        "ordinal": 20,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "uploaded_by"
+          }
+        }
+      },
+      {
+        "name": "acquisition_id",
+        "ordinal": 21,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "acquisition_id"
+          }
+        }
+      },
+      {
+        "name": "is_preferred",
+        "ordinal": 22,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "is_preferred"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "1700b9b42eb6834336df1486ab855dc7e14aab4205bc788738518e7017ccea67"
+}
