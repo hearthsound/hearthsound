@@ -33,3 +33,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial database schema covering accounts, settings, library folders, the
   music catalog, media files and retention, playlists, acquisitions, plugins,
   jobs, caches, and a shared full-text search index kept in step by triggers.
+- `PRAGMA data_version` watching, notifying the running server when another
+  connection such as a CLI command writes to the database.

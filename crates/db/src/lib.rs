@@ -6,6 +6,10 @@
 //! through [`Database::readers`]. Migrations are forward-only and are applied at
 //! startup by [`Database::migrate`], which copies the database out of the way
 //! before applying anything to a database that already holds data.
+//!
+//! Because a CLI command can write to the same file while the server runs, the
+//! server watches for those commits with [`Database::watch_data_version`] and
+//! reloads whatever the command changed.
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
@@ -14,6 +18,10 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+
+mod watch;
+
+pub use watch::{DataVersionSubscription, DataVersionWatcher};
 
 /// How many milliseconds a connection waits for a busy database before failing.
 const BUSY_TIMEOUT_MS: u64 = 5000;
@@ -26,6 +34,13 @@ pub const READER_CONNECTIONS: u32 = 4;
 /// One, because every write is serialized behind a single connection so write
 /// transactions stay short and WAL checkpoint starvation is avoided.
 pub const WRITER_CONNECTIONS: u32 = 1;
+
+/// How often the server polls `PRAGMA data_version` for writes made by other
+/// connections.
+///
+/// One second, so a change a CLI command makes takes effect about a second
+/// later. See [`Database::watch_data_version`].
+pub const DATA_VERSION_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The migrations bundled into this crate: the server's schema.
 ///
