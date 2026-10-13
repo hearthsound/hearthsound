@@ -44,6 +44,8 @@ pub enum Command {
     Migrate,
     /// Index the tags of the files in the library folders.
     Scan(ScanArgs),
+    /// Read and write the runtime settings.
+    Settings(SettingsArgs),
     /// Manage accounts, credentials, and library folders.
     Admin(AdminArgs),
     /// Install plugins and list what is installed.
@@ -239,4 +241,45 @@ pub struct SetLayerArgs {
     /// The instance slugs of the layer, in priority order.
     #[arg(value_name = "SLUG", num_args = 1..)]
     pub slugs: Vec<String>,
+}
+
+/// The arguments of `settings`.
+#[derive(Debug, Args)]
+pub struct SettingsArgs {
+    /// The settings command to run.
+    #[command(subcommand)]
+    pub command: SettingsCommand,
+}
+
+/// Every command under `settings`.
+#[derive(Debug, Subcommand)]
+pub enum SettingsCommand {
+    /// Print one setting's value and where it comes from.
+    Get(SettingKeyArgs),
+    /// Store one setting in the database.
+    Set(SetSettingArgs),
+    /// Remove one setting's stored value, falling back to the layers below it.
+    Unset(SettingKeyArgs),
+    /// List every setting with its value, source, and default.
+    List,
+}
+
+/// The arguments of a command that names one setting.
+#[derive(Debug, Args)]
+pub struct SettingKeyArgs {
+    /// The dotted setting key, for example `stream.pending.mode`.
+    #[arg(value_name = "KEY")]
+    pub key: String,
+}
+
+/// The arguments of `settings set`.
+#[derive(Debug, Args)]
+pub struct SetSettingArgs {
+    /// The dotted setting key.
+    #[arg(value_name = "KEY")]
+    pub key: String,
+    /// The new value, written as the setting's kind expects: `true` or `false`,
+    /// a number, a string, or a comma-separated list of strings.
+    #[arg(value_name = "VALUE")]
+    pub value: String,
 }

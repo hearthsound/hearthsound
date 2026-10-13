@@ -589,3 +589,86 @@ fn providers_add_refuses_a_malformed_import_root() {
         stderr(&output)
     );
 }
+
+/// `settings set`/`get`/`unset` round-trip and a pinned key is refused.
+#[test]
+fn settings_round_trip_and_refuse_a_pinned_key() {
+    let sandbox = Sandbox::new("\"stream.pending.mode\" = \"hold\"\n");
+
+    let listed = succeeded(&sandbox.run(&["settings", "list"]));
+    assert!(
+        listed.contains("stream.pending.mode = hold [pinned]"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("stream.max_concurrent_transcodes = 8"),
+        "{listed}"
+    );
+
+    let pinned = sandbox.run(&["settings", "set", "stream.pending.mode", "pad"]);
+    assert_eq!(pinned.status.code(), Some(1));
+    assert!(
+        stderr(&pinned).contains("pinned by the configuration file"),
+        "{}",
+        stderr(&pinned)
+    );
+
+    let malformed = sandbox.run(&[
+        "settings",
+        "set",
+        "stream.max_concurrent_transcodes",
+        "many",
+    ]);
+    assert_eq!(malformed.status.code(), Some(1));
+    assert!(
+        stderr(&malformed).contains("is not an integer"),
+        "{}",
+        stderr(&malformed)
+    );
+
+    let stored =
+        succeeded(&sandbox.run(&["settings", "set", "stream.max_concurrent_transcodes", "3"]));
+    assert!(
+        stored.contains("set stream.max_concurrent_transcodes = 3"),
+        "{stored}"
+    );
+
+    let read = succeeded(&sandbox.run(&["settings", "get", "stream.max_concurrent_transcodes"]));
+    assert!(read.contains("= 3"), "{read}");
+    assert!(read.contains("from the database"), "{read}");
+
+    let unknown = sandbox.run(&["settings", "get", "not.a.setting"]);
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(
+        stderr(&unknown).contains("is not registered"),
+        "{}",
+        stderr(&unknown)
+    );
+
+    let unset = succeeded(&sandbox.run(&["settings", "unset", "stream.max_concurrent_transcodes"]));
+    assert!(unset.contains("from the built-in default"), "{unset}");
+
+    let read = succeeded(&sandbox.run(&["settings", "get", "stream.max_concurrent_transcodes"]));
+    assert!(read.contains("= 8"), "{read}");
+    assert!(read.contains("from the built-in default"), "{read}");
+}
+
+/// A setting changed by the CLI is seen by a server started afterwards.
+#[test]
+fn settings_set_is_visible_to_a_later_server_start() {
+    let sandbox = Sandbox::new("");
+    succeeded(&sandbox.run(&["settings", "set", "stream.pending.mode", "hold"]));
+
+    let config = bootstrap_config(&sandbox);
+    assert_eq!(
+        config
+            .settings
+            .get("stream.pending.mode")
+            .and_then(|value| value.as_str()),
+        None
+    );
+
+    let listed = succeeded(&sandbox.run(&["settings", "get", "stream.pending.mode"]));
+    assert!(listed.contains("= hold"), "{listed}");
+    assert!(listed.contains("from the database"), "{listed}");
+}

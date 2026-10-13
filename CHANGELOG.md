@@ -319,3 +319,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rejects the configuration) and `providers list` lists the instances, and
   `layers set <layer> <slug>...` replaces a layer's ordered instances while
   `layers list` shows every layer.
+- The `settings` commands: `settings get <key>` and `settings list` print each
+  setting's effective value, the layer it came from, its built-in default, and
+  whether the config file pins it, `settings set <key> <value>` parses the value
+  as the registry declares the key's kind and refuses a key the config file pins
+  or an environment variable overrides with the reason it cannot take a stored
+  value, and `settings unset <key>` removes the stored value and reports what the
+  key falls back to.

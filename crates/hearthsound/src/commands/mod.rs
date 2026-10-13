@@ -12,3 +12,4 @@ pub mod plugins;
 pub mod providers;
 pub mod scan;
 pub mod serve;
+pub mod settings;
