@@ -46,6 +46,7 @@ use hearthsound_plugin_host::ProviderRegistry;
 use tokio::sync::{Notify, watch};
 use uuid::Uuid;
 
+use crate::download::DownloadOutcome;
 use crate::error::AcquireError;
 use crate::repo::{self, AcquisitionRepository, AcquisitionRow, NewAcquisition};
 use crate::search::SearchOutcome;
@@ -442,6 +443,8 @@ struct Inner {
     running: AtomicUsize,
     /// The per-instance search budgets the search stage respects.
     search_budgets: crate::budget::InstanceBudgets,
+    /// The per-instance download slots and the in-flight registry.
+    download_budgets: crate::budget::DownloadBudgets,
     /// Whether the scheduler task has been started.
     started: AtomicBool,
     /// Wakes the scheduler when there is work.
@@ -486,6 +489,7 @@ impl AcquisitionOrchestrator {
                 waiters: Mutex::new(HashMap::new()),
                 running: AtomicUsize::new(0),
                 search_budgets: crate::budget::InstanceBudgets::new(),
+                download_budgets: crate::budget::DownloadBudgets::new(),
                 started: AtomicBool::new(false),
                 notify: Notify::new(),
             }),
@@ -530,6 +534,11 @@ impl AcquisitionOrchestrator {
     /// Returns the per-instance search budgets.
     pub(crate) fn search_budgets(&self) -> &crate::budget::InstanceBudgets {
         &self.inner.search_budgets
+    }
+
+    /// Returns the per-instance download slots and the in-flight registry.
+    pub(crate) fn download_budgets(&self) -> &crate::budget::DownloadBudgets {
+        &self.inner.download_budgets
     }
 
     /// Returns the root per-acquisition staging directories are created under.
@@ -772,9 +781,11 @@ impl AcquisitionOrchestrator {
     /// Reads an acquisition's progress from the ledger.
     ///
     /// This is the view a client that is not subscribed gets, and the view the
-    /// live channel starts from. The percentage and ETA a running download
-    /// reports are only in the live channel; this snapshot carries the state,
-    /// the priority, the instance the last report named and the failure reason.
+    /// live channel starts from. It carries the state, the priority, the
+    /// instance the ledger names, the failure reason, and the percentage and ETA
+    /// of the last progress a download reported. Only the file a completed
+    /// download resolved is exclusive to the live channel, because the ledger
+    /// does not store paths.
     ///
     /// # Parameters
     ///
@@ -906,27 +917,39 @@ impl AcquisitionOrchestrator {
             row.state = AcquisitionState::Searching;
             self.announce(&self.progress_of_row(&row, row.priority));
         }
-        if row.state != AcquisitionState::Searching {
-            return Ok(());
-        }
-        match self.search(&row).await? {
-            SearchOutcome::Failed(_reason) => Ok(()),
-            // The search selected the candidates to try and logged them. The
-            // best one names the instance and the ETA a client sees while the
-            // acquisition waits in `searching` for its download stage.
-            SearchOutcome::Planned { instances, plan } => {
-                let mut progress = self.progress_of_row(&row, row.priority);
-                if let Some(best) = plan.attempts.first() {
-                    progress.instance = instances
-                        .get(best.instance_index)
-                        .map(|instance| instance.slug().as_str().to_owned());
-                    progress.eta_secs = best
-                        .eta
-                        .map(|eta| eta.as_secs().min(u64::from(u32::MAX)) as u32);
+        loop {
+            if row.state == AcquisitionState::Searching {
+                match self.search(&row).await? {
+                    SearchOutcome::Failed(_reason) => return Ok(()),
+                    // The search selected the candidates to try and logged
+                    // them. The best one names the instance and the ETA a client
+                    // sees while the download starts.
+                    SearchOutcome::Planned { instances, plan } => {
+                        let mut progress = self.progress_of_row(&row, row.priority);
+                        if let Some(best) = plan.attempts.first() {
+                            progress.instance = instances
+                                .get(best.instance_index)
+                                .map(|instance| instance.slug().as_str().to_owned());
+                            progress.eta_secs = best
+                                .eta
+                                .map(|eta| eta.as_secs().min(u64::from(u32::MAX)) as u32);
+                        }
+                        self.announce(&progress);
+
+                        match self.download(row.id, &instances, &plan).await? {
+                            DownloadOutcome::Ready | DownloadOutcome::Stopped => return Ok(()),
+                            DownloadOutcome::RestartSearch => {
+                                // The backend lost the token. The download stage
+                                // moved the acquisition back to `searching`, so
+                                // the pipeline starts the search again.
+                                row.state = AcquisitionState::Searching;
+                                continue;
+                            }
+                        }
+                    }
                 }
-                self.announce(&progress);
-                Ok(())
             }
+            return Ok(());
         }
     }
 
@@ -1100,6 +1123,7 @@ impl AcquisitionOrchestrator {
         row: &AcquisitionRow,
         priority: Priority,
     ) -> AcquisitionProgress {
+        let stored = crate::download::stored_progress(row.progress.as_deref());
         AcquisitionProgress {
             acquisition_id: row.id,
             target_id: row
@@ -1109,12 +1133,34 @@ impl AcquisitionOrchestrator {
                 .unwrap_or_default(),
             state: row.state,
             priority,
-            percent: None,
-            eta_secs: None,
-            instance: None,
+            percent: stored
+                .as_ref()
+                .and_then(crate::download::StoredProgress::percent),
+            eta_secs: stored
+                .as_ref()
+                .and_then(crate::download::StoredProgress::eta_secs),
+            instance: row.instance_id.and_then(|id| self.instance_slug(id)),
             failure_reason: row.failure_reason,
             file: None,
         }
+    }
+
+    /// Returns the slug of an instance the acquisition layer serves.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance_id`: the instance id a ledger row names.
+    ///
+    /// # Returns
+    ///
+    /// The slug, or `None` when the registry no longer serves that instance.
+    fn instance_slug(&self, instance_id: Uuid) -> Option<String> {
+        self.inner
+            .registry
+            .layers(hearthsound_core::Layer::Acquisition)
+            .into_iter()
+            .find(|instance| instance.id() == instance_id)
+            .map(|instance| instance.slug().as_str().to_owned())
     }
 
     /// Returns how many acquisitions may run at once.

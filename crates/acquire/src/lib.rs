@@ -34,6 +34,7 @@ mod brackets;
 mod budget;
 mod error;
 
+pub mod download;
 pub mod normalize;
 pub mod orchestrator;
 pub mod path;

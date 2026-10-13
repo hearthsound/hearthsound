@@ -229,7 +229,7 @@ async fn a_claimed_acquisition_is_logged_at_every_state() {
     let id = started.acquisition_id().unwrap();
 
     env.start();
-    env.wait_for_state(id, AcquisitionState::Searching).await;
+    env.wait_for_state(id, AcquisitionState::Verifying).await;
 
     let log = env.log(id).await;
     let states: Vec<AcquisitionState> = log.iter().map(|row| row.state).collect();
@@ -242,13 +242,17 @@ async fn a_claimed_acquisition_is_logged_at_every_state() {
         ]
     );
     assert!(
-        log.last()
-            .and_then(|row| row.message.as_deref())
-            .unwrap_or_default()
-            .contains("selected"),
+        states.contains(&AcquisitionState::Downloading),
+        "{states:?}"
+    );
+    assert_eq!(states.last(), Some(&AcquisitionState::Verifying));
+    assert!(
+        log.iter()
+            .filter_map(|row| row.message.as_deref())
+            .any(|message| message.contains("selected")),
         "the search result is logged: {log:?}"
     );
-    assert_eq!(env.acquisition(id).await.attempts, 0);
+    assert_eq!(env.acquisition(id).await.attempts, 1);
 }
 
 #[tokio::test]
@@ -322,25 +326,24 @@ async fn waiters_observe_the_acquisition_at_every_attach_point() {
     // channel follows the acquisition as the pipeline advances.
     let mut late = env.orchestrator.subscribe(id).unwrap();
     env.start();
-    env.wait_for_state(id, AcquisitionState::Searching).await;
+    env.wait_for_state(id, AcquisitionState::Verifying).await;
     tokio::time::timeout(std::time::Duration::from_secs(5), late.changed())
         .await
         .expect("the channel carries the pipeline's advance")
         .unwrap();
     let snapshot: AcquisitionProgress = late.borrow_and_update().clone();
-    assert_eq!(snapshot.state, AcquisitionState::Searching);
+    assert_eq!(snapshot.state, AcquisitionState::Verifying);
     assert_eq!(snapshot.priority, Priority::Play);
     assert_eq!(snapshot.acquisition_id, id);
     assert_eq!(snapshot.target_id, track.to_string());
-    assert_eq!(snapshot.percent, None);
     assert_eq!(snapshot.failure_reason, None);
-    assert_eq!(snapshot.file, None);
+    assert!(snapshot.file.is_some());
     assert!(!snapshot.succeeded());
     assert!(!snapshot.failed());
 
     // The ledger is the view a client without a subscription reads.
     let progress = env.orchestrator.progress_of(id).await.unwrap().unwrap();
-    assert_eq!(progress.state, AcquisitionState::Searching);
+    assert_eq!(progress.state, AcquisitionState::Verifying);
     assert_eq!(progress.priority, Priority::Play);
 
     // A track the process did not admit has no channel and no row.

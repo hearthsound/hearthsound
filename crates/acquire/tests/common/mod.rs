@@ -25,6 +25,7 @@ use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::{
     InstanceService, InstanceSpec, PluginHost, PluginRepository, PluginSource, ProviderRegistry,
 };
+use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
 use hearthsound_test_support::{ACQUISITION_FIXTURE, fixture_plugin};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -191,18 +192,47 @@ impl Env {
         }
     }
 
-    /// Builds an environment whose instance finds one lossless candidate.
+    /// Builds an environment whose instance finds and downloads one lossless
+    /// candidate.
+    ///
+    /// The generated audio file the simulated backend "downloads" is already in
+    /// the instance's import root, so an acquisition admitted here runs the
+    /// whole pipeline to `verifying`.
     ///
     /// # Parameters
     ///
     /// - `env`: extra settings environment variables.
     pub async fn normal(env: &[(&str, &str)]) -> Env {
-        Env::new(
+        let env = Env::new(
             config(one_candidate(), "normal", 0, "downloads", ".flac"),
             InstanceLimits::default(),
             env,
         )
-        .await
+        .await;
+        env.place_download("01 - Hello Song.flac").await;
+        env
+    }
+
+    /// Writes a generated audio file into the instance's import root.
+    ///
+    /// The fixture reports every file with the configured suffix it finds there
+    /// when a download completes, which is how the simulated backend produces
+    /// its output.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: the file name to write.
+    ///
+    /// # Returns
+    ///
+    /// The path of the written file.
+    pub async fn place_download(&self, name: &str) -> PathBuf {
+        AudioFixture::new(AudioFormat::Flac)
+            .seconds(0.2)
+            .file_name(name.to_owned())
+            .write_into(&self.downloads)
+            .await
+            .unwrap()
     }
 
     /// Adds a second instance to the acquisition layer, after the first.
@@ -369,7 +399,7 @@ impl Env {
     /// Panics when the state is not reached within ten seconds, so a stuck
     /// pipeline fails the test instead of hanging it.
     pub async fn wait_for_state(&self, id: Uuid, state: AcquisitionState) {
-        for _ in 0..500 {
+        for _ in 0..1000 {
             if self
                 .orchestrator
                 .repository()
@@ -393,7 +423,7 @@ impl Env {
 
     /// Waits until an acquisition reaches a terminal state.
     pub async fn wait_for_terminal(&self, id: Uuid) -> hearthsound_acquire::repo::AcquisitionRow {
-        for _ in 0..1500 {
+        for _ in 0..3000 {
             let row = self.acquisition(id).await;
             if row.state.is_terminal() {
                 return row;

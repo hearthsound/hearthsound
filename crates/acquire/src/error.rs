@@ -46,6 +46,23 @@ pub enum AcquireError {
     /// A request named an album that has no tracks.
     #[error("no album with id `{0}`")]
     UnknownAlbum(EntityId),
+    /// A download reported an output file under a root the instance does not
+    /// grant.
+    #[error("instance `{instance}` has no import root `{root}`")]
+    UnknownRoot {
+        /// The slug of the instance that reported the file.
+        instance: String,
+        /// The root name the plugin used.
+        root: String,
+    },
+    /// A download reported an output path that leaves its root.
+    #[error("the reported output path `{path}` leaves the root `{root}`")]
+    UnsafeOutputPath {
+        /// The root name the plugin used.
+        root: String,
+        /// The path the plugin reported.
+        path: String,
+    },
     /// An acquisition id has no row.
     #[error("no acquisition with id `{0}`")]
     UnknownAcquisition(Uuid),

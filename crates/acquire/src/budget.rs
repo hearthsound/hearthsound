@@ -5,19 +5,25 @@
 //! `searchesPerHour` for searches, and `maxConcurrent` for downloads. This
 //! module turns those numbers into the objects that enforce them.
 //!
-//! The budgets are built lazily, on the first search that names an instance, and
-//! rebuilt when the instance's configuration changes, so a rebuild of the
-//! provider registry - which is what an administrator's change causes - is
-//! picked up without a restart. Each budget belongs to one instance id and is
+//! The budgets are built lazily, on the first search or download that names an
+//! instance, and rebuilt when the instance's configuration changes, so a rebuild
+//! of the provider registry - which is what an administrator's change causes -
+//! is picked up without a restart. Each budget belongs to one instance id and is
 //! shared by every clone of the orchestrator.
+//!
+//! The download side also carries the in-flight registry: the orchestrator
+//! records which acquisition is downloading from which instance, at which
+//! priority, so a `play` request that finds every download slot of an instance
+//! busy can cancel the least urgent bulk download and take its place.
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
+use hearthsound_core::Priority;
 use hearthsound_plugin_host::RegistryInstance;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use uuid::Uuid;
 
 /// How many searches an instance may start back to back before its hourly
@@ -78,6 +84,137 @@ impl SearchBudget {
     }
 }
 
+/// One download that is in flight on an instance.
+///
+/// The record is what preemption reads: a `play` request that needs a slot
+/// cancels the least urgent in-flight download whose priority is `background` or
+/// `upgrade`, and the download's own task is woken through its
+/// [`Notify`](tokio::sync::Notify) so it releases the slot immediately instead
+/// of waiting for its next poll.
+struct InFlightDownload {
+    /// The acquisition whose download is in flight.
+    acquisition_id: Uuid,
+    /// The instance the download runs on.
+    instance_id: Uuid,
+    /// The acquisition's priority.
+    priority: Priority,
+    /// Wakes the download's task when a `play` request preempts it.
+    preempted: Arc<Notify>,
+}
+
+/// The download budget of every instance, with the in-flight registry.
+#[derive(Default)]
+pub(crate) struct DownloadBudgets {
+    /// The download semaphore of each instance, keyed by instance id.
+    slots: Mutex<HashMap<Uuid, Arc<Semaphore>>>,
+    /// The configuration each semaphore was built from, keyed by instance id.
+    configured: Mutex<HashMap<Uuid, u32>>,
+    /// The downloads in flight, keyed by acquisition id.
+    in_flight: Mutex<HashMap<Uuid, InFlightDownload>>,
+}
+
+impl DownloadBudgets {
+    /// Builds an empty budget map.
+    pub(crate) fn new() -> DownloadBudgets {
+        DownloadBudgets::default()
+    }
+
+    /// Returns the download semaphore of an instance.
+    ///
+    /// The semaphore is built on first use and rebuilt when the instance's
+    /// `maxConcurrent` changed, so a configuration change takes effect without a
+    /// restart.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance`: the instance whose budget is wanted.
+    pub(crate) fn slots(&self, instance: &RegistryInstance) -> Arc<Semaphore> {
+        let max_concurrent = instance.host_config().max_concurrent.max(1);
+        let configured = *lock(&self.configured).get(&instance.id()).unwrap_or(&0);
+        if configured == max_concurrent
+            && let Some(semaphore) = lock(&self.slots).get(&instance.id())
+        {
+            return Arc::clone(semaphore);
+        }
+        let semaphore = Arc::new(Semaphore::new(max_concurrent as usize));
+        lock(&self.slots).insert(instance.id(), Arc::clone(&semaphore));
+        lock(&self.configured).insert(instance.id(), max_concurrent);
+        semaphore
+    }
+
+    /// Records a download that is starting.
+    ///
+    /// # Parameters
+    ///
+    /// - `acquisition_id`: the acquisition whose download is in flight.
+    /// - `instance_id`: the instance serving it.
+    /// - `priority`: the acquisition's priority.
+    ///
+    /// # Returns
+    ///
+    /// The notifier the download's task waits on to learn that a `play` request
+    /// took its slot.
+    pub(crate) fn register(
+        &self,
+        acquisition_id: Uuid,
+        instance_id: Uuid,
+        priority: Priority,
+    ) -> Arc<Notify> {
+        let preempted = Arc::new(Notify::new());
+        lock(&self.in_flight).insert(
+            acquisition_id,
+            InFlightDownload {
+                acquisition_id,
+                instance_id,
+                priority,
+                preempted: Arc::clone(&preempted),
+            },
+        );
+        preempted
+    }
+
+    /// Forgets a download that ended.
+    ///
+    /// # Parameters
+    ///
+    /// - `acquisition_id`: the acquisition whose download ended.
+    pub(crate) fn unregister(&self, acquisition_id: Uuid) {
+        lock(&self.in_flight).remove(&acquisition_id);
+    }
+
+    /// Preempts the least urgent bulk download of an instance.
+    ///
+    /// Only a `play` request preempts, and only a download whose priority is
+    /// `background` or `upgrade` can be preempted: an interactive or queued
+    /// download is never cancelled for another caller.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance_id`: the instance whose downloads are in flight.
+    /// - `requester_priority`: the priority of the request that needs the slot.
+    ///
+    /// # Returns
+    ///
+    /// The acquisition whose download was preempted, or `None` when nothing
+    /// could be preempted.
+    pub(crate) fn preempt(&self, instance_id: Uuid, requester_priority: Priority) -> Option<Uuid> {
+        if requester_priority != Priority::Play {
+            return None;
+        }
+        let victim = lock(&self.in_flight)
+            .values()
+            .filter(|download| {
+                download.instance_id == instance_id && download.priority >= Priority::Background
+            })
+            .max_by_key(|download| download.priority)
+            .map(|download| (download.acquisition_id, Arc::clone(&download.preempted)))?;
+        // `notify_one` stores a permit when nobody is waiting yet, so the wake-up
+        // cannot be lost between the registration and the download's next poll.
+        victim.1.notify_one();
+        Some(victim.0)
+    }
+}
+
 /// The budgets of every instance the pipeline has used.
 #[derive(Default)]
 pub(crate) struct InstanceBudgets {
@@ -119,9 +256,9 @@ impl InstanceBudgets {
 
 /// Locks a mutex, ignoring poisoning.
 ///
-/// The state behind the lock is a map of budgets, which stays consistent even if
-/// a task panicked while holding the lock, so poisoning is not a reason to stop
-/// the server.
+/// The state behind the lock is a map of budgets and in-flight downloads, which
+/// stays consistent even if a task panicked while holding the lock, so poisoning
+/// is not a reason to stop the server.
 ///
 /// # Panics
 ///

@@ -560,6 +560,114 @@ pub async fn claim(conn: &mut SqliteConnection, id: Uuid) -> Result<bool, Acquir
     Ok(true)
 }
 
+/// Records the instance, candidate and token of a download that just started.
+///
+/// The three columns are written together, in the same statement, because they
+/// describe one attempt: the token is only meaningful with the instance that
+/// issued it, and the candidate JSON says which files that token is fetching.
+/// Persisting them is what makes a download recoverable after a restart.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `id`: the acquisition being downloaded.
+/// - `instance_id`: the instance serving the download.
+/// - `candidate`: the candidate as JSON text.
+/// - `plugin_token`: the plugin's token for the download.
+///
+/// # Returns
+///
+/// `true` when a row was updated, `false` when the acquisition does not exist.
+///
+/// # Errors
+///
+/// Returns [`AcquireError::Database`] when the statement fails.
+pub async fn set_download(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    instance_id: Option<Uuid>,
+    candidate: Option<&str>,
+    plugin_token: Option<&str>,
+) -> Result<bool, AcquireError> {
+    let affected = sqlx::query!(
+        "UPDATE acquisitions SET instance_id = ?, candidate = ?, plugin_token = ?, updated_at = ? \
+         WHERE id = ?",
+        instance_id.map(|instance| instance.as_bytes().to_vec()),
+        candidate,
+        plugin_token,
+        crate::now_millis(),
+        uuid_key(id),
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
+}
+
+/// Records a download's latest progress snapshot.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `id`: the acquisition being downloaded.
+/// - `progress`: the progress as JSON text, or `None` to clear it.
+///
+/// # Returns
+///
+/// `true` when a row was updated, `false` when the acquisition does not exist.
+///
+/// # Errors
+///
+/// Returns [`AcquireError::Database`] when the statement fails.
+pub async fn set_progress(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    progress: Option<&str>,
+) -> Result<bool, AcquireError> {
+    let affected = sqlx::query!(
+        "UPDATE acquisitions SET progress = ?, updated_at = ? WHERE id = ?",
+        progress,
+        crate::now_millis(),
+        uuid_key(id),
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
+}
+
+/// Records how many candidates an acquisition has attempted.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `id`: the acquisition to update.
+/// - `attempts`: the number of candidates tried so far.
+///
+/// # Returns
+///
+/// `true` when a row was updated, `false` when the acquisition does not exist.
+///
+/// # Errors
+///
+/// Returns [`AcquireError::Database`] when the statement fails.
+pub async fn set_attempts(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    attempts: i64,
+) -> Result<bool, AcquireError> {
+    let affected = sqlx::query!(
+        "UPDATE acquisitions SET attempts = ?, updated_at = ? WHERE id = ?",
+        attempts,
+        crate::now_millis(),
+        uuid_key(id),
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
+}
+
 /// Reads an acquisition's log, oldest first.
 ///
 /// # Parameters
@@ -709,6 +817,54 @@ impl AcquisitionRepository {
         let changed = set_priority(&mut tx, id, priority).await?;
         tx.commit().await?;
         Ok(changed)
+    }
+
+    /// Records a download's instance, candidate and token in its own
+    /// transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::Database`] when the write fails.
+    pub async fn set_download(
+        &self,
+        id: Uuid,
+        instance_id: Option<Uuid>,
+        candidate: Option<&str>,
+        plugin_token: Option<&str>,
+    ) -> Result<bool, AcquireError> {
+        let mut tx = self.writer.begin().await?;
+        let updated = set_download(&mut tx, id, instance_id, candidate, plugin_token).await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    /// Records a download's progress snapshot in its own transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::Database`] when the write fails.
+    pub async fn set_progress(
+        &self,
+        id: Uuid,
+        progress: Option<&str>,
+    ) -> Result<bool, AcquireError> {
+        let mut tx = self.writer.begin().await?;
+        let updated = set_progress(&mut tx, id, progress).await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    /// Records how many candidates an acquisition has attempted, in its own
+    /// transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::Database`] when the write fails.
+    pub async fn set_attempts(&self, id: Uuid, attempts: i64) -> Result<bool, AcquireError> {
+        let mut tx = self.writer.begin().await?;
+        let updated = set_attempts(&mut tx, id, attempts).await?;
+        tx.commit().await?;
+        Ok(updated)
     }
 
     /// Claims an acquisition for a worker in its own transaction.

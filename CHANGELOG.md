@@ -463,3 +463,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `max_candidates` and `acquisition.quality_profile`; and fails an acquisition
   as `no-candidates`, `no-acceptable-quality` or `backend-unavailable`, marking
   the track `unavailable` for `acquisition.unavailable_cooldown_hours`.
+- The acquisition download stage: each candidate is downloaded under its
+  instance's `maxConcurrent` slot budget, polled every 2 seconds for `play` and
+  `next` and every 10 seconds otherwise, with the instance, candidate, plugin
+  token, progress and attempt count persisted in the ledger and
+  `acquisition.updated` carrying the percentage and ETA as bytes advance. A
+  candidate that makes no progress for `acquisition.stall_timeout_secs`, or
+  that stays queued past `acquisition.queue_timeout_secs.interactive` or
+  `.background`, is cancelled and the next candidate is tried; a download token
+  the backend no longer knows restarts the acquisition's search; a `play`
+  request that finds an instance's download slots busy preempts its least
+  urgent `background` or `upgrade` download, which resumes afterwards. A
+  completed download waits for each reported file's size to hold across two
+  checks, resolves the paths through the instance's import roots, moves the
+  acquisition to `verifying`, and hands the stable files to the verification and
+  import entry point.

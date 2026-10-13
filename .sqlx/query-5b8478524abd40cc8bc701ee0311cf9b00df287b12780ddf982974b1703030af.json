@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM plugin_kv WHERE instance_id = ? AND key LIKE 'download:%'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "5b8478524abd40cc8bc701ee0311cf9b00df287b12780ddf982974b1703030af"
+}
