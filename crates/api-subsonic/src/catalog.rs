@@ -1,0 +1,118 @@
+//! The catalog settings and error mapping the catalog-facing endpoints share.
+//!
+//! A catalog entity is one a provider knows but the server has not stored. When
+//! a response describes one, several fields come from settings rather than from
+//! the entity: the format a pending stream will actually deliver
+//! (`stream.pending.format`), which is the `suffix`/`contentType` a client sees
+//! before any file exists, and the suffix appended to every catalog title
+//! (`subsonic.catalog_title_suffix`), which tells a user which results are not
+//! local. Both are read here so `search3` and the catalog-id browse endpoints
+//! agree on them.
+//!
+//! The module also names the artists a catalog entity credits: a provider
+//! record carries an artist's identifiers as external ids, and the first one is
+//! what the issuing instance resolves.
+
+use hearthsound_config::SettingsStore;
+use hearthsound_config::keys;
+use hearthsound_core::providers::ArtistCredit;
+use hearthsound_core::{CatalogId, EntityKind, Slug};
+use hearthsound_library::query::content_type_for;
+
+use crate::browse;
+use crate::response::SubsonicError;
+
+/// The container a catalog entity is projected with before it is acquired.
+///
+/// This is `stream.pending.format`, not the provider's own format: while a
+/// catalog track is being acquired, `/rest/stream` delivers a transcode in this
+/// format, so a client that trusts `suffix`/`contentType` prepares for exactly
+/// the bytes it will receive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingFormat {
+    /// The file suffix, for example `mp3`.
+    pub(crate) suffix: String,
+    /// The MIME type the suffix implies.
+    pub(crate) content_type: String,
+}
+
+/// Reads the pending stream format from a settings snapshot.
+///
+/// # Parameters
+///
+/// - `snapshot`: the settings in effect.
+///
+/// # Returns
+///
+/// The format's suffix and MIME type.
+///
+/// # Errors
+///
+/// Returns a generic Subsonic error when the setting cannot be read.
+pub(crate) fn pending_format(snapshot: &SettingsStore) -> Result<PendingFormat, SubsonicError> {
+    let suffix = snapshot
+        .get(keys::STREAM_PENDING_FORMAT)
+        .map_err(|error| browse::failure("stream.pending.format", &error))?;
+    let content_type = content_type_for(&suffix).to_owned();
+    Ok(PendingFormat {
+        suffix,
+        content_type,
+    })
+}
+
+/// Reads the catalog title suffix from a settings snapshot.
+///
+/// # Parameters
+///
+/// - `snapshot`: the settings in effect.
+///
+/// # Returns
+///
+/// The suffix appended to a catalog entity's title, empty by default.
+///
+/// # Errors
+///
+/// Returns a generic Subsonic error when the setting cannot be read.
+pub(crate) fn title_suffix(snapshot: &SettingsStore) -> Result<String, SubsonicError> {
+    snapshot
+        .get(keys::SUBSONIC_CATALOG_TITLE_SUFFIX)
+        .map_err(|error| browse::failure("subsonic.catalog_title_suffix", &error))
+}
+
+/// Builds the catalog id of the artist one credit names.
+///
+/// A provider record carries an artist's credit as a name plus the external
+/// identifiers it knows for that artist. The provider's own identifier, when it
+/// supplied one, is what the issuing instance resolves, so the first external
+/// id becomes the payload of an `x_<slug>_r_<payload>` id. A credit without an
+/// identifier yields `None`, and the caller emits an empty `artistId` rather
+/// than an id the catalog cannot resolve.
+///
+/// # Parameters
+///
+/// - `slug`: the slug of the instance that issued the entity.
+/// - `credit`: the artist credit.
+///
+/// # Returns
+///
+/// The artist's catalog id, or `None` when the credit carries no identifier.
+pub(crate) fn artist_id(slug: &Slug, credit: &ArtistCredit) -> Option<CatalogId> {
+    let id = credit.ids.first()?;
+    CatalogId::new(slug.clone(), EntityKind::Artist, id.value.clone()).ok()
+}
+
+/// Returns the MusicBrainz identifier an entity's external ids carry.
+///
+/// # Parameters
+///
+/// - `ids`: the entity's external identifiers.
+///
+/// # Returns
+///
+/// The value namespaced `musicbrainz`, or an empty string when there is none.
+pub(crate) fn music_brainz_id(ids: &[hearthsound_core::providers::ExternalId]) -> String {
+    ids.iter()
+        .find(|id| id.namespace == "musicbrainz")
+        .map(|id| id.value.clone())
+        .unwrap_or_default()
+}

@@ -351,3 +351,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`DURATION_TOLERANCE_MS`). Albums and artists are reported when they are
   already materialized but never dropped, and the alias lookups run once per
   instance and entity kind through the `external_ids` table.
+- `search3` on the Subsonic surface: the local full-text matches first, then
+  the catalog layer's matches appended when `search.catalog.enabled` and the
+  local count of a kind is below its requested `artistCount`, `albumCount`, or
+  `songCount` (each with its offset, and each search bounded by
+  `search.catalog.timeout_ms` and capped by `search.catalog.max_results`).
+  Catalog results are deduplicated against the local hits, so a catalog entity
+  the server already stores is represented by its stored row. A catalog artist,
+  album, or song is projected with its `x_<slug>_<kind>_<payload>` id, the
+  pending stream format, the `subsonic.catalog_title_suffix` title, and a
+  synthetic `catalog/<slug>/<id>` path; an empty query lists the local library
+  instead, and a catalog failure or timeout never fails the search. The `/rest`
+  state carries the catalog layer and the activity service, and
+  `hearthsound-library` gains a scope-filtered track listing for the empty
+  query.

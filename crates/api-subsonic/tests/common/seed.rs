@@ -243,6 +243,7 @@ async fn track(library: &LibraryRepository, album: EntityId, spec: &TrackSpec) -
     );
     let mut input = TrackInput::new(spec.title, Origin::Local, spec.availability);
     input.album_id = Some(album);
+    input.display_artist = Some(credit.artist.name.clone());
     input.track_number = Some(spec.number);
     input.disc_number = Some(1);
     input.duration_ms = Some(spec.duration_ms);

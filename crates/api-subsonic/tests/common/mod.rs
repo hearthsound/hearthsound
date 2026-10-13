@@ -14,12 +14,19 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use axum::response::Response as HttpResponse;
+use hearthsound_activity::ActivityService;
 use hearthsound_api_subsonic::SubsonicState;
 use hearthsound_auth::{ApiKeys, AppPasswords, Authenticator, NewUser, Users};
+use hearthsound_catalog::CatalogService;
+use hearthsound_config::secret::SecretBox;
 use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingSources, SettingValue, SettingsRegistry, keys};
-use hearthsound_core::{EntityId, IdPrefix};
+use hearthsound_core::{EntityId, IdPrefix, Layer};
 use hearthsound_db::{Database, MIGRATOR};
+use hearthsound_plugin_host::{
+    InstanceService, InstanceSpec, PluginHost, PluginRepository, PluginSource, ProviderRegistry,
+};
+use hearthsound_test_support::{HELLO_CATALOG, fixture_plugin};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -59,6 +66,14 @@ pub struct Fixture {
     pub app_password: String,
     /// The shared state the router is built with.
     pub state: SubsonicState,
+    /// The plugin host a fixture plugin is installed into.
+    host: Arc<PluginHost>,
+    /// The plugin tables an instance is configured in.
+    repository: PluginRepository,
+    /// The secret box instance configurations are sealed with.
+    secrets: SecretBox,
+    /// The provider registry the catalog layer resolves instances through.
+    registry: Arc<ProviderRegistry>,
 }
 
 impl Fixture {
@@ -97,8 +112,35 @@ impl Fixture {
             .await
             .unwrap()
             .plaintext;
-        let authenticator = Arc::new(Authenticator::new(&database, secret_box, 10));
-        let state = SubsonicState::new(Arc::clone(&database), settings.clone(), authenticator);
+        let authenticator = Arc::new(Authenticator::new(&database, secret_box.clone(), 10));
+
+        let host = Arc::new(
+            PluginHost::new(
+                dir.path().join("plugins"),
+                settings.current(),
+                Arc::clone(&database),
+            )
+            .unwrap(),
+        );
+        let repository = PluginRepository::new(&database);
+        let registry = Arc::new(ProviderRegistry::new(
+            Arc::clone(&host),
+            repository.clone(),
+            secret_box.clone(),
+        ));
+        let catalog = Arc::new(CatalogService::new(
+            Arc::clone(&registry),
+            Arc::clone(&database),
+            settings.clone(),
+        ));
+        let activity = Arc::new(ActivityService::new(&database));
+        let state = SubsonicState::new(
+            Arc::clone(&database),
+            settings.clone(),
+            authenticator,
+            catalog,
+            activity,
+        );
 
         Fixture {
             _dir: dir,
@@ -108,7 +150,50 @@ impl Fixture {
             api_key,
             app_password,
             state,
+            host,
+            repository,
+            secrets: secret_box,
+            registry,
         }
+    }
+
+    /// Installs the `hello-catalog` fixture and assigns it to the catalog layer.
+    ///
+    /// The instance answers every non-empty search with one greeting track,
+    /// album, and artist, so a search response's catalog side is exactly those
+    /// three entities under the `hello` slug.
+    pub async fn install_hello_catalog(&self) {
+        let installed = self
+            .host
+            .install(&fixture_plugin(HELLO_CATALOG))
+            .await
+            .unwrap();
+        let plugin_id = self
+            .repository
+            .register_installed(&installed, PluginSource::Sideload)
+            .await
+            .unwrap()
+            .id;
+        let instances = InstanceService::new(
+            Arc::clone(&self.host),
+            self.repository.clone(),
+            self.secrets.clone(),
+        );
+        instances
+            .create(&InstanceSpec {
+                slug: "hello".to_owned(),
+                plugin_id,
+                display_name: "Hello catalog".to_owned(),
+                server_config: serde_json::json!({ "greeting": "Hello" }),
+                host_config: serde_json::Value::Null,
+            })
+            .await
+            .unwrap();
+        instances
+            .set_layer(Layer::Catalog, &["hello".to_owned()])
+            .await
+            .unwrap();
+        self.registry.rebuild().await.unwrap();
     }
 
     /// Returns the `/rest` router under test.

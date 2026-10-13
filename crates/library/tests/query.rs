@@ -500,6 +500,58 @@ async fn the_personal_library_is_the_union_of_its_sources() {
 }
 
 #[tokio::test]
+async fn track_listings_follow_the_scope_and_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let seeded = seed(dir.path()).await;
+    let mut conn = seeded.db.readers().acquire().await.unwrap();
+    let scope = Scope::Personal {
+        user_id: seeded.user,
+    };
+
+    let listed = query::list_tracks(&mut conn, scope, -1, 0).await.unwrap();
+    let titles: Vec<&str> = listed
+        .iter()
+        .map(|view| view.track.title.as_str())
+        .collect();
+    for title in ["Owned Song", "Liked Song", "Saved Song", "Playlist Song"] {
+        assert!(titles.contains(&title), "{title} should be listed");
+    }
+    for title in ["Generic Song", "Cache Song", "Temporary Song"] {
+        assert!(!titles.contains(&title), "{title} should not be listed");
+    }
+
+    // The listing is ordered by sort title, and paging walks it without repeats.
+    let mut sorted = titles.clone();
+    sorted.sort();
+    assert_eq!(titles, sorted);
+    let page_one = query::list_tracks(&mut conn, scope, 2, 0).await.unwrap();
+    let page_two = query::list_tracks(&mut conn, scope, 2, 2).await.unwrap();
+    assert_eq!(page_one.len(), 2);
+    assert!(page_two.iter().all(|view| !page_one.contains(view)));
+
+    // The permanent server scope adds the permanent library track, not the
+    // evictable cache one, and the disabled view offers nothing.
+    let permanent = Scope::Server(ServerBrowse::PermanentOnly);
+    let listed = query::list_tracks(&mut conn, permanent, -1, 0)
+        .await
+        .unwrap();
+    let titles: Vec<&str> = listed
+        .iter()
+        .map(|view| view.track.title.as_str())
+        .collect();
+    assert!(titles.contains(&"Library Song"));
+    assert!(!titles.contains(&"Cache Song"));
+
+    let disabled = Scope::Server(ServerBrowse::Disabled);
+    assert!(
+        query::list_tracks(&mut conn, disabled, -1, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn the_server_scope_follows_the_privacy_setting() {
     let dir = tempfile::tempdir().unwrap();
     let seeded = seed(dir.path()).await;

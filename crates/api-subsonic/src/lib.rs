@@ -81,10 +81,17 @@
 //! | `getAlbum` | one album with its songs |
 //! | `getSong` | one song |
 //! | `getAlbumList2` | the albums in scope, ordered by `newest`, `alphabeticalByName`, or `random` |
+//! | `search3` | local matches first, then catalog matches when `search.catalog.enabled` |
 //!
 //! The browse endpoints share one scope rule: an explicit `musicFolderId` of
 //! `1` is the requesting user's personal library and of `2` the server-wide
 //! view, and a request without one reads the user's `subsonic.default_scope`.
+//!
+//! `search3` is the one endpoint that also answers for entities the server has
+//! not stored: a catalog provider's match is projected with an `x_` id, so the
+//! client can stream, save, or acquire it later. The catalog layer is a
+//! dependency of this crate for exactly that reason, and it never makes a
+//! search fail: a catalog instance that is down leaves the local results.
 //!
 //! Every other path under `/rest/`, including the endpoint families this server
 //! never implements (podcast, internet radio, share, video, and chat), answers
@@ -123,6 +130,7 @@
 
 mod auth;
 mod browse;
+mod catalog;
 mod endpoints;
 mod params;
 mod projection;
@@ -136,7 +144,7 @@ mod value;
 pub use auth::{BinaryCall, Call, InvalidProxy, TrustedProxies, forbidden};
 pub use endpoints::{
     get_album, get_album_list_2, get_artist, get_artists, get_license, get_music_folders,
-    get_open_subsonic_extensions, get_song, ping, token_info,
+    get_open_subsonic_extensions, get_song, ping, search3, token_info,
 };
 pub use params::{MAX_FORM_BODY_BYTES, Params, ParamsRejection};
 pub use response::{

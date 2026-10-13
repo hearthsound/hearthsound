@@ -9,7 +9,9 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use hearthsound_activity::ActivityService;
 use hearthsound_auth::{Authenticator, Principal, ResolveError, SubsonicCredentials, UserSettings};
+use hearthsound_catalog::CatalogService;
 use hearthsound_config::SettingsStore;
 use hearthsound_config::settings::Settings;
 use hearthsound_db::Database;
@@ -35,6 +37,10 @@ struct Inner {
     settings: Settings,
     /// The per-user setting overrides browse scope resolution reads.
     user_settings: UserSettings,
+    /// The catalog layer, which search and the catalog-id browse endpoints use.
+    catalog: Arc<CatalogService>,
+    /// The activity service, which `scrobble` records plays through.
+    activity: Arc<ActivityService>,
     /// The credential resolver.
     authenticator: Arc<Authenticator>,
     /// The proxies whose forwarding headers are trusted.
@@ -50,6 +56,10 @@ impl SubsonicState {
     /// - `settings`: the settings service; a call reads its current snapshot.
     /// - `authenticator`: the credential resolver, shared with the other
     ///   surfaces so one login rate limiter covers them all.
+    /// - `catalog`: the catalog layer, shared with the composition root that
+    ///   built it over the same provider registry.
+    /// - `activity`: the activity service, shared with the stream service so
+    ///   the "no song audio delivered" guard reads the same session registry.
     ///
     /// # Returns
     ///
@@ -60,6 +70,8 @@ impl SubsonicState {
         database: Arc<Database>,
         settings: Settings,
         authenticator: Arc<Authenticator>,
+        catalog: Arc<CatalogService>,
+        activity: Arc<ActivityService>,
     ) -> SubsonicState {
         let user_settings = UserSettings::new(&database, settings.registry().clone());
         SubsonicState {
@@ -67,6 +79,8 @@ impl SubsonicState {
                 database,
                 settings,
                 user_settings,
+                catalog,
+                activity,
                 authenticator,
                 trusted_proxies: Arc::new(TrustedProxies::default()),
             }),
@@ -90,6 +104,8 @@ impl SubsonicState {
                 database: Arc::clone(&self.inner.database),
                 settings: self.inner.settings.clone(),
                 user_settings: self.inner.user_settings.clone(),
+                catalog: Arc::clone(&self.inner.catalog),
+                activity: Arc::clone(&self.inner.activity),
                 authenticator: Arc::clone(&self.inner.authenticator),
                 trusted_proxies: Arc::new(trusted_proxies),
             }),
@@ -137,6 +153,22 @@ impl SubsonicState {
     /// Returns the proxies whose forwarding headers are trusted.
     pub fn trusted_proxies(&self) -> &TrustedProxies {
         &self.inner.trusted_proxies
+    }
+
+    /// Returns the catalog layer.
+    ///
+    /// `search3` searches it for catalog results and the browse endpoints
+    /// resolve an unmaterialized `x_` id through it.
+    pub fn catalog(&self) -> &CatalogService {
+        &self.inner.catalog
+    }
+
+    /// Returns the activity service.
+    ///
+    /// `scrobble` records a play through it, so the writes share the session
+    /// registry the stream service reports into.
+    pub fn activity(&self) -> &ActivityService {
+        &self.inner.activity
     }
 
     /// Resolves a request's credentials into a principal.

@@ -736,6 +736,86 @@ pub async fn list_albums_for_artist(
     rows.into_iter().map(|row| row.into_album()).collect()
 }
 
+/// Lists the tracks in scope.
+///
+/// This is the listing an empty `search3` query answers with: the OpenSubsonic
+/// protocol requires a server to return all its data for an empty query, and an
+/// FTS5 query with no token matches nothing, so the browse layer lists the
+/// scope directly instead. The tracks are ordered by sort title, with the id as
+/// a tie breaker, so the listing is stable across pages.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `scope`: the scope to filter by.
+/// - `limit`: the maximum number of tracks; a negative limit is unbounded.
+/// - `offset`: how many tracks to skip.
+///
+/// # Returns
+///
+/// The tracks in scope, each with its album, credited artists, genres, and
+/// preferred file.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn list_tracks(
+    conn: &mut SqliteConnection,
+    scope: Scope,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<TrackView>, LibraryError> {
+    if let Scope::Server(ServerBrowse::Disabled) = scope {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<Vec<u8>> = match scope {
+        Scope::Personal { user_id } => {
+            let user = user_id.as_bytes().as_slice();
+            sqlx::query_scalar!(
+                "WITH scope_tracks(track_id) AS ( \
+                     SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'track' \
+                     UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'track' AND value = 'like' \
+                     UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id \
+                         WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
+                     UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
+                         WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
+                 ) \
+                 SELECT t.id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id \
+                 ORDER BY t.sort_title, t.id LIMIT ? OFFSET ?",
+                user,
+                user,
+                user,
+                user,
+                limit,
+                offset,
+            )
+            .fetch_all(&mut *conn)
+            .await?
+        }
+        Scope::Server(view) => {
+            let (available, cached) = view.availability_pair();
+            sqlx::query_scalar!(
+                "SELECT t.id FROM tracks t WHERE t.availability IN (?, ?) \
+                 ORDER BY t.sort_title, t.id LIMIT ? OFFSET ?",
+                available,
+                cached,
+                limit,
+                offset,
+            )
+            .fetch_all(&mut *conn)
+            .await?
+        }
+    };
+    let mut views = Vec::with_capacity(rows.len());
+    for bytes in rows {
+        let id = decode_entity(IdPrefix::Track, &bytes).map_err(LibraryError::from)?;
+        if let Some(track) = tracks::get_track(conn, id).await? {
+            views.push(track_view(conn, track).await?);
+        }
+    }
+    Ok(views)
+}
+
 /// Searches the local full-text index.
 ///
 /// The query text is sanitized into an FTS5 prefix query by [`sanitize_match`],

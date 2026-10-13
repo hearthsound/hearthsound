@@ -10,9 +10,10 @@
 //! exhausted by a browse request.
 
 use hearthsound_core::EntityId;
+use hearthsound_core::EntityKind;
 use hearthsound_db::Database;
 use hearthsound_library::query::{
-    AlbumDetail, AlbumSort, ArtistDetail, ArtistSummary, Scope, TrackView,
+    AlbumDetail, AlbumSort, ArtistDetail, ArtistSummary, Scope, SearchResults, TrackView,
 };
 use hearthsound_library::{Album, Artist, LibraryError, MediaFile, artists, media_files, query};
 
@@ -164,6 +165,92 @@ pub(crate) async fn artists(
 ) -> Result<Vec<ArtistSummary>, LibraryError> {
     let mut conn = database.readers().acquire().await?;
     query::list_artists(&mut conn, scope, -1, 0).await
+}
+
+/// Lists the artists in scope, paged.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `scope`: the scope to filter by.
+/// - `limit`: the maximum number of artists.
+/// - `offset`: how many artists to skip.
+///
+/// # Returns
+///
+/// The artists in the requested window, ordered by sort name.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub(crate) async fn artists_page(
+    database: &Database,
+    scope: Scope,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<ArtistSummary>, LibraryError> {
+    let mut conn = database.readers().acquire().await?;
+    query::list_artists(&mut conn, scope, limit, offset).await
+}
+
+/// Lists the tracks in scope, paged.
+///
+/// This is the listing an empty `search3` query answers with; the full-text
+/// index has nothing to match an empty query against.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `scope`: the scope to filter by.
+/// - `limit`: the maximum number of tracks.
+/// - `offset`: how many tracks to skip.
+///
+/// # Returns
+///
+/// The tracks in the requested window, ordered by sort title.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub(crate) async fn list_tracks(
+    database: &Database,
+    scope: Scope,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<TrackView>, LibraryError> {
+    let mut conn = database.readers().acquire().await?;
+    query::list_tracks(&mut conn, scope, limit, offset).await
+}
+
+/// Searches the local full-text index for one entity kind.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `scope`: the scope to filter by.
+/// - `text`: the raw search text.
+/// - `kind`: the entity kind to search.
+/// - `limit`: the maximum number of results.
+/// - `offset`: how many results to skip.
+///
+/// # Returns
+///
+/// The matching entities, in relevance order, inside the one list the kind
+/// names.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub(crate) async fn search(
+    database: &Database,
+    scope: Scope,
+    text: &str,
+    kind: EntityKind,
+    limit: i64,
+    offset: i64,
+) -> Result<SearchResults, LibraryError> {
+    let mut conn = database.readers().acquire().await?;
+    query::search(&mut conn, scope, text, &[kind], limit, offset).await
 }
 
 /// Reads one artist with its albums, if the scope contains it.

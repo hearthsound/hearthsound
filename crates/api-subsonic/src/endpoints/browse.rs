@@ -332,7 +332,7 @@ fn entity_id(call: &Call, expected: IdPrefix) -> Result<EntityId, SubsonicError>
 /// # Errors
 ///
 /// Returns a generic Subsonic error when the value is not a number.
-fn number(call: &Call, name: &'static str, default: i64) -> Result<i64, SubsonicError> {
+pub(crate) fn number(call: &Call, name: &'static str, default: i64) -> Result<i64, SubsonicError> {
     let Some(value) = call.get(name).map(str::trim) else {
         return Ok(default);
     };

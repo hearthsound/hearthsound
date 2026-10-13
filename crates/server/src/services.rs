@@ -10,8 +10,9 @@
 //!    database, then default;
 //! 4. load the 32-byte secret key, creating it on first start;
 //! 5. build the event bus, the authenticator (with the login rate limit from
-//!    `auth.login_rate_limit_per_minute`), the plugin host, and the provider
-//!    registry (rebuilt from the plugin tables);
+//!    `auth.login_rate_limit_per_minute`), the plugin host, the provider
+//!    registry (rebuilt from the plugin tables), and the catalog layer over
+//!    that registry;
 //! 6. build the ffmpeg runner capped by `stream.max_concurrent_transcodes`, the
 //!    library scanner, the job queue, the job runner with its handlers, and the
 //!    cron scheduler with the system schedules;
@@ -29,11 +30,11 @@
 //!
 //! # Where later wiring goes
 //!
-//! The catalog service, the acquisition orchestrator (with its job handlers and
-//! schedules), and the stream service are constructed in [`Services::build`]
-//! between the provider registry and the job runner, and their fields are added
-//! to [`Services`] with accessors next to the existing ones. Nothing else needs
-//! to change: the domain crates take the handles they are given, the API crates
+//! The acquisition orchestrator (with its job handlers and schedules), the
+//! stream service, and the stream surface are constructed in [`Services::build`]
+//! between the catalog layer and the job runner, and their fields are added to
+//! [`Services`] with accessors next to the existing ones. Nothing else needs to
+//! change: the domain crates take the handles they are given, the API crates
 //! read them through [`SubsonicState`](hearthsound_api_subsonic::SubsonicState),
 //! and [`crate::Server`] already starts whatever background work the services
 //! expose.
@@ -46,6 +47,7 @@ use std::sync::Arc;
 use hearthsound_activity::ActivityService;
 use hearthsound_api_subsonic::{SubsonicState, TrustedProxies};
 use hearthsound_auth::Authenticator;
+use hearthsound_catalog::CatalogService;
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_config::keys;
 use hearthsound_config::secret::SecretKey;
@@ -84,6 +86,8 @@ pub struct Services {
     plugins: Arc<PluginHost>,
     /// The provider registry built from the plugin tables.
     registry: Arc<ProviderRegistry>,
+    /// The catalog layer over the provider registry.
+    catalog: Arc<CatalogService>,
     /// The write side of the plugin instance and layer tables.
     instances: InstanceService,
     /// The ffmpeg process runner.
@@ -189,6 +193,12 @@ impl Services {
 
         let instances = InstanceService::new(Arc::clone(&plugins), repository, secrets);
 
+        let catalog = Arc::new(CatalogService::new(
+            Arc::clone(&registry),
+            Arc::clone(&database),
+            settings.clone(),
+        ));
+
         let ffmpeg = Arc::new(FfmpegRunner::new(
             None,
             max_concurrent_transcodes(&snapshot)?,
@@ -236,6 +246,7 @@ impl Services {
             authenticator,
             plugins,
             registry,
+            catalog,
             instances,
             ffmpeg,
             scanner,
@@ -285,6 +296,14 @@ impl Services {
         &self.registry
     }
 
+    /// Returns the catalog layer.
+    ///
+    /// The `/rest` surface searches it and resolves an unmaterialized `x_` id
+    /// through it.
+    pub fn catalog(&self) -> &Arc<CatalogService> {
+        &self.catalog
+    }
+
     /// Returns the plugin instance and layer service.
     pub fn instances(&self) -> &InstanceService {
         &self.instances
@@ -326,6 +345,8 @@ impl Services {
             Arc::clone(&self.database),
             self.settings.clone(),
             Arc::clone(&self.authenticator),
+            Arc::clone(&self.catalog),
+            Arc::clone(&self.activity),
         )
         .with_trusted_proxies(self.trusted_proxies.clone())
     }
