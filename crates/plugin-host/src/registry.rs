@@ -19,7 +19,8 @@ use hearthsound_config::secret::SecretBox;
 use hearthsound_core::providers::{AcquisitionProvider, CatalogProvider, MetadataProvider};
 use hearthsound_core::{Layer, Slug};
 
-use crate::host::{InstalledPlugin, PluginHost};
+use crate::host::{InstalledPlugin, PluginHost, instance_http_client};
+use crate::http::{HttpClient, HttpError, HttpRequest};
 use crate::instance::{InstanceConfig, InstanceHostConfig};
 use crate::instances::open_server_config;
 use crate::manifest::{ImageCachePolicy, Manifest, Permissions};
@@ -38,6 +39,7 @@ pub struct RegistryInstance {
     plugin_version: String,
     manifest: Manifest,
     host_config: InstanceHostConfig,
+    http: Arc<HttpClient>,
     catalog: Option<Arc<dyn CatalogProvider>>,
     metadata: Option<Arc<dyn MetadataProvider>>,
     acquisition: Option<Arc<dyn AcquisitionProvider>>,
@@ -101,6 +103,91 @@ impl RegistryInstance {
     pub fn acquisition(&self) -> Option<&Arc<dyn AcquisitionProvider>> {
         self.acquisition.as_ref()
     }
+
+    /// Fetches one image under the instance's HTTP permissions.
+    ///
+    /// This is the host asking, not the plugin: the server proxies cover art a
+    /// catalog plugin named, and it does so through the same client, and
+    /// therefore the same allowlist, address policy, redirect re-checks,
+    /// timeout, body cap and rate limit, that the plugin itself would get from
+    /// [`host-http`](crate::http). A URL the instance could not reach itself is
+    /// denied here too, with the same message. The request uses the default
+    /// timeout; a caller that needs a different budget has to go through the
+    /// plugin.
+    ///
+    /// The response is returned as it arrived, including a status the caller may
+    /// want to treat as an error. Whether it may be stored is the caller's
+    /// decision, made from [`RegistryInstance::image_cache_policy`].
+    ///
+    /// # Parameters
+    ///
+    /// - `url`: the absolute image URL.
+    ///
+    /// # Returns
+    ///
+    /// The status, the `Content-Type` when the server sent one, the body, and
+    /// the instance's image cache policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FetchError::Http`] with [`HttpError::Denied`](crate::http::HttpError::Denied)
+    /// when the URL is outside the instance's grant,
+    /// [`HttpError::BodyTooLarge`](crate::http::HttpError::BodyTooLarge) when
+    /// the body exceeds the instance's cap, and
+    /// [`HttpError::Timeout`](crate::http::HttpError::Timeout) or
+    /// [`HttpError::Network`](crate::http::HttpError::Network) when the request
+    /// does not complete.
+    pub async fn fetch_image(&self, url: &str) -> Result<FetchedImage, FetchError> {
+        let request = HttpRequest {
+            method: "GET".to_owned(),
+            url: url.to_owned(),
+            headers: Vec::new(),
+            body: None,
+            timeout_ms: None,
+        };
+        let response = self.http.send(&request, None).await?;
+        Ok(FetchedImage {
+            status: response.status,
+            content_type: header(&response.headers, "content-type"),
+            bytes: response.body,
+            cache_policy: self.image_cache_policy(),
+        })
+    }
+}
+
+/// One image fetched on an instance's behalf.
+///
+/// The bytes are the server's copy of the image, not the plugin's: nothing is
+/// stored until the caller decides the instance's policy allows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedImage {
+    /// The HTTP status code.
+    pub status: u16,
+    /// The response's `Content-Type`, when it sent one.
+    pub content_type: Option<String>,
+    /// The response body.
+    pub bytes: Vec<u8>,
+    /// How the issuing instance's manifest says the image may be stored.
+    pub cache_policy: ImageCachePolicy,
+}
+
+/// Why an image could not be fetched.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FetchError {
+    /// The registry serves no instance with that slug.
+    #[error("no provider instance with slug `{0}`")]
+    UnknownInstance(String),
+    /// The request was denied or did not complete.
+    #[error(transparent)]
+    Http(#[from] HttpError),
+}
+
+/// Returns the first value of one response header, matched case-insensitively.
+fn header(headers: &[(String, String)], name: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|(field, _)| field.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.clone())
 }
 
 impl std::fmt::Debug for RegistryInstance {
@@ -323,6 +410,33 @@ impl ProviderRegistry {
         self.read().by_slug.get(slug).cloned()
     }
 
+    /// Fetches one image under the permissions of the instance with `slug`.
+    ///
+    /// The fetch is the host's, so it also applies to instances that are not
+    /// catalog providers; the caller picks the instance whose grant should
+    /// cover the URL, which is the instance that named it.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the instance whose HTTP permissions apply.
+    /// - `url`: the absolute image URL.
+    ///
+    /// # Returns
+    ///
+    /// The status, content type, bytes and the instance's image cache policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FetchError::UnknownInstance`] when the registry serves no
+    /// instance with the slug, and otherwise the errors of
+    /// [`RegistryInstance::fetch_image`].
+    pub async fn fetch_image(&self, slug: &str, url: &str) -> Result<FetchedImage, FetchError> {
+        let instance = self
+            .instance(slug)
+            .ok_or_else(|| FetchError::UnknownInstance(slug.to_owned()))?;
+        instance.fetch_image(url).await
+    }
+
     /// Builds one instance's entry.
     async fn build(
         &self,
@@ -348,6 +462,7 @@ impl ProviderRegistry {
             .with_server_config(server_config)
             .with_permissions(permissions)
             .with_host_config(host_config.clone());
+        let http = instance_http_client(manifest, &instance).map_err(|error| error.to_string())?;
 
         let mut catalog = None;
         let mut metadata = None;
@@ -388,6 +503,7 @@ impl ProviderRegistry {
             plugin_version: plugin.version.clone(),
             manifest: manifest.clone(),
             host_config,
+            http,
             catalog,
             metadata,
             acquisition,

@@ -208,3 +208,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Instances are disabled in the database and reported through a `plugin.status`
   event when a plugin traps five times in ten minutes, and every plugin host
   publishes on one `EventBus` a composition root can replace.
+- Catalog artwork fetched on behalf of an instance: the host performs the
+  request through the same client, and therefore the same allowlist, address
+  policy, redirect re-checks, timeout and body cap, that `host-http` enforces
+  for the plugin, and returns the status, content type and bytes together with
+  the instance's `catalog.imageCachePolicy` so the caller decides whether to
+  store them.
