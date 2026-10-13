@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/acquire",
+    "crates/auth",
     "crates/config",
     "crates/core",
     "crates/db",
@@ -31,6 +32,7 @@ expect_used = "deny"
 [workspace.dependencies]
 aes-gcm = "0.11.1"
 anyhow = "1.0.104"
+argon2 = "0.6.0"
 async-trait = "0.1.92"
 chrono = "0.4.45"
 clap = { version = "4.6.7", features = ["derive"] }

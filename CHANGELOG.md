@@ -87,3 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   idempotent upsert keyed by owner and kind; fire times computed in server-local
   time; and a tick loop that enqueues the schedules that are due, advances them
   in the same transaction, and skips the runs missed during downtime.
+- User accounts: Argon2id password hashing on the blocking pool, case-insensitive
+  unique usernames, display names, the admin flag, permission flags defaulted
+  from `users.default_permissions`, lookup by id or username, disabling, and
+  listing, plus per-user setting overrides that reject unknown, server-only, or
+  badly typed keys.

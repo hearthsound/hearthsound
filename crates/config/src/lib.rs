@@ -227,6 +227,42 @@ pub struct SettingDef {
     pub user_overridable: bool,
 }
 
+impl SettingDef {
+    /// Checks a value against this setting's kind.
+    ///
+    /// This is the check [`SettingsStore::resolve`] runs on every layer, made
+    /// available on its own so a caller that stores a value outside the
+    /// `settings` table - a per-user override in `user_settings`, for example -
+    /// can reject a value the store would later refuse to resolve.
+    ///
+    /// # Parameters
+    ///
+    /// - `value`: the value to check.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the value satisfies the kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::InvalidValue`] with [`SettingSource::Database`]
+    /// as the origin when the type does not match, a number is outside its
+    /// range, a string is not in its fixed set, or a list repeats a value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_config::{SettingValue, SettingsRegistry, keys};
+    ///
+    /// let def = SettingsRegistry::builtin().def(keys::SUBSONIC_TOKEN_AUTH.name()).unwrap();
+    /// assert!(def.validate(&SettingValue::Bool(false)).is_ok());
+    /// assert!(def.validate(&SettingValue::String("nope".to_owned())).is_err());
+    /// ```
+    pub fn validate(&self, value: &SettingValue) -> Result<(), ConfigError> {
+        validate(self, value, SettingSource::Database)
+    }
+}
+
 /// A typed handle to a setting.
 ///
 /// The type parameter is the Rust type the setting is read as. It is part of the
