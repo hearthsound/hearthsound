@@ -60,3 +60,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   config file, database, then default, with a shared service that rejects
   file-pinned and environment-overridden keys and notifies subscribers when the
   resolved snapshot changes.
+- The AES-256-GCM secret box and the secret key file, read from
+  `HEARTHSOUND_SECRET_KEY` or created on first use with 32 random bytes and
+  owner-only permissions.

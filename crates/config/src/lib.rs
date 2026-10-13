@@ -1,14 +1,17 @@
 //! The settings registry and resolution.
 //!
-//! Settings have three layers, resolved with a fixed precedence: environment
-//! variables, then values from the configuration file, then the built-in
-//! default. This crate owns the registry of known settings, the typed keys used
-//! to read them, and the resolution rules; the [`bootstrap`] module loads the
-//! bootstrap keys and hands the file's `[settings]` table over as the file
-//! layer.
+//! Settings have four layers, resolved with a fixed precedence: environment
+//! variables, then values from the configuration file, then values from the
+//! database, then the built-in default. This crate owns the registry of known
+//! settings, the typed keys used to read them, and the resolution rules; the
+//! [`bootstrap`] module loads the bootstrap keys and hands the file's
+//! `[settings]` table over as the file layer, [`settings`] owns the database
+//! layer and the change notification, and [`secret`] owns the AES-256-GCM key
+//! material.
 #![forbid(unsafe_code)]
 
 pub mod bootstrap;
+pub mod secret;
 pub mod settings;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -1033,7 +1036,8 @@ impl SettingSources {
     ///
     /// # Returns
     ///
-    /// The sources.
+    /// The sources, with an empty database layer: the [`settings::Settings`]
+    /// service reads that layer from the `settings` table.
     ///
     /// # Examples
     ///
