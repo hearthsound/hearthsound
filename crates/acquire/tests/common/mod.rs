@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hearthsound_acquire::orchestrator::{AcquisitionOrchestrator, AcquisitionStorage};
 use hearthsound_acquire::repo::{self, NewAcquisition};
@@ -906,6 +906,107 @@ pub fn drain(events: &mut tokio::sync::broadcast::Receiver<EventEnvelope>) -> Ve
         drained.push(envelope.event);
     }
     drained
+}
+
+/// How long a test waits for an observable condition.
+///
+/// A test that runs alone reaches every condition it waits for in
+/// milliseconds, so a fixed number of polls is enough for it; the same test
+/// inside the whole workspace suite shares the machine with over eight hundred
+/// other tests, where a stage that is one wait away can take seconds longer.
+/// Every wait therefore ends on this deadline, which is generous enough for a
+/// loaded machine and still fails a stuck pipeline instead of hanging the test.
+pub const WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How often a wait re-checks its condition.
+pub const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Waits until `condition` holds.
+///
+/// # Parameters
+///
+/// - `description`: what the wait is for, which the panic names.
+/// - `condition`: the condition, re-checked every [`WAIT_POLL_INTERVAL`].
+///
+/// # Panics
+///
+/// Panics when the condition is still false after [`WAIT_TIMEOUT`].
+pub async fn wait_until(description: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + WAIT_TIMEOUT;
+    loop {
+        if condition() {
+            return;
+        }
+        if Instant::now() >= deadline {
+            panic!("{description} did not happen within {WAIT_TIMEOUT:?}");
+        }
+        tokio::time::sleep(WAIT_POLL_INTERVAL).await;
+    }
+}
+
+/// Waits until nothing exists at `path`.
+///
+/// The pipeline cleans up after it has written the state a test waits for - the
+/// staging directory is removed after the terminal row is committed, and a
+/// `move` import root loses its source file after the import committed - so a
+/// test that observed the state has to wait for the cleanup instead of asserting
+/// on sight.
+///
+/// # Parameters
+///
+/// - `path`: the path that has to disappear.
+/// - `description`: what the wait is for, which the panic names.
+///
+/// # Panics
+///
+/// Panics when the path still exists after [`WAIT_TIMEOUT`].
+pub async fn wait_for_removal(path: &Path, description: &str) {
+    let deadline = Instant::now() + WAIT_TIMEOUT;
+    while path.exists() {
+        if Instant::now() >= deadline {
+            panic!("{description}: {} still exists", path.display());
+        }
+        tokio::time::sleep(WAIT_POLL_INTERVAL).await;
+    }
+}
+
+/// Waits until the events collected so far satisfy `accept`.
+///
+/// Every event a stage publishes follows the write that makes its state
+/// observable, so a test that read the ledger first has to wait for the publish
+/// rather than drain once. Everything the receiver holds is collected and
+/// offered to `accept` every [`WAIT_POLL_INTERVAL`].
+///
+/// # Parameters
+///
+/// - `events`: the receiver, subscribed before the acquisition was requested.
+/// - `description`: what the wait is for, which the panic names.
+/// - `accept`: the condition the collected events are checked against.
+///
+/// # Returns
+///
+/// Everything drained up to and including the poll that satisfied `accept`.
+///
+/// # Panics
+///
+/// Panics when the events do not satisfy `accept` after [`WAIT_TIMEOUT`].
+pub async fn wait_for_events(
+    events: &mut tokio::sync::broadcast::Receiver<EventEnvelope>,
+    description: &str,
+    accept: impl Fn(&[ServerEvent]) -> bool,
+) -> Vec<ServerEvent> {
+    let mut collected = Vec::new();
+    let deadline = Instant::now() + WAIT_TIMEOUT;
+    loop {
+        collected.extend(drain(events));
+        if accept(&collected) {
+            return collected;
+        }
+        if Instant::now() >= deadline {
+            panic!("{description} did not happen within {WAIT_TIMEOUT:?}");
+        }
+        tokio::time::sleep(WAIT_POLL_INTERVAL).await;
+    }
 }
 
 /// Returns whether the events contain an `acquisition.updated` for `id`.

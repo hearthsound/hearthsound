@@ -381,7 +381,8 @@ async fn a_failed_acquisition_cools_the_track_down_for_the_configured_window() {
     assert_eq!(row.failure_reason, Some(FailureReason::NoCandidates));
 
     // The failure marked the track unavailable for the cooldown, and left no
-    // staging directory behind.
+    // staging directory behind. The staging directory is removed after the
+    // failed row is written, so it is waited for rather than asserted on sight.
     let stored = env.track(track).await;
     assert_eq!(stored.availability, Availability::Unavailable);
     let until = stored
@@ -391,7 +392,11 @@ async fn a_failed_acquisition_cools_the_track_down_for_the_configured_window() {
         until > now_millis() && until <= now_millis() + 3_600_000,
         "the cooldown end is inside the configured hour: {until}"
     );
-    assert!(!env.orchestrator.staging_dir(id).exists());
+    common::wait_for_removal(
+        &env.orchestrator.staging_dir(id),
+        "the failed acquisition removed its staging directory",
+    )
+    .await;
 
     // A replay inside the window starts no new search.
     let refused = env

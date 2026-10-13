@@ -405,7 +405,11 @@ fn resumes_verification_and_import_after_a_restart() {
             assert!(row.media_file_id.is_some(), "acquisition {id} imported");
             assert_eq!(row.failure_reason, None);
             assert_eq!(env.track(track).await.availability, Availability::Cached);
-            assert!(!env.orchestrator.staging_dir(id).exists());
+            common::wait_for_removal(
+                &env.orchestrator.staging_dir(id),
+                "the resumed import removed its staging directory",
+            )
+            .await;
             let states: Vec<AcquisitionState> = env
                 .log(id)
                 .await
@@ -511,9 +515,19 @@ fn resumes_a_download_after_a_restart() {
             .cache_root
             .join("Hello Artist/Hello Song album (1993)/01 - Hello Song.flac");
         assert!(destination.is_file(), "{}", destination.display());
-        assert!(!env.downloads.join("01 - Hello Song.flac").exists());
+        // The source file and the staging directory are cleaned up after the
+        // completed row is written.
+        common::wait_for_removal(
+            &env.downloads.join("01 - Hello Song.flac"),
+            "the resumed download dropped its source file",
+        )
+        .await;
         assert_eq!(env.track(track).await.availability, Availability::Cached);
-        assert!(!env.orchestrator.staging_dir(id).exists());
+        common::wait_for_removal(
+            &env.orchestrator.staging_dir(id),
+            "the resumed download removed its staging directory",
+        )
+        .await;
 
         let states: Vec<AcquisitionState> = env
             .log(id)

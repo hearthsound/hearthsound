@@ -61,11 +61,15 @@ async fn an_unpinned_track_lands_in_the_cache_with_its_tags() {
     let destination = env.cache_root.join(RELATIVE);
     assert!(destination.is_file(), "the file landed in the cache root");
     assert!(!env.library_root.join(RELATIVE).exists());
-    assert!(!source.exists(), "a move import root drops the source file");
-    assert!(
-        !env.staging.join(id.to_string()).exists(),
-        "the staging directory is removed"
-    );
+    // The source file and the staging directory are cleaned up after the
+    // completed row is written, so they are waited for rather than asserted on
+    // sight.
+    common::wait_for_removal(&source, "a move import root drops the source file").await;
+    common::wait_for_removal(
+        &env.staging.join(id.to_string()),
+        "the staging directory is removed",
+    )
+    .await;
 
     let probed = probe(&destination).await.unwrap();
     assert_eq!(probed.container, Container::Flac);
@@ -111,7 +115,19 @@ async fn an_unpinned_track_lands_in_the_cache_with_its_tags() {
     assert_eq!(preferred.storage, StorageClass::Cache);
     assert_eq!(preferred.rel_path, RELATIVE);
 
-    let published = common::drain(&mut events);
+    let published = common::wait_for_events(
+        &mut events,
+        "the availability and the library change are published",
+        |published| {
+            has_availability_event(published, track, Availability::Cached)
+                && published.iter().any(|event| matches!(
+                    event,
+                    ServerEvent::LibraryChanged(change)
+                        if change.entity_id == track.to_string() && change.change == LibraryChange::Added
+                ))
+        },
+    )
+    .await;
     assert!(
         has_availability_event(&published, track, Availability::Cached),
         "the availability change is published"
@@ -535,8 +551,10 @@ async fn a_failed_import_fails_the_acquisition() {
         Availability::Unavailable,
         "a failed import puts the track into cooldown"
     );
-    assert!(
-        !env.orchestrator.staging_dir(id).exists(),
-        "the staging directory is removed"
-    );
+    // The staging directory is removed after the failed row is written.
+    common::wait_for_removal(
+        &env.orchestrator.staging_dir(id),
+        "the staging directory is removed",
+    )
+    .await;
 }

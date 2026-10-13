@@ -138,15 +138,20 @@ async fn a_completed_download_is_verified_and_imported() {
     assert_eq!(progress["totalBytes"], json!(4000));
 
     // The live channel carries the final managed path a client waiting for
-    // audio reads, and the source file left the import root.
+    // audio reads, and the source file left the import root. Both follow the
+    // completed row, so they are waited for rather than read on sight.
     let destination = env
         .cache_root
         .join("Hello Artist/Hello Song album (1993)/01 - Hello Song.flac");
+    common::wait_until("the live channel carries the completed acquisition", || {
+        handle.snapshot().state == AcquisitionState::Completed
+    })
+    .await;
     let live = handle.snapshot();
     assert_eq!(live.state, AcquisitionState::Completed);
     assert_eq!(live.file.as_deref(), Some(destination.as_path()));
     assert!(destination.is_file());
-    assert!(!file.exists(), "a move import root drops the source file");
+    common::wait_for_removal(&file, "a move import root drops the source file").await;
 
     // The ledger carries the state, the instance and the last percentage; the
     // resolved path is not stored.
