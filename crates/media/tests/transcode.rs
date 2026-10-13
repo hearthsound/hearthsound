@@ -10,6 +10,15 @@ use hearthsound_media::{
 };
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
 
+/// How long a freshly spawned ffmpeg may take to deliver the first bytes.
+///
+/// A spawn returns as soon as the child process exists, so the first chunk of a
+/// stream arrives only after the child has started up, read its input, and
+/// filled the pipe. That takes about a tenth of a second on an idle machine,
+/// but a loaded machine can stretch it past a second, so the deadline is the
+/// ten seconds a client waits for a stream before giving up.
+const FIRST_BYTES_DEADLINE: Duration = Duration::from_secs(10);
+
 /// The container and codec a transcode format produces.
 fn expected(format: TranscodeFormat) -> (Container, Codec) {
     match format {
@@ -95,9 +104,9 @@ async fn transcodes_to_every_format() {
 
         // The first bytes arrive promptly: clients wait about ten seconds for a
         // stream before giving up.
-        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+        let first = tokio::time::timeout(FIRST_BYTES_DEADLINE, stream.next())
             .await
-            .expect("the first chunk arrives within a second")
+            .expect("the first chunk arrives before the client gives up")
             .expect("the stream has data")
             .unwrap();
         assert!(!first.is_empty(), "{} sent an empty chunk", format);

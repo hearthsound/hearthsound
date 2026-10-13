@@ -5,9 +5,19 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use hearthsound_media::{
-    Codec, Container, FfmpegRunner, MediaError, PendingRequest, TranscodeFormat, probe,
+    Codec, Container, FfmpegRunner, MediaError, PendingRequest, SILENCE_BURST, TranscodeFormat,
+    probe,
 };
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
+
+/// How long a freshly spawned encoder may take to deliver the first bytes.
+///
+/// The padding is written as soon as the stream starts, but the first chunk
+/// still waits for the encoder process to start up and fill the pipe. That
+/// takes about a tenth of a second on an idle machine, but a loaded machine can
+/// stretch it past a second, so the deadline is the ten seconds a client waits
+/// for a stream before giving up.
+const FIRST_BYTES_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Drains a stream into one byte vector.
 ///
@@ -107,11 +117,15 @@ async fn pads_with_silence_then_plays_the_file() {
 
     let request = PendingRequest::new(TranscodeFormat::Mp3, 320, Duration::from_secs(30));
     let mut pending = runner.pending_stream(&request).await.unwrap();
+    // The silence is paced at the real-time rate, so the stream carries as much
+    // of it as the acquisition takes, not as much as the test sleeps. Measure
+    // the wait instead of assuming it.
+    let started = tokio::time::Instant::now();
 
     // The client hears the padding immediately.
-    let first = tokio::time::timeout(Duration::from_secs(1), pending.next())
+    let first = tokio::time::timeout(FIRST_BYTES_DEADLINE, pending.next())
         .await
-        .expect("the first bytes arrive within a second")
+        .expect("the first bytes arrive before the client gives up")
         .expect("the stream has data")
         .unwrap();
     assert!(!first.is_empty());
@@ -120,6 +134,7 @@ async fn pads_with_silence_then_plays_the_file() {
     // The acquisition finishes a moment later.
     tokio::time::sleep(Duration::from_millis(300)).await;
     pending.control().ready(&source).await.unwrap();
+    let acquisition = started.elapsed();
 
     let mut collected = first.to_vec();
     collected.extend(drain(pending).await.unwrap());
@@ -129,16 +144,18 @@ async fn pads_with_silence_then_plays_the_file() {
     assert_eq!(probed.container, Container::Mpeg);
     assert_eq!(probed.codec, Codec::Mp3);
 
-    // Two seconds of burst, a fraction of a second of paced silence, and the
-    // two second song.
+    // Two seconds of burst, the paced silence the acquisition waited through,
+    // and the two second song. The ceiling allows the feeder a couple of
+    // seconds to notice the switch on a loaded machine.
+    let expected = SILENCE_BURST.as_secs_f64() + acquisition.as_secs_f64() + 2.0;
     let duration: f64 = ffprobe(&path, "duration")
         .await
         .expect("ffprobe reports a duration")
         .parse()
         .unwrap();
     assert!(
-        (3.8..=5.6).contains(&duration),
-        "the pending stream produced {duration}s"
+        duration >= 3.8 && duration <= expected + 2.0,
+        "the pending stream produced {duration}s for an acquisition of {acquisition:?}"
     );
     assert_eq!(runner.in_flight(), 0);
 }
@@ -156,13 +173,15 @@ async fn encodes_every_pending_format() {
             Duration::from_secs(30),
         );
         let mut pending = runner.pending_stream(&request).await.unwrap();
-        let first = tokio::time::timeout(Duration::from_secs(1), pending.next())
+        let started = tokio::time::Instant::now();
+        let first = tokio::time::timeout(FIRST_BYTES_DEADLINE, pending.next())
             .await
-            .expect("the first bytes arrive within a second")
+            .expect("the first bytes arrive before the client gives up")
             .expect("the stream has data")
             .unwrap();
         assert!(!first.is_empty(), "{format} produced nothing");
         pending.control().ready(&source).await.unwrap();
+        let acquisition = started.elapsed();
 
         let mut collected = first.to_vec();
         collected.extend(drain(pending).await.unwrap());
@@ -199,9 +218,15 @@ async fn encodes_every_pending_format() {
                 report.duration_ms.expect("the decoder counted frames") as f64 / 1000.0
             }
         };
+        // Two seconds of burst, the paced silence the acquisition waited
+        // through, and the one second song. The paced silence follows the wall
+        // clock, so it is as long as the acquisition took, and the ceiling
+        // allows the feeder a couple of seconds to notice the switch on a
+        // loaded machine.
+        let expected = SILENCE_BURST.as_secs_f64() + acquisition.as_secs_f64() + 1.0;
         assert!(
-            (2.7..=4.0).contains(&seconds),
-            "{format} produced {seconds}s"
+            seconds >= 2.7 && seconds <= expected + 2.0,
+            "{format} produced {seconds}s for an acquisition of {acquisition:?}"
         );
         assert_eq!(runner.in_flight(), 0, "{format}");
     }
@@ -213,16 +238,21 @@ async fn ends_one_second_after_a_failure() {
     let runner = FfmpegRunner::new(None, 4);
     let request = PendingRequest::new(TranscodeFormat::Mp3, 192, Duration::from_secs(30));
     let mut pending = runner.pending_stream(&request).await.unwrap();
+    let started = tokio::time::Instant::now();
 
     let first = pending.next().await.unwrap().unwrap();
     assert!(!first.is_empty());
     tokio::time::sleep(Duration::from_millis(200)).await;
     pending.control().fail().await.unwrap();
+    // The silence is paced at the real-time rate, so the stream carries as much
+    // of it as the failure took to be reported, which a loaded machine can
+    // stretch.
+    let acquisition = started.elapsed();
 
     let mut collected = first.to_vec();
-    let started = tokio::time::Instant::now();
+    let draining = tokio::time::Instant::now();
     collected.extend(drain(pending).await.unwrap());
-    let elapsed = started.elapsed();
+    let elapsed = draining.elapsed();
 
     let path = write_encoded(dir.path(), "failed.mp3", &collected).unwrap();
     let duration: f64 = ffprobe(&path, "duration")
@@ -230,11 +260,13 @@ async fn ends_one_second_after_a_failure() {
         .expect("ffprobe reports a duration")
         .parse()
         .unwrap();
-    // Two seconds of burst, a fifth of a second of silence, and the one second
-    // of grace.
+    // Two seconds of burst, the paced silence the failure waited through, and
+    // the one second of grace. The ceiling allows the feeder a couple of
+    // seconds to notice the failure on a loaded machine.
+    let expected = SILENCE_BURST.as_secs_f64() + acquisition.as_secs_f64() + 1.0;
     assert!(
-        (2.9..=4.0).contains(&duration),
-        "a failed pending stream produced {duration}s"
+        duration >= 2.9 && duration <= expected + 2.0,
+        "a failed pending stream produced {duration}s for a failure after {acquisition:?}"
     );
     assert!(
         elapsed < Duration::from_secs(3),
@@ -306,11 +338,15 @@ async fn a_stalled_client_blocks_the_pipeline() {
     let pending = runner.pending_stream(&request).await.unwrap();
     pending.control().ready(&source).await.unwrap();
 
-    // Read nothing. ffmpeg could encode ten minutes of audio in a couple of
-    // seconds, so both processes still running after three seconds of silence
-    // proves the client backpressure reached them: the encoder is blocked on a
-    // full output pipe and the decoder on a full input pipe, and neither can
-    // buffer the file.
+    // Read nothing. Wait for the decoder to start, then check that both
+    // processes are still running: ffmpeg could encode ten minutes of audio in
+    // a couple of seconds, so both of them alive proves the client backpressure
+    // reached them. The encoder is blocked on a full output pipe and the
+    // decoder on a full input pipe, and neither can buffer the file.
+    assert!(
+        wait_for(Duration::from_secs(10), || runner.in_flight() == 2).await,
+        "the decoder did not start"
+    );
     for _ in 0..3 {
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(

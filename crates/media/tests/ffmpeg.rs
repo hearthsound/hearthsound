@@ -5,6 +5,15 @@ use std::time::Duration;
 use hearthsound_media::{FfmpegRunner, MediaError};
 use tokio::io::AsyncReadExt;
 
+/// How long a freshly spawned ffmpeg may take to write its first bytes.
+///
+/// A spawn returns as soon as the child process exists, and the child still has
+/// to start up, read its input, and fill the pipe. On an idle machine that
+/// takes about a tenth of a second, but a loaded machine can stretch it past
+/// several seconds, so tests wait for the bytes themselves instead of sleeping
+/// for a fixed time.
+const FIRST_BYTES_DEADLINE: Duration = Duration::from_secs(30);
+
 /// The argument vector of an ffmpeg that runs until it is killed.
 fn endless_args() -> Vec<std::ffi::OsString> {
     vec![
@@ -137,9 +146,19 @@ async fn kills_the_child_when_its_handle_is_dropped() {
         .await
         .unwrap();
     let mut stdout = child.take_stdout().expect("stdout is piped");
+    // Wait for the child's first bytes before dropping it: the handle has to be
+    // dropped while samples are in flight, and a fixed sleep cannot know that
+    // they are.
+    let mut buffer = [0u8; 4096];
+    let first = tokio::time::timeout(FIRST_BYTES_DEADLINE, stdout.read(&mut buffer))
+        .await
+        .expect("the child wrote its first samples in time")
+        .expect("the pipe read succeeds");
+    assert_eq!(runner.in_flight(), 1, "the child lost its permit early");
+
     let reader = tokio::spawn(async move {
         let mut buffer = [0u8; 4096];
-        let mut total = 0usize;
+        let mut total = first;
         while let Ok(read) = stdout.read(&mut buffer).await {
             if read == 0 {
                 break;
@@ -148,19 +167,6 @@ async fn kills_the_child_when_its_handle_is_dropped() {
         }
         total
     });
-
-    // The child is producing samples, so the pipe carries data before the drop.
-    let running = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if runner.in_flight() == 1 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
-    assert!(running.is_ok());
 
     let pid = child.id();
     drop(child);
