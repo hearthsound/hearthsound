@@ -1093,6 +1093,7 @@ dependencies = [
 name = "hearthsound-plugin-host"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "async-trait",
  "hearthsound-config",
  "hearthsound-core",
  "hearthsound-test-support",

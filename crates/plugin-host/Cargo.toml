@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
 hearthsound-config = { path = "../config" }
 hearthsound-core = { path = "../core" }
 jsonschema.workspace = true

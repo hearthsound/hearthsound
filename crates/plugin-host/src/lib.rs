@@ -4,8 +4,11 @@
 //! `hearthsound:plugin@0.1.0` package. This crate reads plugin archives,
 //! validates that a component only imports what the host offers and only
 //! exports the interfaces its manifest declares, installs it under the data
-//! directory, and runs it inside a wasmtime store with deadlines and host
-//! imports that deny everything the plugin was not granted.
+//! directory, and runs it inside a pool of wasmtime stores with deadlines and
+//! host imports that deny everything the plugin was not granted.
+//!
+//! The rest of the server never sees WebAssembly: [`PluginHost::catalog_provider`]
+//! hands out a core trait object whose calls cross the guest boundary and back.
 //!
 //! The crate contains one `unsafe` call: deserializing a precompiled component
 //! from the host's own data directory. Every other operation is safe Rust.
@@ -14,15 +17,18 @@
 
 pub mod archive;
 mod bindings;
+mod catalog;
 mod engine;
 mod error;
 mod host;
 pub mod log;
 pub mod manifest;
+mod pool;
 mod state;
 mod validate;
 
 pub use archive::PluginArchive;
+pub use catalog::InstanceConfig;
 pub use engine::PluginEngine;
 pub use error::{HostError, InstallError};
 pub use host::{InstalledPlugin, PluginHost};

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hearthsound_config::SettingsStore;
+use hearthsound_core::providers::CatalogProvider;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use wasmtime::Engine;
@@ -18,9 +19,12 @@ use wasmtime::component::{Component, HasSelf, Linker};
 
 use crate::archive::PluginArchive;
 use crate::bindings::{self, CatalogProviderPre};
+use crate::catalog::{InstanceConfig, WasmCatalogProvider};
 use crate::engine::PluginEngine;
 use crate::error::{HostError, InstallError};
+use crate::log::LogSink;
 use crate::manifest::{Manifest, ManifestError, SUPPORTED_API};
+use crate::pool::{PoolConfig, StorePool};
 use crate::state::InstanceState;
 use crate::validate;
 
@@ -79,10 +83,6 @@ impl PluginHost {
     ///
     /// Returns [`HostError::Engine`] when the wasmtime engine or the linker
     /// cannot be built.
-    ///
-    /// # Panics
-    ///
-    /// Panics when called outside a Tokio runtime.
     pub fn new(
         plugins_dir: PathBuf,
         settings: Arc<SettingsStore>,
@@ -174,6 +174,56 @@ impl PluginHost {
                 path: failure_path,
                 source: std::io::Error::other(error),
             })?
+    }
+
+    /// Wraps an installed plugin as a catalog provider.
+    ///
+    /// The returned provider owns a pool of guest stores for one instance; each
+    /// call borrows a store, runs under the instance's deadline, and is returned
+    /// to the pool when the guest answers.
+    ///
+    /// # Parameters
+    ///
+    /// - `plugin`: the installed plugin to drive.
+    /// - `instance`: the instance's slug and server-scoped configuration.
+    ///
+    /// # Returns
+    ///
+    /// The provider, as the core trait object the rest of the server uses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostError::Incompatible`] when the component cannot be prepared
+    /// for instantiation against this host.
+    pub fn catalog_provider(
+        &self,
+        plugin: &InstalledPlugin,
+        instance: InstanceConfig,
+    ) -> Result<Arc<dyn CatalogProvider>, HostError> {
+        let manifest = plugin.manifest();
+        let log = Arc::new(LogSink::new(manifest.id.clone(), instance.slug.clone()));
+
+        let pool = StorePool::new(
+            self.engine.engine(),
+            &self.linker,
+            plugin.component(),
+            PoolConfig {
+                plugin: manifest.id.clone(),
+                slug: instance.slug.clone(),
+                server_config: Arc::from(instance.server_config.as_str()),
+                log,
+                memory_mb: manifest.resources.memory_mb,
+                max_instances: manifest.resources.max_instances,
+                call_timeout_ms: manifest.resources.call_timeout_ms,
+            },
+        )
+        .map_err(|error| HostError::Incompatible(format!("{error:#}")))?;
+
+        Ok(Arc::new(WasmCatalogProvider::new(
+            pool,
+            manifest.id.clone(),
+            instance.slug,
+        )))
     }
 }
 
