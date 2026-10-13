@@ -302,3 +302,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   migration report naming the version the database started at, moved to, and,
   when one was needed, the backup it wrote, and a scan that indexes one folder
   (by id or by path) or every folder and prints the counts per folder.
+- The `admin` commands: `create-user` with a password prompted twice on the
+  terminal or read from standard input and the login name defaulting to `admin`
+  for `--admin`, `create-api-key` and `create-app-password` printing the new
+  secret exactly once with a warning that it cannot be shown again, and
+  `add-folder` with exactly one of `--owner <user>` and `--generic`, applying the
+  association through the library layer so the folder's tracks are pinned to its
+  owner in the same transaction as the ownership column.

@@ -268,3 +268,204 @@ fn free_port() -> u16 {
         .unwrap()
         .port()
 }
+
+/// The account and key a first-run installation creates make a server serve.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_created_by_the_cli_authenticates_against_a_server() {
+    let sandbox = Sandbox::new("");
+    succeeded(&sandbox.run_with_stdin(
+        &["admin", "create-user", "--admin", "--password-stdin"],
+        "hunter2\n",
+    ));
+    let created = succeeded(&sandbox.run(&[
+        "admin",
+        "create-api-key",
+        "--user",
+        "admin",
+        "--name",
+        "test",
+    ]));
+    let key = created
+        .lines()
+        .find(|line| line.starts_with("hs_"))
+        .unwrap_or_else(|| panic!("no API key in: {created}"));
+    assert!(
+        created.contains("cannot be shown again"),
+        "the key warning is missing: {created}"
+    );
+
+    let (server, port) = serve_in_process(&sandbox).await;
+    let response = http_get(port, &format!("/rest/ping?apiKey={key}&f=json")).unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("\"status\":\"ok\""), "{response}");
+    server.shutdown().await;
+}
+
+/// An app password created by the CLI authenticates the legacy `u`/`p` call.
+///
+/// The account password cannot be used on `/rest` by default
+/// (`subsonic.allow_account_password` is off), so a successful `u`/`p` call
+/// proves the app password was sealed, stored, and decrypted again.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_app_password_created_by_the_cli_authenticates_a_rest_call() {
+    let sandbox = Sandbox::new("");
+    succeeded(&sandbox.run_with_stdin(
+        &["admin", "create-user", "--admin", "--password-stdin"],
+        "hunter2\n",
+    ));
+    let created = succeeded(&sandbox.run(&[
+        "admin",
+        "create-app-password",
+        "--user",
+        "admin",
+        "--name",
+        "Feishin",
+    ]));
+    let secret = created
+        .lines()
+        .find(|line| line.len() == 20 && line.chars().all(|ch| ch.is_ascii_alphanumeric()))
+        .unwrap_or_else(|| panic!("no app password in: {created}"));
+    assert!(
+        created.contains("cannot be shown again"),
+        "the secret warning is missing: {created}"
+    );
+
+    let (server, port) = serve_in_process(&sandbox).await;
+    let response = http_get(port, &format!("/rest/ping?u=admin&p={secret}&f=json")).unwrap();
+
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("\"status\":\"ok\""), "{response}");
+    server.shutdown().await;
+}
+
+/// `add-folder` requires exactly one of `--owner` and `--generic`.
+#[test]
+fn add_folder_requires_exactly_one_of_owner_and_generic() {
+    let sandbox = Sandbox::new("");
+    let music = sandbox.data().join("music");
+    std::fs::create_dir_all(&music).unwrap();
+    let path = music.to_str().unwrap();
+
+    let missing = sandbox.run(&["admin", "add-folder", "--path", path]);
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(stderr(&missing).contains("owner"), "{}", stderr(&missing));
+
+    let both = sandbox.run(&[
+        "admin",
+        "add-folder",
+        "--path",
+        path,
+        "--generic",
+        "--owner",
+        "admin",
+    ]);
+    assert_eq!(both.status.code(), Some(2));
+    assert!(
+        stderr(&both).contains("cannot be used with"),
+        "{}",
+        stderr(&both)
+    );
+}
+
+/// `add-folder --owner` associates the folder with the account.
+#[tokio::test(flavor = "multi_thread")]
+async fn add_folder_associates_the_folder_with_its_owner() {
+    let sandbox = Sandbox::new("");
+    let created = succeeded(&sandbox.run_with_stdin(
+        &["admin", "create-user", "--admin", "--password-stdin"],
+        "hunter2\n",
+    ));
+    let music = sandbox.data().join("music");
+    std::fs::create_dir_all(&music).unwrap();
+
+    let added = succeeded(&sandbox.run(&[
+        "admin",
+        "add-folder",
+        "--path",
+        music.to_str().unwrap(),
+        "--owner",
+        "admin",
+        "--name",
+        "Music",
+    ]));
+    assert!(added.contains("owned by `admin`"), "{added}");
+
+    let config = bootstrap_config(&sandbox);
+    let database = hearthsound_db::Database::open(&config.database.path)
+        .await
+        .unwrap();
+    let folders = hearthsound_library::LibraryRepository::new(&database)
+        .list_library_folders()
+        .await
+        .unwrap();
+    assert_eq!(folders.len(), 1);
+    assert_eq!(folders[0].name, "Music");
+    assert_eq!(folders[0].path, music.canonicalize().unwrap());
+    let owner = hearthsound_auth::Users::new(&database)
+        .find_by_username("admin")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(folders[0].owner_user_id, Some(owner.id));
+    assert!(
+        created.contains("created administrator account `admin`"),
+        "{created}"
+    );
+}
+
+/// `add-folder --generic` adds a folder nobody owns, and `scan` finds it.
+#[test]
+fn add_folder_generic_is_scanable() {
+    let sandbox = Sandbox::new("");
+    let music = sandbox.data().join("music");
+    std::fs::create_dir_all(&music).unwrap();
+
+    let added = succeeded(&sandbox.run(&[
+        "admin",
+        "add-folder",
+        "--path",
+        music.to_str().unwrap(),
+        "--generic",
+    ]));
+    assert!(added.contains("as a generic folder"), "{added}");
+
+    let scanned = succeeded(&sandbox.run(&["scan", "--folder", music.to_str().unwrap()]));
+
+    assert!(scanned.contains("music ("), "{scanned}");
+    assert!(scanned.contains("0 seen"), "{scanned}");
+}
+
+/// Runs a server over the sandbox's data directory.
+///
+/// # Parameters
+///
+/// - `sandbox`: the sandbox whose data directory the server serves.
+///
+/// # Returns
+///
+/// The running server and the port it listens on. The caller shuts it down.
+async fn serve_in_process(sandbox: &Sandbox) -> (hearthsound_server::Server, u16) {
+    let config = bootstrap_config(sandbox);
+    let services = hearthsound_server::Services::build(config, &std::collections::BTreeMap::new())
+        .await
+        .unwrap();
+    let server = hearthsound_server::Server::start_on(services, "127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let port = server.local_addr().port();
+    (server, port)
+}
+
+/// Loads the sandbox's configuration file.
+///
+/// # Parameters
+///
+/// - `sandbox`: the sandbox to read.
+fn bootstrap_config(sandbox: &Sandbox) -> hearthsound_config::bootstrap::BootstrapConfig {
+    hearthsound_config::bootstrap::BootstrapConfig::load(
+        Some(sandbox.config()),
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap()
+}
