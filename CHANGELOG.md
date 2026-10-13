@@ -96,3 +96,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as their SHA-256 hash with a short prefix, resolved to their owner with
   malformed, unknown, revoked, and disabled-account keys failing alike, and
   revocable per key.
+- App passwords: 20 characters drawn from a 32-symbol typeable alphabet, sealed
+  at rest with the AES-256-GCM secret box, listed and revoked per app password,
+  and opened for Subsonic credential verification.

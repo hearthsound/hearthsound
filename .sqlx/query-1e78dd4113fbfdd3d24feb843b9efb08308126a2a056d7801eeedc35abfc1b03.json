@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT ciphertext, nonce FROM app_passwords WHERE user_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "ciphertext",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "app_passwords",
+            "name": "ciphertext"
+          }
+        }
+      },
+      {
+        "name": "nonce",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "app_passwords",
+            "name": "nonce"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "1e78dd4113fbfdd3d24feb843b9efb08308126a2a056d7801eeedc35abfc1b03"
+}

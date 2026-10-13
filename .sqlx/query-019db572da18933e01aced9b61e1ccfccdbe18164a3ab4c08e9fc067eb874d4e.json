@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, ciphertext, nonce FROM app_passwords\n             WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "app_passwords",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "ciphertext",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "app_passwords",
+            "name": "ciphertext"
+          }
+        }
+      },
+      {
+        "name": "nonce",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "app_passwords",
+            "name": "nonce"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "019db572da18933e01aced9b61e1ccfccdbe18164a3ab4c08e9fc067eb874d4e"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE app_passwords SET last_used_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "2cdb245b7c0641744b5756ce00a7cd32943badf49b2b8ecfa13ef67870e5a6b0"
+}

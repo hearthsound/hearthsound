@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO app_passwords (id, user_id, name, ciphertext, nonce, created_at)\n             VALUES (?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "ad686c12157b183f6973bdaf47dbd78cb7a93e8bf1521b9b70cd77b7b1ed9aac"
+}
