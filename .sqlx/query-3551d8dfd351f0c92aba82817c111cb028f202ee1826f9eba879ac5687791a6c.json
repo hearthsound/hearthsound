@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT entity_id FROM external_ids WHERE namespace = ? AND entity_kind = ? AND value = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "entity_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "external_ids",
+            "name": "entity_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3551d8dfd351f0c92aba82817c111cb028f202ee1826f9eba879ac5687791a6c"
+}

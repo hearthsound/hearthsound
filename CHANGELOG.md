@@ -375,3 +375,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the activity service, honoring its "no song audio delivered" guard, while a
   `submission=false` now-playing report is accepted and discarded. Only a
   stored track is recorded; an `x_` catalog id is accepted and discarded.
+- Materialization of catalog entities through the `external_ids` aliases: a
+  catalog track, album or artist that no row describes is fetched from its
+  issuing instance and stored through the library crate's own writers with
+  origin `catalog` and availability `remote`, recording the provider id
+  (`p:<slug>`) and every canonical identifier the entity carries (ISRC, UPC,
+  MusicBrainz ids) in the same transaction, so the original `x_` id keeps
+  resolving and two providers that know one recording agree on one row. A
+  recording the server already stores is reused by its ISRC, an album is stored
+  with all of its tracks in track order or not at all, and `provider_aliases`
+  and `entity_by_alias` read the alias table back, so a caller can reach the
+  instance that issued an entity and the row an identifier names. `ArtistInput`
+  gained an `origin` so a catalog artist is not written as a local one.

@@ -399,12 +399,7 @@ pub async fn write_alias(
     value: &str,
     entity: hearthsound_core::EntityId,
 ) {
-    let kind = match kind {
-        hearthsound_core::EntityKind::Track => "track",
-        hearthsound_core::EntityKind::Album => "album",
-        hearthsound_core::EntityKind::Artist => "artist",
-        hearthsound_core::EntityKind::Playlist => "playlist",
-    };
+    let kind = entity_kind_literal(kind);
     sqlx::query(
         "INSERT INTO external_ids (namespace, value, entity_kind, entity_id) VALUES (?, ?, ?, ?)",
     )
@@ -415,4 +410,199 @@ pub async fn write_alias(
     .execute(database.writer())
     .await
     .unwrap();
+}
+
+/// Returns the literal an entity kind has in the `entity_kind` column.
+///
+/// # Parameters
+///
+/// - `kind`: the entity kind.
+pub fn entity_kind_literal(kind: hearthsound_core::EntityKind) -> &'static str {
+    match kind {
+        hearthsound_core::EntityKind::Track => "track",
+        hearthsound_core::EntityKind::Album => "album",
+        hearthsound_core::EntityKind::Artist => "artist",
+        hearthsound_core::EntityKind::Playlist => "playlist",
+    }
+}
+
+/// Returns the stored row an alias names.
+///
+/// # Parameters
+///
+/// - `database`: the database to read.
+/// - `namespace`: the alias namespace.
+/// - `kind`: the entity kind the alias names.
+/// - `value`: the alias value.
+pub async fn alias_target(
+    database: &Database,
+    namespace: &str,
+    kind: hearthsound_core::EntityKind,
+    value: &str,
+) -> Option<Vec<u8>> {
+    sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT entity_id FROM external_ids \
+         WHERE namespace = ? AND entity_kind = ? AND value = ?",
+    )
+    .bind(namespace)
+    .bind(entity_kind_literal(kind))
+    .bind(value)
+    .fetch_optional(database.readers())
+    .await
+    .unwrap()
+}
+
+/// Counts the rows of one table.
+///
+/// The statement per table is a literal, because a query string sqlx accepts
+/// has to be one.
+///
+/// # Parameters
+///
+/// - `database`: the database to read.
+/// - `table`: the table name, one of the names the harness knows.
+///
+/// # Panics
+///
+/// Panics when the table is not one the harness knows, which is a test bug.
+pub async fn count_rows(database: &Database, table: &str) -> i64 {
+    let sql = match table {
+        "tracks" => "SELECT COUNT(*) FROM tracks",
+        "albums" => "SELECT COUNT(*) FROM albums",
+        "artists" => "SELECT COUNT(*) FROM artists",
+        "external_ids" => "SELECT COUNT(*) FROM external_ids",
+        "artwork_cache" => "SELECT COUNT(*) FROM artwork_cache",
+        other => panic!("the harness does not know the table `{other}`"),
+    };
+    sqlx::query_scalar::<_, i64>(sql)
+        .fetch_one(database.readers())
+        .await
+        .unwrap()
+}
+
+/// One stored track row, as the materialization tests read it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredTrackRow {
+    /// The album the track belongs to, as raw bytes.
+    pub album_id: Option<Vec<u8>>,
+    /// The track title.
+    pub title: String,
+    /// Where the row comes from.
+    pub origin: String,
+    /// The track's availability.
+    pub availability: String,
+    /// The International Standard Recording Code.
+    pub isrc: Option<String>,
+    /// The MusicBrainz recording id.
+    pub mb_recording_id: Option<String>,
+}
+
+/// Reads one stored track row.
+///
+/// # Parameters
+///
+/// - `database`: the database to read.
+/// - `id`: the track's raw primary key.
+pub async fn stored_track(database: &Database, id: uuid::Uuid) -> Option<StoredTrackRow> {
+    sqlx::query_as::<
+        _,
+        (
+            Option<Vec<u8>>,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        "SELECT album_id, title, origin, availability, isrc, mb_recording_id \
+         FROM tracks WHERE id = ?",
+    )
+    .bind(id.as_bytes().as_slice())
+    .fetch_optional(database.readers())
+    .await
+    .unwrap()
+    .map(
+        |(album_id, title, origin, availability, isrc, mb_recording_id)| StoredTrackRow {
+            album_id,
+            title,
+            origin,
+            availability,
+            isrc,
+            mb_recording_id,
+        },
+    )
+}
+
+/// Reads the origin and the MusicBrainz columns of one stored album.
+///
+/// # Parameters
+///
+/// - `database`: the database to read.
+/// - `id`: the album's raw primary key.
+pub async fn stored_album(
+    database: &Database,
+    id: uuid::Uuid,
+) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
+    sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+        "SELECT origin, mb_release_id, mb_release_group_id, upc FROM albums WHERE id = ?",
+    )
+    .bind(id.as_bytes().as_slice())
+    .fetch_optional(database.readers())
+    .await
+    .unwrap()
+}
+
+/// Reads the origin and the MusicBrainz id of one stored artist.
+///
+/// # Parameters
+///
+/// - `database`: the database to read.
+/// - `id`: the artist's raw primary key.
+pub async fn stored_artist(
+    database: &Database,
+    id: uuid::Uuid,
+) -> Option<(String, Option<String>)> {
+    sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT origin, mb_artist_id FROM artists WHERE id = ?",
+    )
+    .bind(id.as_bytes().as_slice())
+    .fetch_optional(database.readers())
+    .await
+    .unwrap()
+}
+
+/// Reads the artist ids one stored track credits, in credit order.
+///
+/// # Parameters
+///
+/// - `database`: the database to read.
+/// - `track_id`: the track's raw primary key.
+pub async fn track_artist_ids(database: &Database, track_id: uuid::Uuid) -> Vec<Vec<u8>> {
+    sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT artist_id FROM track_artists WHERE track_id = ? ORDER BY position",
+    )
+    .bind(track_id.as_bytes().as_slice())
+    .fetch_all(database.readers())
+    .await
+    .unwrap()
+}
+
+/// Reads one stored artwork cache row.
+///
+/// # Parameters
+///
+/// - `database`: the database to read.
+/// - `key`: the cache key.
+pub async fn stored_artwork(
+    database: &Database,
+    key: &str,
+) -> Option<(String, String, String, Option<i64>, Option<i64>)> {
+    sqlx::query_as::<_, (String, String, String, Option<i64>, Option<i64>)>(
+        "SELECT source, path, content_type, width, height FROM artwork_cache WHERE key = ?",
+    )
+    .bind(key)
+    .fetch_optional(database.readers())
+    .await
+    .unwrap()
 }

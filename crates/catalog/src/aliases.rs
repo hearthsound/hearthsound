@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 
 use hearthsound_core::{EntityId, EntityKind, IdPrefix, Slug};
 use hearthsound_db::Database;
+use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::error::CatalogError;
@@ -26,6 +27,9 @@ use crate::error::CatalogError;
 /// results; the bound keeps a pathological caller from building a statement no
 /// SQLite build wants to parse.
 pub(crate) const ALIAS_CHUNK: usize = 256;
+
+/// The prefix of the namespace of a provider id issued by one instance.
+pub(crate) const PROVIDER_PREFIX: &str = "p:";
 
 /// Returns the namespace of a provider id issued by one instance.
 ///
@@ -43,7 +47,7 @@ pub(crate) const ALIAS_CHUNK: usize = 256;
 /// assert_eq!(provider_namespace(&slug), "p:deezer");
 /// ```
 pub fn provider_namespace(slug: &Slug) -> String {
-    format!("p:{}", slug.as_str())
+    format!("{PROVIDER_PREFIX}{}", slug.as_str())
 }
 
 /// Reads the stored rows a set of provider ids resolve to.
@@ -150,6 +154,113 @@ async fn lookup(
         found.insert(row.value, entity_id(kind, &row.entity_id)?);
     }
     Ok(found)
+}
+
+/// Reads the row one alias names.
+///
+/// This is the reverse of a lookup by entity: the caller holds an identifier
+/// (an ISRC, a MusicBrainz id, a provider id) and wants the stored row it
+/// points at.
+///
+/// # Parameters
+///
+/// - `database`: the database to read.
+/// - `namespace`: the alias namespace.
+/// - `kind`: the entity kind the alias names.
+/// - `value`: the alias value.
+///
+/// # Returns
+///
+/// The row the alias names, or `None` when no alias has that value.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::Database`] when the query fails and
+/// [`CatalogError::CorruptAlias`] when a stored id does not decode.
+pub(crate) async fn entity_by_alias(
+    database: &Database,
+    namespace: &str,
+    kind: EntityKind,
+    value: &str,
+) -> Result<Option<EntityId>, CatalogError> {
+    let mut conn = database.readers().acquire().await?;
+    entity_by_alias_conn(&mut conn, namespace, kind, value).await
+}
+
+/// Reads the row one alias names, on a given connection.
+///
+/// A materialization calls this on its own write transaction, where the answer
+/// is the authoritative one: no other writer can commit between the read and
+/// the write that follows it.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `namespace`: the alias namespace.
+/// - `kind`: the entity kind the alias names.
+/// - `value`: the alias value.
+///
+/// # Returns
+///
+/// The row the alias names, or `None` when no alias has that value.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::Database`] when the query fails and
+/// [`CatalogError::CorruptAlias`] when a stored id does not decode.
+pub(crate) async fn entity_by_alias_conn(
+    conn: &mut SqliteConnection,
+    namespace: &str,
+    kind: EntityKind,
+    value: &str,
+) -> Result<Option<EntityId>, CatalogError> {
+    let row = sqlx::query!(
+        "SELECT entity_id FROM external_ids \
+         WHERE namespace = ? AND entity_kind = ? AND value = ?",
+        namespace,
+        kind_literal(kind),
+        value,
+    )
+    .fetch_optional(conn)
+    .await?;
+    row.map(|row| entity_id(kind, &row.entity_id)).transpose()
+}
+
+/// Reads every alias of one stored row.
+///
+/// # Parameters
+///
+/// - `database`: the database to read.
+/// - `kind`: the entity kind of the row.
+/// - `entity`: the stored row.
+///
+/// # Returns
+///
+/// One namespace and value per alias, ordered by namespace and value so two
+/// calls report the same order.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::Database`] when the query fails.
+pub(crate) async fn aliases_of_entity(
+    database: &Database,
+    kind: EntityKind,
+    entity: EntityId,
+) -> Result<Vec<(String, String)>, CatalogError> {
+    let mut conn = database.readers().acquire().await?;
+    let key = entity.uuid();
+    let rows = sqlx::query!(
+        "SELECT namespace, value FROM external_ids \
+         WHERE entity_kind = ? AND entity_id = ? ORDER BY namespace, value",
+        kind_literal(kind),
+        key.as_bytes().as_slice(),
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.namespace, row.value))
+        .collect())
 }
 
 /// One row of an alias lookup.

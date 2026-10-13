@@ -57,13 +57,16 @@ impl ArtistRow {
 /// case-insensitively. A matching row has its name, sort key, and `updated_at`
 /// refreshed and its id returned, so a rescan of an unchanged folder does not
 /// grow the table. A MusicBrainz id the input does not carry is left in place,
-/// so a caller that knows less never clears a column the table already holds.
+/// so a caller that knows less never clears a column the table already holds,
+/// and the `origin` of an existing row is never rewritten: an artist a scan
+/// created stays local when the catalog layer later resolves it.
 ///
 /// # Parameters
 ///
 /// - `conn`: the connection or transaction to write on.
 /// - `artist`: the artist's fields. An omitted sort key is derived from the
-///   name with [`sort_key`].
+///   name with [`sort_key`], and the origin is written only by the insert, so
+///   a catalog-materialized artist must supply [`Origin::Catalog`](crate::Origin).
 ///
 /// # Returns
 ///
@@ -119,13 +122,15 @@ pub async fn upsert_artist(
     }
 
     let id = new_uuid_v7();
+    let origin = artist.origin.as_str();
     sqlx::query!(
         "INSERT INTO artists (id, name, sort_name, mb_artist_id, origin, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, 'local', ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
         id.as_bytes().as_slice(),
         artist.name,
         sort_name,
         artist.mb_artist_id,
+        origin,
         now,
         now,
     )

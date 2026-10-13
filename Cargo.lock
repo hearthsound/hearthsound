@@ -1688,6 +1688,7 @@ dependencies = [
  "hearthsound-config",
  "hearthsound-core",
  "hearthsound-db",
+ "hearthsound-library",
  "hearthsound-plugin-host",
  "hearthsound-test-support",
  "moka",

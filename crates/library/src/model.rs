@@ -375,10 +375,13 @@ pub struct Credit {
 /// # Examples
 ///
 /// ```
-/// use hearthsound_library::ArtistInput;
+/// use hearthsound_library::{ArtistInput, Origin};
 ///
 /// let input = ArtistInput::new("Energy 52");
 /// assert_eq!(input.name, "Energy 52");
+///
+/// let catalog = ArtistInput::new("Energy 52").origin(Origin::Catalog);
+/// assert_eq!(catalog.origin, Origin::Catalog);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtistInput {
@@ -388,10 +391,16 @@ pub struct ArtistInput {
     pub sort_name: Option<String>,
     /// The MusicBrainz artist id, when known.
     pub mb_artist_id: Option<String>,
+    /// Where the row comes from.
+    pub origin: Origin,
 }
 
 impl ArtistInput {
     /// Builds an input with only a name.
+    ///
+    /// The origin is [`Origin::Local`], which is what a scan or an upload
+    /// writes; a caller materializing a catalog entity sets
+    /// [`ArtistInput::origin`] instead.
     ///
     /// # Parameters
     ///
@@ -401,6 +410,7 @@ impl ArtistInput {
             name: name.into(),
             sort_name: None,
             mb_artist_id: None,
+            origin: Origin::Local,
         }
     }
 
@@ -411,6 +421,17 @@ impl ArtistInput {
     /// - `mb_artist_id`: the MBID, when known.
     pub fn mb_artist_id(mut self, mb_artist_id: impl Into<String>) -> ArtistInput {
         self.mb_artist_id = Some(mb_artist_id.into());
+        self
+    }
+
+    /// Sets where the row comes from.
+    ///
+    /// # Parameters
+    ///
+    /// - `origin`: [`Origin::Local`] for a scanned or uploaded artist,
+    ///   [`Origin::Catalog`] for one materialized from a catalog provider.
+    pub fn origin(mut self, origin: Origin) -> ArtistInput {
+        self.origin = origin;
         self
     }
 }

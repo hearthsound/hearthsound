@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT namespace, value FROM external_ids WHERE entity_kind = ? AND entity_id = ? ORDER BY namespace, value",
+  "describe": {
+    "columns": [
+      {
+        "name": "namespace",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "external_ids",
+            "name": "namespace"
+          }
+        }
+      },
+      {
+        "name": "value",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "external_ids",
+            "name": "value"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "eb68eafee58be90ed0e34867dc5dcbdd0dfd4a03772c78b8a7eb346c9fb18b8e"
+}

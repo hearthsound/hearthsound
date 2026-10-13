@@ -144,7 +144,7 @@ async fn lookups_route_by_the_slug_the_id_carries() {
         .await
         .unwrap();
     assert_eq!(album.album.title, "Hello Album");
-    assert_eq!(album.album.tracks.len(), 1);
+    assert_eq!(album.album.tracks.len(), 2);
     assert_eq!(album.album.tracks[0].id, "hello-track-1");
 
     let artist = service

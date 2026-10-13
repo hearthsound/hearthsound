@@ -717,7 +717,7 @@ fn effective_query(query: &CatalogQuery, cap: i64) -> CatalogQuery {
 /// Returns [`CatalogError::NotFound`] when the kinds differ, and logs the
 /// mismatch: a client address would answer a mismatched id with a not-found,
 /// and a caller inside the server has a bug worth a log line.
-fn require_kind(id: &CatalogId, expected: EntityKind) -> Result<(), CatalogError> {
+pub(crate) fn require_kind(id: &CatalogId, expected: EntityKind) -> Result<(), CatalogError> {
     if id.kind() == expected {
         return Ok(());
     }

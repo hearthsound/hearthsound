@@ -77,6 +77,12 @@ pub enum CatalogError {
     /// was written by something other than this server.
     #[error("a stored external id is not a UUID")]
     CorruptAlias,
+    /// The library layer rejected a row the catalog layer writes.
+    ///
+    /// Materialization stores artists, albums and tracks through the library's
+    /// own writers, so their failures surface here unchanged.
+    #[error(transparent)]
+    Library(#[from] hearthsound_library::LibraryError),
     /// A setting could not be read.
     #[error(transparent)]
     Setting(#[from] hearthsound_config::ConfigError),
@@ -155,6 +161,7 @@ impl CatalogError {
         match self {
             CatalogError::NotFound
             | CatalogError::CorruptAlias
+            | CatalogError::Library(_)
             | CatalogError::Setting(_)
             | CatalogError::Json(_)
             | CatalogError::Database(_) => None,

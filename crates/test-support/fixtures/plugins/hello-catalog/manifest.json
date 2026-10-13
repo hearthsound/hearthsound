@@ -9,15 +9,28 @@
   "homepage": "https://github.com/hearthsound/plugin-template-rust",
   "api": "hearthsound:plugin@0.1.0",
   "provides": ["catalog"],
-  "permissions": {},
+  "permissions": {
+    "http": { "hosts": ["$config:coverUrl"], "maxBodyBytes": 1048576 }
+  },
   "config": {
     "server": {
       "schema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
-        "properties": { "greeting": { "type": "string", "title": "Greeting", "default": "Hello" } }
+        "properties": {
+          "greeting": { "type": "string", "title": "Greeting", "default": "Hello" },
+          "isrc": { "type": "string", "title": "ISRC" },
+          "coverUrl": { "type": "string", "format": "uri", "title": "Cover URL template" }
+        }
       },
-      "uiSchema": { "type": "VerticalLayout", "elements": [ { "type": "Control", "scope": "#/properties/greeting" } ] }
+      "uiSchema": {
+        "type": "VerticalLayout",
+        "elements": [
+          { "type": "Control", "scope": "#/properties/greeting" },
+          { "type": "Control", "scope": "#/properties/isrc" },
+          { "type": "Control", "scope": "#/properties/coverUrl" }
+        ]
+      }
     },
     "user": null
   },
