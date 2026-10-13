@@ -17,3 +17,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SQLite database layer with a writer pool, a reader pool, and pre-migration
   backups.
 - `hearthsound` binary that reports its version.
+- `xtask` maintenance binary with a `sync-wit` command that copies the
+  WebAssembly interface files from the plugin SDK and verifies them.

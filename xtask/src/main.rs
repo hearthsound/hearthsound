@@ -1,0 +1,192 @@
+//! Repository maintenance tasks.
+//!
+//! Run through the `cargo xtask` alias. Each subcommand exists because it needs
+//! the workspace's own dependencies or the repository root, which a shell script
+//! in CI would have to reimplement.
+#![forbid(unsafe_code)]
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{Context, Result, bail};
+use clap::{ArgGroup, Args, Parser, Subcommand};
+
+/// The repository the WebAssembly interface files are owned by.
+const PLUGIN_SDK_URL: &str = "https://github.com/hearthsound/plugin-sdk";
+
+#[derive(Debug, Parser)]
+#[command(name = "xtask", about = "Repository maintenance tasks")]
+struct Cli {
+    #[command(subcommand)]
+    command: Task,
+}
+
+#[derive(Debug, Subcommand)]
+enum Task {
+    /// Copy or verify the WebAssembly interface files owned by plugin-sdk.
+    SyncWit(SyncWitArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(disable_version_flag = true)]
+#[command(group(ArgGroup::new("mode").required(true).args(["version", "check"])))]
+struct SyncWitArgs {
+    /// The plugin-sdk version to copy the interface files from.
+    #[arg(long, value_name = "V")]
+    version: Option<String>,
+    /// Verify the committed interface files against the version in
+    /// `wit/VERSION`.
+    #[arg(long)]
+    check: bool,
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    match cli.command {
+        Task::SyncWit(args) => sync_wit(args),
+    }
+}
+
+/// Returns the repository root.
+fn repo_root() -> Result<PathBuf> {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    match manifest.parent() {
+        Some(root) => Ok(root.to_path_buf()),
+        None => bail!("xtask has no parent directory"),
+    }
+}
+
+/// Copies or verifies the `wit/` directory against plugin-sdk.
+fn sync_wit(args: SyncWitArgs) -> Result<()> {
+    let root = repo_root()?;
+    let wit_dir = root.join("wit");
+
+    let version = if args.check {
+        let raw = fs::read_to_string(wit_dir.join("VERSION"))
+            .context("reading wit/VERSION for the pinned plugin-sdk version")?;
+        raw.trim().to_owned()
+    } else {
+        match args.version {
+            Some(version) => version,
+            None => bail!("pass either --version or --check"),
+        }
+    };
+
+    let checkout = tempfile::tempdir().context("creating a temporary directory")?;
+    let clone_dir = checkout.path().join("plugin-sdk");
+
+    let status = Command::new("git")
+        .args(["clone", "--quiet", "--depth", "1", "--branch"])
+        .arg(format!("v{version}"))
+        .arg(PLUGIN_SDK_URL)
+        .arg(&clone_dir)
+        .status()
+        .context("running git clone")?;
+    if !status.success() {
+        bail!("git clone of plugin-sdk v{version} failed");
+    }
+
+    let source = clone_dir.join("wit");
+    let files = read_wit_files(&source)?;
+    if files.is_empty() {
+        bail!("{} contains no .wit files", source.display());
+    }
+
+    if args.check {
+        check_wit(&wit_dir, &source, &files, &version)
+    } else {
+        write_wit(&wit_dir, &source, &files, &version)
+    }
+}
+
+/// Lists the `.wit` file names in a directory.
+///
+/// The directory must contain only `.wit` files; a subdirectory is an error,
+/// because the sync copies a flat package and a nested layout would silently
+/// drop files.
+fn read_wit_files(dir: &Path) -> Result<Vec<String>> {
+    let entries =
+        fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?;
+
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading directory {}", dir.display()))?;
+        if entry.file_type()?.is_dir() {
+            bail!(
+                "{} contains the subdirectory `{}`",
+                dir.display(),
+                entry.file_name().to_string_lossy()
+            );
+        }
+        if entry.path().extension().and_then(|ext| ext.to_str()) == Some("wit") {
+            files.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// Replaces `wit/` with the files from `source`.
+fn write_wit(wit_dir: &Path, source: &Path, files: &[String], version: &str) -> Result<()> {
+    fs::create_dir_all(wit_dir)
+        .with_context(|| format!("creating directory {}", wit_dir.display()))?;
+
+    for entry in
+        fs::read_dir(wit_dir).with_context(|| format!("reading directory {}", wit_dir.display()))?
+    {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("wit") {
+            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
+    }
+
+    for file in files {
+        let target = wit_dir.join(file);
+        fs::copy(source.join(file), &target)
+            .with_context(|| format!("copying {} to {}", file, target.display()))?;
+    }
+
+    let version_file = wit_dir.join("VERSION");
+    fs::write(&version_file, format!("{version}\n"))
+        .with_context(|| format!("writing {}", version_file.display()))?;
+
+    println!("wit/ synced from plugin-sdk v{version}");
+    Ok(())
+}
+
+/// Compares `wit/` with `source`, reporting every difference.
+fn check_wit(wit_dir: &Path, source: &Path, files: &[String], version: &str) -> Result<()> {
+    let found = if wit_dir.is_dir() {
+        read_wit_files(wit_dir)?
+    } else {
+        Vec::new()
+    };
+
+    let mut mismatched = false;
+    for file in files {
+        let target = wit_dir.join(file);
+        if !target.is_file() {
+            println!("wit/{file}: missing");
+            mismatched = true;
+        } else if fs::read(source.join(file)).with_context(|| format!("reading {file}"))?
+            != fs::read(&target).with_context(|| format!("reading {}", target.display()))?
+        {
+            println!("wit/{file}: differs");
+            mismatched = true;
+        }
+    }
+    for file in &found {
+        if !files.contains(file) {
+            println!("wit/{file}: unexpected");
+            mismatched = true;
+        }
+    }
+
+    if mismatched {
+        std::process::exit(1);
+    }
+
+    println!("wit/ matches plugin-sdk v{version}");
+    Ok(())
+}

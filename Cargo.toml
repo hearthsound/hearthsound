@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/config", "crates/core", "crates/db", "crates/hearthsound"]
+members = ["crates/config", "crates/core", "crates/db", "crates/hearthsound", "xtask"]
 exclude = ["crates/test-support/fixtures"]
 
 [workspace.package]
