@@ -39,6 +39,16 @@ pub const ACTIVE_STATES: [AcquisitionState; 6] = [
     AcquisitionState::Importing,
 ];
 
+/// The statement a transaction that reads before it writes starts with.
+///
+/// A deferred transaction that reads first holds a read snapshot, and upgrading
+/// it to a write can only wait on `busy_timeout` when no other connection has
+/// written since; SQLite answers `SQLITE_BUSY_SNAPSHOT` instead when one has.
+/// That is what a running server does while the command line cancels an
+/// acquisition, so those transactions start as a write: the writer lock is taken
+/// up front and the wait is the one `busy_timeout` covers.
+const READ_THEN_WRITE: &str = "BEGIN IMMEDIATE";
+
 /// The row one [`insert`] writes.
 ///
 /// The id is chosen by the caller so the staging directory
@@ -1134,6 +1144,10 @@ impl AcquisitionRepository {
 
     /// Cancels an acquisition in its own transaction.
     ///
+    /// The cancellation reads the row's state before it writes, so the
+    /// transaction starts as a write and a running server that commits to the
+    /// same file cannot make it fail with a busy snapshot.
+    ///
     /// # Returns
     ///
     /// `true` when the row was cancelled, `false` when it had already ended.
@@ -1142,13 +1156,16 @@ impl AcquisitionRepository {
     ///
     /// Returns [`AcquireError::UnknownAcquisition`] when no row has that id.
     pub async fn cancel(&self, id: Uuid, message: Option<&str>) -> Result<bool, AcquireError> {
-        let mut tx = self.writer.begin().await?;
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
         let cancelled = cancel(&mut tx, id, message).await?;
         tx.commit().await?;
         Ok(cancelled)
     }
 
     /// Moves an acquisition to `to` in its own transaction.
+    ///
+    /// The transition reads the row's state before it writes, so the transaction
+    /// starts as a write; see [`AcquisitionRepository::cancel`].
     ///
     /// # Errors
     ///
@@ -1159,13 +1176,16 @@ impl AcquisitionRepository {
         to: AcquisitionState,
         message: Option<&str>,
     ) -> Result<(), AcquireError> {
-        let mut tx = self.writer.begin().await?;
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
         transition(&mut tx, id, to, message).await?;
         tx.commit().await?;
         Ok(())
     }
 
     /// Fails an acquisition in its own transaction.
+    ///
+    /// The failure reads the row's state before it writes, so the transaction
+    /// starts as a write; see [`AcquisitionRepository::cancel`].
     ///
     /// # Errors
     ///
@@ -1176,13 +1196,16 @@ impl AcquisitionRepository {
         reason: FailureReason,
         detail: Option<&str>,
     ) -> Result<(), AcquireError> {
-        let mut tx = self.writer.begin().await?;
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
         fail(&mut tx, id, reason, detail).await?;
         tx.commit().await?;
         Ok(())
     }
 
     /// Completes an acquisition in its own transaction.
+    ///
+    /// The completion reads the row's state before it writes, so the transaction
+    /// starts as a write; see [`AcquisitionRepository::cancel`].
     ///
     /// # Errors
     ///
@@ -1193,7 +1216,7 @@ impl AcquisitionRepository {
         media_file_id: Uuid,
         message: Option<&str>,
     ) -> Result<(), AcquireError> {
-        let mut tx = self.writer.begin().await?;
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
         complete(&mut tx, id, media_file_id, message).await?;
         tx.commit().await?;
         Ok(())

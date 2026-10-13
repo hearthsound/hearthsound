@@ -71,6 +71,16 @@ pub mod retention;
 pub mod scan;
 pub mod tracks;
 
+/// The statement a transaction that reads before it writes starts with.
+///
+/// A deferred transaction that reads first holds a read snapshot, and upgrading
+/// it to a write can only wait on `busy_timeout` when no other connection has
+/// written since; SQLite answers `SQLITE_BUSY_SNAPSHOT` instead when one has.
+/// A scan or an administrative command runs alongside a server that writes to
+/// the same file, so those transactions start as a write: the writer lock is
+/// taken up front and the wait is the one `busy_timeout` covers.
+pub(crate) const READ_THEN_WRITE: &str = "BEGIN IMMEDIATE";
+
 /// Returns the current time in unix milliseconds.
 ///
 /// Every timestamp this crate writes shares one clock and one unit.

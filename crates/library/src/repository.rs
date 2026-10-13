@@ -23,7 +23,7 @@ use crate::model::{
     Album, AlbumInput, Artist, ArtistCredit, ArtistInput, Credit, Genre, LibraryFolder,
     ManagedMediaFile, MediaFile, MediaFileInput, ScannedMediaFile, Track, TrackInput,
 };
-use crate::{albums, artists, folders, media_files, retention, tracks};
+use crate::{READ_THEN_WRITE, albums, artists, folders, media_files, retention, tracks};
 
 /// The library tables, read and written over a database's two pools.
 ///
@@ -185,6 +185,10 @@ impl LibraryRepository {
 
     /// Adds a library folder in its own transaction.
     ///
+    /// A folder that already exists is reported rather than duplicated, so the
+    /// transaction reads before it writes and starts as a write; see
+    /// [`crate::READ_THEN_WRITE`].
+    ///
     /// # Errors
     ///
     /// Returns [`LibraryError`] when the path is unusable or the write fails.
@@ -193,7 +197,7 @@ impl LibraryRepository {
         path: &Path,
         owner_user_id: Option<Uuid>,
     ) -> Result<LibraryFolder, LibraryError> {
-        let mut tx = self.writer.begin().await?;
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
         let folder = folders::add_library_folder(&mut tx, path, owner_user_id).await?;
         tx.commit().await?;
         Ok(folder)

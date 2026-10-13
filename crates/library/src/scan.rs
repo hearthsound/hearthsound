@@ -42,7 +42,7 @@ use crate::error::LibraryError;
 use crate::model::{
     AlbumInput, ArtistCredit, ArtistInput, LibraryFolder, Origin, ScannedMediaFile, TrackInput,
 };
-use crate::{albums, folders, media_files, now_millis, retention, tracks};
+use crate::{READ_THEN_WRITE, albums, folders, media_files, now_millis, retention, tracks};
 
 /// The job kind a library scan is enqueued under.
 pub const SCAN_JOB_KIND: &str = "library.scan";
@@ -309,7 +309,10 @@ impl LibraryScanner {
         if pending.is_empty() {
             return Ok(());
         }
-        let mut tx = self.writer.begin().await?;
+        // The batch upserts albums and tracks, each of which reads before it
+        // writes, so the transaction starts as a write; see
+        // [`READ_THEN_WRITE`].
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
         let mut added: Vec<EntityId> = Vec::new();
         for file in pending.drain(..) {
             let tags = IndexedTags::from_probe(&file.probe, &file.found.rel_path);
@@ -374,7 +377,9 @@ impl LibraryScanner {
         seen: &HashSet<String>,
         report: &mut ScanReport,
     ) -> Result<(), LibraryError> {
-        let mut tx = self.writer.begin().await?;
+        // The prune lists the folder's files before it removes any, so the
+        // transaction starts as a write; see [`READ_THEN_WRITE`].
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
         let existing = media_files::list_folder_media_files(&mut tx, folder.id).await?;
         let mut removed: Vec<EntityId> = Vec::new();
         for file in existing {

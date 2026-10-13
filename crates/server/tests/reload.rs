@@ -299,11 +299,13 @@ async fn insert_remote_track(library: &LibraryRepository) -> EntityId {
         .unwrap()
 }
 
-/// Cancels an acquisition through a second connection, retrying a busy file.
+/// Cancels an acquisition through a second connection.
 ///
-/// The command line's cancellation is a read-then-write transaction, and the
-/// running server writes to the same file while an acquisition runs, so a single
-/// attempt can find the database busy; an operator retries, and so does this.
+/// This is what `hearthsound acquisitions cancel` does: it opens the database
+/// file itself and writes the terminal row through its own connection while the
+/// running server keeps writing to the same file. The cancellation's transaction
+/// reads the row's state and then writes it, and it starts as a write, so a
+/// commit the server made in between cannot fail it with a busy snapshot.
 ///
 /// # Parameters
 ///
@@ -316,21 +318,15 @@ async fn insert_remote_track(library: &LibraryRepository) -> EntityId {
 ///
 /// # Panics
 ///
-/// Panics when every attempt found the database busy, which is a server that
-/// never stops writing rather than a test arrangement.
+/// Panics when the database cannot be opened or the cancellation cannot be
+/// written, both of which a server writing to the same file used to cause.
 async fn cancel_through_another_connection(path: &std::path::Path, id: uuid::Uuid) -> bool {
     let other = Arc::new(Database::open(path).await.unwrap());
     let repository = AcquisitionRepository::new(&other);
-    for _ in 0..100 {
-        if let Ok(cancelled) = repository
-            .cancel(id, Some("cancelled from the command line"))
-            .await
-        {
-            return cancelled;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    panic!("the cancellation could not be written");
+    repository
+        .cancel(id, Some("cancelled from the command line"))
+        .await
+        .expect("the cancellation is written while the server runs")
 }
 
 /// A cancellation written by another connection stops the server's worker.

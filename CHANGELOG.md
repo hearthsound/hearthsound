@@ -613,3 +613,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an `albumartist` tag instead of directly in the storage root. A catalog album
   that cannot be read leaves the totals empty rather than failing an import whose
   file verified.
+- Read-then-write transactions through the command line start as writes
+  (`BEGIN IMMEDIATE`), so a commit a running server makes between the read and
+  the write cannot fail them with `SQLITE_BUSY`: cancelling, moving, failing and
+  completing an acquisition, adding a library folder, and a scan's write batches
+  now take the writer lock up front, where the five second busy timeout applies,
+  rather than upgrading a read snapshot the server's commit has already
+  invalidated. The reload test no longer retries the cancellation it writes
+  through a second connection.
