@@ -4,7 +4,7 @@ use std::path::Path;
 
 use hearthsound_core::Slug;
 use hearthsound_media::{
-    Artwork, TrackTags, extract_picture, probe, write_sidecar_cover, write_tags,
+    Artwork, FfmpegRunner, TrackTags, extract_picture, probe, write_sidecar_cover, write_tags,
 };
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
 
@@ -107,6 +107,7 @@ async fn round_trips_the_full_tag_set_through_every_container() {
     let dir = tempfile::tempdir().unwrap();
     let acquired_via = Slug::new("slskd01").unwrap();
     let tags = tag_set(&acquired_via);
+    let runner = FfmpegRunner::new(None, 4);
 
     for format in AudioFormat::ALL {
         let path = AudioFixture::new(format)
@@ -140,7 +141,9 @@ async fn round_trips_the_full_tag_set_through_every_container() {
         );
 
         // The file still plays after being rewritten.
-        let verified = hearthsound_media::verify_decodes(&path).await.unwrap();
+        let verified = hearthsound_media::verify_decodes(&path, &runner)
+            .await
+            .unwrap();
         assert!(verified.damaged_packets == 0, "{}", format.extension());
     }
 }

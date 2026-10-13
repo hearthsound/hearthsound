@@ -34,6 +34,7 @@ use lofty::probe::Probe;
 use lofty::tag::{ItemKey, Tag};
 
 use crate::error::MediaError;
+use crate::ffmpeg::FfmpegRunner;
 use crate::tags::{Artwork, TrackTags};
 
 /// The container a media file is stored in.
@@ -347,11 +348,13 @@ fn extract_picture_blocking(path: &Path) -> Result<Option<Artwork>, MediaError> 
 /// The file is decoded with `symphonia` when `symphonia` has a decoder for its
 /// codec. When it does not, which is the case for Opus and for containers
 /// `symphonia` cannot read, the file is decoded by `ffmpeg` instead, which
-/// proves that the file is decodable but reports no frame count.
+/// proves that the file is decodable but reports no frame count. The fallback
+/// runs through the runner, so it counts against the process budget.
 ///
 /// # Parameters
 ///
 /// - `path`: the file to decode.
+/// - `runner`: the ffmpeg runner used for the fallback decode.
 ///
 /// # Returns
 ///
@@ -361,16 +364,17 @@ fn extract_picture_blocking(path: &Path) -> Result<Option<Artwork>, MediaError> 
 ///
 /// Returns [`MediaError::Decode`] when the file cannot be decoded from start to
 /// finish, and [`MediaError::Io`] when it cannot be read at all.
-pub async fn verify_decodes(path: &Path) -> Result<DecodeReport, MediaError> {
+pub async fn verify_decodes(
+    path: &Path,
+    runner: &FfmpegRunner,
+) -> Result<DecodeReport, MediaError> {
     let owned = path.to_path_buf();
     let outcome = tokio::task::spawn_blocking(move || symphonia_decode(&owned))
         .await
         .map_err(MediaError::task_failed)?;
     match outcome {
         Ok(report) => Ok(report),
-        Err(SymphoniaFailure::Unsupported(message)) => {
-            ffmpeg_decode(path, "ffmpeg", &message).await
-        }
+        Err(SymphoniaFailure::Unsupported(message)) => ffmpeg_decode(path, runner, &message).await,
         Err(SymphoniaFailure::Failed(message)) => Err(MediaError::decode(path, message)),
     }
 }
@@ -517,11 +521,9 @@ fn classify_symphonia_error(error: symphonia::core::errors::Error) -> SymphoniaF
 /// [`MediaError::Process`] when ffmpeg cannot be started.
 async fn ffmpeg_decode(
     path: &Path,
-    binary: &str,
+    runner: &FfmpegRunner,
     reason: &str,
 ) -> Result<DecodeReport, MediaError> {
-    use tokio::process::Command;
-
     let args: Vec<std::ffi::OsString> = vec![
         "-hide_banner".into(),
         "-v".into(),
@@ -537,25 +539,12 @@ async fn ffmpeg_decode(
         reason,
         "decoding with ffmpeg"
     );
-    let output = Command::new(binary)
-        .args(&args)
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(|source| MediaError::Process {
-            program: binary.to_owned(),
-            args: join_args(&args),
-            message: source.to_string(),
-        })?;
-    if !output.status.success() {
-        return Err(MediaError::decode(
-            path,
-            format!(
-                "ffmpeg exited with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        ));
+    match runner.run(args).await {
+        Ok(()) => {}
+        Err(MediaError::Process { message, .. }) => {
+            return Err(MediaError::decode(path, message));
+        }
+        Err(other) => return Err(other),
     }
     Ok(DecodeReport {
         backend: DecodeBackend::Ffmpeg,
@@ -765,16 +754,4 @@ fn non_empty<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .collect()
-}
-
-/// Joins an argument vector for an error message.
-///
-/// # Parameters
-///
-/// - `args`: the argument vector.
-fn join_args(args: &[std::ffi::OsString]) -> String {
-    args.iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join(" ")
 }

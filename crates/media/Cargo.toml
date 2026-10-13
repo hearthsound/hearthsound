@@ -15,10 +15,10 @@ hearthsound-core = { path = "../core" }
 lofty.workspace = true
 symphonia.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["process", "rt"] }
+tokio = { workspace = true, features = ["io-util", "process", "rt"] }
 tracing.workspace = true
 
 [dev-dependencies]
 hearthsound-test-support = { path = "../test-support" }
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use hearthsound_media::{
-    Artwork, Codec, Container, DecodeBackend, MediaError, TrackTags, extract_picture, probe,
-    verify_decodes,
+    Artwork, Codec, Container, DecodeBackend, FfmpegRunner, MediaError, TrackTags, extract_picture,
+    probe, verify_decodes,
 };
 use hearthsound_test_support::audio::{
     AudioFixture, AudioFormat, BitDepth, TrackTags as FixtureTags,
@@ -217,6 +217,7 @@ async fn extracts_an_embedded_picture() {
 #[tokio::test]
 async fn verifies_that_every_fixture_decodes() {
     let dir = tempfile::tempdir().unwrap();
+    let runner = FfmpegRunner::new(None, 4);
     for format in AudioFormat::ALL {
         let path = AudioFixture::new(format)
             .seconds(1.0)
@@ -225,7 +226,7 @@ async fn verifies_that_every_fixture_decodes() {
             .await
             .unwrap();
 
-        let report = verify_decodes(&path).await.unwrap();
+        let report = verify_decodes(&path, &runner).await.unwrap();
         let expected_backend = match format {
             // symphonia has no Opus decoder and no WavPack reader.
             AudioFormat::Opus | AudioFormat::WavPack => DecodeBackend::Ffmpeg,
@@ -251,6 +252,7 @@ async fn verifies_that_every_fixture_decodes() {
 #[tokio::test]
 async fn rejects_a_file_that_does_not_decode() {
     let dir = tempfile::tempdir().unwrap();
+    let runner = FfmpegRunner::new(None, 4);
     let path = dir.path().join("broken.flac");
     // 64 KiB of noise with a FLAC extension parses as no container at all for
     // symphonia and fails ffmpeg's decoder.
@@ -260,8 +262,9 @@ async fn rejects_a_file_that_does_not_decode() {
     }
     std::fs::write(&path, &bytes).unwrap();
 
-    let error = verify_decodes(&path).await.unwrap_err();
+    let error = verify_decodes(&path, &runner).await.unwrap_err();
     assert!(matches!(error, MediaError::Decode { .. }), "{error:?}");
+    assert_eq!(runner.in_flight(), 0);
 }
 
 #[tokio::test]

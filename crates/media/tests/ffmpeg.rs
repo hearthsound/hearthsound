@@ -1,0 +1,175 @@
+//! Tests for the ffmpeg runner's process budget and lifecycle.
+
+use std::time::Duration;
+
+use hearthsound_media::{FfmpegRunner, MediaError};
+use tokio::io::AsyncReadExt;
+
+/// The argument vector of an ffmpeg that runs until it is killed.
+fn endless_args() -> Vec<std::ffi::OsString> {
+    vec![
+        "-hide_banner".into(),
+        "-v".into(),
+        "error".into(),
+        "-f".into(),
+        "lavfi".into(),
+        "-i".into(),
+        "anullsrc=r=44100".into(),
+        "-f".into(),
+        "null".into(),
+        "-".into(),
+    ]
+}
+
+#[tokio::test]
+async fn runs_a_command_to_completion() {
+    let runner = FfmpegRunner::new(None, 2);
+    runner
+        .run(["-hide_banner".into(), "-version".into()])
+        .await
+        .unwrap();
+    assert_eq!(runner.in_flight(), 0);
+    assert_eq!(runner.max_concurrent(), 2);
+    assert!(runner.binary().ends_with("ffmpeg"));
+}
+
+#[tokio::test]
+async fn reports_a_failed_process_with_its_stderr() {
+    let runner = FfmpegRunner::new(None, 2);
+    let error = runner
+        .run([
+            "-hide_banner".into(),
+            "-v".into(),
+            "error".into(),
+            "-i".into(),
+            "/nonexistent/hearthsound-not-here.flac".into(),
+            "-f".into(),
+            "null".into(),
+            "-".into(),
+        ])
+        .await
+        .unwrap_err();
+    match error {
+        MediaError::Process { message, args, .. } => {
+            assert!(
+                message.contains("hearthsound-not-here.flac"),
+                "message was `{message}`"
+            );
+            assert!(args.contains("-f null -"), "args were `{args}`");
+        }
+        other => panic!("expected a process error, got {other:?}"),
+    }
+    assert_eq!(runner.in_flight(), 0);
+}
+
+#[tokio::test]
+async fn waits_for_a_free_slot_before_spawning() {
+    let runner = FfmpegRunner::new(None, 1);
+    let first = runner.spawn(endless_args()).await.unwrap();
+    assert_eq!(runner.in_flight(), 1);
+
+    let blocked = tokio::time::timeout(Duration::from_millis(300), runner.spawn(endless_args()))
+        .await
+        .map(|result| result.unwrap());
+    assert!(
+        blocked.is_err(),
+        "the second child started without a permit"
+    );
+
+    // Dropping a running child gives its permit back and kills it.
+    drop(first);
+    assert_eq!(runner.in_flight(), 0);
+
+    let second = tokio::time::timeout(Duration::from_secs(5), runner.spawn(endless_args()))
+        .await
+        .expect("a freed slot starts the next child")
+        .unwrap();
+    assert_eq!(runner.in_flight(), 1);
+    drop(second);
+    assert_eq!(runner.in_flight(), 0);
+}
+
+#[tokio::test]
+async fn grows_the_cap_when_the_setting_changes() {
+    let runner = FfmpegRunner::new(None, 1);
+    let first = runner.spawn(endless_args()).await.unwrap();
+    assert_eq!(runner.in_flight(), 1);
+
+    runner.set_max_concurrent(2);
+    assert_eq!(runner.max_concurrent(), 2);
+    let second = tokio::time::timeout(Duration::from_secs(5), runner.spawn(endless_args()))
+        .await
+        .expect("the raised cap admits a second child")
+        .unwrap();
+    assert_eq!(runner.in_flight(), 2);
+
+    // Shrinking the cap takes budget away from callers that have not started.
+    runner.set_max_concurrent(1);
+    assert_eq!(runner.max_concurrent(), 1);
+    let blocked =
+        tokio::time::timeout(Duration::from_millis(300), runner.spawn(endless_args())).await;
+    assert!(
+        blocked.is_err(),
+        "a third child started after the cap shrank"
+    );
+
+    drop(first);
+    drop(second);
+    assert_eq!(runner.in_flight(), 0);
+}
+
+#[tokio::test]
+async fn kills_the_child_when_its_handle_is_dropped() {
+    let runner = FfmpegRunner::new(None, 2);
+    let mut child = runner
+        .spawn([
+            "-hide_banner".into(),
+            "-v".into(),
+            "error".into(),
+            "-f".into(),
+            "lavfi".into(),
+            "-i".into(),
+            "sine=frequency=440:sample_rate=44100".into(),
+            "-f".into(),
+            "s16le".into(),
+            "-".into(),
+        ])
+        .await
+        .unwrap();
+    let mut stdout = child.take_stdout().expect("stdout is piped");
+    let reader = tokio::spawn(async move {
+        let mut buffer = [0u8; 4096];
+        let mut total = 0usize;
+        while let Ok(read) = stdout.read(&mut buffer).await {
+            if read == 0 {
+                break;
+            }
+            total += read;
+        }
+        total
+    });
+
+    // The child is producing samples, so the pipe carries data before the drop.
+    let running = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if runner.in_flight() == 1 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(running.is_ok());
+
+    let pid = child.id();
+    drop(child);
+
+    let total = tokio::time::timeout(Duration::from_secs(5), reader)
+        .await
+        .expect("the pipe closed after the drop")
+        .unwrap();
+    assert!(total > 0, "the child produced no samples");
+    assert_eq!(runner.in_flight(), 0, "the permit was not released");
+    assert!(pid.is_some());
+}

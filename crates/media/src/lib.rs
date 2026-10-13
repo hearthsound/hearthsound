@@ -20,9 +20,12 @@
 //! # async fn example() -> Result<(), hearthsound_media::MediaError> {
 //! use std::path::Path;
 //!
+//! use hearthsound_media::FfmpegRunner;
+//!
 //! let path = Path::new("/music/track.flac");
+//! let runner = FfmpegRunner::new(None, 8);
 //! let probed = hearthsound_media::probe(path).await?;
-//! let verified = hearthsound_media::verify_decodes(path).await?;
+//! let verified = hearthsound_media::verify_decodes(path, &runner).await?;
 //! println!("{} {} {:?}", probed.container.as_str(), probed.codec.as_str(), verified.duration_ms);
 //! # Ok(())
 //! # }
@@ -30,10 +33,12 @@
 #![forbid(unsafe_code)]
 
 mod error;
+pub mod ffmpeg;
 pub mod probe;
 pub mod tags;
 
 pub use error::MediaError;
+pub use ffmpeg::{FfmpegProcess, FfmpegRunner};
 pub use probe::{
     Codec, Container, DecodeBackend, DecodeReport, ProbeResult, extract_picture, probe,
     verify_decodes,

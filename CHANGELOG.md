@@ -121,3 +121,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `HEARTHSOUND_ACQUIRED_VIA` marker, each into the key its container uses
   (Vorbis comments, ID3v2 `TXXX`, MP4 freeform atoms, or APE items), with
   optional cover embedding and a sidecar cover writer.
+- An ffmpeg process runner: one shared concurrency budget that can be resized
+  when `stream.max_concurrent_transcodes` changes, argument vectors passed
+  straight to `tokio::process` without a shell, standard error forwarded to the
+  debug log, and children killed when their handle is dropped. Verification
+  decodes now run through the same budget.
