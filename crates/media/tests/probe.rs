@@ -268,6 +268,30 @@ async fn rejects_a_file_that_does_not_decode() {
 }
 
 #[tokio::test]
+async fn rejects_a_file_that_is_truncated() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = FfmpegRunner::new(None, 4);
+    for format in [AudioFormat::Flac, AudioFormat::Opus, AudioFormat::WavPack] {
+        let path = AudioFixture::new(format)
+            .seconds(1.0)
+            .file_name(format!("truncated.{}", format.extension()))
+            .write_into(dir.path())
+            .await
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+
+        let error = verify_decodes(&path, &runner).await.unwrap_err();
+        assert!(
+            matches!(error, MediaError::Decode { .. }),
+            "{}: {error:?}",
+            format.extension()
+        );
+    }
+    assert_eq!(runner.in_flight(), 0);
+}
+
+#[tokio::test]
 async fn reports_unreadable_and_unknown_files() {
     let dir = tempfile::tempdir().unwrap();
     let error = probe(&dir.path().join("missing.flac")).await.unwrap_err();

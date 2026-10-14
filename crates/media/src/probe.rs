@@ -506,13 +506,16 @@ fn classify_symphonia_error(error: symphonia::core::errors::Error) -> SymphoniaF
 
 /// Decodes a file with `ffmpeg` into a null sink.
 ///
-/// `ffmpeg -v error -i <file> -f null -` decodes every packet and discards the
-/// samples; a non-zero exit status means the file does not decode.
+/// `ffmpeg -v error -xerror -i <file> -f null -` decodes every packet and
+/// discards the samples; a non-zero exit status means the file does not decode.
+/// `-xerror` turns a decode error into a failure exit status: without it a
+/// stream that ends inside a block only prints the error and ffmpeg still exits
+/// successfully, which would accept a truncated file.
 ///
 /// # Parameters
 ///
 /// - `path`: the file to decode.
-/// - `binary`: the ffmpeg binary path or name.
+/// - `runner`: the runner the decode counts against.
 /// - `reason`: why `symphonia` was skipped, recorded at debug level.
 ///
 /// # Errors
@@ -528,6 +531,7 @@ async fn ffmpeg_decode(
         "-hide_banner".into(),
         "-v".into(),
         "error".into(),
+        "-xerror".into(),
         "-i".into(),
         path.as_os_str().to_owned(),
         "-f".into(),

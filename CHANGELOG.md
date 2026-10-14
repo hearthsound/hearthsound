@@ -663,3 +663,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the `dev/.env` keys it reads and the provider command the container needs;
   which credential a client uses; and what the three `stream.pending.mode` values
   (`pad`, `hold`, `fail`) do to a stream of a song the server does not have yet.
+- Verification with `ffmpeg` for the files `symphonia` cannot read now fails
+  when the decode reports an error, so a truncated WavPack or Opus file is
+  rejected instead of accepted.
