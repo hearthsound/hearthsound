@@ -335,7 +335,7 @@ async fn a_stalled_client_blocks_the_pipeline() {
     let runner = FfmpegRunner::new(None, 4);
 
     let request = PendingRequest::new(TranscodeFormat::Mp3, 320, Duration::from_secs(30));
-    let pending = runner.pending_stream(&request).await.unwrap();
+    let mut pending = runner.pending_stream(&request).await.unwrap();
     pending.control().ready(&source).await.unwrap();
 
     // Read nothing. Wait for the decoder to start, then check that both
@@ -355,8 +355,20 @@ async fn a_stalled_client_blocks_the_pipeline() {
             "the pending stream ran ahead of a stalled client"
         );
     }
+
+    // The decoder has decoded its first chunk by now, but whether that chunk
+    // reached the encoder depends on how much PCM the encoder takes in before
+    // its stalled output makes it stop reading, which differs between ffmpeg
+    // versions. Reading one chunk drains the pipeline, which is what lets the
+    // file audio through.
+    let chunk = pending
+        .next()
+        .await
+        .expect("a chunk")
+        .expect("encoded audio");
+    assert!(!chunk.is_empty());
     assert!(
-        pending.audio_delivered(),
+        wait_for(Duration::from_secs(10), || pending.audio_delivered()).await,
         "the switch to the file never delivered audio"
     );
 
