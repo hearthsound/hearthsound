@@ -666,3 +666,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verification with `ffmpeg` for the files `symphonia` cannot read now fails
   when the decode reports an error, so a truncated WavPack or Opus file is
   rejected instead of accepted.
+- Verification now hands a file to `ffmpeg` when the `symphonia` probe latches
+  onto a container marker that runs out of stream, so a WavPack file whose audio
+  data happens to contain such a marker is no longer rejected.

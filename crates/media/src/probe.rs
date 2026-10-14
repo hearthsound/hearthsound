@@ -382,7 +382,9 @@ pub async fn verify_decodes(
 /// Why `symphonia` could not verify a file.
 #[derive(Debug)]
 enum SymphoniaFailure {
-    /// The codec or the container is not registered, so `ffmpeg` has to try.
+    /// No `symphonia` reader applies to the file, so `ffmpeg` has to try: the
+    /// codec or the container is not registered, or the probe found only a
+    /// container whose stream ends before its first block.
     Unsupported(String),
     /// The file is unreadable or does not decode, so it must be rejected.
     Failed(String),
@@ -420,7 +422,7 @@ fn symphonia_decode(path: &Path) -> Result<DecodeReport, SymphoniaFailure> {
             FormatOptions::default(),
             MetadataOptions::default(),
         )
-        .map_err(classify_symphonia_error)?;
+        .map_err(classify_probe_error)?;
 
     let (track_id, decoder) = {
         let track = format
@@ -482,6 +484,39 @@ fn symphonia_decode(path: &Path) -> Result<DecodeReport, SymphoniaFailure> {
         frames: Some(frames),
         damaged_packets,
     })
+}
+
+/// Maps a `symphonia` probe error onto a verification failure.
+///
+/// The probe scans the stream for the marker of a registered container, and a
+/// marker can occur by chance inside the data of a codec `symphonia` cannot
+/// read. The reader that matched the chance marker then walks the stream
+/// looking for a structure it never finds, and reports an unexpected end of
+/// file when the stream runs out. Nothing about that says the file is broken,
+/// so the probe falls back to `ffmpeg` exactly as it does for a missing reader.
+/// Every other probe error keeps the file out of `ffmpeg`'s hands and is
+/// reported as a failure.
+///
+/// # Parameters
+///
+/// - `error`: the error the probe returned.
+///
+/// # Returns
+///
+/// [`SymphoniaFailure::Unsupported`] for a missing reader and for an unexpected
+/// end of file, and [`SymphoniaFailure::Failed`] for everything else.
+fn classify_probe_error(error: symphonia::core::errors::Error) -> SymphoniaFailure {
+    match &error {
+        symphonia::core::errors::Error::Unsupported(message) => {
+            SymphoniaFailure::Unsupported((*message).to_owned())
+        }
+        symphonia::core::errors::Error::IoError(source)
+            if source.kind() == std::io::ErrorKind::UnexpectedEof =>
+        {
+            SymphoniaFailure::Unsupported(error.to_string())
+        }
+        _ => SymphoniaFailure::Failed(error.to_string()),
+    }
 }
 
 /// Maps a `symphonia` error onto a verification failure.
@@ -758,4 +793,43 @@ fn non_empty<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use symphonia::core::errors::Error as SymphoniaError;
+
+    #[test]
+    fn a_probe_that_runs_out_of_stream_falls_back_to_ffmpeg() {
+        let chance_marker = SymphoniaError::IoError(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "out of bounds",
+        ));
+        assert!(matches!(
+            classify_probe_error(chance_marker),
+            SymphoniaFailure::Unsupported(_)
+        ));
+
+        let missing_reader = SymphoniaError::Unsupported("core (probe): no suitable format reader");
+        assert!(matches!(
+            classify_probe_error(missing_reader),
+            SymphoniaFailure::Unsupported(_)
+        ));
+    }
+
+    #[test]
+    fn a_probe_that_cannot_read_the_file_is_reported_as_a_failure() {
+        let unreadable = SymphoniaError::IoError(std::io::Error::other("input/output error"));
+        assert!(matches!(
+            classify_probe_error(unreadable),
+            SymphoniaFailure::Failed(_)
+        ));
+
+        let malformed = SymphoniaError::DecodeError("flac: bad stream info");
+        assert!(matches!(
+            classify_probe_error(malformed),
+            SymphoniaFailure::Failed(_)
+        ));
+    }
 }
