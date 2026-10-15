@@ -399,10 +399,6 @@ fn record_listing(call: &Call, listing: impl IntoIterator<Item = ClientId>) {
 /// generic error when the issuing instance cannot answer.
 async fn catalog_song(call: &Call, id: CatalogId) -> Encoded {
     let snapshot = call.state().settings_snapshot();
-    let format = match catalog::pending_format(&snapshot) {
-        Ok(format) => format,
-        Err(error) => return call.encode(Response::failed(error)),
-    };
     let suffix = match catalog::title_suffix(&snapshot) {
         Ok(suffix) => suffix,
         Err(error) => return call.encode(Response::failed(error)),
@@ -411,13 +407,7 @@ async fn catalog_song(call: &Call, id: CatalogId) -> Encoded {
         Ok(track) => track,
         Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
     };
-    let song = projection::catalog_child(
-        &track.id,
-        &track.track,
-        &format.suffix,
-        &format.content_type,
-        &suffix,
-    );
+    let song = projection::catalog_child(&track.id, &track.track, &suffix);
     call.encode(Response::ok().member("song", song))
 }
 
@@ -439,10 +429,6 @@ async fn catalog_song(call: &Call, id: CatalogId) -> Encoded {
 /// generic error when the issuing instance cannot answer.
 async fn catalog_album(call: &Call, id: CatalogId) -> Encoded {
     let snapshot = call.state().settings_snapshot();
-    let format = match catalog::pending_format(&snapshot) {
-        Ok(format) => format,
-        Err(error) => return call.encode(Response::failed(error)),
-    };
     let suffix = match catalog::title_suffix(&snapshot) {
         Ok(suffix) => suffix,
         Err(error) => return call.encode(Response::failed(error)),
@@ -459,13 +445,7 @@ async fn catalog_album(call: &Call, id: CatalogId) -> Encoded {
         else {
             continue;
         };
-        songs.push(projection::catalog_child(
-            &track_id,
-            track,
-            &format.suffix,
-            &format.content_type,
-            &suffix,
-        ));
+        songs.push(projection::catalog_child(&track_id, track, &suffix));
         listing.push(ClientId::Catalog(track_id));
     }
     record_listing(call, listing);

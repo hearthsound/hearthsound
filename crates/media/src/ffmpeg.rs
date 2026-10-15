@@ -1,10 +1,10 @@
 //! Running `ffmpeg` child processes under one concurrency budget.
 //!
-//! Every ffmpeg invocation in the server - transcodes, pending-stream PCM
-//! decoders, and verification decodes - goes through one [`FfmpegRunner`], which
-//! holds the process budget in a semaphore. A permit is taken before a child is
-//! spawned and released when the child's handle is dropped, so a caller that
-//! drops a stream also gives its budget back.
+//! Every ffmpeg invocation in the server - transcodes and verification decodes -
+//! goes through one [`FfmpegRunner`], which holds the process budget in a
+//! semaphore. A permit is taken before a child is spawned and released when the
+//! child's handle is dropped, so a caller that drops a stream also gives its
+//! budget back.
 //!
 //! Arguments are always passed as a vector: the runner never builds a shell
 //! command line, and the child is killed if its handle is dropped without
@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStdout, Command};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::error::MediaError;
@@ -40,11 +40,10 @@ const DEFAULT_BINARY: &str = "ffmpeg";
 /// Spawns and limits `ffmpeg` child processes.
 ///
 /// One runner serves the whole process: it owns the concurrency budget, so
-/// transcodes and PCM decoders of pending streams compete for the same slots,
-/// and it can be resized when the operator changes
-/// `stream.max_concurrent_transcodes`. Cloning a runner shares the budget, which
-/// is how a task that outlives its caller - the feeder of a pending stream -
-/// keeps spending from the same pool.
+/// transcodes and verification decodes compete for the same slots, and it can be
+/// resized when the operator changes `stream.max_concurrent_transcodes`.
+/// Cloning a runner shares the budget, which is how a task that outlives its
+/// caller keeps spending from the same pool.
 #[derive(Debug, Clone)]
 pub struct FfmpegRunner {
     inner: Arc<FfmpegRunnerInner>,
@@ -174,11 +173,12 @@ impl FfmpegRunner {
         Ok(())
     }
 
-    /// Spawns ffmpeg with piped standard streams.
+    /// Spawns ffmpeg with piped standard output.
     ///
-    /// The returned [`FfmpegProcess`] holds a budget permit until it is dropped,
-    /// so callers that stream from the child must keep the handle alive for as
-    /// long as they read.
+    /// Standard input is connected to nothing and standard output is piped, so a
+    /// caller streams from the child. The returned [`FfmpegProcess`] holds a
+    /// budget permit until it is dropped, so callers that stream from the child
+    /// must keep the handle alive for as long as they read.
     ///
     /// # Parameters
     ///
@@ -201,7 +201,7 @@ impl FfmpegRunner {
         let program = self.binary_display();
         let mut child = Command::new(&self.inner.binary)
             .args(&args)
-            .stdin(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
@@ -212,7 +212,6 @@ impl FfmpegRunner {
                 message: source.to_string(),
             })?;
         let pid = child.id();
-        let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         tracing::debug!(
@@ -231,7 +230,6 @@ impl FfmpegRunner {
         });
         Ok(FfmpegProcess {
             child,
-            stdin,
             stdout,
             stderr_task,
             pid,
@@ -280,7 +278,6 @@ impl FfmpegRunner {
 #[derive(Debug)]
 pub struct FfmpegProcess {
     child: Child,
-    stdin: Option<ChildStdin>,
     stdout: Option<ChildStdout>,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
     pid: Option<u32>,
@@ -298,15 +295,6 @@ impl FfmpegProcess {
     /// Returns the ffmpeg binary the child runs.
     pub fn program(&self) -> &str {
         &self.program
-    }
-
-    /// Takes the child's standard input.
-    ///
-    /// # Returns
-    ///
-    /// The pipe, or `None` when it was already taken.
-    pub fn take_stdin(&mut self) -> Option<ChildStdin> {
-        self.stdin.take()
     }
 
     /// Takes the child's standard output.

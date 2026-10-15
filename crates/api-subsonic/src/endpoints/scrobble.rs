@@ -4,8 +4,8 @@
 //! submission (`submission=true`, the default) records a play through the
 //! activity service, and a now-playing report (`submission=false`) is accepted
 //! and discarded. The service itself enforces the "no song audio delivered"
-//! guard, so a client that only ever heard silence padding while an acquisition
-//! failed does not create a false play.
+//! guard, so a client that gave up before any audio arrived does not create a
+//! false play.
 //!
 //! Only a stored track is recorded. A catalog id (`x_`) names an entity the
 //! server may not have stored yet: the id is resolved through the provider

@@ -227,7 +227,7 @@ impl BootstrapConfig {
     ///
     /// let mut env = BTreeMap::new();
     /// env.insert("HOME".to_owned(), "/home/ada".to_owned());
-    /// env.insert("HEARTHSOUND__STREAM__PENDING__MODE".to_owned(), "pad".to_owned());
+    /// env.insert("HEARTHSOUND__STREAM__PENDING__MODE".to_owned(), "hold".to_owned());
     /// let config = BootstrapConfig::load(None, &env).unwrap();
     /// let sources = config.setting_sources(&env);
     /// assert!(sources.file.is_empty());
@@ -885,7 +885,7 @@ storage = "<data>/media"
 data = "/srv/hearthsound"
 
 [settings]
-"stream.pending.mode" = "pad"
+"stream.pending.mode" = "hold"
 "plugins.auto_update" = false
 "storage.cache.max_bytes" = 21474836480
 "sleep.gap_ms" = 1.5
@@ -896,7 +896,7 @@ data = "/srv/hearthsound"
 
         assert_eq!(
             config.settings.get("stream.pending.mode"),
-            Some(&toml::Value::String("pad".to_owned()))
+            Some(&toml::Value::String("hold".to_owned()))
         );
         assert_eq!(
             config.settings.get("plugins.auto_update"),

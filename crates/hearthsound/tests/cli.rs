@@ -605,7 +605,7 @@ fn settings_round_trip_and_refuse_a_pinned_key() {
         "{listed}"
     );
 
-    let pinned = sandbox.run(&["settings", "set", "stream.pending.mode", "pad"]);
+    let pinned = sandbox.run(&["settings", "set", "stream.pending.mode", "fail"]);
     assert_eq!(pinned.status.code(), Some(1));
     assert!(
         stderr(&pinned).contains("pinned by the configuration file"),
@@ -657,7 +657,7 @@ fn settings_round_trip_and_refuse_a_pinned_key() {
 #[test]
 fn settings_set_is_visible_to_a_later_server_start() {
     let sandbox = Sandbox::new("");
-    succeeded(&sandbox.run(&["settings", "set", "stream.pending.mode", "hold"]));
+    succeeded(&sandbox.run(&["settings", "set", "stream.pending.mode", "fail"]));
 
     let config = bootstrap_config(&sandbox);
     assert_eq!(
@@ -669,7 +669,7 @@ fn settings_set_is_visible_to_a_later_server_start() {
     );
 
     let listed = succeeded(&sandbox.run(&["settings", "get", "stream.pending.mode"]));
-    assert!(listed.contains("= hold"), "{listed}");
+    assert!(listed.contains("= fail"), "{listed}");
     assert!(listed.contains("from the database"), "{listed}");
 }
 

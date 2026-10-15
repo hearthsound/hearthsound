@@ -262,7 +262,7 @@ async fn a_submission_without_a_session_is_recorded() {
 }
 
 #[tokio::test]
-async fn a_pad_only_session_blocks_the_play() {
+async fn a_session_that_delivered_no_audio_blocks_the_play() {
     let dir = tempfile::tempdir().unwrap();
     let database = open_database(dir.path()).await;
     let activity = ActivityService::new(&database);
@@ -270,7 +270,7 @@ async fn a_pad_only_session_blocks_the_play() {
     insert_user(&database, user).await;
     insert_track(&database, track).await;
 
-    // A pending stream that was only fed silence padding reports false.
+    // A stream that delivered no song audio reports false.
     activity
         .sessions()
         .register(user, track, Some("dsub"), AudioDelivered::probe(|| false));
@@ -324,8 +324,8 @@ async fn the_latest_session_decides() {
     insert_track(&database, first_track).await;
     insert_track(&database, second_track).await;
 
-    // An earlier pad-only attempt followed by a stream that delivered: the
-    // restarted stream owns the answer.
+    // An earlier attempt that delivered nothing followed by a stream that
+    // delivered: the restarted stream owns the answer.
     activity
         .sessions()
         .register(user, first_track, None, AudioDelivered::probe(|| false));

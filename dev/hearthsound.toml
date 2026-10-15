@@ -30,8 +30,9 @@ format = "text"
 # Runtime settings live in the database and are edited through the API or the
 # admin UI. A runtime setting can be pinned read-only by putting it in the
 # `[settings]` table, which is how an operator enforces policy: a pinned key
-# rejects API edits. For example, to make a stream pad silence instead of
-# waiting for the first acquired file:
+# rejects API edits. For example, to answer a stream of a song the server has
+# not acquired yet with `503` at once instead of holding it until the file is
+# ready (the default):
 #
 # [settings]
-# "stream.pending.mode" = "pad"
+# "stream.pending.mode" = "fail"

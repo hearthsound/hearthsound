@@ -21,6 +21,7 @@ use hearthsound_acquire::repo::{AcquisitionRow, ListFilter};
 use hearthsound_catalog::CatalogService;
 use hearthsound_core::{CatalogId, EntityId, EntityKind, Layer, Priority, Slug};
 use hearthsound_plugin_host::{InstanceSpec, PluginRepository, PluginSource};
+use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
 use hearthsound_test_support::{ACQUISITION_FIXTURE, ALBUM_CATALOG, fixture_plugin};
 use reqwest::StatusCode;
 use serde_json::json;
@@ -39,9 +40,19 @@ const ALBUM_TRACKS: u8 = 5;
 
 /// How long the acquisition fixture answers `running` before a search completes.
 ///
-/// The prefetch's job is to admit the acquisitions, not to finish them, so the
-/// search is kept alive far longer than the test.
-const SEARCH_POLLS: u32 = 60;
+/// The streamed track has to be acquired and imported before the held stream
+/// can be served, so the fixture's search completes on its first poll and the
+/// test does not wait on a simulated backend that keeps searching.
+const SEARCH_POLLS: u32 = 0;
+
+/// The name of the file the fixture's download produces.
+const FIRST_FILE: &str = "01 - Fixture Song 1.flac";
+
+/// How long the generated audio lasts, in seconds.
+///
+/// The album catalog's tracks claim 180 seconds, and verification refuses a
+/// file whose duration is more than five seconds away from the track's.
+const AUDIO_SECONDS: f64 = 180.0;
 
 /// Installs the album catalog fixture and assigns it to the catalog layer.
 async fn install_catalog(services: &Arc<hearthsound_server::Services>) {
@@ -133,6 +144,24 @@ async fn install_acquisition(services: &Arc<hearthsound_server::Services>, downl
     services
         .instances()
         .set_layer(Layer::Acquisition, &["acq".to_owned()])
+        .await
+        .unwrap();
+}
+
+/// Writes the audio the simulated backend serves into its import root.
+///
+/// The held stream of the first track is only served once its acquisition has
+/// imported a file, so the import root holds the real audio the fixture's
+/// download resolves and imports.
+///
+/// # Parameters
+///
+/// - `downloads`: the instance's import root.
+async fn place_audio(downloads: &Path) {
+    AudioFixture::new(AudioFormat::Flac)
+        .seconds(AUDIO_SECONDS)
+        .file_name(FIRST_FILE.to_owned())
+        .write_into(downloads)
         .await
         .unwrap();
 }
@@ -235,6 +264,7 @@ async fn a_catalog_stream_prefetches_the_tracks_after_it() {
     install_catalog(&services).await;
     install_acquisition(&services, &downloads).await;
     services.registry().rebuild().await.unwrap();
+    place_audio(&downloads).await;
 
     let api_key = &fixture.api_key;
     let album = catalog_album();

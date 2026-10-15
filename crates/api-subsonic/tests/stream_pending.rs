@@ -4,8 +4,7 @@
 //! The acquisition layer is a scripted [`PendingSource`] behind the stream
 //! service's seam, so every test drives an exact outcome - a file after a delay,
 //! a failure, a cooldown, a denial - while the bytes, the headers, and the
-//! timing are the real ones a client would receive. The padding and the
-//! encoder are the real `hearthsound-media` PCM bus and ffmpeg.
+//! timing are the real ones a client would receive.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -21,7 +20,6 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderName, Method, Request, StatusCode, header};
 use axum::response::Response;
-use bytes::Bytes;
 use futures_util::StreamExt;
 use hearthsound_acquire::AcquireError;
 use hearthsound_acquire::orchestrator::{AcquisitionHandle, AcquisitionProgress};
@@ -332,18 +330,6 @@ async fn collect(response: Response) -> Vec<u8> {
     }
 }
 
-/// Reads the next chunk of a body, failing the test if none arrives in time.
-async fn next_chunk<S>(stream: &mut S, deadline: Duration) -> Bytes
-where
-    S: futures_util::Stream<Item = Result<Bytes, axum::Error>> + Unpin,
-{
-    tokio::time::timeout(deadline, stream.next())
-        .await
-        .expect("a chunk arrives before the deadline")
-        .expect("the stream has data")
-        .unwrap()
-}
-
 /// Returns one response header as text.
 fn header_of(response: &Response, name: HeaderName) -> String {
     response
@@ -352,43 +338,6 @@ fn header_of(response: &Response, name: HeaderName) -> String {
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_owned()
-}
-
-/// Reads one ffprobe field of a container or its streams.
-async fn ffprobe(path: &Path, section: &str, field: &str) -> Option<String> {
-    let output = tokio::process::Command::new("ffprobe")
-        .args([
-            "-hide_banner",
-            "-v",
-            "error",
-            "-show_entries",
-            &format!("{section}={field}"),
-            "-of",
-            "default=nw=1",
-        ])
-        .arg(path)
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| line.strip_prefix(&format!("{field}=")))
-        .map(str::to_owned)
-}
-
-/// Returns the duration of an encoded file, in seconds.
-async fn duration_of(bytes: &[u8]) -> f64 {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("stream.mp3");
-    std::fs::write(&path, bytes).unwrap();
-    ffprobe(&path, "format", "duration")
-        .await
-        .expect("ffprobe reports a duration")
-        .parse()
-        .unwrap()
 }
 
 /// Sets a pending-stream setting to a short value for a test.
@@ -427,97 +376,7 @@ async fn set_short_waits(fixture: &Fixture, hold_secs: i64, max_wait_secs: i64) 
 }
 
 #[tokio::test]
-async fn pad_sends_silence_first_and_then_the_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = fixture_file(dir.path(), "song.flac", 2.0).await;
-    let source = FakeSource::new(Script::Complete {
-        file,
-        delay: Duration::from_millis(300),
-    });
-    let fixture = Fixture::with_pending(source.clone()).await;
-    let track = pending_track(&fixture).await;
-    let app = fixture.app();
-    set_short_waits(&fixture, 60, 12).await;
-
-    let started = Instant::now();
-    let response = start(
-        &app,
-        &format!("/rest/stream?id={track}&apiKey={}", fixture.api_key),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(header_of(&response, header::CONTENT_TYPE), "audio/mpeg");
-    assert_eq!(header_of(&response, header::ACCEPT_RANGES), "none");
-    assert!(!response.headers().contains_key(header::CONTENT_LENGTH));
-
-    let mut body = Box::pin(response.into_body().into_data_stream());
-    let first = next_chunk(&mut body, Duration::from_secs(1)).await;
-    assert!(!first.is_empty());
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "the first bytes arrived after {:?}",
-        started.elapsed()
-    );
-
-    let mut collected = first.to_vec();
-    loop {
-        let next = tokio::time::timeout(Duration::from_secs(20), body.next())
-            .await
-            .expect("the file's audio ends before the deadline");
-        match next {
-            Some(Ok(chunk)) => collected.extend_from_slice(&chunk),
-            Some(Err(error)) => panic!("the stream failed: {error}"),
-            None => break,
-        }
-    }
-
-    // A two second silence burst, the silence the acquisition waited through,
-    // and the two second file. A stream that only ever padded would run to its
-    // wait bound instead.
-    let duration = duration_of(&collected).await;
-    assert!(
-        (3.9..=6.0).contains(&duration),
-        "the pending stream produced {duration}s for a two second file"
-    );
-    assert_eq!(source.calls(), 1);
-}
-
-#[tokio::test]
-async fn pad_ends_the_stream_one_second_after_a_failure() {
-    let source = FakeSource::new(Script::Fail {
-        delay: Duration::from_millis(200),
-    });
-    let fixture = Fixture::with_pending(source).await;
-    let track = pending_track(&fixture).await;
-    let app = fixture.app();
-    set_short_waits(&fixture, 60, 60).await;
-
-    let response = start(
-        &app,
-        &format!("/rest/stream?id={track}&apiKey={}", fixture.api_key),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(header_of(&response, header::CONTENT_TYPE), "audio/mpeg");
-
-    let started = Instant::now();
-    let collected = collect(response).await;
-    assert!(!collected.is_empty(), "the padding is still sent");
-    // The burst, the wait for the failure, and the one second grace: a stream
-    // that ignored the failure would run to the 60 second bound instead.
-    let duration = duration_of(&collected).await;
-    assert!(
-        (2.0..=5.0).contains(&duration),
-        "the failed pending stream produced {duration}s"
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "the stream did not end after the failure"
-    );
-}
-
-#[tokio::test]
-async fn hold_waits_for_the_file_and_serves_it_whole() {
+async fn hold_serves_the_imported_file_whole_when_the_acquisition_completes() {
     let dir = tempfile::tempdir().unwrap();
     let file = fixture_file(dir.path(), "song.flac", 1.0).await;
     let bytes = std::fs::read(&file).unwrap();
@@ -528,8 +387,8 @@ async fn hold_waits_for_the_file_and_serves_it_whole() {
     });
     let track = pending_track(&fixture).await;
     let app = fixture.app_with(source);
-    set_mode(&fixture, "hold").await;
 
+    // No mode is set: `hold` is what a server that was never configured uses.
     let started = Instant::now();
     let response = start(
         &app,
@@ -539,7 +398,7 @@ async fn hold_waits_for_the_file_and_serves_it_whole() {
     assert_eq!(response.status(), StatusCode::OK);
     assert!(
         started.elapsed() >= Duration::from_millis(250),
-        "hold sent headers before the file was ready"
+        "hold answered before the file was ready"
     );
     // The file is served as a stored file is: with ranges and a length.
     assert_eq!(header_of(&response, header::ACCEPT_RANGES), "bytes");
@@ -559,7 +418,6 @@ async fn hold_answers_a_failed_acquisition_with_404() {
     let fixture = Fixture::with_pending(source).await;
     let track = pending_track(&fixture).await;
     let app = fixture.app();
-    set_mode(&fixture, "hold").await;
 
     let response = start(
         &app,
@@ -576,7 +434,6 @@ async fn hold_answers_a_wait_that_elapsed_with_503() {
     let fixture = Fixture::with_pending(source).await;
     let track = pending_track(&fixture).await;
     let app = fixture.app();
-    set_mode(&fixture, "hold").await;
     set_short_waits(&fixture, 1, 2).await;
 
     let response = start(
@@ -665,7 +522,7 @@ async fn a_user_without_the_acquire_permission_is_403() {
 }
 
 #[tokio::test]
-async fn raw_under_pad_waits_for_the_file() {
+async fn a_raw_request_is_held_until_the_file_is_ready() {
     let dir = tempfile::tempdir().unwrap();
     let file = fixture_file(dir.path(), "song.flac", 1.0).await;
     let bytes = std::fs::read(&file).unwrap();
@@ -689,62 +546,10 @@ async fn raw_under_pad_waits_for_the_file() {
     assert_eq!(response.status(), StatusCode::OK);
     assert!(
         started.elapsed() >= Duration::from_millis(250),
-        "raw did not wait for the file"
+        "a raw request was answered before the file was ready"
     );
     assert_eq!(header_of(&response, header::CONTENT_TYPE), "audio/flac");
     assert_eq!(collect(response).await, bytes);
-}
-
-#[tokio::test]
-async fn raw_under_pad_pads_once_the_raw_hold_elapses() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = fixture_file(dir.path(), "song.flac", 2.0).await;
-    let source = FakeSource::new(Script::Complete {
-        file,
-        delay: Duration::from_millis(2_500),
-    });
-    let fixture = Fixture::with_pending(source.clone()).await;
-    let track = pending_track(&fixture).await;
-    let app = fixture.app();
-    set_short_waits(&fixture, 60, 12).await;
-    fixture
-        .settings
-        .set(
-            keys::STREAM_PENDING_RAW_HOLD_SECS.name(),
-            SettingValue::Integer(1),
-            None,
-        )
-        .await
-        .unwrap();
-
-    let started = Instant::now();
-    let response = start(
-        &app,
-        &format!(
-            "/rest/stream?id={track}&format=raw&apiKey={}",
-            fixture.api_key
-        ),
-    )
-    .await;
-    let answered = started.elapsed();
-    // Held for the raw wait, then answered before the acquisition finished,
-    // which is what keeps a client's read timeout from firing.
-    assert!(
-        (Duration::from_millis(900)..Duration::from_millis(2_400)).contains(&answered),
-        "the raw stream was answered after {answered:?}"
-    );
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(header_of(&response, header::CONTENT_TYPE), "audio/mpeg");
-    assert_eq!(header_of(&response, header::ACCEPT_RANGES), "none");
-
-    // The padding, then the two second file; a stream that only ever padded
-    // would run to its 12 second bound instead.
-    let duration = duration_of(&collect(response).await).await;
-    assert!(
-        (3.5..=7.0).contains(&duration),
-        "the padded raw stream produced {duration}s for a two second file"
-    );
-    assert_eq!(source.calls(), 1);
 }
 
 #[tokio::test]
@@ -778,7 +583,6 @@ async fn hold_answers_a_completed_acquisition_without_a_file_with_404() {
     let fixture = Fixture::with_pending(source).await;
     let track = pending_track(&fixture).await;
     let app = fixture.app();
-    set_mode(&fixture, "hold").await;
 
     // The acquisition reports a file, but it was never imported into the
     // managed library, so the track still has no preferred file to serve.
@@ -792,17 +596,17 @@ async fn hold_answers_a_completed_acquisition_without_a_file_with_404() {
 }
 
 #[tokio::test]
-async fn a_catalog_id_is_materialized_and_padded() {
+async fn a_catalog_id_is_materialized_and_held_until_its_file_is_ready() {
     let dir = tempfile::tempdir().unwrap();
     let file = fixture_file(dir.path(), "song.flac", 1.0).await;
-    let source = FakeSource::new(Script::Complete {
-        file,
+    let bytes = std::fs::read(&file).unwrap();
+    let fixture = Fixture::new().await;
+    let source = FakeSource::new(Script::Import {
+        importer: Importer::new(Arc::clone(&fixture.database), &file, 1.0),
         delay: Duration::from_millis(200),
     });
-    let fixture = Fixture::with_pending(source.clone()).await;
+    let app = fixture.app_with(source.clone());
     fixture.install_hello_catalog().await;
-    let app = fixture.app();
-    set_short_waits(&fixture, 60, 12).await;
     let id = CatalogId::new(Slug::new("hello").unwrap(), EntityKind::Track, HELLO_TRACK).unwrap();
 
     let started = Instant::now();
@@ -812,11 +616,11 @@ async fn a_catalog_id_is_materialized_and_padded() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(header_of(&response, header::CONTENT_TYPE), "audio/mpeg");
-    let mut body = Box::pin(response.into_body().into_data_stream());
-    let first = next_chunk(&mut body, Duration::from_secs(1)).await;
-    assert!(!first.is_empty());
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(
+        started.elapsed() >= Duration::from_millis(150),
+        "the catalog stream was answered before its file was ready"
+    );
+    assert_eq!(header_of(&response, header::CONTENT_TYPE), "audio/flac");
+    assert_eq!(collect(response).await, bytes);
     assert_eq!(source.calls(), 1, "the catalog track reaches acquisition");
-    drop(body);
 }

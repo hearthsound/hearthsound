@@ -585,33 +585,26 @@ fn timestamp(millis: i64) -> String {
 /// Builds one catalog `Child` member (a song the server has not stored).
 ///
 /// The fields follow the catalog result rules (05-api.md, section 3.5): the id
-/// is the `x_` id that names the entity, `suffix` and `contentType` describe the
-/// pending stream format rather than the provider's own container, `size` is
-/// zero because no file exists yet, `duration` is the provider's duration,
-/// `path` is a synthetic `catalog/<slug>/<id>` that can never be a filesystem
-/// path, `coverArt` names the entity itself so `getCoverArt` resolves it
-/// through the issuing instance, and the title carries the catalog title
-/// suffix. Every other OpenSubsonic field is emitted at its default, so a
-/// client can tell a supported-but-unknown value from an unsupported field.
+/// is the `x_` id that names the entity, `suffix` and `contentType` are empty
+/// because no file exists yet and the container the acquired track will have is
+/// unknown, `size` is zero because no file exists yet, `duration` is the
+/// provider's duration, `path` is a synthetic `catalog/<slug>/<id>` that can
+/// never be a filesystem path, `coverArt` names the entity itself so
+/// `getCoverArt` resolves it through the issuing instance, and the title carries
+/// the catalog title suffix. Every other OpenSubsonic field is emitted at its
+/// default, so a client can tell a supported-but-unknown value from an
+/// unsupported field.
 ///
 /// # Parameters
 ///
 /// - `id`: the catalog id that names the track.
 /// - `track`: the track the provider returned.
-/// - `suffix`: the pending stream format's suffix.
-/// - `content_type`: the MIME type the pending suffix implies.
 /// - `title_suffix`: the suffix appended to the title.
 ///
 /// # Returns
 ///
 /// The child.
-pub(crate) fn catalog_child(
-    id: &CatalogId,
-    track: &CatalogTrack,
-    suffix: &str,
-    content_type: &str,
-    title_suffix: &str,
-) -> Object {
+pub(crate) fn catalog_child(id: &CatalogId, track: &CatalogTrack, title_suffix: &str) -> Object {
     let slug = id.slug();
     let album = track.album.as_ref();
     let album_id = album
@@ -651,8 +644,8 @@ pub(crate) fn catalog_child(
         .set("genre", "")
         .set("coverArt", id.to_string())
         .set("size", 0)
-        .set("contentType", content_type)
-        .set("suffix", suffix)
+        .set("contentType", "")
+        .set("suffix", "")
         .set("duration", duration_secs)
         .set("bitRate", 0)
         .set("bitDepth", 0)

@@ -1,13 +1,12 @@
 //! The catalog settings and error mapping the catalog-facing endpoints share.
 //!
 //! A catalog entity is one a provider knows but the server has not stored. When
-//! a response describes one, several fields come from settings rather than from
-//! the entity: the format a pending stream will actually deliver
-//! (`stream.pending.format`), which is the `suffix`/`contentType` a client sees
-//! before any file exists, and the suffix appended to every catalog title
-//! (`subsonic.catalog_title_suffix`), which tells a user which results are not
-//! local. Both are read here so `search3` and the catalog-id browse endpoints
-//! agree on them.
+//! a response describes one, its container and MIME type are unknown, because no
+//! file exists yet: the projection emits those legacy fields empty, and a client
+//! that trusts them cannot prepare for bytes the server has not produced. The
+//! suffix appended to every catalog title (`subsonic.catalog_title_suffix`) does
+//! come from a setting, and tells a user which results are not local. It is read
+//! here so `search3` and the catalog-id browse endpoints agree on it.
 //!
 //! The module also names the artists a catalog entity credits: a provider
 //! record carries an artist's identifiers as external ids, and the first one
@@ -22,48 +21,9 @@ use hearthsound_config::SettingsStore;
 use hearthsound_config::keys;
 use hearthsound_core::providers::{self, ArtistCredit};
 use hearthsound_core::{CatalogId, EntityKind, Slug};
-use hearthsound_library::query::content_type_for;
 
 use crate::browse;
 use crate::response::{SubsonicError, codes};
-
-/// The container a catalog entity is projected with before it is acquired.
-///
-/// This is `stream.pending.format`, not the provider's own format: while a
-/// catalog track is being acquired, `/rest/stream` delivers a transcode in this
-/// format, so a client that trusts `suffix`/`contentType` prepares for exactly
-/// the bytes it will receive.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PendingFormat {
-    /// The file suffix, for example `mp3`.
-    pub(crate) suffix: String,
-    /// The MIME type the suffix implies.
-    pub(crate) content_type: String,
-}
-
-/// Reads the pending stream format from a settings snapshot.
-///
-/// # Parameters
-///
-/// - `snapshot`: the settings in effect.
-///
-/// # Returns
-///
-/// The format's suffix and MIME type.
-///
-/// # Errors
-///
-/// Returns a generic Subsonic error when the setting cannot be read.
-pub(crate) fn pending_format(snapshot: &SettingsStore) -> Result<PendingFormat, SubsonicError> {
-    let suffix = snapshot
-        .get(keys::STREAM_PENDING_FORMAT)
-        .map_err(|error| browse::failure("stream.pending.format", &error))?;
-    let content_type = content_type_for(&suffix).to_owned();
-    Ok(PendingFormat {
-        suffix,
-        content_type,
-    })
-}
 
 /// Reads the catalog title suffix from a settings snapshot.
 ///

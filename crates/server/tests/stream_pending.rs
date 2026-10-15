@@ -19,7 +19,7 @@ use hearthsound_core::{CatalogId, EntityKind, Layer, Slug};
 use hearthsound_plugin_host::{InstanceSpec, PluginRepository, PluginSource};
 use hearthsound_test_support::{ACQUISITION_FIXTURE, HELLO_CATALOG, fixture_plugin};
 use reqwest::StatusCode;
-use reqwest::header::{ACCEPT_RANGES, CONTENT_TYPE, RETRY_AFTER};
+use reqwest::header::RETRY_AFTER;
 use serde_json::json;
 
 /// The catalog fixture's manifest id.
@@ -33,8 +33,8 @@ const HELLO_TRACK: &str = "hello-track-1";
 
 /// How long the acquisition fixture answers `running` before a search completes.
 ///
-/// The pending stream's job is to answer while an acquisition runs, so the
-/// search is kept alive far longer than the test.
+/// A pending stream's job is to decide what to answer while an acquisition
+/// runs, so the search is kept alive far longer than the test.
 const SEARCH_POLLS: u32 = 60;
 
 /// Installs the catalog fixture and assigns it to the catalog layer.
@@ -134,9 +134,9 @@ async fn install_acquisition(services: &Arc<hearthsound_server::Services>, downl
         .unwrap();
 }
 
-/// A catalog stream pads with silence, and `fail` mode answers 503.
+/// A catalog stream is held until its file is ready, and `fail` answers 503.
 #[tokio::test]
-async fn a_catalog_stream_pads_and_then_answers_503_in_fail_mode() {
+async fn a_catalog_stream_is_held_and_then_answers_503_in_fail_mode() {
     let fixture = common::Fixture::new().await;
     let services = Arc::clone(&fixture.services);
     let downloads = fixture.database_path().parent().unwrap().join("downloads");
@@ -148,34 +148,41 @@ async fn a_catalog_stream_pads_and_then_answers_503_in_fail_mode() {
     let id = CatalogId::new(Slug::new("hello").unwrap(), EntityKind::Track, HELLO_TRACK).unwrap();
     let path = format!("/rest/stream?id={id}&apiKey={}", fixture.api_key);
 
-    // The default mode is `pad`: the client hears the pending stream's codec at
-    // once, while the acquisition runs in the background.
-    let mut response = fixture.get(&path).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok()),
-        Some("audio/mpeg")
-    );
-    assert_eq!(
-        response
-            .headers()
-            .get(ACCEPT_RANGES)
-            .and_then(|value| value.to_str().ok()),
-        Some("none")
-    );
-    let first = tokio::time::timeout(Duration::from_secs(1), response.chunk())
-        .await
-        .expect("the first bytes arrive before a client gives up")
-        .unwrap()
-        .expect("the pending stream has data");
-    assert!(!first.is_empty());
-    drop(response);
+    // The wait bounds are shortened so the held request ends as a `503` instead
+    // of holding for the documented default.
+    for (key, value) in [
+        (keys::STREAM_HOLD_TIMEOUT_SECS.name(), 1),
+        (keys::STREAM_PENDING_MAX_WAIT_SECS.name(), 2),
+    ] {
+        services
+            .settings()
+            .set(key, SettingValue::Integer(value), None)
+            .await
+            .unwrap();
+    }
 
-    // `fail` answers at once with a retry hint, while the same acquisition keeps
-    // running in the background.
+    // The default mode is `hold`: nothing is sent while the acquisition runs, so
+    // no response arrives within the window the test watches.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), fixture.get(&path))
+            .await
+            .is_err(),
+        "hold answered the request before the acquisition produced a file"
+    );
+
+    // The held request gives up with a retry hint once its wait elapses, while
+    // the acquisition keeps running in the background.
+    let response = fixture.get(&path).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("10")
+    );
+
+    // `fail` answers at once with the same hint.
     services
         .settings()
         .set(

@@ -42,10 +42,10 @@ use tokio::sync::mpsc;
 use crate::error::MediaError;
 use crate::ffmpeg::FfmpegRunner;
 
-/// The encoded byte stream a transcode or a pending bus produces.
+/// The encoded byte stream a transcode produces.
 ///
-/// The stream is boxed so that the raw transcode and the pending PCM bus, which
-/// are built differently, can be handed to the same HTTP body type.
+/// The stream is boxed so a caller can hold it in a field and hand it to the
+/// HTTP body type without naming the concrete type the ffmpeg pump builds.
 pub type AudioStream = Pin<Box<dyn Stream<Item = Result<Bytes, MediaError>> + Send>>;
 
 /// How many encoded chunks may wait for a slow client before ffmpeg is held

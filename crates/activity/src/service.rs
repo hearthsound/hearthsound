@@ -3,8 +3,8 @@
 //! A client reports playback with `scrobble`. When the call carries
 //! `submission=true` it claims the song was played, and the server records a
 //! play for it - unless the latest stream session for the same user and track
-//! reported that it delivered no song audio, which is what a client fed only
-//! silence padding while an acquisition failed would otherwise turn into a
+//! reported that it delivered no song audio, which is what a client that gave
+//! up before a pending acquisition produced a file would otherwise turn into a
 //! false play. When the call carries `submission=false` it is a now-playing
 //! report, which is accepted and discarded because now-playing is not stored.
 

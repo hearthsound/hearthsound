@@ -69,7 +69,7 @@ impl SettingValue {
     /// assert_eq!(SettingValue::parse_env("true"), SettingValue::Bool(true));
     /// assert_eq!(SettingValue::parse_env("320"), SettingValue::Integer(320));
     /// assert_eq!(SettingValue::parse_env("0.8"), SettingValue::Float(0.8));
-    /// assert_eq!(SettingValue::parse_env("pad"), SettingValue::String("pad".to_owned()));
+    /// assert_eq!(SettingValue::parse_env("library"), SettingValue::String("library".to_owned()));
     /// assert_eq!(SettingValue::parse_env("nan"), SettingValue::String("nan".to_owned()));
     /// ```
     pub fn parse_env(raw: &str) -> SettingValue {
@@ -469,21 +469,12 @@ pub mod keys {
     /// Cap on concurrent ffmpeg transcode processes.
     pub const STREAM_MAX_CONCURRENT_TRANSCODES: SettingKey<i64> =
         SettingKey::new("stream.max_concurrent_transcodes");
-    /// Behavior of a stream for a track that is still being acquired: `pad`,
-    /// `hold`, or `fail`.
+    /// Behavior of a stream for a track that is still being acquired: `hold` or
+    /// `fail`.
     pub const STREAM_PENDING_MODE: SettingKey<String> = SettingKey::new("stream.pending.mode");
-    /// Transcode format used for a pending stream: `mp3`, `opus`, or `aac`.
-    pub const STREAM_PENDING_FORMAT: SettingKey<String> = SettingKey::new("stream.pending.format");
-    /// Bitrate in kbit/s for the pending transcode.
-    pub const STREAM_PENDING_BITRATE_KBPS: SettingKey<i64> =
-        SettingKey::new("stream.pending.bitrate_kbps");
     /// Seconds a pending stream is held before it ends without a file.
     pub const STREAM_PENDING_MAX_WAIT_SECS: SettingKey<i64> =
         SettingKey::new("stream.pending.max_wait_secs");
-    /// Seconds a pending `format=raw` stream waits for the file before it pads
-    /// with silence under `pad` mode.
-    pub const STREAM_PENDING_RAW_HOLD_SECS: SettingKey<i64> =
-        SettingKey::new("stream.pending.raw_hold_secs");
     /// Seconds a hold-mode stream waits before it serves normally.
     pub const STREAM_HOLD_TIMEOUT_SECS: SettingKey<i64> =
         SettingKey::new("stream.hold.timeout_secs");
@@ -566,10 +557,7 @@ const EVICTION_ORDERS: &[&str] = &["lru", "lfu", "fifo"];
 const UNPIN_ACTIONS: &[&str] = &["demote", "delete"];
 
 /// The behaviors of a stream for a track that is still being acquired.
-const PENDING_MODES: &[&str] = &["pad", "hold", "fail"];
-
-/// The transcode formats an operator can select for pending streams.
-const TRANSCODE_FORMATS: &[&str] = &["mp3", "opus", "aac"];
+const PENDING_MODES: &[&str] = &["hold", "fail"];
 
 /// The browse scopes a user can select.
 const BROWSE_SCOPES: &[&str] = &["library", "server"];
@@ -835,34 +823,14 @@ impl SettingsRegistry {
                     SettingKind::String {
                         allowed: PENDING_MODES,
                     },
-                    SettingValue::String("pad".to_owned()),
+                    SettingValue::String("hold".to_owned()),
                     "Behavior of a stream for a track that is still being acquired",
-                ),
-                def(
-                    keys::STREAM_PENDING_FORMAT,
-                    SettingKind::String {
-                        allowed: TRANSCODE_FORMATS,
-                    },
-                    SettingValue::String("mp3".to_owned()),
-                    "Transcode format used for a pending stream",
-                ),
-                def(
-                    keys::STREAM_PENDING_BITRATE_KBPS,
-                    SettingKind::Integer { min: 32, max: 512 },
-                    SettingValue::Integer(320),
-                    "Bitrate in kbit/s for the pending transcode",
                 ),
                 def(
                     keys::STREAM_PENDING_MAX_WAIT_SECS,
                     SettingKind::Integer { min: 1, max: 3_600 },
                     SettingValue::Integer(180),
                     "Seconds a pending stream is held before it ends without a file",
-                ),
-                def(
-                    keys::STREAM_PENDING_RAW_HOLD_SECS,
-                    SettingKind::Integer { min: 0, max: 3_600 },
-                    SettingValue::Integer(10),
-                    "Seconds a raw pending stream waits for the file before it pads",
                 ),
                 def(
                     keys::STREAM_HOLD_TIMEOUT_SECS,
@@ -1169,7 +1137,7 @@ impl SettingsStore {
     /// let sources = SettingSources::default();
     /// let store = SettingsStore::resolve(&registry, &sources).unwrap();
     /// assert_eq!(store.get(keys::PLUGINS_MAX_MEMORY_MB).unwrap(), 1024);
-    /// assert_eq!(store.get(keys::STREAM_PENDING_MODE).unwrap(), "pad");
+    /// assert_eq!(store.get(keys::STREAM_PENDING_MODE).unwrap(), "hold");
     /// assert_eq!(store.get(keys::ACQUISITION_MIN_MATCH_SCORE).unwrap(), 0.80);
     /// ```
     pub fn resolve(
@@ -1284,7 +1252,7 @@ impl SettingsStore {
     /// let store = SettingsStore::resolve(&SettingsRegistry::builtin(), &SettingSources::default()).unwrap();
     /// assert_eq!(
     ///     store.value(keys::STREAM_PENDING_MODE.name()),
-    ///     Some(&SettingValue::String("pad".to_owned()))
+    ///     Some(&SettingValue::String("hold".to_owned()))
     /// );
     /// ```
     pub fn value(&self, key: &str) -> Option<&SettingValue> {

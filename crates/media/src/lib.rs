@@ -33,17 +33,12 @@
 //! ```
 #![forbid(unsafe_code)]
 
-pub mod bus;
 mod error;
 pub mod ffmpeg;
 pub mod probe;
 pub mod tags;
 pub mod transcode;
 
-pub use bus::{
-    PCM_BYTES_PER_SECOND, PCM_CHANNELS, PCM_SAMPLE_RATE, PendingControl, PendingRequest,
-    PendingStream, SILENCE_BURST,
-};
 pub use error::MediaError;
 pub use ffmpeg::{FfmpegProcess, FfmpegRunner};
 pub use probe::{

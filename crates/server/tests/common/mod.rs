@@ -109,11 +109,6 @@ impl Fixture {
         &self.services.config().database.path
     }
 
-    /// Returns the directory holding the data tree and the config file.
-    pub fn directory(&self) -> &Path {
-        self._dir.path()
-    }
-
     /// Stops the server and hands the data directory back.
     ///
     /// This is what a restart looks like to a test: the data tree, the config

@@ -50,12 +50,6 @@ pub enum MediaError {
         /// What the reader reported.
         message: String,
     },
-    /// A pending stream ended before a command reached it.
-    #[error("the pending stream ended before it could {action}")]
-    PendingEnded {
-        /// What the caller tried to do, for example `switch to a file`.
-        action: &'static str,
-    },
     /// An ffmpeg process could not be started or exited with a failure.
     #[error("{program} {args} failed: {message}")]
     Process {

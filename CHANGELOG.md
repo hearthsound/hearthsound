@@ -131,13 +131,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flushing so the first bytes arrive immediately, an encoded-length estimate for
   `estimateContentLength`, a bounded queue so a stalled client cannot grow a
   buffer, and a failure reported on the stream rather than as a truncated body.
-- The pending PCM bus: one encoder that reads s16le 44100 Hz stereo PCM and
-  produces the requested format, fed by a two second silence burst, then silence
-  paced at the bus rate, then a decoder that pipes the finished file into the
-  same encoder with no gap. The stream ends when the song ends, one second after
-  a reported failure, or when the wait elapses; it reports whether any file
-  audio was delivered, and dropping it kills both processes and releases their
-  permits.
 - The `host-http` import: outbound requests through an instance's approved host
   allowlist with literal, wildcard and `$config:` entries, a public-address
   policy enforced on the addresses the connection uses, request timeouts
@@ -165,9 +158,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scrobble entry point that discards a now-playing report and records a
   submission unless the latest stream session for that user and track delivered
   no song audio. A bounded in-memory stream-session registry keeps the latest
-  session per user and track, taking its answer either from a flag a raw file
-  stream sets as it writes bytes or from a probe such as the pending PCM bus's
-  audio-delivered handle.
+  session per user and track, taking its answer either from a flag a served
+  stream sets as it writes bytes or from a probe.
 - `bundled-plugins.lock`, pinning the released first-party plugin archives, and
   the `xtask fetch-plugins` command that downloads each pinned archive and
   verifies its SHA-256 before writing it.
@@ -511,14 +503,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The pending-stream path of `/rest/stream`: a request for a track the server
   has not stored resolves an `x_` catalog id through the catalog layer, checks
   the requester's acquire permission, and asks the acquisition layer for the
-  track at priority `play`. `stream.pending.mode` then decides the answer: `pad`
-  starts a pending PCM stream in the requested (or configured) format and feeds
-  silence until a task watching the acquisition switches in the imported file,
-  ending one second after a failure; `hold` sends nothing until the file is
-  ready, answers `404` when the acquisition fails, and answers `503` with
-  `Retry-After` when `stream.pending.max_wait_secs` elapses first; `fail`
-  answers `503` with `Retry-After` at once while the acquisition continues. A
-  `format=raw` request under `pad` behaves as `hold`, and a cooling-down or
+  track at priority `play`. `stream.pending.mode` then decides the answer: `hold`
+  (the default) sends nothing until the file is ready, answers `404` when the
+  acquisition fails, and answers `503` with `Retry-After` when
+  `stream.pending.max_wait_secs` elapses first; `fail` answers `503` with
+  `Retry-After` at once while the acquisition continues. A cooling-down or
   denied track is answered `404` or `403` without starting anything.
 - The acquisition orchestrator in the composition root: `Services::build` builds
   it over the catalog layer, the provider registry, the ffmpeg runner, the event
@@ -639,19 +628,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which start the real server over a temporary data directory and drive it over
   HTTP with the album catalog and acquisition fixtures: `search3` answers the
   requester's own library first and the catalog after it; a stream of an
-  unmaterialized catalog id answers `200 audio/mpeg` whose first bytes arrive
-  within a second, plays silence until the acquisition finishes, and then plays
-  the imported file, which lands in the cache under the template's name with the
-  track's own tags and leaves the `move` import root empty; a replay of that id
-  serves the stored file and answers a `Range` request with `206`; a track no
-  backend can find ends its stream and cools down, and a replay inside the
-  cooldown answers `404` without starting a second acquisition; `stream.pending.mode`
-  switches between `hold`, which serves the whole file once it is ready, and
-  `fail`, which answers `503` with `Retry-After`; and a server stopped in the
-  middle of a download resumes it in a new process on the same data directory,
-  imports the file and empties the import root. The shared fixture grows the
-  helpers a restart needs: the data directory it runs over, a stop that hands
-  that directory back, and a reopen that builds a new process over it.
+  unmaterialized catalog id sends nothing while the acquisition runs and then
+  serves the imported file as any stored file is served, which lands in the cache
+  under the template's name with the track's own tags and leaves the `move`
+  import root empty; a replay of that id serves the stored file and answers a
+  `Range` request with `206`; a track no backend can find ends its stream with
+  `404` and cools down, and a replay inside the cooldown answers `404` without
+  starting a second acquisition; `stream.pending.mode`
+  switches between `hold`, the default, and `fail`, which answers `503` with
+  `Retry-After`; and a server stopped in the middle of a download resumes it in a
+  new process on the same data directory, imports the file and empties the import
+  root. The shared fixture grows the helpers a restart needs: the data directory
+  it runs over, a stop that hands that directory back, and a reopen that builds a
+  new process over it.
 - README instructions for running the server: the build prerequisites (`ffmpeg`
   and `ffprobe` on `PATH`, the pinned Rust toolchain, `wasm32-wasip2` only for
   the test fixtures, `cargo xtask fetch-plugins` for the bundled archives), a
@@ -661,8 +650,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configuration and the slskd import root in `move` mode, the catalog, metadata
   and acquisition layer assignments, and `serve`; the `dev/compose.yml` stack
   with the `dev/.env` keys it reads and the provider command the container needs;
-  which credential a client uses; and what the three `stream.pending.mode` values
-  (`pad`, `hold`, `fail`) do to a stream of a song the server does not have yet.
+  which credential a client uses; and what the two `stream.pending.mode` values
+  (`hold`, the default, and `fail`) do to a stream of a song the server does not
+  have yet.
 - Verification with `ffmpeg` for the files `symphonia` cannot read now fails
   when the decode reports an error, so a truncated WavPack or Opus file is
   rejected instead of accepted.
@@ -674,16 +664,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stopping at the first one.
 - The Subsonic login rate limit counts only failed logins, so a client that
   authenticates every request with a username and app password is no longer
-  locked out after ten requests a minute. A username or address that has spent
+  lock out after ten requests a minute. A username or address that has spent
   its budget is refused before its secret is checked.
 - `server.cors_origins` now takes effect: the listed origins, or every origin
   for `*`, may read any response, which browser-engine clients such as the
   Feishin desktop app need. The development stack allows every origin.
-- A `format=raw` stream of a song that is still being acquired waits up to
-  `stream.pending.raw_hold_secs` (default 10) for the file and then pads with
-  silence, instead of holding until the file arrives. GStreamer clients such
-  as Rufin give up on a response that sends nothing for 15 seconds, so slower
-  acquisitions never played.
 
 ### Security
 

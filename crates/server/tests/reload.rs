@@ -43,7 +43,7 @@ async fn a_setting_written_by_another_connection_is_picked_up() {
             .current()
             .get(keys::STREAM_PENDING_MODE)
             .unwrap(),
-        "pad"
+        "hold"
     );
 
     let other = Arc::new(Database::open(fixture.database_path()).await.unwrap());
@@ -58,7 +58,7 @@ async fn a_setting_written_by_another_connection_is_picked_up() {
     settings
         .set(
             keys::STREAM_PENDING_MODE.name(),
-            SettingValue::String("hold".to_owned()),
+            SettingValue::String("fail".to_owned()),
             None,
         )
         .await
@@ -80,7 +80,7 @@ async fn a_setting_written_by_another_connection_is_picked_up() {
             .current()
             .get(keys::STREAM_PENDING_MODE)
             .unwrap();
-        if mode == "hold" && fixture.services.ffmpeg().max_concurrent() == 3 {
+        if mode == "fail" && fixture.services.ffmpeg().max_concurrent() == 3 {
             break;
         }
         assert!(

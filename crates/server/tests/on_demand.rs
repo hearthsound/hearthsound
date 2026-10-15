@@ -26,7 +26,7 @@ use hearthsound_core::{
     AcquisitionState, Availability, CatalogId, EntityId, EntityKind, Layer, Slug,
 };
 use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, Origin, TrackInput};
-use hearthsound_media::{Container, probe, verify_decodes};
+use hearthsound_media::{Container, probe};
 use hearthsound_plugin_host::{InstanceSpec, PluginRepository, PluginSource};
 use hearthsound_server::Services;
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
@@ -299,10 +299,10 @@ fn stream_path(fixture: &Fixture, id: &str) -> String {
 
 /// Plays one catalog id and returns the bytes the client received.
 ///
-/// The answer is a pending stream, so it is `200 audio/mpeg` that carries no
-/// ranges, and its first bytes arrive within a second - the property that makes
-/// a player start instead of giving up - before the acquisition finishes and the
-/// stream plays the file.
+/// The answer is the held pending stream: nothing is sent while the acquisition
+/// runs, and once it has imported the file the response is the stored file
+/// itself - `200 audio/flac` with a length and byte ranges. Nothing is written
+/// before then, so the body is exactly the file.
 ///
 /// # Parameters
 ///
@@ -311,29 +311,21 @@ fn stream_path(fixture: &Fixture, id: &str) -> String {
 ///
 /// # Returns
 ///
-/// The whole body, which is the silence the pending stream played and the song
-/// it switched to.
+/// The whole body, which is the imported file.
 async fn play_stream(fixture: &Fixture, id: &str) -> Vec<u8> {
-    let mut response = fixture.get(&stream_path(fixture, id)).await;
+    let response = fixture.get(&stream_path(fixture, id)).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         header(&response, CONTENT_TYPE),
-        Some("audio/mpeg"),
-        "a pending stream is answered as the pending format"
+        Some("audio/flac"),
+        "a held stream is served as the stored file is"
     );
     assert_eq!(
         header(&response, ACCEPT_RANGES),
-        Some("none"),
-        "a pending stream cannot be seeked"
+        Some("bytes"),
+        "a held stream can be seeked once its file exists"
     );
-    let first = tokio::time::timeout(Duration::from_secs(1), response.chunk())
-        .await
-        .expect("the first bytes arrive within a second")
-        .unwrap()
-        .expect("the pending stream has bytes");
-    let mut body = first.to_vec();
-    body.extend_from_slice(&read_body(response, Duration::from_secs(120)).await);
-    body
+    read_body(response, Duration::from_secs(120)).await
 }
 
 /// Reads a response body to its end.
@@ -341,8 +333,7 @@ async fn play_stream(fixture: &Fixture, id: &str) -> Vec<u8> {
 /// # Parameters
 ///
 /// - `response`: the response to drain.
-/// - `deadline`: how long one chunk may take; the pending stream paces its
-///   silence in real time, so a chunk arrives every hundred milliseconds.
+/// - `deadline`: how long one chunk may take.
 ///
 /// # Returns
 ///
@@ -566,9 +557,9 @@ async fn search3_lists_local_results_before_catalog_results() {
     );
 }
 
-/// A catalog stream pads with silence, then plays the imported file.
+/// A catalog stream is held and then serves the imported file.
 #[tokio::test]
-async fn a_catalog_stream_pads_then_plays_the_imported_file() {
+async fn a_catalog_stream_serves_the_imported_file() {
     let fixture = Fixture::new().await;
     let services = Arc::clone(&fixture.services);
     let downloads = downloads_dir(&fixture);
@@ -583,24 +574,18 @@ async fn a_catalog_stream_pads_then_plays_the_imported_file() {
 
     let body = play_stream(&fixture, &id).await;
 
-    // The whole body is one decodable MPEG stream: the silence the pending
-    // stream played while the acquisition ran, then the song.
-    let path = fixture.directory().join("pending.mp3");
-    std::fs::write(&path, &body).unwrap();
-    let report = verify_decodes(&path, services.ffmpeg()).await.unwrap();
-    let duration = report
-        .duration_ms
-        .expect("the decoder counted the frames of the body");
-    assert!(
-        (TRACK_MS..TRACK_MS + 60_000).contains(&duration),
-        "the body plays the song after its silence, not {duration} ms of it"
+    // The body is the imported file byte for byte: the held stream sent nothing
+    // before the file existed and then served it as any stored file is served.
+    let imported = services.config().paths.cache.join(FIRST_REL_PATH);
+    assert_eq!(
+        body,
+        std::fs::read(&imported).unwrap(),
+        "the held stream carried the whole imported file"
     );
-    assert_eq!(probe(&path).await.unwrap().container, Container::Mpeg);
 
     // The file landed in the cache under the name the template renders, tagged
     // with the track's own metadata rather than with the tags the backend's file
     // carried, and the import root no longer holds it.
-    let imported = services.config().paths.cache.join(FIRST_REL_PATH);
     let probed = probe(&imported).await.unwrap();
     assert_eq!(probed.container, Container::Flac);
     assert!(probed.lossless);
@@ -687,10 +672,15 @@ async fn a_track_with_no_sources_ends_its_stream_and_cools_down() {
     services.registry().rebuild().await.unwrap();
 
     let id = catalog_id(1);
-    let body = play_stream(&fixture, &id).await;
+    let response = fixture.get(&stream_path(&fixture, &id)).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "a held stream ends as 404 when its acquisition fails"
+    );
     assert!(
-        !body.is_empty(),
-        "the pending stream played silence before the acquisition failed"
+        response.bytes().await.unwrap().is_empty(),
+        "a failed acquisition sends no bytes"
     );
 
     let track = materialize(services.catalog(), 1).await;
@@ -814,14 +804,21 @@ async fn a_restart_mid_download_finishes_the_acquisition() {
             services.registry().rebuild().await.unwrap();
             place_audio(&downloads).await;
 
-            let mut response = fixture.get(&stream_path(&fixture, &catalog_id(1))).await;
-            assert_eq!(response.status(), StatusCode::OK);
-            let first = tokio::time::timeout(Duration::from_secs(1), response.chunk())
+            // `fail` answers the request at once and leaves the acquisition it
+            // started running, which is what this test needs: a download in
+            // flight while the process stops.
+            services
+                .settings()
+                .set(
+                    keys::STREAM_PENDING_MODE.name(),
+                    SettingValue::String("fail".to_owned()),
+                    None,
+                )
                 .await
-                .expect("the pending stream started")
                 .unwrap();
-            assert!(first.is_some(), "the pending stream has bytes");
-            drop(response);
+            let response = fixture.get(&stream_path(&fixture, &catalog_id(1))).await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(header(&response, RETRY_AFTER), Some("10"));
 
             let track = materialize(services.catalog(), 1).await;
             let row = wait_for_download(services.orchestrator(), track).await;

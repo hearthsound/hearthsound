@@ -156,8 +156,6 @@ pub enum Signal {
     /// Pink noise, which is less compressible than a tone and therefore gives
     /// lossy encoders something real to do.
     Noise,
-    /// Digital silence.
-    Silence,
 }
 
 impl Default for Signal {
@@ -190,7 +188,6 @@ impl Signal {
                 format!("sine=frequency={hz}:duration={seconds}:sample_rate={sample_rate}")
             }
             Signal::Noise => format!("anoisesrc=d={seconds}:c=pink:r={sample_rate}:a=0.5"),
-            Signal::Silence => format!("anullsrc=r={sample_rate}"),
         }
     }
 }
@@ -525,7 +522,7 @@ impl AudioSpec {
                 .lavfi_source(self.sample_rate, self.duration)
                 .into(),
         ];
-        if self.signal == Signal::Silence {
+        if self.signal == Signal::Noise {
             args.push("-t".into());
             args.push(format!("{:.6}", self.duration.as_secs_f64()).into());
         }

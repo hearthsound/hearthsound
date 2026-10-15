@@ -74,14 +74,13 @@ impl Default for SessionOptions {
 ///
 /// The stream service owns the answer and gives the registry a way to read it
 /// later, because the answer is only known once the stream is under way. Two
-/// forms are accepted, one per kind of stream:
+/// forms are accepted:
 ///
-/// - a raw file stream shares an [`AtomicBool`] through [`AudioDelivered::flag`]
+/// - a served stream shares an [`AtomicBool`] through [`AudioDelivered::flag`]
 ///   or [`AudioDelivered::from_flag`] and sets it as soon as bytes reach the
 ///   client;
-/// - a pending stream answers through [`AudioDelivered::probe`] with a closure
-///   over its `hearthsound_media::PendingControl`, whose `audio_delivered` is
-///   `false` while only silence padding has been played.
+/// - a caller that computes the answer another way answers through
+///   [`AudioDelivered::probe`].
 ///
 /// # Examples
 ///
@@ -191,8 +190,7 @@ impl AudioDelivered {
     ///
     /// # Returns
     ///
-    /// `true` when the stream delivered song audio; `false` while it has only
-    /// played silence padding, or before it started.
+    /// `true` when the stream delivered song audio; `false` before any did.
     pub fn delivered(&self) -> bool {
         match &self.source {
             Source::Flag(flag) => flag.load(Ordering::SeqCst),

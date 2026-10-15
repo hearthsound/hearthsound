@@ -24,7 +24,7 @@ use hearthsound_db::Database;
 use hearthsound_library::query::{AlbumSort, Scope, TrackView};
 
 use crate::auth::Call;
-use crate::catalog::{self, PendingFormat};
+use crate::catalog;
 use crate::response::{Encoded, Response, SubsonicError};
 use crate::value::{Array, Object};
 use crate::{browse, projection, scope};
@@ -113,10 +113,6 @@ pub async fn search3(call: Call) -> Encoded {
     };
 
     let settings = call.state().settings_snapshot();
-    let format = match catalog::pending_format(&settings) {
-        Ok(format) => format,
-        Err(error) => return call.encode(Response::failed(error)),
-    };
     let title_suffix = match catalog::title_suffix(&settings) {
         Ok(suffix) => suffix,
         Err(error) => return call.encode(Response::failed(error)),
@@ -132,16 +128,7 @@ pub async fn search3(call: Call) -> Encoded {
     ];
     if !text.is_empty() && catalog_enabled(&settings) {
         let hits = side.hits.clone();
-        append_catalog(
-            &call,
-            &hits,
-            &text,
-            &shortfalls,
-            &format,
-            &title_suffix,
-            &mut side,
-        )
-        .await;
+        append_catalog(&call, &hits, &text, &shortfalls, &title_suffix, &mut side).await;
     }
 
     let search_result = Object::new()
@@ -394,7 +381,6 @@ fn hit(view: &TrackView) -> LocalTrackHit {
 /// - `text`: the search text.
 /// - `shortfalls`: each kind with its window and how many local results it
 ///   already has.
-/// - `format`: the pending stream format a catalog entity is projected with.
 /// - `title_suffix`: the suffix appended to catalog titles.
 /// - `side`: the local side to append the catalog results to.
 async fn append_catalog(
@@ -402,7 +388,6 @@ async fn append_catalog(
     hits: &[LocalTrackHit],
     text: &str,
     shortfalls: &[(EntityKind, Window, usize)],
-    format: &PendingFormat,
     title_suffix: &str,
     side: &mut LocalSide,
 ) {
@@ -467,15 +452,7 @@ async fn append_catalog(
         .tracks
         .iter()
         .take(window_limit(song_window))
-        .map(|track| {
-            projection::catalog_child(
-                &track.id,
-                &track.track,
-                &format.suffix,
-                &format.content_type,
-                title_suffix,
-            )
-        })
+        .map(|track| projection::catalog_child(&track.id, &track.track, title_suffix))
         .collect();
 
     side.artists.append(&mut artists);

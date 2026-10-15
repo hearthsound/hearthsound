@@ -149,18 +149,18 @@ that value comes from; `hearthsound settings set <key> <value>` stores one, and
 
 ### Pending playback modes
 
-A stream of a song the server does not have yet answers before the download
-finishes. `stream.pending.mode` decides how:
+A stream of a song the server does not have yet is answered once the acquisition
+finishes. `stream.pending.mode` decides how the request waits:
 
 ```sh
-hearthsound settings set stream.pending.mode pad    # default: answer 200 at once and play silence until the file is ready
-hearthsound settings set stream.pending.mode hold   # send nothing until the file is ready, then serve it
+hearthsound settings set stream.pending.mode hold   # default: send nothing until the file is ready, then serve it
 hearthsound settings set stream.pending.mode fail   # answer 503 with Retry-After and keep acquiring
 ```
 
-`pad` is what a player with no buffer of its own needs; `hold` trades the wait
-for a clean start of the file; `fail` lets a client show its own retry and try
-again later.
+`hold` is what a client that can wait for a clean start of the file needs: the
+first byte it receives is the song. A client that would rather show its own
+retry, or that gives up on a long wait, is served by `fail`, which lets it try
+again later while the acquisition continues in the background.
 
 ## The development stack
 

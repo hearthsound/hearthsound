@@ -34,26 +34,14 @@
 //! the acquisition layer for it through [`PendingSource`], and answers
 //! according to `stream.pending.mode`:
 //!
-//! - `pad`, the default, starts a pending PCM stream and answers `200` at once;
-//!   it pads with silence until a task watching the acquisition's progress
-//!   switches in the imported file, and ends one second after a failure. A
-//!   `format=raw` request asks for the stored file, which silence cannot be,
-//!   so it first waits up to `stream.pending.raw_hold_secs` for the file as
-//!   `hold` does, and only pads when the file is not ready by then. The wait
-//!   stays below the 15 second read timeout of GStreamer's HTTP source, so a
-//!   client built on it neither gives up on a slow acquisition nor hears
-//!   silence before a quick one;
-//! - `hold` sends nothing until the file is ready or `stream.hold.timeout_secs`
-//!   elapses, then serves the file normally;
+//! - `hold`, the default, sends nothing until the file is ready or
+//!   `stream.hold.timeout_secs` elapses, then serves the file normally;
 //! - `fail` answers `503` with `Retry-After` at once and lets the acquisition
 //!   continue in the background.
 //!
-//! A pending stream registers a session whose audio-delivered flag the pending
-//! stream's own control handle answers, so silence padding alone is never
-//! recorded as a play. A failure only becomes a status code while the headers
-//! are still unsent: `pad` and `fail` answer before any acquisition outcome is
-//! known, while `hold` answers `404` when the acquisition fails and `503` when
-//! its wait elapses.
+//! Neither mode writes a byte before the outcome is known, so a failure, a
+//! cooldown, or an elapsed wait is still answered as a status code: `hold`
+//! answers `404` when the acquisition fails and `503` when its wait elapses.
 //!
 //! # A stream is a session
 //!
@@ -62,7 +50,8 @@
 //! time a body frame is written to the client. That flag is what lets a later
 //! `scrobble` refuse to record a play for a stream the client never heard (see
 //! `hearthsound_activity::ActivityService::scrobble`), so it is set by the body
-//! rather than when the response is built. Recording the file's last access is
+//! rather than when the response is built: a client that gave up while the file
+//! was still being acquired records no play. Recording the file's last access is
 //! a detached write: it never delays the first byte, and a failure is logged
 //! and dropped, because it is bookkeeping for the retention policy rather than
 //! part of the response.
@@ -79,7 +68,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -99,10 +88,7 @@ use hearthsound_core::{ClientId, EntityId, IdPrefix, Priority};
 use hearthsound_db::Database;
 use hearthsound_library::query::{self, PreferredFile};
 use hearthsound_library::{LibraryError, MediaFile, StorageRoots, tracks};
-use hearthsound_media::{
-    FfmpegRunner, PendingControl, PendingRequest, TranscodeFormat, TranscodeRequest,
-    estimate_content_length,
-};
+use hearthsound_media::{FfmpegRunner, TranscodeFormat, TranscodeRequest, estimate_content_length};
 use tower_http::services::ServeFile;
 use uuid::Uuid;
 
@@ -281,7 +267,7 @@ impl StreamError {
 pub struct StreamService {
     /// The open database the file lookup and the access record use.
     database: Arc<Database>,
-    /// The settings service the pending-stream mode and its tunables are read
+    /// The settings service the pending-stream mode and its wait bounds are read
     /// from, once per pending request.
     settings: Settings,
     /// The catalog layer an unmaterialized `x_` id is resolved through.
@@ -316,8 +302,9 @@ impl StreamService {
     ///
     /// - `database`: the open database, for the preferred-file lookup and the
     ///   last-access record.
-    /// - `settings`: the settings service, read for `stream.pending.*` and
-    ///   `stream.hold.*` when a request reaches a track without a file.
+    /// - `settings`: the settings service, read for `stream.pending.mode` and
+    ///   the `stream.hold`/`stream.pending` wait bounds when a request reaches a
+    ///   track without a file.
     /// - `catalog`: the catalog layer, which resolves an unmaterialized `x_` id
     ///   to the track row an acquisition is requested for.
     /// - `roots`: the managed storage roots a `library` or `cache` file
@@ -506,7 +493,6 @@ impl StreamService {
     /// when the id names no track, and when the track cannot be acquired now,
     /// and [`StreamError::Forbidden`] when the requester may not acquire.
     async fn pending(&self, request: &StreamRequest) -> Result<Response, StreamError> {
-        let arrived = Instant::now();
         let Some(source) = &self.pending else {
             tracing::debug!(
                 id = %request.id,
@@ -554,9 +540,7 @@ impl StreamService {
                 tracing::debug!(track = %track, "the acquisition layer denied a pending stream");
                 Err(StreamError::Forbidden)
             }
-            PendingOutcome::Pending(handle) => {
-                self.serve_pending(request, track, handle, arrived).await
-            }
+            PendingOutcome::Pending(handle) => self.serve_pending(request, track, handle).await,
         }
     }
 
@@ -609,54 +593,33 @@ impl StreamService {
 
     /// Answers a request whose acquisition was started or joined.
     ///
-    /// The mode comes from `stream.pending.mode`. A `format=raw` request under
-    /// `pad` is held until `stream.pending.raw_hold_secs` after it arrived:
-    /// silence is not a valid stored file, so the file is served as a stored
-    /// track would be when it arrives in time, and the stream pads only once
-    /// the wait elapses. The wait counts from the request's arrival rather than
-    /// from the acquisition's start, because resolving the track can take
-    /// seconds and the client's read timeout is already running. A failure
-    /// within the wait is answered as `hold` answers it.
+    /// The mode comes from `stream.pending.mode`: `hold`, the default, waits for
+    /// the file and serves it as a stored track would be, and `fail` answers
+    /// `503` at once while the acquisition continues in the background.
     ///
     /// # Parameters
     ///
     /// - `request`: the request being answered.
     /// - `track`: the track being acquired.
     /// - `handle`: the started or joined acquisition to watch.
-    /// - `arrived`: when the request reached the pending path.
     ///
     /// # Errors
     ///
     /// Returns the error of the mode's path: [`StreamError::Unavailable`] for a
-    /// `fail` mode answer, and whatever [`StreamService::serve_padded`] and
-    /// [`StreamService::serve_held`] return.
+    /// `fail` mode answer, and whatever [`StreamService::serve_held`] returns.
     async fn serve_pending(
         &self,
         request: &StreamRequest,
         track: EntityId,
         handle: AcquisitionHandle,
-        arrived: Instant,
     ) -> Result<Response, StreamError> {
         let settings = self.settings.current();
         let mode = PendingMode::of(&setting_or(
             &settings,
             keys::STREAM_PENDING_MODE,
-            "pad".to_owned(),
+            "hold".to_owned(),
         ));
-        if mode == PendingMode::Pad && request.format == StreamFormat::Raw {
-            let wait = raw_hold(&settings).saturating_sub(arrived.elapsed());
-            if let Ok(outcome) = tokio::time::timeout(wait, handle.clone().wait()).await {
-                return self.serve_held_outcome(request, track, outcome).await;
-            }
-            tracing::debug!(
-                track = %track,
-                waited = ?wait,
-                "a raw pending stream switched to padding"
-            );
-            return self.serve_padded(request, track, handle).await;
-        }
         match mode {
-            PendingMode::Pad => self.serve_padded(request, track, handle).await,
             PendingMode::Hold => self.serve_held(request, track, handle).await,
             PendingMode::Fail => {
                 tracing::debug!(
@@ -668,70 +631,6 @@ impl StreamService {
                 })
             }
         }
-    }
-
-    /// Serves a pending stream as silence followed by the file's own audio.
-    ///
-    /// The encoder is started at once and its output is written as it arrives,
-    /// so the client hears silence while the acquisition runs. A task watching
-    /// the acquisition's progress switches the encoder's input to the imported
-    /// file when it completes, and ends the stream one second after a failure.
-    /// The session registered for the stream answers "audio delivered" from the
-    /// pending control, so silence alone is never recorded as a play.
-    ///
-    /// # Parameters
-    ///
-    /// - `request`: the request being answered; its format, when it names a
-    ///   transcode, is the format the encoder produces, and otherwise (no
-    ///   format, or `raw`) `stream.pending.format` is.
-    /// - `track`: the track being acquired, for the stream session.
-    /// - `handle`: the acquisition to watch.
-    ///
-    /// # Errors
-    ///
-    /// Returns a server-side error when the encoder cannot be started.
-    async fn serve_padded(
-        &self,
-        request: &StreamRequest,
-        track: EntityId,
-        handle: AcquisitionHandle,
-    ) -> Result<Response, StreamError> {
-        let settings = self.settings.current();
-        let format = match request.format {
-            StreamFormat::Transcode(format) => format,
-            _ => pending_format(&settings),
-        };
-        let pending_request = PendingRequest::new(
-            format,
-            pending_bitrate(&settings),
-            pending_max_wait(&settings),
-        );
-        let pending = self
-            .ffmpeg
-            .pending_stream(&pending_request)
-            .await
-            .map_err(internal)?;
-        let (body, control) = pending.into_parts();
-
-        let flag = control.clone();
-        self.sessions.register(
-            request.user_id,
-            track.uuid(),
-            request.client.as_deref(),
-            AudioDelivered::probe(move || flag.audio_delivered()),
-        );
-
-        tokio::spawn(watch_acquisition(handle, control));
-
-        let mut response = Response::new(Body::from_stream(body));
-        *response.status_mut() = StatusCode::OK;
-        let headers = response.headers_mut();
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static(format.content_type()),
-        );
-        headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("none"));
-        Ok(response)
     }
 
     /// Waits for a pending acquisition's file and serves it.
@@ -1111,8 +1010,6 @@ const RETRY_AFTER_SECS: u64 = 10;
 /// The pending-stream mode `stream.pending.mode` selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingMode {
-    /// Pad with silence until the file is ready.
-    Pad,
     /// Send nothing until the file is ready, then serve it normally.
     Hold,
     /// Answer `503` with `Retry-After` at once.
@@ -1128,63 +1025,13 @@ impl PendingMode {
     ///
     /// # Returns
     ///
-    /// The named mode, or [`PendingMode::Pad`] for an absent or unknown literal,
-    /// which is the documented default.
+    /// The named mode, or [`PendingMode::Hold`] for an absent or unknown
+    /// literal, which is the documented default.
     fn of(value: &str) -> PendingMode {
         match value {
-            "hold" => PendingMode::Hold,
             "fail" => PendingMode::Fail,
-            _ => PendingMode::Pad,
+            _ => PendingMode::Hold,
         }
-    }
-}
-
-/// Watches a pending acquisition and steers the PCM bus with its outcome.
-///
-/// # Parameters
-///
-/// - `handle`: the acquisition to wait for.
-/// - `control`: the pending stream's control handle, whose `ready` switches the
-///   encoder to the file and whose `fail` ends the stream one second later.
-async fn watch_acquisition(handle: AcquisitionHandle, control: PendingControl) {
-    match handle.wait().await {
-        Ok(progress) if progress.succeeded() => match progress.file {
-            Some(file) => {
-                if let Err(error) = control.ready(file).await {
-                    tracing::debug!(%error, "the pending stream ended before its file was ready");
-                }
-            }
-            None => {
-                tracing::warn!(
-                    acquisition = %progress.acquisition_id,
-                    "a completed acquisition reported no file"
-                );
-                report_pending_failure(&control).await;
-            }
-        },
-        Ok(progress) => {
-            tracing::debug!(
-                acquisition = %progress.acquisition_id,
-                state = progress.state.as_str(),
-                "a pending stream's acquisition ended without a file"
-            );
-            report_pending_failure(&control).await;
-        }
-        Err(error) => {
-            tracing::debug!(%error, "a pending stream lost its acquisition");
-            report_pending_failure(&control).await;
-        }
-    }
-}
-
-/// Ends a pending stream one second after its acquisition failed.
-///
-/// # Parameters
-///
-/// - `control`: the pending stream's control handle.
-async fn report_pending_failure(control: &PendingControl) {
-    if let Err(error) = control.fail().await {
-        tracing::debug!(%error, "the pending stream ended before its failure was reported");
     }
 }
 
@@ -1219,36 +1066,6 @@ where
     }
 }
 
-/// Returns the format a pending stream encodes in when the request names none.
-///
-/// # Parameters
-///
-/// - `store`: the settings snapshot to read `stream.pending.format` from.
-///
-/// # Returns
-///
-/// The configured format, or mp3 for an unparsable value, which is the
-/// documented default.
-fn pending_format(store: &SettingsStore) -> TranscodeFormat {
-    let name = setting_or(store, keys::STREAM_PENDING_FORMAT, "mp3".to_owned());
-    name.parse::<TranscodeFormat>()
-        .unwrap_or(TranscodeFormat::Mp3)
-}
-
-/// Returns the bitrate a pending stream encodes at, in kbit/s.
-///
-/// # Parameters
-///
-/// - `store`: the settings snapshot to read `stream.pending.bitrate_kbps` from.
-///
-/// # Returns
-///
-/// The configured bitrate, or 320 for a negative one.
-fn pending_bitrate(store: &SettingsStore) -> u32 {
-    let kbps = setting_or(store, keys::STREAM_PENDING_BITRATE_KBPS, 320);
-    u32::try_from(kbps).unwrap_or(320)
-}
-
 /// Returns how long a pending stream may play before it ends without a file.
 ///
 /// # Parameters
@@ -1276,21 +1093,6 @@ fn pending_max_wait(store: &SettingsStore) -> Duration {
 fn hold_timeout(store: &SettingsStore) -> Duration {
     let secs = setting_or(store, keys::STREAM_HOLD_TIMEOUT_SECS, 60);
     Duration::from_secs(u64::try_from(secs).unwrap_or(60))
-}
-
-/// Returns how long a raw pending stream waits for the file before it pads.
-///
-/// # Parameters
-///
-/// - `store`: the settings snapshot to read `stream.pending.raw_hold_secs`
-///   from.
-///
-/// # Returns
-///
-/// The configured wait, or 10 seconds for a negative one.
-fn raw_hold(store: &SettingsStore) -> Duration {
-    let secs = setting_or(store, keys::STREAM_PENDING_RAW_HOLD_SECS, 10);
-    Duration::from_secs(u64::try_from(secs).unwrap_or(10))
 }
 
 /// Wraps an encoded stream so that its first chunk marks the stream as audibly
@@ -1341,7 +1143,7 @@ struct TranscodePlan {
 /// different format, a cap below the file's own bitrate, or an offset into the
 /// track - is transcoded. A request that names only a cap is transcoded to mp3,
 /// which is what the clients of this protocol expect of a server that caps the
-/// bitrate, and the same default the pending stream uses.
+/// bitrate.
 ///
 /// # Parameters
 ///

@@ -71,7 +71,7 @@ pub struct Fixture {
     pub state: SubsonicState,
     /// The managed storage roots the state resolves stored files against.
     pub roots: StorageRoots,
-    /// The ffmpeg runner the state transcodes and pads through.
+    /// The ffmpeg runner the state transcodes and verifies through.
     ffmpeg: Arc<FfmpegRunner>,
     /// The artwork cache directory catalog cover art is written to.
     artwork: PathBuf,
@@ -247,10 +247,10 @@ impl Fixture {
         &self.roots
     }
 
-    /// Returns the ffmpeg runner the state transcodes and pads through.
+    /// Returns the ffmpeg runner the state transcodes and verifies through.
     ///
     /// A test reads its in-flight count to assert that a request started (or
-    /// did not start) an encoder.
+    /// did not start) an ffmpeg process.
     pub fn ffmpeg(&self) -> &Arc<FfmpegRunner> {
         &self.ffmpeg
     }

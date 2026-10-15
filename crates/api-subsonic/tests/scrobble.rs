@@ -129,7 +129,7 @@ async fn scrobble_honors_the_no_song_audio_guard() {
     let app = fixture.app();
     let track = seeded.alpha_tracks[0];
 
-    // The stream that the client heard delivered only silence padding.
+    // The stream the client heard never delivered song audio.
     fixture.state.activity().sessions().register(
         fixture.user_id.uuid(),
         track.uuid(),
@@ -154,7 +154,7 @@ async fn scrobble_honors_the_no_song_audio_guard() {
         .play_count(fixture.user_id.uuid(), track.uuid())
         .await
         .unwrap();
-    assert_eq!(plays, 0, "a play needs song audio, not silence padding");
+    assert_eq!(plays, 0, "a play needs song audio");
 }
 
 #[tokio::test]

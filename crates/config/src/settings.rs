@@ -508,7 +508,7 @@ mod tests {
 
         assert_eq!(
             settings.current().get(keys::STREAM_PENDING_MODE).unwrap(),
-            "pad"
+            "hold"
         );
         assert_eq!(
             settings.current().source(keys::STREAM_PENDING_MODE.name()),
@@ -518,14 +518,14 @@ mod tests {
         settings
             .set(
                 keys::STREAM_PENDING_MODE.name(),
-                SettingValue::String("hold".to_owned()),
+                SettingValue::String("fail".to_owned()),
                 None,
             )
             .await
             .unwrap();
         assert_eq!(
             settings.current().get(keys::STREAM_PENDING_MODE).unwrap(),
-            "hold"
+            "fail"
         );
         assert_eq!(
             settings.current().source(keys::STREAM_PENDING_MODE.name()),
@@ -538,7 +538,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             settings.current().get(keys::STREAM_PENDING_MODE).unwrap(),
-            "pad"
+            "hold"
         );
         assert_eq!(
             settings.current().source(keys::STREAM_PENDING_MODE.name()),
@@ -662,16 +662,16 @@ mod tests {
 
         let error = settings
             .set(
-                keys::STREAM_PENDING_BITRATE_KBPS.name(),
-                SettingValue::Integer(8),
+                keys::STREAM_PENDING_MAX_WAIT_SECS.name(),
+                SettingValue::Integer(0),
                 None,
             )
             .await
             .unwrap_err();
         match error {
             SettingsError::Invalid(ConfigError::InvalidValue { key, reason, .. }) => {
-                assert_eq!(key, "stream.pending.bitrate_kbps");
-                assert_eq!(reason, "must be between 32 and 512");
+                assert_eq!(key, "stream.pending.max_wait_secs");
+                assert_eq!(reason, "must be between 1 and 3600");
             }
             other => panic!("unexpected error: {other}"),
         }
@@ -689,9 +689,9 @@ mod tests {
         assert_eq!(
             settings
                 .current()
-                .get(keys::STREAM_PENDING_BITRATE_KBPS)
+                .get(keys::STREAM_PENDING_MAX_WAIT_SECS)
                 .unwrap(),
-            320
+            180
         );
     }
 
@@ -704,7 +704,7 @@ mod tests {
         settings
             .set(
                 keys::STREAM_PENDING_MODE.name(),
-                SettingValue::String("hold".to_owned()),
+                SettingValue::String("fail".to_owned()),
                 None,
             )
             .await
@@ -712,14 +712,14 @@ mod tests {
         changes.changed().await.unwrap();
         assert_eq!(
             changes.borrow().get(keys::STREAM_PENDING_MODE).unwrap(),
-            "hold"
+            "fail"
         );
 
         // Writing the same value from the same layer leaves the snapshot alone.
         settings
             .set(
                 keys::STREAM_PENDING_MODE.name(),
-                SettingValue::String("hold".to_owned()),
+                SettingValue::String("fail".to_owned()),
                 None,
             )
             .await
@@ -733,7 +733,7 @@ mod tests {
         changes.changed().await.unwrap();
         assert_eq!(
             changes.borrow().get(keys::STREAM_PENDING_MODE).unwrap(),
-            "pad"
+            "hold"
         );
     }
 
@@ -851,7 +851,7 @@ mod tests {
         let settings = settings(pool).await;
         assert_eq!(
             settings.current().get(keys::STREAM_PENDING_MODE).unwrap(),
-            "pad"
+            "hold"
         );
     }
 
@@ -878,7 +878,7 @@ mod tests {
             }) => {
                 assert_eq!(key, "stream.pending.mode");
                 assert_eq!(origin, SettingSource::Database);
-                assert_eq!(reason, "must be one of: pad, hold, fail");
+                assert_eq!(reason, "must be one of: hold, fail");
             }
             other => panic!("unexpected error: {other}"),
         }
@@ -899,7 +899,7 @@ mod tests {
             .find(|entry| entry.key == keys::STREAM_PENDING_MODE.name())
             .unwrap();
         assert_eq!(pinned.value, SettingValue::String("fail".to_owned()));
-        assert_eq!(pinned.default, SettingValue::String("pad".to_owned()));
+        assert_eq!(pinned.default, SettingValue::String("hold".to_owned()));
         assert_eq!(pinned.source, SettingSource::File);
         assert!(pinned.pinned);
         assert!(!pinned.user_overridable);
