@@ -669,3 +669,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verification now hands a file to `ffmpeg` when the `symphonia` probe latches
   onto a container marker that runs out of stream, so a WavPack file whose audio
   data happens to contain such a marker is no longer rejected.
+- The library scan skips hidden files and directories, such as the `._` metadata
+  files macOS writes, and reports files it cannot read as audio instead of
+  stopping at the first one.

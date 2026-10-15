@@ -129,10 +129,11 @@ fn folder_name(folders: &[LibraryFolder], id: uuid::Uuid) -> String {
 /// - `folder`: the folder's name and path as configured.
 fn print_report(report: &ScanReport, folder: String) {
     println!(
-        "{folder}: {} seen, {} indexed, {} skipped, {} removed, {} tracks removed",
+        "{folder}: {} seen, {} indexed, {} skipped, {} unreadable, {} removed, {} tracks removed",
         report.files_seen,
         report.files_indexed,
         report.files_skipped,
+        report.files_failed,
         report.files_removed,
         report.tracks_removed,
     );

@@ -138,6 +138,45 @@ async fn scan_indexes_every_audio_file_and_skips_unchanged_ones() {
 }
 
 #[tokio::test]
+async fn hidden_metadata_files_are_ignored_and_unreadable_files_do_not_stop_the_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let album = dir.path().join("music").join("Album");
+    std::fs::create_dir_all(album.join(".AppleDouble")).unwrap();
+
+    write_song(&album, "02 - Your Imagination", "Band", "Album").await;
+    // macOS AppleDouble companions carry the audio extension but hold metadata.
+    let apple_double = b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X        ";
+    std::fs::write(album.join("._02 - Your Imagination.flac"), apple_double).unwrap();
+    std::fs::write(album.join(".AppleDouble").join("song.flac"), apple_double).unwrap();
+    // A visible file whose content is not audio is reported, not fatal.
+    std::fs::write(album.join("03 - Broken.flac"), b"this is not a flac file").unwrap();
+
+    let scanner = LibraryScanner::new(&db, Arc::new(EventBus::new()));
+    let folder = library
+        .add_library_folder(&dir.path().join("music"), None)
+        .await
+        .unwrap();
+
+    let report = scanner.scan_folder(folder.id).await.unwrap();
+    assert_eq!(report.files_seen, 2, "hidden entries are not walked");
+    assert_eq!(report.files_indexed, 1);
+    assert_eq!(report.files_failed, 1);
+    assert_eq!(library.list_artists().await.unwrap().len(), 1);
+    assert!(
+        library
+            .get_library_folder(folder.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_scan_at
+            .is_some(),
+        "the scan ran to completion"
+    );
+}
+
+#[tokio::test]
 async fn a_changed_file_is_reindexed_without_duplicating_the_track() {
     let dir = tempfile::tempdir().unwrap();
     let db = migrated(dir.path()).await;

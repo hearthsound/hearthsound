@@ -106,6 +106,10 @@ pub struct ScanReport {
     pub files_indexed: u64,
     /// How many files were skipped because size and modification time matched.
     pub files_skipped: u64,
+    /// How many files could not be read as audio and were left out of the
+    /// index, for example a damaged file or one whose content does not match
+    /// its extension.
+    pub files_failed: u64,
     /// How many media files were removed because the file is gone.
     pub files_removed: u64,
     /// How many locally created tracks were removed because they lost their last
@@ -234,7 +238,10 @@ impl LibraryScanner {
     ///
     /// Returns [`LibraryError::UnknownFolder`] when no folder has that id,
     /// [`LibraryError::Scan`] when the folder cannot be walked or a file cannot
-    /// be read, and [`LibraryError::Media`] when a probe fails.
+    /// be read. A file that cannot be probed as audio does not fail the scan: it
+    /// is logged, counted in [`ScanReport::files_failed`], and left out. A file
+    /// that was indexed by an earlier scan and fails to probe now keeps its
+    /// stored row.
     pub async fn scan_folder(&self, folder_id: Uuid) -> Result<ScanReport, LibraryError> {
         let mut read = self.readers.acquire().await?;
         let folder = folders::get_library_folder(&mut read, folder_id)
@@ -264,7 +271,18 @@ impl LibraryScanner {
                 report.files_skipped += 1;
                 continue;
             }
-            let probe = hearthsound_media::probe(&file.absolute).await?;
+            let probe = match hearthsound_media::probe(&file.absolute).await {
+                Ok(probe) => probe,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %file.absolute.display(),
+                        %error,
+                        "skipped a file that could not be read as audio"
+                    );
+                    report.files_failed += 1;
+                    continue;
+                }
+            };
             pending.push(PendingFile {
                 found: file,
                 probe,
@@ -586,7 +604,8 @@ fn scanned_file(folder_id: Uuid, file: &PendingFile) -> ScannedMediaFile {
 /// Walks a folder and returns its audio files.
 ///
 /// The walk is depth-first and never follows a symbolic link, so it can never
-/// leave the folder it started in. Directories are visited in the order the
+/// leave the folder it started in. Hidden files and directories (names starting
+/// with a dot) are skipped. Directories are visited in the order the
 /// filesystem lists them; the result is sorted by relative path so a scan is
 /// reproducible.
 ///
@@ -618,7 +637,7 @@ fn walk(root: &Path) -> Result<Vec<FoundFile>, LibraryError> {
                 path: entry.path(),
                 source,
             })?;
-            if file_type.is_symlink() {
+            if file_type.is_symlink() || is_hidden(&entry.file_name()) {
                 continue;
             }
             let path = entry.path();
@@ -669,6 +688,24 @@ fn is_audio_extension(extension: &str) -> bool {
     AUDIO_EXTENSIONS
         .iter()
         .any(|known| known.eq_ignore_ascii_case(extension))
+}
+
+/// Reports whether a directory entry is hidden.
+///
+/// Hidden entries are skipped by the walk. This covers the `._<name>`
+/// AppleDouble metadata files macOS writes next to every file on a foreign
+/// filesystem, which carry an audio extension but hold no audio, as well as
+/// hidden directories such as `.Trashes` or `.AppleDouble`.
+///
+/// # Parameters
+///
+/// - `name`: the entry's file name.
+///
+/// # Returns
+///
+/// `true` when the name starts with a dot.
+fn is_hidden(name: &std::ffi::OsStr) -> bool {
+    name.as_encoded_bytes().first() == Some(&b'.')
 }
 
 /// Reads a file's modification time in unix milliseconds.
