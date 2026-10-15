@@ -1,23 +1,34 @@
 //! Login rate limiting.
 //!
 //! A Subsonic login that presents a username and a secret is limited to
-//! `auth.login_rate_limit_per_minute` attempts per minute, counted against the
-//! client's address and against the submitted username separately. Both keys are
-//! charged on every attempt, so neither a single address walking a list of
-//! usernames nor a single account attacked from many addresses can exceed the
-//! limit, and a failed attempt counts exactly like a successful one.
+//! `auth.login_rate_limit_per_minute` failed attempts per minute, counted
+//! against the client's address and against the submitted username separately.
+//! Both keys are charged on every failure, so neither a single address walking
+//! a list of usernames nor a single account attacked from many addresses can
+//! exceed the limit.
 //!
-//! The limit is enforced with `governor`'s generic cell rate algorithm over a
-//! keyed state store. The clock is a type parameter, which lets a test drive a
-//! `FakeRelativeClock` instead of waiting a minute for the bucket to refill.
+//! A successful login is not charged. Subsonic clients send their credentials
+//! with every request, so counting successes would lock out a client that
+//! merely browses quickly. Once a key has spent its budget, every attempt for
+//! it is refused before the secret is checked, including a correct one, until
+//! the budget refills; otherwise the limiter would answer a guess with success
+//! or failure and stop nothing.
+//!
+//! The budget is `governor`'s generic cell rate algorithm over a keyed state
+//! store. `governor` cannot inspect a key without charging it, so a key that
+//! spends its last cell is recorded in a block list with the instant its next
+//! cell arrives, and [`LoginRateLimiter::check`] reads that list. The clock is
+//! a type parameter, which lets a test drive a `FakeRelativeClock` instead of
+//! waiting a minute for the bucket to refill.
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use governor::clock::{Clock, DefaultClock};
-use governor::middleware::NoOpMiddleware;
+use governor::middleware::StateInformationMiddleware;
 use governor::state::keyed::DefaultKeyedStateStore;
 use governor::{Quota, RateLimiter};
 
@@ -41,16 +52,21 @@ pub enum LoginKey {
 #[error("the login rate limit was exceeded")]
 pub struct RateLimited;
 
-/// The keyed limiter type the clock and the no-op middleware resolve to.
+/// The keyed limiter type the clock resolves to.
 ///
-/// The middleware type must name the clock's own instant, which is why it cannot
-/// be left at its default.
-type Limiter<C> = RateLimiter<
-    LoginKey,
-    DefaultKeyedStateStore<LoginKey>,
-    C,
-    NoOpMiddleware<<C as Clock>::Instant>,
->;
+/// The state information middleware reports the burst capacity left after a
+/// charge, which is how a key that has just spent its budget is recognised.
+type Limiter<C> =
+    RateLimiter<LoginKey, DefaultKeyedStateStore<LoginKey>, C, StateInformationMiddleware>;
+
+/// The limiter and the keys it currently refuses, guarded together.
+struct State<C: Clock> {
+    /// The failure budget of every key.
+    limiter: Limiter<C>,
+    /// Keys that have spent their budget, with the instant the next attempt
+    /// is allowed.
+    blocked: HashMap<LoginKey, C::Instant>,
+}
 
 /// A login rate limiter keyed by address and by username.
 ///
@@ -67,16 +83,18 @@ type Limiter<C> = RateLimiter<
 /// let limiter = LoginRateLimiter::new(2);
 /// let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 /// assert!(limiter.check(ip, "echo").is_ok());
+/// limiter.record_failure(ip, "echo");
 /// assert!(limiter.check(ip, "echo").is_ok());
+/// limiter.record_failure(ip, "echo");
 /// assert!(limiter.check(ip, "echo").is_err());
 /// ```
 pub struct LoginRateLimiter<C: Clock + Clone = DefaultClock> {
-    /// The limiter itself, replaced when the rate changes.
-    limiter: Mutex<Limiter<C>>,
+    /// The limiter and its block list, replaced when the rate changes.
+    state: Mutex<State<C>>,
     /// The rate the limiter currently enforces, per minute.
     ///
     /// Atomic so [`LoginRateLimiter::per_minute`] needs no lock; it is only ever
-    /// written while the limiter lock is held.
+    /// written while the state lock is held.
     per_minute: AtomicU32,
     /// The clock every rebuilt limiter keeps using.
     clock: C,
@@ -87,8 +105,8 @@ impl LoginRateLimiter<DefaultClock> {
     ///
     /// # Parameters
     ///
-    /// - `per_minute`: the number of attempts allowed per minute. Zero is
-    ///   treated as one, because a limiter that admits nothing could never
+    /// - `per_minute`: the number of failed attempts allowed per minute. Zero
+    ///   is treated as one, because a limiter that admits nothing could never
     ///   recover.
     ///
     /// # Returns
@@ -104,8 +122,8 @@ impl<C: Clock + Clone> LoginRateLimiter<C> {
     ///
     /// # Parameters
     ///
-    /// - `per_minute`: the number of attempts allowed per minute; zero is
-    ///   treated as one.
+    /// - `per_minute`: the number of failed attempts allowed per minute; zero
+    ///   is treated as one.
     /// - `clock`: the clock the limiter reads.
     ///
     /// # Returns
@@ -113,13 +131,14 @@ impl<C: Clock + Clone> LoginRateLimiter<C> {
     /// The limiter.
     pub fn with_clock(per_minute: u32, clock: C) -> LoginRateLimiter<C> {
         LoginRateLimiter {
-            limiter: Mutex::new(build(per_minute, clock.clone())),
+            state: Mutex::new(State::new(per_minute, clock.clone())),
             per_minute: AtomicU32::new(per_minute.max(1)),
             clock,
         }
     }
 
-    /// Charges one attempt against an address and a username.
+    /// Reports whether an attempt from an address for a username may be
+    /// checked, without charging either key.
     ///
     /// # Parameters
     ///
@@ -132,37 +151,53 @@ impl<C: Clock + Clone> LoginRateLimiter<C> {
     ///
     /// # Errors
     ///
-    /// Returns [`RateLimited`] when either key has spent its budget for the
-    /// current minute.
+    /// Returns [`RateLimited`] when either key has spent its failure budget and
+    /// it has not refilled yet.
     pub fn check(&self, ip: IpAddr, username: &str) -> Result<(), RateLimited> {
-        let limiter = self.lock();
-        let address_allowed = limiter.check_key(&LoginKey::Ip(ip)).is_ok();
-        let username_allowed = limiter
-            .check_key(&LoginKey::Username(username.to_ascii_lowercase()))
-            .is_ok();
-        if address_allowed && username_allowed {
-            Ok(())
-        } else {
+        let state = self.lock();
+        let now = self.clock.now();
+        let address = LoginKey::Ip(ip);
+        let username = LoginKey::Username(username.to_ascii_lowercase());
+        if state.is_blocked(&address, now) || state.is_blocked(&username, now) {
             Err(RateLimited)
+        } else {
+            Ok(())
         }
+    }
+
+    /// Charges one failed attempt against an address and a username.
+    ///
+    /// A key whose budget this failure spends is refused by
+    /// [`LoginRateLimiter::check`] until its next attempt is due.
+    ///
+    /// # Parameters
+    ///
+    /// - `ip`: the address the request came from.
+    /// - `username`: the submitted username, counted case-insensitively.
+    pub fn record_failure(&self, ip: IpAddr, username: &str) {
+        let mut state = self.lock();
+        let now = self.clock.now();
+        state.blocked.retain(|_, until| *until > now);
+        state.charge(LoginKey::Ip(ip));
+        state.charge(LoginKey::Username(username.to_ascii_lowercase()));
     }
 
     /// Changes the rate, resetting the counters when it actually changes.
     ///
     /// # Parameters
     ///
-    /// - `per_minute`: the new number of attempts allowed per minute; zero is
-    ///   treated as one.
+    /// - `per_minute`: the new number of failed attempts allowed per minute;
+    ///   zero is treated as one.
     pub fn set_per_minute(&self, per_minute: u32) {
         let per_minute = per_minute.max(1);
         if self.per_minute.load(Ordering::Relaxed) == per_minute {
             return;
         }
-        let mut limiter = self.lock();
+        let mut state = self.lock();
         if self.per_minute.load(Ordering::Relaxed) == per_minute {
             return;
         }
-        *limiter = build(per_minute, self.clock.clone());
+        *state = State::new(per_minute, self.clock.clone());
         self.per_minute.store(per_minute, Ordering::Relaxed);
     }
 
@@ -171,32 +206,63 @@ impl<C: Clock + Clone> LoginRateLimiter<C> {
         self.per_minute.load(Ordering::Relaxed)
     }
 
-    /// Locks the limiter, recovering from a poison rather than panicking.
+    /// Locks the state, recovering from a poison rather than panicking.
     ///
     /// A panic while the lock is held would otherwise make every later login
     /// fail, so the state is taken back instead.
-    fn lock(&self) -> std::sync::MutexGuard<'_, Limiter<C>> {
-        match self.limiter.lock() {
+    fn lock(&self) -> std::sync::MutexGuard<'_, State<C>> {
+        match self.state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
     }
 }
 
-/// Builds a keyed limiter for a rate.
-///
-/// # Parameters
-///
-/// - `per_minute`: the number of attempts allowed per minute; zero is treated
-///   as one.
-/// - `clock`: the clock the limiter reads.
-///
-/// # Returns
-///
-/// The limiter.
-fn build<C: Clock + Clone>(per_minute: u32, clock: C) -> Limiter<C> {
-    let per_minute = NonZeroU32::new(per_minute.max(1)).unwrap_or(NonZeroU32::MIN);
-    RateLimiter::dashmap_with_clock(Quota::per_minute(per_minute), clock)
+impl<C: Clock> State<C> {
+    /// Builds an empty state for a rate.
+    ///
+    /// # Parameters
+    ///
+    /// - `per_minute`: the number of failed attempts allowed per minute; zero
+    ///   is treated as one.
+    /// - `clock`: the clock the limiter reads.
+    ///
+    /// # Returns
+    ///
+    /// A state in which no key is blocked.
+    fn new(per_minute: u32, clock: C) -> State<C> {
+        let per_minute = NonZeroU32::new(per_minute.max(1)).unwrap_or(NonZeroU32::MIN);
+        State {
+            limiter: RateLimiter::dashmap_with_clock(Quota::per_minute(per_minute), clock)
+                .with_middleware::<StateInformationMiddleware>(),
+            blocked: HashMap::new(),
+        }
+    }
+
+    /// Reports whether a key is refused at an instant.
+    fn is_blocked(&self, key: &LoginKey, now: C::Instant) -> bool {
+        self.blocked.get(key).is_some_and(|until| *until > now)
+    }
+
+    /// Charges one failure to a key, blocking the key when its budget is spent.
+    ///
+    /// When the charge takes the last cell, the key is checked once more: the
+    /// refusal names the instant the next cell arrives, which is how long the
+    /// key stays blocked. A refused check leaves `governor`'s state unchanged,
+    /// so that second check costs nothing. Should a cell arrive between the two
+    /// checks, the second one takes it and the key simply waits for the next.
+    fn charge(&mut self, key: LoginKey) {
+        let spent = match self.limiter.check_key(&key) {
+            Ok(snapshot) => snapshot.remaining_burst_capacity() == 0,
+            Err(_) => true,
+        };
+        if !spent {
+            return;
+        }
+        if let Err(not_until) = self.limiter.check_key(&key) {
+            self.blocked.insert(key, not_until.earliest_possible());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -209,12 +275,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn limits_an_address_after_the_budget_is_spent() {
+    fn checking_alone_never_spends_the_budget() {
+        let limiter = LoginRateLimiter::new(1);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        for _ in 0..100 {
+            assert_eq!(limiter.check(ip, "echo"), Ok(()));
+        }
+    }
+
+    #[test]
+    fn limits_an_address_after_its_failures_are_spent() {
         let limiter = LoginRateLimiter::new(2);
         let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
+        limiter.record_failure(ip, "echo");
         assert_eq!(limiter.check(ip, "echo"), Ok(()));
-        assert_eq!(limiter.check(ip, "echo"), Ok(()));
+        limiter.record_failure(ip, "echo");
         assert_eq!(limiter.check(ip, "echo"), Err(RateLimited));
     }
 
@@ -223,14 +300,17 @@ mod tests {
         let limiter = LoginRateLimiter::new(2);
         let first = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let second = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let third = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
 
-        assert_eq!(limiter.check(first, "echo"), Ok(()));
-        assert_eq!(limiter.check(first, "other"), Ok(()));
-        assert_eq!(limiter.check(second, "echo"), Ok(()));
-        // The first address has spent its two attempts.
+        limiter.record_failure(first, "echo");
+        limiter.record_failure(first, "other");
+        limiter.record_failure(second, "echo");
+        // The first address has spent its two failures.
         assert_eq!(limiter.check(first, "third"), Err(RateLimited));
-        // The username has spent its two attempts.
-        assert_eq!(limiter.check(second, "echo"), Err(RateLimited));
+        // The username has spent its two failures, whatever the address.
+        assert_eq!(limiter.check(third, "echo"), Err(RateLimited));
+        // A fresh address and username are unaffected.
+        assert_eq!(limiter.check(third, "other"), Ok(()));
     }
 
     #[test]
@@ -239,22 +319,29 @@ mod tests {
         let first = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let second = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
 
-        assert_eq!(limiter.check(first, "Echo"), Ok(()));
+        limiter.record_failure(first, "Echo");
         assert_eq!(limiter.check(second, "echo"), Err(RateLimited));
     }
 
     #[test]
-    fn a_fake_clock_advances_the_window() {
+    fn a_blocked_key_is_admitted_again_when_a_failure_refills() {
         let clock = FakeRelativeClock::default();
-        let limiter = LoginRateLimiter::with_clock(1, clock.clone());
+        let limiter = LoginRateLimiter::with_clock(2, clock.clone());
         let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
-        assert_eq!(limiter.check(ip, "echo"), Ok(()));
+        limiter.record_failure(ip, "echo");
+        limiter.record_failure(ip, "echo");
         assert_eq!(limiter.check(ip, "echo"), Err(RateLimited));
 
-        clock.advance(Duration::from_secs(60));
-
+        // At two per minute, one failure refills every 30 seconds.
+        clock.advance(Duration::from_secs(29));
+        assert_eq!(limiter.check(ip, "echo"), Err(RateLimited));
+        clock.advance(Duration::from_secs(1));
         assert_eq!(limiter.check(ip, "echo"), Ok(()));
+
+        // The refilled failure is the only one: the next one blocks again.
+        limiter.record_failure(ip, "echo");
+        assert_eq!(limiter.check(ip, "echo"), Err(RateLimited));
     }
 
     #[test]
@@ -262,7 +349,7 @@ mod tests {
         let limiter = LoginRateLimiter::new(1);
         let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
-        assert_eq!(limiter.check(ip, "echo"), Ok(()));
+        limiter.record_failure(ip, "echo");
         assert_eq!(limiter.check(ip, "echo"), Err(RateLimited));
 
         limiter.set_per_minute(2);
@@ -271,12 +358,13 @@ mod tests {
     }
 
     #[test]
-    fn zero_is_treated_as_one_attempt() {
+    fn zero_is_treated_as_one_failure() {
         let limiter = LoginRateLimiter::new(0);
         let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
         assert_eq!(limiter.per_minute(), 1);
         assert_eq!(limiter.check(ip, "echo"), Ok(()));
+        limiter.record_failure(ip, "echo");
         assert_eq!(limiter.check(ip, "echo"), Err(RateLimited));
     }
 }

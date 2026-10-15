@@ -24,9 +24,10 @@
 //! URL pointing at the app-password documentation, which is exactly the advice
 //! the client needs.
 //!
-//! Login attempts that present a username are rate limited before any credential
-//! is checked; the limit's keys and window are described in
-//! [`crate::rate_limit`].
+//! Logins that present a username are rate limited on their failures: a key
+//! that has spent its failure budget is refused before any credential is
+//! checked, and a successful login costs nothing. The limit's keys and window
+//! are described in [`crate::rate_limit`].
 
 use std::net::IpAddr;
 
@@ -448,13 +449,17 @@ impl<C: Clock + Clone> Authenticator<C> {
 
     /// Resolves `u` + `p`.
     ///
+    /// Only a rejected attempt is charged to the login rate limit; a correct
+    /// secret costs nothing, because a Subsonic client sends its credentials
+    /// with every request.
+    ///
     /// # Errors
     ///
     /// Returns [`AuthenticationError::AccountPasswordDisabled`] when no app
     /// password matches and the account password is not accepted on `/rest`,
     /// [`AuthenticationError::WrongCredentials`] when the account password is
     /// accepted and does not match, and [`AuthenticationError::TooManyAttempts`]
-    /// when the rate limit is spent.
+    /// when the address or the username has spent its failure budget.
     async fn resolve_password(
         &self,
         settings: &SettingsStore,
@@ -465,7 +470,25 @@ impl<C: Clock + Clone> Authenticator<C> {
         self.limiter
             .check(client_ip, username)
             .map_err(|_| AuthenticationError::TooManyAttempts)?;
+        let outcome = self
+            .verify_password_login(settings, username, credentials)
+            .await;
+        self.charge_rejection(client_ip, username, &outcome);
+        outcome
+    }
 
+    /// Verifies `u` + `p` against the account's app passwords and, when
+    /// allowed, its account password.
+    ///
+    /// # Errors
+    ///
+    /// As [`Authenticator::resolve_password`], without the rate limit.
+    async fn verify_password_login(
+        &self,
+        settings: &SettingsStore,
+        username: &str,
+        credentials: &SubsonicCredentials,
+    ) -> Result<Principal, ResolveError> {
         let allow_account_password = settings
             .get(keys::SUBSONIC_ALLOW_ACCOUNT_PASSWORD)
             .map_err(AuthError::from)?;
@@ -507,13 +530,17 @@ impl<C: Clock + Clone> Authenticator<C> {
 
     /// Resolves `u` + `t` + `s`.
     ///
+    /// Only a rejected attempt is charged to the login rate limit, as for
+    /// [`Authenticator::resolve_password`].
+    ///
     /// # Errors
     ///
     /// Returns [`AuthenticationError::MissingParameter`] for an absent token or
     /// a salt below [`MIN_SALT_LEN`], [`AuthenticationError::TokenAuthDisabled`]
     /// when `subsonic.token_auth` is off,
-    /// [`AuthenticationError::TooManyAttempts`] when the rate limit is spent,
-    /// and [`AuthenticationError::WrongCredentials`] when no active app password
+    /// [`AuthenticationError::TooManyAttempts`] when the address or the
+    /// username has spent its failure budget, and
+    /// [`AuthenticationError::WrongCredentials`] when no active app password
     /// hashes to the token.
     async fn resolve_token(
         &self,
@@ -546,7 +573,24 @@ impl<C: Clock + Clone> Authenticator<C> {
         self.limiter
             .check(client_ip, username)
             .map_err(|_| AuthenticationError::TooManyAttempts)?;
+        let outcome = self.verify_token(username, token, salt).await;
+        self.charge_rejection(client_ip, username, &outcome);
+        outcome
+    }
 
+    /// Verifies a token against `md5(secret + salt)` for each of the account's
+    /// active app passwords.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthenticationError::WrongCredentials`] when the token is not
+    /// hex, the account is unknown or disabled, or no app password matches.
+    async fn verify_token(
+        &self,
+        username: &str,
+        token: &str,
+        salt: &str,
+    ) -> Result<Principal, ResolveError> {
         let expected = match data_encoding::HEXLOWER_PERMISSIVE.decode(token.as_bytes()) {
             Ok(bytes) => bytes,
             Err(_) => return Err(AuthenticationError::WrongCredentials.into()),
@@ -573,6 +617,27 @@ impl<C: Clock + Clone> Authenticator<C> {
         }
 
         Err(AuthenticationError::WrongCredentials.into())
+    }
+
+    /// Charges a rejected login attempt to the rate limit.
+    ///
+    /// An internal failure is not charged, because it says nothing about the
+    /// presented secret.
+    ///
+    /// # Parameters
+    ///
+    /// - `client_ip`: the address the request came from.
+    /// - `username`: the submitted username.
+    /// - `outcome`: the result of the credential check.
+    fn charge_rejection(
+        &self,
+        client_ip: IpAddr,
+        username: &str,
+        outcome: &Result<Principal, ResolveError>,
+    ) {
+        if let Err(ResolveError::Rejected(_)) = outcome {
+            self.limiter.record_failure(client_ip, username);
+        }
     }
 
     /// Builds the rejection for a failed `u` + `p` check.
@@ -1316,6 +1381,73 @@ mod tests {
             rejection(resolve_wrong_password(&fixture, &settings).await),
             AuthenticationError::WrongCredentials,
             "the budget refills after a minute"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_logins_do_not_spend_the_budget() {
+        let fixture = Fixture::new(2).await;
+        let settings = settings(false, true);
+        let secret = fixture.app_password("Gelly").await;
+
+        for attempt in 0..20 {
+            let salt = format!("salt{attempt:04}");
+            let token = data_encoding::HEXLOWER.encode(&Md5::digest(format!("{secret}{salt}")));
+            let credentials = SubsonicCredentials {
+                username: Some("echo".to_owned()),
+                token: Some(token),
+                salt: Some(salt),
+                ..SubsonicCredentials::default()
+            };
+            assert!(
+                fixture
+                    .authenticator
+                    .resolve(&settings, Fixture::ip(), &credentials)
+                    .await
+                    .is_ok(),
+                "token login {attempt} is accepted"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_spent_budget_refuses_even_the_right_secret() {
+        let fixture = Fixture::new(2).await;
+        let settings = settings(false, true);
+        let secret = fixture.app_password("Feishin").await;
+        let password = |value: &str| SubsonicCredentials {
+            username: Some("echo".to_owned()),
+            password: Some(value.to_owned()),
+            ..SubsonicCredentials::default()
+        };
+
+        for _ in 0..2 {
+            assert!(
+                fixture
+                    .authenticator
+                    .resolve(&settings, Fixture::ip(), &password("guess"))
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            rejection(
+                fixture
+                    .authenticator
+                    .resolve(&settings, Fixture::ip(), &password(&secret))
+                    .await
+            ),
+            AuthenticationError::TooManyAttempts,
+            "a guess after the budget is spent learns nothing"
+        );
+
+        fixture.clock.advance(Duration::from_secs(30));
+        assert!(
+            fixture
+                .authenticator
+                .resolve(&settings, Fixture::ip(), &password(&secret))
+                .await
+                .is_ok()
         );
     }
 

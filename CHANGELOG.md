@@ -672,6 +672,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The library scan skips hidden files and directories, such as the `._` metadata
   files macOS writes, and reports files it cannot read as audio instead of
   stopping at the first one.
+- The Subsonic login rate limit counts only failed logins, so a client that
+  authenticates every request with a username and app password is no longer
+  locked out after ten requests a minute. A username or address that has spent
+  its budget is refused before its secret is checked.
 
 ### Security
 

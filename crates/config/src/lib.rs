@@ -540,7 +540,7 @@ pub mod keys {
 
     /// Lifetime in days of a web session cookie.
     pub const AUTH_SESSION_TTL_DAYS: SettingKey<i64> = SettingKey::new("auth.session_ttl_days");
-    /// Login attempts per minute per IP and username.
+    /// Failed login attempts per minute per IP and username.
     pub const AUTH_LOGIN_RATE_LIMIT_PER_MINUTE: SettingKey<i64> =
         SettingKey::new("auth.login_rate_limit_per_minute");
 }
@@ -998,7 +998,7 @@ impl SettingsRegistry {
                         max: 10_000,
                     },
                     SettingValue::Integer(10),
-                    "Login attempts per minute per IP and username",
+                    "Failed login attempts per minute per IP and username",
                 ),
             ],
         }
