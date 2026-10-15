@@ -696,6 +696,58 @@ async fn raw_under_pad_waits_for_the_file() {
 }
 
 #[tokio::test]
+async fn raw_under_pad_pads_once_the_raw_hold_elapses() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = fixture_file(dir.path(), "song.flac", 2.0).await;
+    let source = FakeSource::new(Script::Complete {
+        file,
+        delay: Duration::from_millis(2_500),
+    });
+    let fixture = Fixture::with_pending(source.clone()).await;
+    let track = pending_track(&fixture).await;
+    let app = fixture.app();
+    set_short_waits(&fixture, 60, 12).await;
+    fixture
+        .settings
+        .set(
+            keys::STREAM_PENDING_RAW_HOLD_SECS.name(),
+            SettingValue::Integer(1),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let started = Instant::now();
+    let response = start(
+        &app,
+        &format!(
+            "/rest/stream?id={track}&format=raw&apiKey={}",
+            fixture.api_key
+        ),
+    )
+    .await;
+    let answered = started.elapsed();
+    // Held for the raw wait, then answered before the acquisition finished,
+    // which is what keeps a client's read timeout from firing.
+    assert!(
+        (Duration::from_millis(900)..Duration::from_millis(2_400)).contains(&answered),
+        "the raw stream was answered after {answered:?}"
+    );
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(header_of(&response, header::CONTENT_TYPE), "audio/mpeg");
+    assert_eq!(header_of(&response, header::ACCEPT_RANGES), "none");
+
+    // The padding, then the two second file; a stream that only ever padded
+    // would run to its 12 second bound instead.
+    let duration = duration_of(&collect(response).await).await;
+    assert!(
+        (3.5..=7.0).contains(&duration),
+        "the padded raw stream produced {duration}s for a two second file"
+    );
+    assert_eq!(source.calls(), 1);
+}
+
+#[tokio::test]
 async fn an_available_track_without_a_file_is_404() {
     let source = FakeSource::new(Script::Available);
     let fixture = Fixture::with_pending(source).await;

@@ -480,6 +480,10 @@ pub mod keys {
     /// Seconds a pending stream is held before it ends without a file.
     pub const STREAM_PENDING_MAX_WAIT_SECS: SettingKey<i64> =
         SettingKey::new("stream.pending.max_wait_secs");
+    /// Seconds a pending `format=raw` stream waits for the file before it pads
+    /// with silence under `pad` mode.
+    pub const STREAM_PENDING_RAW_HOLD_SECS: SettingKey<i64> =
+        SettingKey::new("stream.pending.raw_hold_secs");
     /// Seconds a hold-mode stream waits before it serves normally.
     pub const STREAM_HOLD_TIMEOUT_SECS: SettingKey<i64> =
         SettingKey::new("stream.hold.timeout_secs");
@@ -853,6 +857,12 @@ impl SettingsRegistry {
                     SettingKind::Integer { min: 1, max: 3_600 },
                     SettingValue::Integer(180),
                     "Seconds a pending stream is held before it ends without a file",
+                ),
+                def(
+                    keys::STREAM_PENDING_RAW_HOLD_SECS,
+                    SettingKind::Integer { min: 0, max: 3_600 },
+                    SettingValue::Integer(10),
+                    "Seconds a raw pending stream waits for the file before it pads",
                 ),
                 def(
                     keys::STREAM_HOLD_TIMEOUT_SECS,

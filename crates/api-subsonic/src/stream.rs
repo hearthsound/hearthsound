@@ -37,8 +37,12 @@
 //! - `pad`, the default, starts a pending PCM stream and answers `200` at once;
 //!   it pads with silence until a task watching the acquisition's progress
 //!   switches in the imported file, and ends one second after a failure. A
-//!   `format=raw` request cannot carry silence as a valid file and behaves as
-//!   `hold` instead;
+//!   `format=raw` request asks for the stored file, which silence cannot be,
+//!   so it first waits up to `stream.pending.raw_hold_secs` for the file as
+//!   `hold` does, and only pads when the file is not ready by then. The wait
+//!   stays below the 15 second read timeout of GStreamer's HTTP source, so a
+//!   client built on it neither gives up on a slow acquisition nor hears
+//!   silence before a quick one;
 //! - `hold` sends nothing until the file is ready or `stream.hold.timeout_secs`
 //!   elapses, then serves the file normally;
 //! - `fail` answers `503` with `Retry-After` at once and lets the acquisition
@@ -75,7 +79,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -502,6 +506,7 @@ impl StreamService {
     /// when the id names no track, and when the track cannot be acquired now,
     /// and [`StreamError::Forbidden`] when the requester may not acquire.
     async fn pending(&self, request: &StreamRequest) -> Result<Response, StreamError> {
+        let arrived = Instant::now();
         let Some(source) = &self.pending else {
             tracing::debug!(
                 id = %request.id,
@@ -549,7 +554,9 @@ impl StreamService {
                 tracing::debug!(track = %track, "the acquisition layer denied a pending stream");
                 Err(StreamError::Forbidden)
             }
-            PendingOutcome::Pending(handle) => self.serve_pending(request, track, handle).await,
+            PendingOutcome::Pending(handle) => {
+                self.serve_pending(request, track, handle, arrived).await
+            }
         }
     }
 
@@ -602,15 +609,21 @@ impl StreamService {
 
     /// Answers a request whose acquisition was started or joined.
     ///
-    /// The mode comes from `stream.pending.mode`; a `format=raw` request under
-    /// `pad` behaves as `hold`, because silence is not a valid stored file and a
-    /// client that plays it as one would hear noise.
+    /// The mode comes from `stream.pending.mode`. A `format=raw` request under
+    /// `pad` is held until `stream.pending.raw_hold_secs` after it arrived:
+    /// silence is not a valid stored file, so the file is served as a stored
+    /// track would be when it arrives in time, and the stream pads only once
+    /// the wait elapses. The wait counts from the request's arrival rather than
+    /// from the acquisition's start, because resolving the track can take
+    /// seconds and the client's read timeout is already running. A failure
+    /// within the wait is answered as `hold` answers it.
     ///
     /// # Parameters
     ///
     /// - `request`: the request being answered.
     /// - `track`: the track being acquired.
     /// - `handle`: the started or joined acquisition to watch.
+    /// - `arrived`: when the request reached the pending path.
     ///
     /// # Errors
     ///
@@ -622,6 +635,7 @@ impl StreamService {
         request: &StreamRequest,
         track: EntityId,
         handle: AcquisitionHandle,
+        arrived: Instant,
     ) -> Result<Response, StreamError> {
         let settings = self.settings.current();
         let mode = PendingMode::of(&setting_or(
@@ -630,7 +644,16 @@ impl StreamService {
             "pad".to_owned(),
         ));
         if mode == PendingMode::Pad && request.format == StreamFormat::Raw {
-            return self.serve_held(request, track, handle).await;
+            let wait = raw_hold(&settings).saturating_sub(arrived.elapsed());
+            if let Ok(outcome) = tokio::time::timeout(wait, handle.clone().wait()).await {
+                return self.serve_held_outcome(request, track, outcome).await;
+            }
+            tracing::debug!(
+                track = %track,
+                waited = ?wait,
+                "a raw pending stream switched to padding"
+            );
+            return self.serve_padded(request, track, handle).await;
         }
         match mode {
             PendingMode::Pad => self.serve_padded(request, track, handle).await,
@@ -658,8 +681,9 @@ impl StreamService {
     ///
     /// # Parameters
     ///
-    /// - `request`: the request being answered; its format, when it names one,
-    ///   is the format the encoder produces.
+    /// - `request`: the request being answered; its format, when it names a
+    ///   transcode, is the format the encoder produces, and otherwise (no
+    ///   format, or `raw`) `stream.pending.format` is.
     /// - `track`: the track being acquired, for the stream session.
     /// - `handle`: the acquisition to watch.
     ///
@@ -1252,6 +1276,21 @@ fn pending_max_wait(store: &SettingsStore) -> Duration {
 fn hold_timeout(store: &SettingsStore) -> Duration {
     let secs = setting_or(store, keys::STREAM_HOLD_TIMEOUT_SECS, 60);
     Duration::from_secs(u64::try_from(secs).unwrap_or(60))
+}
+
+/// Returns how long a raw pending stream waits for the file before it pads.
+///
+/// # Parameters
+///
+/// - `store`: the settings snapshot to read `stream.pending.raw_hold_secs`
+///   from.
+///
+/// # Returns
+///
+/// The configured wait, or 10 seconds for a negative one.
+fn raw_hold(store: &SettingsStore) -> Duration {
+    let secs = setting_or(store, keys::STREAM_PENDING_RAW_HOLD_SECS, 10);
+    Duration::from_secs(u64::try_from(secs).unwrap_or(10))
 }
 
 /// Wraps an encoded stream so that its first chunk marks the stream as audibly

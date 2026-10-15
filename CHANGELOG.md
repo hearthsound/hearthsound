@@ -679,6 +679,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `server.cors_origins` now takes effect: the listed origins, or every origin
   for `*`, may read any response, which browser-engine clients such as the
   Feishin desktop app need. The development stack allows every origin.
+- A `format=raw` stream of a song that is still being acquired waits up to
+  `stream.pending.raw_hold_secs` (default 10) for the file and then pads with
+  silence, instead of holding until the file arrives. GStreamer clients such
+  as Rufin give up on a response that sends nothing for 15 seconds, so slower
+  acquisitions never played.
 
 ### Security
 
