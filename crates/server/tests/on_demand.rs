@@ -442,7 +442,11 @@ where
     panic!("the condition never held");
 }
 
-/// Waits until a track has an acquisition that is downloading.
+/// Waits until a track has an acquisition that is downloading and has recorded
+/// the backend's download token.
+///
+/// The ledger moves to `downloading` before the backend's answer is written, so
+/// the token is what proves a download is in flight and can be resumed.
 ///
 /// # Parameters
 ///
@@ -451,7 +455,7 @@ where
 ///
 /// # Panics
 ///
-/// Panics when no acquisition of the track reaches `downloading`.
+/// Panics when no acquisition of the track reaches `downloading` with a token.
 async fn wait_for_download(
     orchestrator: &AcquisitionOrchestrator,
     track: EntityId,
@@ -460,7 +464,7 @@ async fn wait_for_download(
         if let Some(row) = ledger_rows(orchestrator, track)
             .await
             .into_iter()
-            .find(|row| row.state == AcquisitionState::Downloading)
+            .find(|row| row.state == AcquisitionState::Downloading && row.plugin_token.is_some())
         {
             return row;
         }
@@ -822,7 +826,6 @@ async fn a_restart_mid_download_finishes_the_acquisition() {
 
             let track = materialize(services.catalog(), 1).await;
             let row = wait_for_download(services.orchestrator(), track).await;
-            assert!(row.plugin_token.is_some(), "the download token is recorded");
 
             let api_key = fixture.api_key.clone();
             let dir = fixture.stop().await;
