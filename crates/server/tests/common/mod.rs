@@ -44,8 +44,20 @@ pub struct Fixture {
 impl Fixture {
     /// Builds a server with one account and one API key.
     pub async fn new() -> Fixture {
+        Fixture::with_config(|_| {}).await
+    }
+
+    /// Builds a server with one account and one API key over an adjusted
+    /// bootstrap configuration.
+    ///
+    /// # Parameters
+    ///
+    /// - `adjust`: changes the configuration the default config file loads to,
+    ///   before the services are built from it.
+    pub async fn with_config(adjust: impl FnOnce(&mut BootstrapConfig)) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
-        let config = write_config(dir.path(), None);
+        let mut config = write_config(dir.path(), None);
+        adjust(&mut config);
         let services = Services::build(config, &BTreeMap::new()).await.unwrap();
         let user = Users::new(services.database())
             .create(

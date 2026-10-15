@@ -44,6 +44,15 @@ pub enum ServerError {
     /// block.
     #[error("invalid trusted proxy: {0}")]
     Proxy(#[from] hearthsound_api_subsonic::InvalidProxy),
+    /// `server.cors_origins` holds something that is not `*`, `null`, or a
+    /// `scheme://host[:port]` origin.
+    #[error(
+        "invalid CORS origin `{origin}`: expected `*`, `null`, or `scheme://host[:port]` without a path"
+    )]
+    CorsOrigin {
+        /// The configured value.
+        origin: String,
+    },
     /// The configured bind address and port do not resolve to a socket address.
     #[error("`{addr}` is not a usable listen address: {source}")]
     Listen {

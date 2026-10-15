@@ -316,7 +316,8 @@ pub struct ServerConfig {
     pub base_url: String,
     /// Proxy IPs and CIDRs whose `X-Forwarded-*` headers are trusted.
     pub trusted_proxies: Vec<String>,
-    /// Allowed CORS origins; empty denies cross-origin requests.
+    /// Allowed CORS origins as `scheme://host[:port]` or `null`, or `*` for any
+    /// origin; empty denies cross-origin requests.
     pub cors_origins: Vec<String>,
 }
 

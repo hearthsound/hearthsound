@@ -676,6 +676,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authenticates every request with a username and app password is no longer
   locked out after ten requests a minute. A username or address that has spent
   its budget is refused before its secret is checked.
+- `server.cors_origins` now takes effect: the listed origins, or every origin
+  for `*`, may read any response, which browser-engine clients such as the
+  Feishin desktop app need. The development stack allows every origin.
 
 ### Security
 

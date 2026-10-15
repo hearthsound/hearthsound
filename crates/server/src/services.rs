@@ -17,7 +17,8 @@
 //!    acquisition orchestrator over the catalog, registry and storage, and start
 //!    its scheduler, then the managed storage roots, the library scanner, the
 //!    job queue, the job runner, and the cron scheduler;
-//! 7. build the activity service and the trusted-proxy list.
+//! 7. build the activity service, the trusted-proxy list, and the CORS policy
+//!    ([`crate::cors`]).
 //!
 //! Every service is shared through an `Arc`, so a handler, a job, or an
 //! endpoint clones the handle it needs and holds nothing else.
@@ -66,6 +67,7 @@ use hearthsound_library::scan::{LibraryScanner, SCAN_JOB_KIND, ScanJobHandler};
 use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::instances::InstanceService;
 use hearthsound_plugin_host::{PluginHost, PluginRepository, ProviderRegistry};
+use tower_http::cors::CorsLayer;
 
 use crate::error::ServerError;
 use crate::jobs::{KvSweepJobHandler, PLUGIN_KV_SWEEP_CRON, PLUGIN_KV_SWEEP_JOB_KIND};
@@ -114,6 +116,9 @@ pub struct Services {
     storage_roots: StorageRoots,
     /// The proxies whose forwarding headers are trusted.
     trusted_proxies: TrustedProxies,
+    /// The CORS layer `server.cors_origins` describes, or `None` when it is
+    /// empty and cross-origin reads are denied.
+    cors: Option<CorsLayer>,
 }
 
 impl Services {
@@ -258,6 +263,7 @@ impl Services {
         let storage_roots =
             StorageRoots::new(config.paths.library.clone(), config.paths.cache.clone());
         let trusted_proxies = TrustedProxies::parse(config.server.trusted_proxies.iter().cloned())?;
+        let cors = crate::cors::layer(&config.server.cors_origins)?;
 
         tracing::info!(
             data = %config.paths.data.display(),
@@ -285,6 +291,7 @@ impl Services {
             activity,
             storage_roots,
             trusted_proxies,
+            cors,
         }))
     }
 
@@ -412,6 +419,11 @@ impl Services {
         .with_pending_source(pending)
         .with_prefetch(Arc::clone(&self.prefetch))
         .with_trusted_proxies(self.trusted_proxies.clone())
+    }
+
+    /// Returns the CORS layer, or `None` when cross-origin reads are denied.
+    pub(crate) fn cors(&self) -> Option<&CorsLayer> {
+        self.cors.as_ref()
     }
 
     /// Resolves `server.bind` and `server.port` into a socket address.

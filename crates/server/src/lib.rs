@@ -47,6 +47,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod cors;
 mod error;
 pub mod http;
 pub mod jobs;

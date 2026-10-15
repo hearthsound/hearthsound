@@ -2,7 +2,8 @@
 //!
 //! Three routes belong to no domain crate: `/healthz`, `/readyz`, and `/`.
 //! [`router`] builds the whole application from them plus the `/rest` router
-//! [`hearthsound_api_subsonic`] owns, and adds the request-tracing layer.
+//! [`hearthsound_api_subsonic`] owns, and adds the request-tracing layer and,
+//! when `server.cors_origins` allows any origin, the CORS layer.
 //!
 //! `/healthz` is the liveness probe: the process is up and the HTTP listener
 //! answers. `/readyz` is the readiness probe: the database is open and migrated
@@ -56,13 +57,17 @@ struct RootStatus {
 /// ```
 pub fn router(services: &Arc<Services>) -> Router {
     let subsonic = hearthsound_api_subsonic::router(services.subsonic_state());
-    Router::new()
+    let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/", get(root))
         .with_state(Arc::clone(services))
         .merge(subsonic)
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http());
+    match services.cors() {
+        Some(cors) => app.layer(cors.clone()),
+        None => app,
+    }
 }
 
 /// Answers the liveness probe.

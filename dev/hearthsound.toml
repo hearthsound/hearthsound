@@ -9,6 +9,12 @@
 [server]
 bind = "0.0.0.0"
 port = 4327
+# Browser-engine clients (the Feishin desktop app loads its interface from a
+# `file://` page) can only read `/rest` responses when CORS allows their origin.
+# `/rest` takes its credentials from the request, never from cookies, so the
+# development stack allows every origin. Leave this out to deny CORS, or list
+# origins as "scheme://host[:port]".
+cors_origins = ["*"]
 
 [paths]
 data = "/data"
