@@ -672,3 +672,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The library scan skips hidden files and directories, such as the `._` metadata
   files macOS writes, and reports files it cannot read as audio instead of
   stopping at the first one.
+
+### Security
+
+- Updated wasmtime to 49.0.3 and rustls to 0.23.46, fixing the plugin runtime
+  panics, the WASI sandbox escape and the TLS advisories published in
+  RUSTSEC-2026-0346 through RUSTSEC-2026-0364.
