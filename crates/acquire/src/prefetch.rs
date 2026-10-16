@@ -122,23 +122,36 @@ struct Inner {
 /// The listing contexts, keyed by user and then by client instance.
 type Contexts = HashMap<Uuid, HashMap<String, Context>>;
 
-/// One listing context: the ordered ids a listing reported, when it was seen,
-/// and the prefetch acquisitions it started.
+/// One listing context: the ordered ids a listing reported, the queue the
+/// client saved, and the prefetch acquisitions it started.
+///
+/// A context lives for one user and client instance. Its listing is the implied
+/// queue the scheduler infers, its saved queue is the one a client wrote with
+/// `savePlayQueue`, and the saved queue wins when it contains the streamed
+/// track, because a client that saves its queue knows it better than a listing
+/// does.
 struct Context {
-    /// When the listing was recorded, in unix milliseconds.
-    recorded_at: i64,
+    /// When the listing was recorded, in unix milliseconds; `None` when the
+    /// client has only saved a queue.
+    listed_at: Option<i64>,
     /// The listing's track ids, in the order the client will play them.
     listing: Vec<ClientId>,
-    /// The acquisitions this context started, keyed by the listing item they
-    /// were started for.
+    /// The queue the client saved, in the order the client will play it.
+    saved: Option<Vec<ClientId>>,
+    /// When the context was last touched by a listing or a save, in unix
+    /// milliseconds.
+    touched_at: i64,
+    /// The acquisitions this context started, keyed by the item they were
+    /// started for.
     prefetched: HashMap<ClientId, Uuid>,
 }
 
 /// The bounded store of listing contexts.
 ///
-/// One entry per user and client instance, holding the most recent listing and
-/// the acquisitions its upcoming set started. An entry that is older than
-/// [`LISTING_WINDOW`] is dropped on the next call, and the oldest entry is
+/// One entry per user and client instance, holding the most recent listing, the
+/// queue the client saved, and the acquisitions the upcoming set started. An
+/// entry whose listing is older than [`LISTING_WINDOW`] and that holds no saved
+/// queue is dropped on the next call, and the least recently touched entry is
 /// dropped when the store is full, so a server that serves many users and
 /// clients keeps a fixed amount of memory.
 #[derive(Default)]
@@ -150,9 +163,9 @@ struct Listings {
 impl Listings {
     /// Records a listing as the context's implied queue.
     ///
-    /// The context's previous listing is replaced; the acquisitions it started
-    /// are kept, so a later stream can still cancel the ones the new listing
-    /// left behind.
+    /// The context's previous listing is replaced; the saved queue and the
+    /// acquisitions it started are kept, so a later stream can still cancel the
+    /// ones the new listing left behind.
     ///
     /// # Parameters
     ///
@@ -162,19 +175,71 @@ impl Listings {
     /// - `now`: the current time in unix milliseconds.
     fn record(&mut self, user: Uuid, client: &str, listing: Vec<ClientId>, now: i64) {
         self.prune(now);
-        let contexts = self.contexts.entry(user).or_default();
-        let prefetched = contexts
-            .remove(client)
-            .map(|context| context.prefetched)
-            .unwrap_or_default();
-        contexts.insert(
-            client.to_owned(),
-            Context {
-                recorded_at: now,
+        let context = self.contexts.entry(user).or_default().remove(client);
+        let context = match context {
+            Some(mut context) => {
+                context.listed_at = Some(now);
+                context.listing = listing;
+                context.touched_at = now;
+                context
+            }
+            None => Context {
+                listed_at: Some(now),
                 listing,
-                prefetched,
+                saved: None,
+                touched_at: now,
+                prefetched: HashMap::new(),
             },
-        );
+        };
+        self.contexts
+            .entry(user)
+            .or_default()
+            .insert(client.to_owned(), context);
+        self.enforce_capacity();
+    }
+
+    /// Records the queue a client saved, or clears it.
+    ///
+    /// The queue is kept until the client saves another one or the context is
+    /// evicted, which is what makes it the best source the scheduler has: a
+    /// client that saves its queue is telling the server exactly what it will
+    /// play next. An empty queue clears the saved one and leaves the listing
+    /// alone.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the user the queue belongs to.
+    /// - `client`: the client instance.
+    /// - `queue`: the ordered track ids of the queue; empty clears it.
+    /// - `now`: the current time in unix milliseconds.
+    fn save(&mut self, user: Uuid, client: &str, queue: Vec<ClientId>, now: i64) {
+        self.prune(now);
+        let contexts = self.contexts.entry(user).or_default();
+        let saved = (!queue.is_empty()).then_some(queue);
+        match contexts.get_mut(client) {
+            Some(context) => {
+                context.saved = saved;
+                context.touched_at = now;
+                if context.saved.is_none() && context.listed_at.is_none_or(|at| !is_recent(at, now))
+                {
+                    contexts.remove(client);
+                }
+            }
+            None if saved.is_some() => {
+                contexts.insert(
+                    client.to_owned(),
+                    Context {
+                        listed_at: None,
+                        listing: Vec::new(),
+                        saved,
+                        touched_at: now,
+                        prefetched: HashMap::new(),
+                    },
+                );
+            }
+            None => {}
+        }
+        self.contexts.retain(|_, contexts| !contexts.is_empty());
         self.enforce_capacity();
     }
 
@@ -238,12 +303,17 @@ impl Listings {
 
     /// Drops the contexts whose listing is older than the window.
     ///
+    /// A context that holds a saved queue is kept whatever its listing's age,
+    /// because the client saved it and has not replaced it.
+    ///
     /// # Parameters
     ///
     /// - `now`: the current time in unix milliseconds.
     fn prune(&mut self, now: i64) {
         for contexts in self.contexts.values_mut() {
-            contexts.retain(|_, context| is_recent(context.recorded_at, now));
+            contexts.retain(|_, context| {
+                context.saved.is_some() || context.listed_at.is_some_and(|at| is_recent(at, now))
+            });
         }
         self.contexts.retain(|_, contexts| !contexts.is_empty());
     }
@@ -266,18 +336,71 @@ impl Listings {
         self.contexts.values().map(HashMap::len).sum()
     }
 
-    /// Returns the user and client of the context whose listing is the oldest.
+    /// Returns the user and client of the context that was touched least
+    /// recently.
     fn oldest(&self) -> Option<(Uuid, String)> {
         self.contexts
             .iter()
             .flat_map(|(user, contexts)| {
                 contexts
                     .iter()
-                    .map(move |(client, context)| (*user, client.clone(), context.recorded_at))
+                    .map(move |(client, context)| (*user, client.clone(), context.touched_at))
             })
-            .min_by_key(|(_, _, recorded_at)| *recorded_at)
+            .min_by_key(|(_, _, touched_at)| *touched_at)
             .map(|(user, client, _)| (user, client))
     }
+}
+
+/// Returns the items a streamed track looks ahead to, from the best source.
+///
+/// The saved queue of a client wins when it holds the streamed track, because a
+/// client that saves its queue knows what it will play next; the listing context
+/// fills in for the clients that do not save one.
+///
+/// # Parameters
+///
+/// - `queue`: the queue the client saved, when it saved one.
+/// - `listing`: the listing the client last read, when it is still recent.
+/// - `track`: the streamed track.
+/// - `lookahead`: how many items to look ahead to.
+///
+/// # Returns
+///
+/// The upcoming items, in playing order, or `None` when neither source holds the
+/// streamed track.
+fn upcoming_from(
+    queue: Option<&[ClientId]>,
+    listing: Option<&[ClientId]>,
+    track: &ClientId,
+    lookahead: usize,
+) -> Option<Vec<ClientId>> {
+    let items = queue
+        .and_then(|queue| position_of(queue, track).map(|position| (queue, position)))
+        .or_else(|| {
+            listing
+                .and_then(|listing| position_of(listing, track).map(|position| (listing, position)))
+        })?;
+    Some(
+        items.0[items.1 + 1..]
+            .iter()
+            .take(lookahead)
+            .cloned()
+            .collect(),
+    )
+}
+
+/// Returns the position of an item in a queue.
+///
+/// # Parameters
+///
+/// - `items`: the ordered items.
+/// - `track`: the item to find.
+///
+/// # Returns
+///
+/// The item's position, or `None` when it is not in the queue.
+fn position_of(items: &[ClientId], track: &ClientId) -> Option<usize> {
+    items.iter().position(|item| item == track)
 }
 
 /// Reports whether a listing recorded at `recorded_at` is inside the window.
@@ -390,29 +513,54 @@ impl PrefetchScheduler {
             return;
         }
         let now = crate::now_millis();
-        let Some(listing) = self.listing(user, client, now) else {
+        let queue = self.queue(user, client);
+        let listing = self.listing(user, client, now);
+        let Some(upcoming) = upcoming_from(
+            queue.as_deref(),
+            listing.as_deref(),
+            track,
+            self.lookahead(),
+        ) else {
             tracing::debug!(
                 user = %user,
                 client,
                 track = %track,
-                "no recent listing to infer a queue from"
-            );
-            return;
-        };
-        let Some(position) = listing.iter().position(|item| item == track) else {
-            tracing::debug!(
-                user = %user,
-                client,
-                track = %track,
-                "the streamed track is in no recorded listing"
+                "neither a saved queue nor a recent listing holds the streamed track"
             );
             return;
         };
 
-        let upcoming = self.upcoming(&listing, position);
         self.drop_departed(user, client, &upcoming).await;
         self.start_upcoming(user, client, &upcoming, can_acquire)
             .await;
+    }
+
+    /// Records the play queue one client saved.
+    ///
+    /// The saved queue is the best source the scheduler has, so a client that
+    /// saves its queue gets look-ahead for exactly what it will play next. The
+    /// queue is kept until the client saves another one or the context is
+    /// evicted; an empty queue clears the saved one, which is what a client that
+    /// emptied its queue reports.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the user the queue belongs to.
+    /// - `client`: the client instance, as in
+    ///   [`record_listing`](PrefetchScheduler::record_listing).
+    /// - `queue`: the queue's track ids in playing order; empty clears it.
+    ///
+    /// # Returns
+    ///
+    /// Nothing. `prefetch.enabled` off makes this a no-op, and a setting that
+    /// cannot be read is logged and treated as off.
+    pub fn record_queue(&self, user: Uuid, client: &str, queue: Vec<ClientId>) {
+        if !self.enabled() {
+            return;
+        }
+        let now = crate::now_millis();
+        lock(&self.inner.listings).save(user, client, queue, now);
+        tracing::debug!(user = %user, client, "recorded a saved play queue for prefetch");
     }
 
     /// Returns the settings in effect.
@@ -455,6 +603,10 @@ impl PrefetchScheduler {
 
     /// Returns the listing recorded for one user and client.
     ///
+    /// A context that holds a saved queue but a stale listing reports no
+    /// listing, because a listing that old says nothing about what the client
+    /// plays next.
+    ///
     /// # Parameters
     ///
     /// - `user`: the user the listing belongs to.
@@ -463,25 +615,25 @@ impl PrefetchScheduler {
     fn listing(&self, user: Uuid, client: &str, now: i64) -> Option<Vec<ClientId>> {
         lock(&self.inner.listings)
             .recent(user, client, now)
+            .filter(|context| context.listed_at.is_some_and(|at| is_recent(at, now)))
             .map(|context| context.listing.clone())
     }
 
-    /// Returns the items a streamed track looks ahead to.
+    /// Returns the queue one user and client saved.
     ///
     /// # Parameters
     ///
-    /// - `listing`: the listing the streamed track is in.
-    /// - `position`: the streamed track's position in that listing.
+    /// - `user`: the user the queue belongs to.
+    /// - `client`: the client instance.
     ///
     /// # Returns
     ///
-    /// The next `prefetch.lookahead` items, in listing order.
-    fn upcoming(&self, listing: &[ClientId], position: usize) -> Vec<ClientId> {
-        listing[position + 1..]
-            .iter()
-            .take(self.lookahead())
-            .cloned()
-            .collect()
+    /// The queue's track ids in playing order, or `None` when the client saved
+    /// none or cleared the one it had.
+    fn queue(&self, user: Uuid, client: &str) -> Option<Vec<ClientId>> {
+        lock(&self.inner.listings)
+            .recent(user, client, crate::now_millis())
+            .and_then(|context| context.saved.clone())
     }
 
     /// Cancels the prefetch acquisitions that left the upcoming set.
@@ -808,6 +960,62 @@ mod tests {
         assert!(is_recent(now - 1_799_999, now));
         assert!(!is_recent(now - 1_800_000, now));
         assert!(is_recent(now + 1_000, now));
+    }
+
+    #[test]
+    fn a_saved_queue_outlasts_the_listing_window() {
+        let mut listings = Listings::default();
+        let user = Uuid::now_v7();
+        let saved = listing(4);
+        listings.save(user, "client", saved.clone(), 1_000);
+
+        // A save with no listing of its own is not pruned by the listing
+        // window, because the client has not replaced it.
+        let later = 1_000 + 10 * LISTING_WINDOW.as_millis() as i64;
+        let context = listings.recent(user, "client", later).unwrap();
+        assert_eq!(context.saved.as_ref(), Some(&saved));
+        assert!(context.listed_at.is_none());
+
+        // A listing recorded afterwards is what the window applies to.
+        listings.record(user, "client", listing(2), later);
+        assert!(
+            listings
+                .recent(user, "client", later + LISTING_WINDOW.as_millis() as i64)
+                .is_some(),
+            "the saved queue still holds the context"
+        );
+        listings.save(user, "client", Vec::new(), later);
+        assert!(
+            listings
+                .recent(user, "client", later + LISTING_WINDOW.as_millis() as i64)
+                .is_none(),
+            "clearing the queue lets the stale listing go"
+        );
+    }
+
+    #[test]
+    fn a_saved_queue_that_holds_the_track_wins_over_the_listing() {
+        let queued = listing(4);
+        let listed = listing(4);
+        let lookahead = 2;
+
+        // The queue holds the track, so its next items are the upcoming set.
+        let upcoming = upcoming_from(Some(&queued), Some(&listed), &queued[1], lookahead).unwrap();
+        assert_eq!(upcoming, vec![queued[2].clone(), queued[3].clone()]);
+
+        // A queue that does not hold the track leaves the listing to answer.
+        let upcoming = upcoming_from(Some(&queued), Some(&listed), &listed[0], lookahead).unwrap();
+        assert_eq!(upcoming, vec![listed[1].clone(), listed[2].clone()]);
+
+        // Neither source holding the track yields nothing to prefetch.
+        assert!(upcoming_from(Some(&queued), Some(&listed), &track(), lookahead).is_none());
+        assert!(upcoming_from(None, None, &queued[0], lookahead).is_none());
+
+        // The last item of a queue has nothing after it.
+        assert_eq!(
+            upcoming_from(Some(&queued), None, &queued[3], lookahead).unwrap(),
+            Vec::<ClientId>::new()
+        );
     }
 
     #[test]

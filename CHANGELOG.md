@@ -754,6 +754,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `deletePlaylist` read and change playlists, which only their owner may edit
   and only their owner and an administrator may list; a playlist answers
   `getCoverArt` with the art of its first entry.
+- The prefetch scheduler prefers the play queue a client saved over the listing
+  it last read, so look-ahead follows the queue a client reports.
 
 ### Security
 
