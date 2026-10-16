@@ -693,6 +693,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `admin add-folder --no-watch` adds a folder without watching it, and
   `admin set-folder-watch` turns watching on or off for a folder named by path
   or id.
+- An ignored benchmark scans a generated 20,000-file library and rescans it,
+  which is how the scan timings are measured.
 
 ### Security
 
