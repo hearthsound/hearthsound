@@ -697,6 +697,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is how the scan timings are measured.
 - The database gained the per-user activity tables: bookmarks, the current
   playback entry per client, the saved play queue per client, and ratings.
+- The media probe searches much further for a file's first frame, so a file
+  whose tagger left a second ID3v2 tag in place is read instead of being
+  reported as an unknown container.
 
 ### Security
 

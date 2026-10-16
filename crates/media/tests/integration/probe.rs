@@ -333,3 +333,41 @@ async fn probes_a_path_that_is_not_utf8_free() {
     assert!(Path::new(&path).is_file());
     assert_eq!(probe(&path).await.unwrap().codec, Codec::Flac);
 }
+
+/// A file whose tagger wrote two ID3v2 tags is read past both of them.
+///
+/// Some taggers leave the tag they replaced in place, so the audio starts after
+/// two tags. The second tag's text frames are what the container guess walks
+/// over, and one kibibyte of them is not enough to reach the first frame.
+#[tokio::test]
+async fn probes_a_file_whose_audio_sits_behind_two_tags() {
+    let dir = tempfile::tempdir().unwrap();
+    let tagged = AudioFixture::new(AudioFormat::Mp3Cbr)
+        .seconds(0.3)
+        .file_name("double.mp3")
+        .tags(FixtureTags::new("T".repeat(1500), "Nova Reyes").album("Nightfall"))
+        .write_into(dir.path())
+        .await
+        .unwrap();
+
+    let bytes = std::fs::read(&tagged).unwrap();
+    let tag_size = 10
+        + (((bytes[6] as usize) << 21)
+            | ((bytes[7] as usize) << 14)
+            | ((bytes[8] as usize) << 7)
+            | bytes[9] as usize);
+    // The first tag is a copy of the file's own tag; the audio then sits behind
+    // the original one, more than a kibibyte further in.
+    let mut doubled = bytes[..tag_size].to_vec();
+    doubled.extend_from_slice(&bytes);
+    let path = dir.path().join("two-tags.mp3");
+    std::fs::write(&path, doubled).unwrap();
+
+    let probed = probe(&path).await.unwrap();
+    assert_eq!(probed.container, Container::Mpeg);
+    assert_eq!(probed.codec, Codec::Mp3);
+    assert_eq!(
+        probed.tags.title.as_deref(),
+        Some("T".repeat(1500).as_str())
+    );
+}

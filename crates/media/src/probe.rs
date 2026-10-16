@@ -37,6 +37,17 @@ use crate::error::MediaError;
 use crate::ffmpeg::FfmpegRunner;
 use crate::tags::{Artwork, TrackTags};
 
+/// How far the container guess searches for a frame sync in a file whose header
+/// is not where it should be.
+///
+/// `lofty` looks one kibibyte past the tag it skipped, which is too small for a
+/// real library: a file whose tagger wrote a second ID3v2 tag after the first
+/// one carries several hundred kibibytes of tags before its first frame, and
+/// the guess would report the file as an unknown container. The search costs
+/// nothing on a file whose frames start where they should, because the first
+/// candidate is checked first.
+const MAX_JUNK_BYTES: usize = 1024 * 1024;
+
 /// The container a media file is stored in.
 ///
 /// The variants are the containers the server imports, not every container
@@ -633,6 +644,7 @@ fn read_tagged_file(path: &Path) -> Result<TaggedFile, MediaError> {
 pub(crate) fn open_probe(path: &Path) -> Result<Probe<BufReader<File>>, MediaError> {
     let file = File::open(path).map_err(|source| MediaError::io(path, source))?;
     let probe = Probe::new(BufReader::new(file))
+        .options(ParseOptions::new().max_junk_bytes(MAX_JUNK_BYTES))
         .guess_file_type()
         .map_err(|source| MediaError::io(path, source))?;
     if probe.file_type().is_none() {
