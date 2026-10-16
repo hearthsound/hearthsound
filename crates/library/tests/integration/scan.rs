@@ -11,7 +11,9 @@ use hearthsound_core::events::EventBus;
 use hearthsound_core::{Availability, StorageClass};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_library::artwork::{CoverArt, cover_for_file, track_cover};
-use hearthsound_library::scan::{LibraryScanner, ScanJobHandler, ScanRequest};
+use hearthsound_library::scan::{
+    LibraryScanner, SCAN_JOB_KIND, ScanJobHandler, ScanRequest, ScanStatus,
+};
 use hearthsound_library::{LibraryRepository, Origin, ReplayGain, StorageRoots};
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
 
@@ -781,6 +783,76 @@ async fn a_scan_never_leaves_the_folder_through_its_subtrees() {
     let report = scanner.scan(&request).await.unwrap().remove(0);
     assert_eq!(report.files_seen, 0);
     assert!(library.list_artists().await.unwrap().is_empty());
+}
+
+/// The scanner reports a scan from the moment it is requested until the job
+/// finishes, and the files it processed while running.
+#[tokio::test]
+async fn the_scan_status_tracks_queued_and_running_scans() {
+    use std::time::{Duration, Instant};
+
+    use hearthsound_jobs::{JobQueue, JobRunner, JobRunnerOptions, QueueOptions, Shutdown};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    for index in 0..60 {
+        write_song(
+            &music,
+            &format!("Song {index}"),
+            &format!("Artist {index}"),
+            "Status",
+        )
+        .await;
+    }
+
+    let scanner = Arc::new(scanner_for(&db, Arc::new(EventBus::new())).await);
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    assert_eq!(scanner.status(), ScanStatus::default());
+
+    let queue = Arc::new(JobQueue::new(&db, QueueOptions::default()));
+    let request = ScanRequest::folder(folder.id);
+    scanner.request_scan(&queue, &request).await.unwrap();
+    let queued = scanner.status();
+    assert!(queued.scanning, "a requested scan counts as scanning");
+    assert_eq!(queued.files_processed, 0);
+
+    let mut runner = JobRunner::new(Arc::clone(&queue), JobRunnerOptions::default());
+    runner.register(
+        SCAN_JOB_KIND,
+        Arc::new(ScanJobHandler::new(Arc::clone(&scanner))),
+    );
+    let runner = Arc::new(runner);
+    let shutdown = Shutdown::new();
+    let running = {
+        let runner = Arc::clone(&runner);
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move { runner.run(shutdown).await })
+    };
+
+    let mut running_with_files = false;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        let status = scanner.status();
+        running_with_files |= status.scanning && status.files_processed > 0;
+        if running_with_files && !status.scanning {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert!(
+        running_with_files,
+        "the status reports the files a running scan processed"
+    );
+
+    shutdown.trigger();
+    running.await.unwrap();
+    let idle = scanner.status();
+    assert!(!idle.scanning, "nothing is queued and nothing is running");
+    assert!(idle.files_processed > 0, "the finished scan kept its count");
+    assert_eq!(library.list_artists().await.unwrap().len(), 60);
 }
 
 #[tokio::test]

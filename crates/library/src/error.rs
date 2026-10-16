@@ -17,6 +17,9 @@ pub enum LibraryError {
     /// The database rejected a read or a write.
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
+    /// The job queue rejected an enqueue.
+    #[error("job queue error: {0}")]
+    Queue(#[from] hearthsound_jobs::JobsError),
     /// A value stored as a setting was rejected by that setting's kind.
     #[error(transparent)]
     Setting(#[from] hearthsound_config::ConfigError),

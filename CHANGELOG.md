@@ -681,6 +681,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A scan job carries the directories to scan and `hearthsound scan` gained
   `--full`, which probes every file instead of trusting the stored size and
   modification time; scans of one folder never overlap.
+- The scanner reports what it is doing: a queued job counts as scanning from the
+  moment it is requested, and the files a running scan processed are counted
+  too.
 
 ### Security
 

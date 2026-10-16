@@ -23,6 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
@@ -35,7 +36,7 @@ use hearthsound_core::events::{
 };
 use hearthsound_core::{Availability, EntityId, EntityKind, PinReason};
 use hearthsound_db::Database;
-use hearthsound_jobs::{Job, JobError, JobHandler};
+use hearthsound_jobs::{Job, JobError, JobHandler, JobQueue, NewJob};
 use hearthsound_media::ProbeResult;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -144,6 +145,36 @@ impl ScanRequest {
     }
 }
 
+/// What the scanner is doing right now.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_library::scan::ScanStatus;
+///
+/// let idle = ScanStatus::default();
+/// assert!(!idle.scanning);
+/// assert_eq!(idle.files_processed, 0);
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanStatus {
+    /// Whether a scan is queued or running.
+    pub scanning: bool,
+    /// How many files the running scans have dealt with.
+    pub files_processed: u64,
+}
+
+/// The counters behind [`ScanStatus`].
+#[derive(Debug, Default)]
+struct ScanCounters {
+    /// Requests enqueued but not started.
+    queued: AtomicUsize,
+    /// Scans running right now.
+    active: AtomicUsize,
+    /// Files the running scans have dealt with.
+    files_processed: AtomicU64,
+}
+
 /// What one folder scan did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanReport {
@@ -241,6 +272,8 @@ pub struct LibraryScanner {
     settings: Settings,
     /// One lock per folder, so two scans of a folder never overlap.
     folder_locks: Arc<Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
+    /// The counters [`LibraryScanner::status`] reports.
+    counters: Arc<ScanCounters>,
 }
 
 impl LibraryScanner {
@@ -264,7 +297,57 @@ impl LibraryScanner {
             events,
             settings,
             folder_locks: Arc::new(Mutex::new(HashMap::new())),
+            counters: Arc::new(ScanCounters::default()),
         }
+    }
+
+    /// Returns what the scanner is doing right now.
+    ///
+    /// The counters cover this process only: a scan enqueued by another
+    /// connection, such as a command-line invocation, is not counted, and a
+    /// restart clears them.
+    ///
+    /// # Returns
+    ///
+    /// Whether a scan is queued or running and how many files the running scans
+    /// have dealt with.
+    pub fn status(&self) -> ScanStatus {
+        let queued = self.counters.queued.load(Ordering::SeqCst);
+        let active = self.counters.active.load(Ordering::SeqCst);
+        ScanStatus {
+            scanning: queued + active > 0,
+            files_processed: self.counters.files_processed.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Enqueues a scan and returns the queued job.
+    ///
+    /// The request counts as queued until a [`ScanJobHandler`] starts it, so
+    /// [`LibraryScanner::status`] reports a scan from the moment it is
+    /// requested.
+    ///
+    /// # Parameters
+    ///
+    /// - `queue`: the queue to enqueue on.
+    /// - `request`: the folders, subtrees, and depth to scan.
+    ///
+    /// # Returns
+    ///
+    /// The enqueued job.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Queue`] when the job cannot be written.
+    pub async fn request_scan(
+        &self,
+        queue: &JobQueue,
+        request: &ScanRequest,
+    ) -> Result<Job, LibraryError> {
+        let job = queue
+            .enqueue(NewJob::new(SCAN_JOB_KIND).payload(request)?)
+            .await?;
+        self.counters.queued.fetch_add(1, Ordering::SeqCst);
+        Ok(job)
     }
 
     /// Scans every folder, or the one a request names.
@@ -345,9 +428,52 @@ impl LibraryScanner {
         folder_id: Uuid,
         request: &ScanRequest,
     ) -> Result<ScanReport, LibraryError> {
+        self.begin_scan();
         let lock = self.folder_lock(folder_id);
         let _guard = lock.lock().await;
-        self.scan_locked(folder_id, request).await
+        let report = self.scan_locked(folder_id, request).await;
+        self.end_scan();
+        report
+    }
+
+    /// Records that a queued request is starting.
+    ///
+    /// A request enqueued by another process, or a job reclaimed after a crash,
+    /// has no counter to release, so a release that would go below zero is
+    /// dropped.
+    fn request_started(&self) {
+        let _ = self
+            .counters
+            .queued
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |queued| {
+                queued.checked_sub(1)
+            });
+    }
+
+    /// Records that a scan started.
+    ///
+    /// The file counter is cleared when the first scan of a run starts, so
+    /// [`LibraryScanner::status`] reports what the current run has done.
+    fn begin_scan(&self) {
+        if self.counters.active.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.counters.files_processed.store(0, Ordering::SeqCst);
+        }
+    }
+
+    /// Records that a scan finished.
+    fn end_scan(&self) {
+        self.counters.active.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Records that one file was dealt with.
+    ///
+    /// # Parameters
+    ///
+    /// - `files`: how many files were dealt with.
+    fn count_files(&self, files: u64) {
+        self.counters
+            .files_processed
+            .fetch_add(files, Ordering::SeqCst);
     }
 
     /// Returns the lock of one folder and builds it when it is missing.
@@ -427,6 +553,7 @@ impl LibraryScanner {
                 && state.mtime_ms == file.mtime_ms
             {
                 report.files_skipped += 1;
+                self.count_files(1);
                 continue;
             }
             changed.push((file, state.map(|state| state.track_id)));
@@ -442,6 +569,7 @@ impl LibraryScanner {
             })
             .buffer_unordered(concurrency);
         while let Some((file, track_id, probe)) = probes.next().await {
+            self.count_files(1);
             let probe = match probe {
                 Ok(probe) => probe,
                 Err(error) => {
@@ -1180,6 +1308,7 @@ impl JobHandler for ScanJobHandler {
             .payload_json()
             .map_err(|error| JobError::new(error.to_string()))?
             .unwrap_or_default();
+        self.scanner.request_started();
         self.scanner
             .scan(&request)
             .await
