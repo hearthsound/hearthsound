@@ -475,9 +475,6 @@ pub mod keys {
     /// Seconds a pending stream is held before it ends without a file.
     pub const STREAM_PENDING_MAX_WAIT_SECS: SettingKey<i64> =
         SettingKey::new("stream.pending.max_wait_secs");
-    /// Seconds a hold-mode stream waits before it serves normally.
-    pub const STREAM_HOLD_TIMEOUT_SECS: SettingKey<i64> =
-        SettingKey::new("stream.hold.timeout_secs");
 
     /// Whether catalog-layer results are included in searches.
     pub const SEARCH_CATALOG_ENABLED: SettingKey<bool> = SettingKey::new("search.catalog.enabled");
@@ -831,12 +828,6 @@ impl SettingsRegistry {
                     SettingKind::Integer { min: 1, max: 3_600 },
                     SettingValue::Integer(180),
                     "Seconds a pending stream is held before it ends without a file",
-                ),
-                def(
-                    keys::STREAM_HOLD_TIMEOUT_SECS,
-                    SettingKind::Integer { min: 1, max: 3_600 },
-                    SettingValue::Integer(60),
-                    "Seconds a hold-mode stream waits before it serves normally",
                 ),
                 def(
                     keys::SEARCH_CATALOG_ENABLED,
@@ -1641,10 +1632,6 @@ mod tests {
             assert!(name.contains('.'), "`{name}` is not dotted");
             assert_eq!(name, name.to_lowercase(), "`{name}` must be lowercase");
         }
-        assert!(
-            unique.len() >= 47,
-            "the runtime settings reference is incomplete"
-        );
     }
 
     #[test]

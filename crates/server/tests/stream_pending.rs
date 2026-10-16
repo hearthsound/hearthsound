@@ -148,18 +148,17 @@ async fn a_catalog_stream_is_held_and_then_answers_503_in_fail_mode() {
     let id = CatalogId::new(Slug::new("hello").unwrap(), EntityKind::Track, HELLO_TRACK).unwrap();
     let path = format!("/rest/stream?id={id}&apiKey={}", fixture.api_key);
 
-    // The wait bounds are shortened so the held request ends as a `503` instead
+    // The wait bound is shortened so the held request ends as a `503` instead
     // of holding for the documented default.
-    for (key, value) in [
-        (keys::STREAM_HOLD_TIMEOUT_SECS.name(), 1),
-        (keys::STREAM_PENDING_MAX_WAIT_SECS.name(), 2),
-    ] {
-        services
-            .settings()
-            .set(key, SettingValue::Integer(value), None)
-            .await
-            .unwrap();
-    }
+    services
+        .settings()
+        .set(
+            keys::STREAM_PENDING_MAX_WAIT_SECS.name(),
+            SettingValue::Integer(2),
+            None,
+        )
+        .await
+        .unwrap();
 
     // The default mode is `hold`: nothing is sent while the acquisition runs, so
     // no response arrives within the window the test watches.

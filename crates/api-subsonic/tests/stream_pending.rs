@@ -353,17 +353,8 @@ async fn set_mode(fixture: &Fixture, mode: &str) {
         .unwrap();
 }
 
-/// Shortens the wait bounds so a stream that never gets a file still ends.
-async fn set_short_waits(fixture: &Fixture, hold_secs: i64, max_wait_secs: i64) {
-    fixture
-        .settings
-        .set(
-            keys::STREAM_HOLD_TIMEOUT_SECS.name(),
-            SettingValue::Integer(hold_secs),
-            None,
-        )
-        .await
-        .unwrap();
+/// Shortens the wait bound so a stream that never gets a file still ends.
+async fn set_max_wait(fixture: &Fixture, max_wait_secs: i64) {
     fixture
         .settings
         .set(
@@ -434,7 +425,7 @@ async fn hold_answers_a_wait_that_elapsed_with_503() {
     let fixture = Fixture::with_pending(source).await;
     let track = pending_track(&fixture).await;
     let app = fixture.app();
-    set_short_waits(&fixture, 1, 2).await;
+    set_max_wait(&fixture, 2).await;
 
     let response = start(
         &app,

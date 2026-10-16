@@ -35,7 +35,7 @@
 //! according to `stream.pending.mode`:
 //!
 //! - `hold`, the default, sends nothing until the file is ready or
-//!   `stream.hold.timeout_secs` elapses, then serves the file normally;
+//!   `stream.pending.max_wait_secs` elapses, then serves the file normally;
 //! - `fail` answers `503` with `Retry-After` at once and lets the acquisition
 //!   continue in the background.
 //!
@@ -637,10 +637,9 @@ impl StreamService {
     ///
     /// Nothing is sent until the file is ready, so no headers are written while
     /// the acquisition runs and a failure, a cooldown, or an elapsed wait can
-    /// still be answered as a status code. The wait is bounded twice: the first
-    /// `stream.hold.timeout_secs` ends the "hold" and starts waiting up to
-    /// `stream.pending.max_wait_secs` in total, after which the request is
-    /// answered `503` with `Retry-After` because the acquisition continues.
+    /// still be answered as a status code. The wait is bounded by
+    /// `stream.pending.max_wait_secs`, after which the request is answered `503`
+    /// with `Retry-After` because the acquisition continues.
     ///
     /// # Parameters
     ///
@@ -659,15 +658,8 @@ impl StreamService {
         track: EntityId,
         handle: AcquisitionHandle,
     ) -> Result<Response, StreamError> {
-        let settings = self.settings.current();
-        let hold = hold_timeout(&settings);
-        let max_wait = pending_max_wait(&settings);
-
-        if let Ok(outcome) = tokio::time::timeout(hold, handle.clone().wait()).await {
-            return self.serve_held_outcome(request, track, outcome).await;
-        }
-        let remaining = max_wait.saturating_sub(hold);
-        match tokio::time::timeout(remaining, handle.wait()).await {
+        let max_wait = pending_max_wait(&self.settings.current());
+        match tokio::time::timeout(max_wait, handle.wait()).await {
             Ok(outcome) => self.serve_held_outcome(request, track, outcome).await,
             Err(_) => {
                 tracing::debug!(
@@ -1078,21 +1070,6 @@ where
 fn pending_max_wait(store: &SettingsStore) -> Duration {
     let secs = setting_or(store, keys::STREAM_PENDING_MAX_WAIT_SECS, 180);
     Duration::from_secs(u64::try_from(secs).unwrap_or(180))
-}
-
-/// Returns how long `hold` sends nothing before it starts waiting for a file in
-/// the `503` window.
-///
-/// # Parameters
-///
-/// - `store`: the settings snapshot to read `stream.hold.timeout_secs` from.
-///
-/// # Returns
-///
-/// The configured timeout, or 60 seconds for a negative one.
-fn hold_timeout(store: &SettingsStore) -> Duration {
-    let secs = setting_or(store, keys::STREAM_HOLD_TIMEOUT_SECS, 60);
-    Duration::from_secs(u64::try_from(secs).unwrap_or(60))
 }
 
 /// Wraps an encoded stream so that its first chunk marks the stream as audibly
