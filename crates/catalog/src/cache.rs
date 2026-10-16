@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hearthsound_core::EntityKind;
-use hearthsound_core::providers::ArtworkSubject;
+use hearthsound_core::providers::{ArtistInfoRequest, ArtworkSubject};
 use hearthsound_core::providers::{CatalogQuery, RecordingHint};
 use hearthsound_db::Database;
 use moka::future::Cache as MemoryCache;
@@ -256,6 +256,48 @@ impl RequestKey {
             "artwork|kind={}|title={}|artists={artists}|ids={ids}",
             kind_literal(kind),
             encode(&subject.title),
+        ))
+    }
+
+    /// Builds the key of an artist-info lookup.
+    ///
+    /// The key names the artist's name and every identifier the caller has for
+    /// them, because two instances asked about the same artist must share the
+    /// answer while two artists who share a name must not.
+    ///
+    /// # Parameters
+    ///
+    /// - `request`: the artist's name and the identifiers the caller has.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_catalog::cache::RequestKey;
+    /// use hearthsound_core::providers::{ArtistInfoRequest, ExternalId};
+    ///
+    /// let request = ArtistInfoRequest {
+    ///     name: "Energy 52".to_owned(),
+    ///     ids: vec![ExternalId {
+    ///         namespace: "mb-artist".to_owned(),
+    ///         value: "1111".to_owned(),
+    ///     }],
+    /// };
+    /// assert_eq!(
+    ///     RequestKey::artist_info(&request).as_str(),
+    ///     "artist-info|name=9:Energy 52|ids=9:mb-artist=4:1111;"
+    /// );
+    /// ```
+    pub fn artist_info(request: &ArtistInfoRequest) -> RequestKey {
+        let mut ids = String::new();
+        for id in &request.ids {
+            ids.push_str(&encode(&id.namespace));
+            ids.push('=');
+            ids.push_str(&encode(&id.value));
+            ids.push(';');
+        }
+        RequestKey(format!(
+            "artist-info|name={}|ids={ids}",
+            encode(&request.name)
         ))
     }
 

@@ -55,6 +55,7 @@
 #![forbid(unsafe_code)]
 
 pub mod aliases;
+pub mod artist_info;
 pub mod artwork;
 pub mod cache;
 pub mod dedupe;

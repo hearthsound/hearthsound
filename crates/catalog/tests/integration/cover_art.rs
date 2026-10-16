@@ -10,11 +10,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use crate::common::{
-    Env, HELLO_CATALOG_ID, HTTP_CATALOG_ID, catalog_id, count_rows, stored_artwork,
+    Env, HELLO_CATALOG_ID, HTTP_CATALOG_ID, METADATA_ID, catalog_id, count_rows, stored_artwork,
 };
 use hearthsound_catalog::{CatalogError, CoverArtRequest};
 use hearthsound_core::{ClientId, EntityKind, Layer};
-use hearthsound_test_support::{ARTWORK_FIXTURE, HELLO_CATALOG, HTTP_CATALOG};
+use hearthsound_test_support::{ARTWORK_FIXTURE, HELLO_CATALOG, HTTP_CATALOG, METADATA_FIXTURE};
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -492,4 +492,61 @@ async fn a_not_found_image_falls_through_to_the_next_instance() {
         ["/cover-250.png", "/missing.png"],
         "the second instance answered after the first one had no image"
     );
+}
+
+/// The metadata layer answers artist information, and an artist it does not
+/// know is reported as unknown.
+#[tokio::test]
+async fn artist_info_is_answered_by_the_metadata_layer() {
+    use hearthsound_core::providers::ArtistInfoRequest;
+
+    let env = Env::new().await;
+    env.instance(
+        "metadata",
+        METADATA_FIXTURE,
+        METADATA_ID,
+        json!({
+            "artists": [{
+                "name": "Hello Artist",
+                "mbid": "44444444-4444-4444-8444-444444444444",
+                "biography": "A greeting in human form.",
+                "links": [{ "kind": "lastfm", "url": "https://www.last.fm/music/Hello+Artist" }],
+            }],
+        }),
+    )
+    .await;
+    env.assign(Layer::Metadata, &["metadata"]).await;
+    let service = env.service();
+
+    let info = service
+        .artist_info(&ArtistInfoRequest {
+            name: "Hello Artist".to_owned(),
+            ids: Vec::new(),
+        })
+        .await
+        .unwrap()
+        .expect("the configured artist is known");
+    assert_eq!(info.biography.as_deref(), Some("A greeting in human form."));
+    assert_eq!(info.links.len(), 1);
+    assert_eq!(info.links[0].kind, "lastfm");
+
+    // The second call is answered from the cache, and an artist no instance
+    // knows is reported as unknown.
+    let again = service
+        .artist_info(&ArtistInfoRequest {
+            name: "Hello Artist".to_owned(),
+            ids: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(again, Some(info));
+
+    let unknown = service
+        .artist_info(&ArtistInfoRequest {
+            name: "Nobody".to_owned(),
+            ids: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert!(unknown.is_none(), "an unknown artist is not an error");
 }

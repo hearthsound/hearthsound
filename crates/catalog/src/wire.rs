@@ -15,8 +15,8 @@
 //! provider call, never a failure.
 
 use hearthsound_core::providers::{
-    ArtistCredit, CatalogAlbum, CatalogAlbumRef, CatalogArtist, CatalogResults, CatalogTrack,
-    ExternalId, Image, RecordingMatch, ReleaseSummary,
+    ArtistCredit, ArtistInfo, ArtistLink, CatalogAlbum, CatalogAlbumRef, CatalogArtist,
+    CatalogResults, CatalogTrack, ExternalId, Image, RecordingMatch, ReleaseSummary,
 };
 use serde::{Deserialize, Serialize};
 
@@ -233,6 +233,74 @@ pub(crate) struct WireRecordingMatch {
 /// JSON array of [`WireRecordingMatch`] objects.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WireRecordingMatches(Vec<WireRecordingMatch>);
+
+/// The stored form of an artist-info answer.
+///
+/// An instance may answer that it knows no such artist, which is a miss worth
+/// remembering for a shorter time than an answer, so the wrapper distinguishes
+/// "the cache holds nothing" from "the cache holds that the instance knows
+/// nothing".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireArtistInfoAnswer(pub Option<WireArtistInfo>);
+
+/// The stored form of what a metadata instance knows about an artist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireArtistInfo {
+    /// The identifiers the instance matched the artist by.
+    #[serde(default)]
+    pub ids: Vec<WireExternalId>,
+    /// The artist's biography, when the instance has one.
+    #[serde(default)]
+    pub biography: Option<String>,
+    /// The pages about the artist.
+    #[serde(default)]
+    pub links: Vec<WireArtistLink>,
+}
+
+/// The stored form of one page about an artist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireArtistLink {
+    /// The kind of page.
+    pub kind: String,
+    /// The page's URL.
+    pub url: String,
+}
+
+impl From<&ArtistInfo> for WireArtistInfo {
+    /// Copies an artist's information into its stored form.
+    fn from(value: &ArtistInfo) -> WireArtistInfo {
+        WireArtistInfo {
+            ids: value.ids.iter().map(WireExternalId::from).collect(),
+            biography: value.biography.clone(),
+            links: value
+                .links
+                .iter()
+                .map(|link| WireArtistLink {
+                    kind: link.kind.clone(),
+                    url: link.url.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<WireArtistInfo> for ArtistInfo {
+    /// Rebuilds an artist's information from its stored form.
+    fn from(value: WireArtistInfo) -> ArtistInfo {
+        ArtistInfo {
+            ids: value.ids.into_iter().map(ExternalId::from).collect(),
+            biography: value.biography,
+            links: value
+                .links
+                .into_iter()
+                .map(|link| ArtistLink {
+                    kind: link.kind,
+                    url: link.url,
+                })
+                .collect(),
+        }
+    }
+}
 
 impl From<&Vec<CatalogAlbumRef>> for WireAlbumRefs {
     /// Copies an album listing into its stored form.

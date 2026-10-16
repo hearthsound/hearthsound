@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it.
 - A stored entity with no local art is served from the artwork layer, and a
   stored artist is asked of the layer before its own albums are walked.
+- Artist information is looked for in the metadata layer, in the order the
+  administrator set, under `metadata.artist_info.timeout_ms`, with both answers
+  and misses cached.
 
 ### Added
 
