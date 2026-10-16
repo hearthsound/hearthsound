@@ -238,7 +238,20 @@ impl SubsonicState {
         &self.inner.user_settings
     }
 
+    /// Returns the accounts table.
+    ///
+    /// # Returns
+    ///
+    /// The users repository, shared with the credential resolver.
+    pub fn users(&self) -> &hearthsound_auth::Users {
+        self.inner.authenticator.users()
+    }
+
     /// Returns the credential resolver.
+    ///
+    /// # Returns
+    ///
+    /// The resolver every `/rest` call authenticates through.
     pub fn authenticator(&self) -> &Authenticator {
         &self.inner.authenticator
     }

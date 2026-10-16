@@ -750,6 +750,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `getStarred` and `getStarred2` list what the user liked however it is stored.
 - `setRating` records the user's rating of a track, album, or artist, and `0`
   clears it.
+- `getPlaylists`, `getPlaylist`, `createPlaylist`, `updatePlaylist`, and
+  `deletePlaylist` read and change playlists, which only their owner may edit
+  and only their owner and an administrator may list; a playlist answers
+  `getCoverArt` with the art of its first entry.
 
 ### Security
 

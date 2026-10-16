@@ -76,6 +76,11 @@
 //! | `getOpenSubsonicExtensions` | public, no credentials; advertises `apiKeyAuthentication` 1 and `formPost` 1 |
 //! | `tokenInfo` | the user an API key belongs to |
 //! | `getMusicFolders` | the personal library, and the server unless `privacy.server_browse` is disabled |
+//! | `getPlaylists` | the playlists the caller may see |
+//! | `getPlaylist` | one playlist with its entries |
+//! | `createPlaylist` | creates a playlist, or replaces an owned one's tracks |
+//! | `updatePlaylist` | changes one owned playlist |
+//! | `deletePlaylist` | deletes one owned playlist |
 //! | `setRating` | records the user's rating of one entity |
 //! | `star` | records the user's like of the named entities |
 //! | `unstar` | removes the user's like of the named entities |

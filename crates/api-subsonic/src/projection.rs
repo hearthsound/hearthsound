@@ -808,7 +808,7 @@ fn index_name(sort_name: &str) -> String {
 ///
 /// The instant in RFC 3339 form, or an empty string when the stored value is
 /// outside the representable range.
-fn timestamp(millis: i64) -> String {
+pub(crate) fn timestamp(millis: i64) -> String {
     let nanos = i128::from(millis) * 1_000_000;
     match time::OffsetDateTime::from_unix_timestamp_nanos(nanos) {
         Ok(value) => value

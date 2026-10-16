@@ -353,6 +353,18 @@ impl<C: Clock + Clone> Authenticator<C> {
         }
     }
 
+    /// Returns the accounts table.
+    ///
+    /// A surface that lists or reports accounts reads them here, so the
+    /// password hashes and the credential checks stay in this crate.
+    ///
+    /// # Returns
+    ///
+    /// The users repository.
+    pub fn users(&self) -> &Users {
+        &self.users
+    }
+
     /// Returns the login rate limiter.
     ///
     /// A caller that follows `auth.login_rate_limit_per_minute` across settings

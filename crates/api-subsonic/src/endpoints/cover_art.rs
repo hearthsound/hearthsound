@@ -129,6 +129,9 @@ pub async fn get_cover_art(call: BinaryCall) -> HttpResponse {
 ///
 /// The image response, or one of the refusal codes of the module header.
 async fn stored(call: &BinaryCall, entity: EntityId, size: Option<u32>) -> HttpResponse {
+    if entity.kind() == IdPrefix::Playlist {
+        return playlist(call, entity).await;
+    }
     match local(call, entity).await {
         Ok(Some(art)) => match load(art).await {
             Ok(served) => image(call.headers(), served),
@@ -137,6 +140,50 @@ async fn stored(call: &BinaryCall, entity: EntityId, size: Option<u32>) -> HttpR
         Ok(None) => catalog_fallback(call, entity, size).await,
         Err(error) => internal("resolving local cover art", &error),
     }
+}
+
+/// Serves the cover image of a playlist.
+///
+/// A playlist has no image of its own, so it answers with the image of the
+/// first entry that has one, which is what a client shows for a saved queue.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `playlist_id`: the playlist the request named.
+///
+/// # Returns
+///
+/// The image response, HTTP 404 when the playlist does not exist, when the
+/// caller may not see it, or when none of its entries has an image, or another
+/// refusal code of the module header.
+async fn playlist(call: &BinaryCall, playlist_id: EntityId) -> HttpResponse {
+    let viewer = call.principal().user_id.uuid();
+    let playlist = match call
+        .state()
+        .activity()
+        .playlists()
+        .get(playlist_id, viewer)
+        .await
+    {
+        Ok(Some(playlist)) => playlist,
+        Ok(None) => return not_found(&playlist_id),
+        Err(error) => return internal("reading a playlist's cover image", &error),
+    };
+    let library = LibraryRepository::new(call.state().database());
+    let settings = call.state().settings_snapshot();
+    let roots = call.state().storage_roots();
+    for entry in &playlist.entries {
+        match track_cover(&library, &settings, roots, entry.track_id).await {
+            Ok(Some(art)) => match load(art).await {
+                Ok(served) => return image(call.headers(), served),
+                Err(error) => return internal("reading a local cover image", &error),
+            },
+            Ok(None) => {}
+            Err(error) => return internal("resolving local cover art", &error),
+        }
+    }
+    not_found(&playlist_id)
 }
 
 /// Finds the cover image a stored entity has of its own.

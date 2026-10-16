@@ -180,7 +180,7 @@ async fn named(call: &Call) -> Result<Vec<(EntityKind, Uuid)>, SubsonicError> {
 /// of the kind the request expects, when it names a kind no entity has, when it
 /// names no stored entity, or when it names a catalog entity the catalog does
 /// not know, and a generic error when a catalog id cannot be materialized.
-async fn resolve(
+pub(super) async fn resolve(
     call: &Call,
     parameter: &str,
     value: &str,
