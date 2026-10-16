@@ -154,16 +154,25 @@ fn version_is_printed() {
 #[test]
 fn migrate_reports_the_versions_it_moved_between() {
     let sandbox = Sandbox::new("");
+    let latest = hearthsound_db::MIGRATOR
+        .migrations
+        .iter()
+        .map(|migration| migration.version)
+        .max()
+        .unwrap();
 
     let first = succeeded(&sandbox.run(&["migrate"]));
     assert!(
-        first.contains("migrated the database from version 0 to 1"),
+        first.contains(&format!("migrated the database from version 0 to {latest}")),
         "{first}"
     );
     assert!(first.contains("no backup was needed"), "{first}");
 
     let second = succeeded(&sandbox.run(&["migrate"]));
-    assert!(second.contains("already at version 1"), "{second}");
+    assert!(
+        second.contains(&format!("already at version {latest}")),
+        "{second}"
+    );
     assert!(sandbox.data().join("hearthsound.db").is_file());
 }
 
