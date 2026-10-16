@@ -76,6 +76,7 @@
 //! | `getOpenSubsonicExtensions` | public, no credentials; advertises `apiKeyAuthentication` 1 and `formPost` 1 |
 //! | `tokenInfo` | the user an API key belongs to |
 //! | `getMusicFolders` | the personal library, and the server unless `privacy.server_browse` is disabled |
+//! | `setRating` | records the user's rating of one entity |
 //! | `star` | records the user's like of the named entities |
 //! | `unstar` | removes the user's like of the named entities |
 //! | `getStarred` | the entities the user liked, in the older shape |

@@ -1,4 +1,5 @@
-//! The star endpoints: `star`, `unstar`, `getStarred`, and `getStarred2`.
+//! The feedback endpoints: `star`, `unstar`, `getStarred`, `getStarred2`, and
+//! `setRating`.
 //!
 //! A star is a like: the activity layer records it per user and per entity, and
 //! a starred entity is listed whatever its availability, because the like is
@@ -15,7 +16,7 @@ use uuid::Uuid;
 
 use crate::auth::Call;
 use crate::browse::LoadedAlbum;
-use crate::response::{Encoded, Response, SubsonicError};
+use crate::response::{Encoded, Response, SubsonicError, codes};
 use crate::value::{Array, Object};
 use crate::{browse, catalog, projection};
 
@@ -143,7 +144,14 @@ async fn named(call: &Call) -> Result<Vec<(EntityKind, Uuid)>, SubsonicError> {
             if value.is_empty() {
                 continue;
             }
-            entities.push((named.kind, resolve(call, named, value).await?));
+            let (kind, id) = resolve(
+                call,
+                named.parameter,
+                value,
+                Some((named.kind, named.prefix)),
+            )
+            .await?;
+            entities.push((kind, id));
         }
     }
     if entities.is_empty() {
@@ -152,70 +160,121 @@ async fn named(call: &Call) -> Result<Vec<(EntityKind, Uuid)>, SubsonicError> {
     Ok(entities)
 }
 
-/// Resolves one value of a star request to a stored entity.
+/// Resolves one id a request wrote to a stored entity.
 ///
 /// # Parameters
 ///
 /// - `call`: the authenticated call.
-/// - `named`: the parameter the value came from.
+/// - `parameter`: the parameter the value came from, for the log.
 /// - `value`: the id the client wrote.
+/// - `expected`: the kind and prefix the request fixes, when its parameter names
+///   one kind of entity; `None` when the id itself decides the kind.
 ///
 /// # Returns
 ///
-/// The stored entity's id.
+/// The kind of the entity and its stored id.
 ///
 /// # Errors
 ///
-/// Answers Subsonic error 70 when the value is not an id of the parameter's
-/// kind, when it names no stored entity, or when it names a catalog entity the
-/// catalog does not know, and a generic error when a catalog id cannot be
-/// materialized.
-async fn resolve(call: &Call, named: &Named, value: &str) -> Result<Uuid, SubsonicError> {
+/// Answers Subsonic error 70 when the value is not an id, when it is not an id
+/// of the kind the request expects, when it names a kind no entity has, when it
+/// names no stored entity, or when it names a catalog entity the catalog does
+/// not know, and a generic error when a catalog id cannot be materialized.
+async fn resolve(
+    call: &Call,
+    parameter: &str,
+    value: &str,
+    expected: Option<(EntityKind, IdPrefix)>,
+) -> Result<(EntityKind, Uuid), SubsonicError> {
     let Ok(id) = ClientId::parse(value) else {
-        tracing::debug!(
-            parameter = named.parameter,
-            "a star request named an unknown id"
-        );
+        tracing::debug!(parameter, "a feedback request named an unknown id");
         return Err(SubsonicError::not_found());
     };
-    match id {
-        ClientId::Entity(id) if id.kind() == named.prefix => {
-            let library = LibraryRepository::new(call.state().database());
-            let stored = match named.kind {
-                EntityKind::Track => library.get_track(id).await.map(|row| row.is_some()),
-                EntityKind::Album => library.get_album(id).await.map(|row| row.is_some()),
-                EntityKind::Artist => library.get_artist(id).await.map(|row| row.is_some()),
-                _ => Ok(false),
-            };
-            let stored = match stored {
-                Ok(stored) => stored,
-                Err(error) => return Err(browse::failure("a star change", &error)),
-            };
-            if stored {
-                Ok(id.uuid())
-            } else {
+    let stored = match &id {
+        ClientId::Entity(entity) => match kind_of(entity.kind()) {
+            Some(named) if expected.is_none_or(|expected| expected == named) => named,
+            _ => {
                 tracing::debug!(
-                    parameter = named.parameter,
-                    "a star request named a stored entity that does not exist"
+                    parameter,
+                    "a feedback request named an entity of another kind"
                 );
-                Err(SubsonicError::not_found())
+                return Err(SubsonicError::not_found());
             }
+        },
+        ClientId::Catalog(catalog) => {
+            let kind = catalog.kind();
+            if expected.is_some_and(|(expected, _)| expected != kind) {
+                tracing::debug!(
+                    parameter,
+                    "a feedback request named a catalog entity of another kind"
+                );
+                return Err(SubsonicError::not_found());
+            }
+            return materialize(call, catalog).await.map(|id| (kind, id));
         }
-        ClientId::Entity(_) => {
-            tracing::debug!(
-                parameter = named.parameter,
-                "a star request named an entity of another kind"
-            );
-            Err(SubsonicError::not_found())
-        }
-        ClientId::Catalog(id) if id.kind() == named.kind => materialize(call, &id).await,
-        ClientId::Catalog(_) => {
-            tracing::debug!(
-                parameter = named.parameter,
-                "a star request named a catalog entity of another kind"
-            );
-            Err(SubsonicError::not_found())
-        }
+    };
+
+    let library = LibraryRepository::new(call.state().database());
+    let found = match stored.0 {
+        EntityKind::Track => library
+            .get_track(stored_id(&id))
+            .await
+            .map(|row| row.is_some()),
+        EntityKind::Album => library
+            .get_album(stored_id(&id))
+            .await
+            .map(|row| row.is_some()),
+        EntityKind::Artist => library
+            .get_artist(stored_id(&id))
+            .await
+            .map(|row| row.is_some()),
+        _ => Ok(false),
+    };
+    let found = match found {
+        Ok(found) => found,
+        Err(error) => return Err(browse::failure("a feedback change", &error)),
+    };
+    if !found {
+        tracing::debug!(
+            parameter,
+            "a feedback request named a stored entity that does not exist"
+        );
+        return Err(SubsonicError::not_found());
+    }
+    Ok((stored.0, stored_id(&id).uuid()))
+}
+
+/// Returns the id of a parsed entity id.
+///
+/// # Parameters
+///
+/// - `id`: the parsed id, which the caller has already matched as an entity.
+///
+/// # Returns
+///
+/// The entity id.
+fn stored_id(id: &ClientId) -> EntityId {
+    match id {
+        ClientId::Entity(id) => *id,
+        ClientId::Catalog(_) => EntityId::new(IdPrefix::Track),
+    }
+}
+
+/// Returns the kind and prefix a stored id names.
+///
+/// # Parameters
+///
+/// - `prefix`: the prefix the id carries.
+///
+/// # Returns
+///
+/// The kind of entity it names, or `None` for a prefix no entity uses.
+fn kind_of(prefix: IdPrefix) -> Option<(EntityKind, IdPrefix)> {
+    match prefix {
+        IdPrefix::Track => Some((EntityKind::Track, IdPrefix::Track)),
+        IdPrefix::Album => Some((EntityKind::Album, IdPrefix::Album)),
+        IdPrefix::Artist => Some((EntityKind::Artist, IdPrefix::Artist)),
+        _ => None,
     }
 }
 
@@ -248,6 +307,57 @@ async fn materialize(call: &Call, id: &CatalogId) -> Result<Uuid, SubsonicError>
     match stored {
         Ok(stored) => Ok(stored.uuid()),
         Err(error) => Err(catalog::failure(&error)),
+    }
+}
+
+/// Answers `setRating`: records the user's rating of one entity.
+///
+/// A rating is per user and per entity: `0` clears it and `1` to `5` set it.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call. `id` names a stored or catalog track,
+///   album, or artist, and `rating` is the value from `0` to `5`.
+///
+/// # Returns
+///
+/// An empty successful envelope, or a failed envelope.
+///
+/// # Errors
+///
+/// Answers Subsonic error 10 when `id` or `rating` is missing, error 0 when
+/// `rating` is not a number from 0 to 5, error 70 when `id` is not an id of a
+/// kind a rating applies to or names no stored entity, and a generic error
+/// carrying the catalog's message when a catalog id cannot be materialized.
+pub async fn set_rating(call: Call) -> Encoded {
+    let Some(value) = call.get("id").filter(|value| !value.is_empty()) else {
+        return call.encode(Response::failed(SubsonicError::missing_parameter("id")));
+    };
+    let Some(rating) = call.get("rating").filter(|value| !value.is_empty()) else {
+        return call.encode(Response::failed(SubsonicError::missing_parameter("rating")));
+    };
+    let rating = match rating.parse::<u8>() {
+        Ok(rating) if rating <= 5 => rating,
+        _ => {
+            return call.encode(Response::failed(SubsonicError::new(
+                codes::GENERIC,
+                "A rating is a number from 0 to 5.",
+            )));
+        }
+    };
+    let (kind, id) = match resolve(&call, "id", value, None).await {
+        Ok(resolved) => resolved,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let user = call.principal().user_id.uuid();
+    match call
+        .state()
+        .activity()
+        .set_rating(user, kind, id, rating)
+        .await
+    {
+        Ok(()) => call.encode(Response::ok()),
+        Err(error) => call.encode(Response::failed(browse::failure("a rating change", &error))),
     }
 }
 

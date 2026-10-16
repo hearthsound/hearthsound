@@ -248,3 +248,167 @@ async fn star_refuses_unusable_ids() {
     .await;
     assert_error(&unserved, 70);
 }
+
+/// `setRating` records a rating the listings report, and `0` clears it.
+#[tokio::test]
+async fn set_rating_records_and_clears_a_rating() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+
+    let rated = get(
+        &app,
+        &format!(
+            "/rest/setRating?id={}&rating=4&apiKey={}&f=json",
+            seeded.alpha, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&rated);
+
+    let listed = get(
+        &app,
+        &format!(
+            "/rest/getAlbum?id={}&apiKey={}&f=json",
+            seeded.alpha, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&listed);
+    assert!(
+        listed.body.contains("\"userRating\":4"),
+        "the album reports the rating: {}",
+        listed.body
+    );
+
+    // A rating of another entity is the user's own, and zero clears one.
+    let cleared = get(
+        &app,
+        &format!(
+            "/rest/setRating?id={}&rating=0&apiKey={}&f=json",
+            seeded.alpha, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&cleared);
+    let after = get(
+        &app,
+        &format!(
+            "/rest/getAlbum?id={}&apiKey={}&f=json",
+            seeded.alpha, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&after);
+    assert!(
+        !after.body.contains("\"userRating\""),
+        "a cleared rating is not reported: {}",
+        after.body
+    );
+}
+
+/// `setRating` refuses a missing parameter, a rating outside 0 to 5, and an id
+/// it cannot resolve.
+#[tokio::test]
+async fn set_rating_refuses_unusable_values() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+
+    let missing_id = get(
+        &app,
+        &format!("/rest/setRating?rating=3&apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_error(&missing_id, 10);
+    let missing_rating = get(
+        &app,
+        &format!(
+            "/rest/setRating?id={}&apiKey={}&f=json",
+            seeded.alpha, fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&missing_rating, 10);
+
+    for rating in ["6", "-1", "high"] {
+        let refused = get(
+            &app,
+            &format!(
+                "/rest/setRating?id={}&rating={rating}&apiKey={}&f=json",
+                seeded.alpha, fixture.api_key
+            ),
+        )
+        .await;
+        assert_error(&refused, 0);
+    }
+
+    let unknown = get(
+        &app,
+        &format!(
+            "/rest/setRating?id=nonsense&rating=3&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&unknown, 70);
+
+    // A track id is a kind a rating applies to, but this one names no row.
+    let absent = EntityId::new(IdPrefix::Track);
+    let no_such = get(
+        &app,
+        &format!(
+            "/rest/setRating?id={absent}&rating=3&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&no_such, 70);
+}
+
+/// `setRating` materializes a catalog id, so a search result can be rated.
+#[tokio::test]
+async fn set_rating_materializes_a_catalog_id() {
+    let (fixture, _seeded) = fixture().await;
+    fixture.install_hello_catalog().await;
+    let app = fixture.app();
+
+    let found = get(
+        &app,
+        &format!(
+            "/rest/search3?query=cardinals&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&found);
+    let track = id_after(&found.body, "x_hello_t_").expect("the search lists a catalog track");
+
+    let rated = get(
+        &app,
+        &format!(
+            "/rest/setRating?id={track}&rating=5&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&rated);
+
+    // The rating is recorded against the stored row the catalog id
+    // materialized into, which the starred listing reports.
+    let starred = get(
+        &app,
+        &format!("/rest/star?id={track}&apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_ok(&starred);
+    let listed = get(
+        &app,
+        &format!("/rest/getStarred2?apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_ok(&listed);
+    assert!(
+        listed.body.contains("\"userRating\":5"),
+        "the materialized track reports the rating: {}",
+        listed.body
+    );
+}

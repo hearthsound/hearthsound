@@ -748,6 +748,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `star` and `unstar` record and remove a user's like of the artists, albums,
   and songs a request names, materializing a catalog id first, and
   `getStarred` and `getStarred2` list what the user liked however it is stored.
+- `setRating` records the user's rating of a track, album, or artist, and `0`
+  clears it.
 
 ### Security
 
