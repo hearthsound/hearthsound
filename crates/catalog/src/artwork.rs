@@ -79,14 +79,27 @@ pub struct CoverArt {
     pub bytes: Vec<u8>,
 }
 
+/// What the artwork layer answered for one request.
+enum LayerCover {
+    /// An instance delivered the picture.
+    Found(CoverArt),
+    /// No instance delivered a picture.
+    Missing {
+        /// The last instance that failed in a way a retry may get past, when
+        /// one did.
+        transient: Option<String>,
+    },
+}
+
 impl CatalogService {
     /// Serves the cover art of an entity.
     ///
     /// The artwork layer is asked first: every instance in the `artwork` layer,
     /// in the order the administrator set, is asked for the entity's picture
-    /// under `artwork.timeout_ms`, and the first one that answers with an image
-    /// has it fetched and served. An entity no artwork instance knows falls back
-    /// to the instance that issued it, which is where its own images are.
+    /// under `artwork.timeout_ms`, and the first one that delivers an image has
+    /// it served. An instance that fails is skipped, and an entity no artwork
+    /// instance delivers a picture of falls back to the instance that issued
+    /// it, which is where its own images are.
     ///
     /// # Parameters
     ///
@@ -100,17 +113,28 @@ impl CatalogService {
     ///
     /// Returns [`CatalogError::NotFound`] when no instance knows an image of the
     /// entity and when the image's URL answers with a not-found, and
-    /// [`CatalogError::Unavailable`] when an instance could not answer right
-    /// now, which is what a client retries.
+    /// [`CatalogError::Unavailable`] when nothing answered and an instance could
+    /// not answer right now, which is what a client retries.
     pub async fn cover_art(&self, request: &CoverArtRequest) -> Result<CoverArt, CatalogError> {
-        match self.artwork_cover(request).await {
-            Ok(Some(cover)) => Ok(cover),
-            Ok(None) => self.issuing_cover_art(request).await,
-            Err(error) => Err(error),
+        let transient = match self.artwork_cover(request).await? {
+            LayerCover::Found(cover) => return Ok(cover),
+            LayerCover::Missing { transient } => transient,
+        };
+        match self.issuing_cover_art(request).await {
+            Err(CatalogError::NotFound) => match transient {
+                Some(instance) => Err(CatalogError::Unavailable { instance }),
+                None => Err(CatalogError::NotFound),
+            },
+            answered => answered,
         }
     }
 
     /// Asks the artwork layer for an entity's picture.
+    ///
+    /// Every instance is asked in layer order until one delivers an image. An
+    /// instance that fails, whether it cannot answer the lookup or cannot
+    /// deliver the image it described, is logged and skipped, so one slow or
+    /// broken image host never hides the pictures the next instance knows.
     ///
     /// # Parameters
     ///
@@ -118,17 +142,15 @@ impl CatalogService {
     ///
     /// # Returns
     ///
-    /// The image when an instance knows one, and `None` when no instance does.
+    /// The image when an instance delivers one; otherwise
+    /// [`LayerCover::Missing`] naming the last instance that failed in a way a
+    /// retry may get past.
     ///
     /// # Errors
     ///
-    /// Returns [`CatalogError::Unavailable`] when an instance that could have
-    /// known the picture could not answer, because a client that retries may
-    /// get an image then.
-    async fn artwork_cover(
-        &self,
-        request: &CoverArtRequest,
-    ) -> Result<Option<CoverArt>, CatalogError> {
+    /// Returns [`CatalogError`] when the subject of the request cannot be
+    /// described or the artwork deadline cannot be read.
+    async fn artwork_cover(&self, request: &CoverArtRequest) -> Result<LayerCover, CatalogError> {
         let instances = self
             .registry()
             .layers(Layer::Artwork)
@@ -136,7 +158,7 @@ impl CatalogService {
             .filter(|instance| instance.artwork().is_some())
             .collect::<Vec<_>>();
         if instances.is_empty() {
-            return Ok(None);
+            return Ok(LayerCover::Missing { transient: None });
         }
         let subject = self.subject(&request.id).await?;
         let timeout = artwork_timeout(&self.settings_snapshot())?;
@@ -185,20 +207,25 @@ impl CatalogService {
             let Some(image) = pick_image(&images, request.size) else {
                 continue;
             };
-            return match self
+            match self
                 .fetch_layer_image(&instance, subject.kind, &subject, image)
                 .await
             {
-                Ok(cover) => Ok(Some(cover)),
-                Err(CatalogError::NotFound) => continue,
-                Err(error) => Err(error),
-            };
+                Ok(cover) => return Ok(LayerCover::Found(cover)),
+                Err(
+                    CatalogError::Unavailable { instance }
+                    | CatalogError::RateLimited { instance, .. },
+                ) => {
+                    transient = Some(instance);
+                }
+                // A not-found image and a host the instance may not reach were
+                // logged where they happened; the next instance may still know
+                // a picture.
+                Err(_) => {}
+            }
         }
 
-        match transient {
-            Some(instance) => Err(CatalogError::Unavailable { instance }),
-            None => Ok(None),
-        }
+        Ok(LayerCover::Missing { transient })
     }
 
     /// Serves the cover art of a catalog entity through its issuing instance.

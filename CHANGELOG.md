@@ -809,6 +809,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parameters ask for, with a transcode's channel count reaching ffmpeg; the
   `transcoding` and `transcodeOffset` extensions are advertised.
 
+### Fixed
+
+- An artwork instance whose image host fails no longer ends a cover art
+  request: the next artwork instance and then the instance that issued the
+  entity are still asked, and the request answers `503` only when none of them
+  delivers a picture.
+
 ### Security
 
 - Updated wasmtime to 49.0.3 and rustls to 0.23.46, fixing the plugin runtime

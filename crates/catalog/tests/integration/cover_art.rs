@@ -494,6 +494,108 @@ async fn a_not_found_image_falls_through_to_the_next_instance() {
     );
 }
 
+/// An instance whose image URL fails leaves the next instance to answer.
+#[tokio::test]
+async fn a_failing_image_falls_through_to_the_next_instance() {
+    let server = MockServer::start().await;
+    // The first instance describes an image its host cannot deliver right now.
+    serve_image(&server, "/broken.png", 500).await;
+    serve_image(&server, "/cover-250.png", 200).await;
+    let env = Env::new().await;
+    env.instance(
+        "first",
+        ARTWORK_FIXTURE,
+        ARTWORK_FIXTURE_ID,
+        json!({
+            "imageUrl": server.uri(),
+            "albums": [{ "title": "Hello Album", "images": [{ "path": "/broken.png" }] }],
+            "artists": [],
+        }),
+    )
+    .await;
+    env.instance(
+        "second",
+        ARTWORK_FIXTURE,
+        ARTWORK_FIXTURE_ID,
+        json!({
+            "imageUrl": server.uri(),
+            "albums": [{ "title": "Hello Album", "images": [{ "path": "/cover-250.png" }] }],
+            "artists": [],
+        }),
+    )
+    .await;
+    env.assign(Layer::Artwork, &["first", "second"]).await;
+    let service = env.service();
+    let album = env.stored_album("Hello Album", "Hello Artist").await;
+
+    let cover = service
+        .cover_art(&CoverArtRequest {
+            id: ClientId::Entity(album),
+            size: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(cover.bytes, IMAGE);
+}
+
+/// A failing artwork layer leaves the issuing catalog instance to answer, and
+/// with nothing else to answer the failure is reported as one a retry may get
+/// past.
+#[tokio::test]
+async fn a_failing_artwork_layer_falls_back_to_the_issuing_instance() {
+    let server = MockServer::start().await;
+    serve_image(&server, "/broken.png", 500).await;
+    serve_image(&server, "/cover-500.png", 200).await;
+    let env = Env::new().await;
+    env.instance(
+        "artwork",
+        ARTWORK_FIXTURE,
+        ARTWORK_FIXTURE_ID,
+        json!({
+            "imageUrl": server.uri(),
+            "albums": [
+                { "title": "Hello Album", "images": [{ "path": "/broken.png" }] },
+                { "title": "Lonely Album", "images": [{ "path": "/broken.png" }] },
+            ],
+            "artists": [],
+        }),
+    )
+    .await;
+    env.assign(Layer::Artwork, &["artwork"]).await;
+    env.instance(
+        "hello",
+        HELLO_CATALOG,
+        HELLO_CATALOG_ID,
+        json!({"coverUrl": format!("{}/cover-{{size}}.png", server.uri())}),
+    )
+    .await;
+    env.assign(Layer::Catalog, &["hello"]).await;
+    let service = env.service();
+
+    let cover = service
+        .cover_art(&CoverArtRequest {
+            id: ClientId::Catalog(catalog_id("hello", EntityKind::Album, "hello-album-1")),
+            size: Some(500),
+        })
+        .await
+        .unwrap();
+    assert_eq!(cover.bytes, IMAGE);
+
+    // A stored album no catalog instance issued has nothing to fall back on.
+    let lonely = env.stored_album("Lonely Album", "Hello Artist").await;
+    let failure = service
+        .cover_art(&CoverArtRequest {
+            id: ClientId::Entity(lonely),
+            size: None,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(failure, CatalogError::Unavailable { ref instance } if instance == "artwork"),
+        "unexpected failure: {failure:?}"
+    );
+}
+
 /// The metadata layer answers artist information, and an artist it does not
 /// know is reported as unknown.
 #[tokio::test]
