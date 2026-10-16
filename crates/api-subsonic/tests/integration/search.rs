@@ -197,3 +197,110 @@ async fn search3_requires_a_query() {
     .await;
     assert_error(&probe, 10);
 }
+
+/// `search2` answers the same matches as `search3` in the older shape: a bare
+/// artist reference, an album folder, and a song.
+#[tokio::test]
+async fn search2_answers_the_same_matches_in_the_older_shape() {
+    let (fixture, seeded) = fixture().await;
+    fixture.install_hello_catalog().await;
+    let app = fixture.app();
+
+    let json = get(
+        &app,
+        &format!(
+            "/rest/search2?query=cardinals&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&json);
+    assert!(json.body.contains("\"searchResult2\""), "{}", json.body);
+    // The artist is a bare reference, the album is a folder, and the catalog
+    // track follows the local songs.
+    assert!(
+        json.body.contains(&format!(
+            "{{\"id\":\"{}\",\"name\":\"The Cardinals\"}}",
+            seeded.cardinals
+        )),
+        "the artist carries its id and name: {}",
+        json.body
+    );
+    assert!(json.body.contains("\"isDir\":true"), "{}", json.body);
+    assert!(json.body.contains("x_hello_t_"), "{}", json.body);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("search2-json", seeded.stabilize(&json.body));
+    });
+
+    let xml = get(
+        &app,
+        &format!(
+            "/rest/search2.view?query=cardinals&apiKey={}",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&xml);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("search2-xml", seeded.stabilize(&xml.body));
+    });
+
+    let missing = get(
+        &app,
+        &format!("/rest/search2?apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_error(&missing, 10);
+}
+
+/// `search2` reports the user's star on a listed artist, and lists the library
+/// for an empty query without reaching the catalog.
+#[tokio::test]
+async fn search2_reports_stars_and_lists_the_library_for_an_empty_query() {
+    let (fixture, seeded) = fixture().await;
+    use hearthsound_core::EntityKind;
+
+    fixture.install_hello_catalog().await;
+    fixture
+        .state
+        .activity()
+        .star(
+            fixture.user_id.uuid(),
+            &[(EntityKind::Artist, seeded.cardinals.uuid())],
+        )
+        .await
+        .unwrap();
+    let app = fixture.app();
+
+    let starred = get(
+        &app,
+        &format!(
+            "/rest/search2?query=cardinals&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&starred);
+    assert!(
+        starred.body.contains("\"starred\":\""),
+        "the listed artist carries the user's star: {}",
+        starred.body
+    );
+
+    let empty = get(
+        &app,
+        &format!("/rest/search2?query=&apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_ok(&empty);
+    assert!(
+        empty.body.contains(&seeded.alpha.to_string()),
+        "{}",
+        empty.body
+    );
+    assert!(
+        !empty.body.contains("x_hello_"),
+        "an empty query returns no catalog results: {}",
+        empty.body
+    );
+}

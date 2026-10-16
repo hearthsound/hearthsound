@@ -743,6 +743,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `getGenres` counts the genres in scope, and `getSongsByGenre` and
   `getRandomSongs` list the songs of a genre or a random sample of the scope,
   narrowed by genre and release year.
+- `search2` answers the same local and catalog matches as `search3` in the
+  older response shape: bare artist references, album folders, and songs.
 
 ### Security
 

@@ -1,5 +1,5 @@
-//! The `search3` endpoint: local full-text results first, catalog results
-//! after them.
+//! The `search2` and `search3` endpoints: local full-text results first,
+//! catalog results after them.
 //!
 //! A search answers three lists (artists, albums, and songs) in a fixed order
 //! (05-api.md, section 3.5): the local full-text matches, restricted by the
@@ -8,6 +8,10 @@
 //! per kind. Catalog results are deduplicated against the local hits, so a
 //! catalog track whose recording the server already stores is represented once,
 //! by its stored entity.
+//!
+//! Both endpoints answer the same matches and differ only in the shape of the
+//! response: `search3` lists ID3 entities, and `search2` lists the artist
+//! references, album folders, and songs the older clients read.
 //!
 //! A catalog failure never fails the search: the local results are still the
 //! answer, and the cause is logged. An empty `query` lists the local library
@@ -18,13 +22,16 @@
 use std::collections::HashMap;
 
 use hearthsound_activity::Annotation;
-use hearthsound_catalog::{CatalogSearch, LocalTrackHit};
+use hearthsound_catalog::{
+    CatalogAlbumRefResult, CatalogArtistResult, CatalogSearch, CatalogTrackResult, LocalTrackHit,
+};
 use hearthsound_config::SettingsStore;
 use hearthsound_config::keys;
 use hearthsound_core::EntityId;
 use hearthsound_core::EntityKind;
 use hearthsound_core::providers::CatalogQuery;
 use hearthsound_db::Database;
+use hearthsound_library::Artist;
 use hearthsound_library::query::{AlbumSort, Scope, TrackView};
 use uuid::Uuid;
 
@@ -49,17 +56,69 @@ struct Window {
     offset: i64,
 }
 
-/// The local side of a search, projected and ready to answer with.
+/// A stored artist a search matched, with the album count it reports.
+#[derive(Debug)]
+struct LocalArtist {
+    /// The artist row.
+    artist: Artist,
+    /// How many albums of the artist the scope holds.
+    album_count: i64,
+}
+
+/// The entities one search matched: the local matches first, then the catalog's.
+///
+/// Collection decides which entities answer a search and stops there, so the
+/// endpoints that answer it project the same matches their own way. A response
+/// lists the local matches of a kind before the catalog's, which is why the two
+/// are kept apart here.
 #[derive(Debug, Default)]
-struct LocalSide {
-    /// The projected local artists.
-    artists: Vec<Object>,
-    /// The projected local albums.
-    albums: Vec<Object>,
-    /// The projected local songs.
-    tracks: Vec<Object>,
+struct Matches {
+    /// The stored artists that matched, in match order.
+    artists: Vec<LocalArtist>,
+    /// The catalog artists that matched, in match order.
+    catalog_artists: Vec<CatalogArtistResult>,
+    /// The stored albums that matched, in match order.
+    albums: Vec<EntityId>,
+    /// The catalog albums that matched, in match order.
+    catalog_albums: Vec<CatalogAlbumRefResult>,
+    /// The stored songs that matched, in match order.
+    tracks: Vec<TrackView>,
+    /// The catalog songs that matched, in match order.
+    catalog_tracks: Vec<CatalogTrackResult>,
     /// The local track hits, reduced to the fields deduplication compares.
     hits: Vec<LocalTrackHit>,
+}
+
+impl Matches {
+    /// Returns the ids of the matched stored artists.
+    ///
+    /// # Returns
+    ///
+    /// The artist ids, in match order.
+    fn local_artist_ids(&self) -> Vec<EntityId> {
+        self.artists
+            .iter()
+            .map(|matched| matched.artist.id)
+            .collect()
+    }
+
+    /// Returns the ids of the matched stored albums.
+    ///
+    /// # Returns
+    ///
+    /// The album ids, in match order.
+    fn local_album_ids(&self) -> Vec<EntityId> {
+        self.albums.clone()
+    }
+
+    /// Returns the ids of the matched stored songs.
+    ///
+    /// # Returns
+    ///
+    /// The track ids, in match order.
+    fn local_track_ids(&self) -> Vec<EntityId> {
+        self.tracks.iter().map(|view| view.track.id).collect()
+    }
 }
 
 /// Answers `search3`: the artists, albums, and songs matching a query.
@@ -82,71 +141,270 @@ struct LocalSide {
 /// a generic error when a local read fails. A catalog failure is never an
 /// error: it is logged and the local results are returned.
 pub async fn search3(call: Call) -> Encoded {
-    let database = call.state().database();
-    let scope = match scope::resolve(&call).await {
-        Ok(scope) => scope,
+    let collected = match collect(&call).await {
+        Ok(collected) => collected,
         Err(error) => return call.encode(Response::failed(error)),
     };
-    let Some(query) = call.get("query") else {
-        return call.encode(Response::failed(SubsonicError::missing_parameter("query")));
-    };
-    let text = query.to_owned();
-    let artist_window = match window(&call, "artistCount", "artistOffset") {
-        Ok(window) => window,
-        Err(error) => return call.encode(Response::failed(error)),
-    };
-    let album_window = match window(&call, "albumCount", "albumOffset") {
-        Ok(window) => window,
-        Err(error) => return call.encode(Response::failed(error)),
-    };
-    let song_window = match window(&call, "songCount", "songOffset") {
-        Ok(window) => window,
-        Err(error) => return call.encode(Response::failed(error)),
-    };
-
-    let query = Search {
-        text: &text,
-        artists: artist_window,
-        albums: album_window,
-        songs: song_window,
-    };
-    let mut side = match local_side(
-        call.state(),
-        call.principal().user_id.uuid(),
-        database,
-        scope,
-        &query,
-    )
-    .await
-    {
-        Ok(side) => side,
-        Err(error) => return call.encode(Response::failed(browse::failure("search3", &error))),
-    };
-
-    let settings = call.state().settings_snapshot();
-    let title_suffix = match catalog::title_suffix(&settings) {
+    let title_suffix = match title_suffix(&call) {
         Ok(suffix) => suffix,
         Err(error) => return call.encode(Response::failed(error)),
     };
+    let annotations = match annotations_of(&call, &collected).await {
+        Ok(annotations) => annotations,
+        Err(error) => return call.encode(Response::failed(browse::failure("search3", &error))),
+    };
+    let matches = &collected.matches;
+    let database = call.state().database();
+    let scope = collected.scope;
+
+    let mut artists = Vec::with_capacity(matches.artists.len() + matches.catalog_artists.len());
+    for matched in &matches.artists {
+        artists.push(projection::artist_id3(
+            &matched.artist,
+            matched.album_count,
+            &annotations.artist(matched.artist.id),
+        ));
+    }
+    for catalog in &matches.catalog_artists {
+        artists.push(projection::catalog_artist(catalog, 0, &title_suffix));
+    }
+
+    let mut albums = Vec::with_capacity(matches.albums.len() + matches.catalog_albums.len());
+    for id in &matches.albums {
+        let object = match album_object(database, scope, *id, &annotations).await {
+            Ok(object) => object,
+            Err(error) => {
+                return call.encode(Response::failed(browse::failure("search3", &error)));
+            }
+        };
+        if let Some(object) = object {
+            albums.push(object);
+        }
+    }
+    for catalog in &matches.catalog_albums {
+        albums.push(projection::catalog_album_ref(catalog, &title_suffix));
+    }
+
+    let mut songs = Vec::with_capacity(matches.tracks.len() + matches.catalog_tracks.len());
+    for view in &matches.tracks {
+        let object = match track_object(database, scope, view.clone(), &annotations).await {
+            Ok(object) => object,
+            Err(error) => {
+                return call.encode(Response::failed(browse::failure("search3", &error)));
+            }
+        };
+        if let Some(object) = object {
+            songs.push(object);
+        }
+    }
+    for catalog in &matches.catalog_tracks {
+        songs.push(projection::catalog_child(
+            &catalog.id,
+            &catalog.track,
+            &title_suffix,
+        ));
+    }
+
+    let search_result = Object::new()
+        .set("artist", Array::new(artists))
+        .set("album", Array::new(albums))
+        .set("song", Array::new(songs));
+    call.encode(Response::ok().member("searchResult3", search_result))
+}
+
+/// Answers `search2`: the same matches as `search3`, in the older shape.
+///
+/// The protocol's first search response lists an artist as a bare reference, an
+/// album as the folder a client browses into, and a song as a `Child`. The
+/// parameters, the windows, and the catalog assembly are the ones [`search3`]
+/// documents.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, with the parameters [`search3`] documents.
+///
+/// # Returns
+///
+/// A successful envelope carrying `searchResult2`, or a failed envelope.
+///
+/// # Errors
+///
+/// Answers the errors [`search3`] documents.
+pub async fn search2(call: Call) -> Encoded {
+    let collected = match collect(&call).await {
+        Ok(collected) => collected,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let title_suffix = match title_suffix(&call) {
+        Ok(suffix) => suffix,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let annotations = match annotations_of(&call, &collected).await {
+        Ok(annotations) => annotations,
+        Err(error) => return call.encode(Response::failed(browse::failure("search2", &error))),
+    };
+    let matches = &collected.matches;
+    let database = call.state().database();
+    let scope = collected.scope;
+
+    let mut artists = Vec::with_capacity(matches.artists.len() + matches.catalog_artists.len());
+    for matched in &matches.artists {
+        artists.push(projection::search_artist_ref(
+            &matched.artist,
+            &annotations.artist(matched.artist.id),
+        ));
+    }
+    for catalog in &matches.catalog_artists {
+        artists.push(projection::catalog_artist_ref(catalog));
+    }
+
+    let mut albums = Vec::with_capacity(matches.albums.len() + matches.catalog_albums.len());
+    for id in &matches.albums {
+        let object = match album_dir_object(database, scope, *id, &annotations).await {
+            Ok(object) => object,
+            Err(error) => {
+                return call.encode(Response::failed(browse::failure("search2", &error)));
+            }
+        };
+        if let Some(object) = object {
+            albums.push(object);
+        }
+    }
+    for catalog in &matches.catalog_albums {
+        albums.push(projection::catalog_album_dir(
+            &catalog.id,
+            catalog,
+            &title_suffix,
+        ));
+    }
+
+    let mut songs = Vec::with_capacity(matches.tracks.len() + matches.catalog_tracks.len());
+    for view in &matches.tracks {
+        let object = match track_object(database, scope, view.clone(), &annotations).await {
+            Ok(object) => object,
+            Err(error) => {
+                return call.encode(Response::failed(browse::failure("search2", &error)));
+            }
+        };
+        if let Some(object) = object {
+            songs.push(object);
+        }
+    }
+    for catalog in &matches.catalog_tracks {
+        songs.push(projection::catalog_child(
+            &catalog.id,
+            &catalog.track,
+            &title_suffix,
+        ));
+    }
+
+    let search_result = Object::new()
+        .set("artist", Array::new(artists))
+        .set("album", Array::new(albums))
+        .set("song", Array::new(songs));
+    call.encode(Response::ok().member("searchResult2", search_result))
+}
+
+/// Collects the matches of one search request, local first and then catalog.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, whose parameters are the ones [`search3`]
+///   documents.
+///
+/// # Returns
+///
+/// The matches and the scope they were read in.
+///
+/// # Errors
+///
+/// Answers Subsonic error 10 when `query` is missing, error 70 for an unknown
+/// `musicFolderId`, a generic error when a count or offset is not a number, and
+/// a generic error when a local read fails. A catalog failure is never an
+/// error: it is logged and the local matches are the answer.
+async fn collect(call: &Call) -> Result<Collected, SubsonicError> {
+    let Some(text) = call.get("query") else {
+        return Err(SubsonicError::missing_parameter("query"));
+    };
+    let scope = scope::resolve(call).await?;
+    let query = Search {
+        text,
+        artists: window(call, "artistCount", "artistOffset")?,
+        albums: window(call, "albumCount", "albumOffset")?,
+        songs: window(call, "songCount", "songOffset")?,
+    };
+    let settings = call.state().settings_snapshot();
+    let mut matches = local_matches(call.state().database(), scope, &query)
+        .await
+        .map_err(|error| browse::failure("search", &error))?;
 
     // The catalog contributes at most the shortfall of each kind, and only for
     // a non-empty query. An empty query lists the local library and nothing
     // else.
     let shortfalls = [
-        (EntityKind::Artist, artist_window, side.artists.len()),
-        (EntityKind::Album, album_window, side.albums.len()),
-        (EntityKind::Track, song_window, side.tracks.len()),
+        (EntityKind::Artist, query.artists, matches.artists.len()),
+        (EntityKind::Album, query.albums, matches.albums.len()),
+        (EntityKind::Track, query.songs, matches.tracks.len()),
     ];
     if !text.is_empty() && catalog_enabled(&settings) {
-        let hits = side.hits.clone();
-        append_catalog(&call, &hits, &text, &shortfalls, &title_suffix, &mut side).await;
+        let hits = matches.hits.clone();
+        append_catalog(call, &hits, text, &shortfalls, &mut matches).await;
     }
+    Ok(Collected { matches, scope })
+}
 
-    let search_result = Object::new()
-        .set("artist", Array::new(side.artists))
-        .set("album", Array::new(side.albums))
-        .set("song", Array::new(side.tracks));
-    call.encode(Response::ok().member("searchResult3", search_result))
+/// The matches of one search request and the scope they were read in.
+#[derive(Debug)]
+struct Collected {
+    /// The matched entities.
+    matches: Matches,
+    /// The scope the search read.
+    scope: Scope,
+}
+
+/// Loads the user's annotations for the stored entities of a search response.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `collected`: the matches the response answers with.
+///
+/// # Returns
+///
+/// The annotations, keyed by entity id.
+///
+/// # Errors
+///
+/// Returns [`ActivityError`] when a read fails.
+async fn annotations_of(
+    call: &Call,
+    collected: &Collected,
+) -> Result<Annotations, hearthsound_activity::ActivityError> {
+    annotations_for(
+        call.state(),
+        call.principal().user_id.uuid(),
+        &collected.matches.local_artist_ids(),
+        &collected.matches.local_album_ids(),
+        &collected.matches.local_track_ids(),
+    )
+    .await
+}
+
+/// Reads the suffix catalog titles carry in a response.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, whose state supplies the settings.
+///
+/// # Returns
+///
+/// The suffix, empty when the setting is empty.
+///
+/// # Errors
+///
+/// Answers a generic error when the setting cannot be read.
+fn title_suffix(call: &Call) -> Result<String, SubsonicError> {
+    catalog::title_suffix(&call.state().settings_snapshot())
 }
 
 /// Reads a count and an offset parameter into a [`Window`].
@@ -314,43 +572,36 @@ struct Search<'a> {
     songs: Window,
 }
 
-/// Builds the projected local side of a search.
+/// Collects the local matches of a search.
 ///
 /// An empty query lists the scope instead of searching it, because the FTS5
 /// index has nothing to match. A non-empty query runs the full-text search per
-/// kind, so each kind can carry its own window. Either way the entities the
-/// response holds are known before they are projected, so the user's
+/// kind, so each kind can carry its own window. Either way the entities that
+/// answer the search are known before they are projected, so the user's
 /// annotations are read once per entity kind.
 ///
 /// # Parameters
 ///
-/// - `state`: the endpoint state, whose database the reads use.
-/// - `user_id`: the account whose annotations are read.
 /// - `database`: the open database.
 /// - `scope`: the scope to search.
-/// - `text`: the search text, possibly empty.
-/// - `artist_window`: the artist window.
-/// - `album_window`: the album window.
-/// - `song_window`: the song window.
+/// - `query`: the text and the windows the request asked for.
 ///
 /// # Returns
 ///
-/// The projected artists, albums, and songs, and the track hits deduplication
+/// The matched artists, albums, and songs, and the track hits deduplication
 /// compares.
 ///
 /// # Errors
 ///
-/// Returns a library or activity failure when a read fails.
-async fn local_side(
-    state: &SubsonicState,
-    user_id: Uuid,
+/// Returns a library failure when a read fails.
+async fn local_matches(
     database: &Database,
     scope: Scope,
     query: &Search<'_>,
-) -> Result<LocalSide, LocalSideError> {
+) -> Result<Matches, LocalSideError> {
     let text = query.text;
     let (artist_window, album_window, song_window) = (&query.artists, &query.albums, &query.songs);
-    let mut side = LocalSide::default();
+    let mut matches = Matches::default();
     if text.is_empty() {
         let summaries =
             browse::artists_page(database, scope, artist_window.count, artist_window.offset)
@@ -365,26 +616,19 @@ async fn local_side(
         .await?;
         let views =
             browse::list_tracks(database, scope, song_window.count, song_window.offset).await?;
-        let artist_ids: Vec<EntityId> = summaries.iter().map(|summary| summary.artist.id).collect();
-        let album_ids: Vec<EntityId> = albums.iter().map(|album| album.id).collect();
-        let track_ids: Vec<EntityId> = views.iter().map(|view| view.track.id).collect();
-        let annotations =
-            annotations_for(state, user_id, &artist_ids, &album_ids, &track_ids).await?;
-
-        for summary in &summaries {
-            side.artists.push(projection::artist_id3(
-                &summary.artist,
-                summary.album_count,
-                &annotations.artist(summary.artist.id),
-            ));
-        }
-        for album in albums {
-            push_album(database, scope, album.id, &annotations, &mut side).await?;
-        }
+        matches.artists = summaries
+            .into_iter()
+            .map(|summary| LocalArtist {
+                artist: summary.artist,
+                album_count: summary.album_count,
+            })
+            .collect();
+        matches.albums = albums.into_iter().map(|album| album.id).collect();
         for view in views {
-            push_track(database, scope, view, &annotations, &mut side).await?;
+            matches.hits.push(hit(&view));
+            matches.tracks.push(view);
         }
-        return Ok(side);
+        return Ok(matches);
     }
 
     let artists = browse::search(
@@ -414,31 +658,24 @@ async fn local_side(
         song_window.offset,
     )
     .await?;
-    let artist_ids: Vec<EntityId> = artists.artists.iter().map(|artist| artist.id).collect();
-    let album_ids: Vec<EntityId> = albums.albums.iter().map(|album| album.id).collect();
-    let track_ids: Vec<EntityId> = tracks.tracks.iter().map(|view| view.track.id).collect();
-    let annotations = annotations_for(state, user_id, &artist_ids, &album_ids, &track_ids).await?;
-
     for artist in artists.artists {
         if let Some(detail) = browse::artist(database, scope, artist.id).await? {
-            side.artists.push(projection::artist_id3(
-                &detail.artist,
-                detail.albums.len() as i64,
-                &annotations.artist(detail.artist.id),
-            ));
+            matches.artists.push(LocalArtist {
+                album_count: detail.albums.len() as i64,
+                artist: detail.artist,
+            });
         }
     }
-    for album in albums.albums {
-        push_album(database, scope, album.id, &annotations, &mut side).await?;
-    }
+    matches.albums = albums.albums.into_iter().map(|album| album.id).collect();
     for view in tracks.tracks {
-        push_track(database, scope, view, &annotations, &mut side).await?;
+        matches.hits.push(hit(&view));
+        matches.tracks.push(view);
     }
 
-    Ok(side)
+    Ok(matches)
 }
 
-/// Loads one album and appends its projection to the local side.
+/// Loads one stored album and projects it as an `AlbumID3`.
 ///
 /// # Parameters
 ///
@@ -446,30 +683,67 @@ async fn local_side(
 /// - `scope`: the scope to filter by.
 /// - `album_id`: the album to load.
 /// - `annotations`: the user's annotations for the response.
-/// - `side`: the side to append to.
+///
+/// # Returns
+///
+/// The album, or `None` when the album left the scope between the search and
+/// the read.
 ///
 /// # Errors
 ///
 /// Returns a library failure when a read fails.
-async fn push_album(
+async fn album_object(
     database: &Database,
     scope: Scope,
     album_id: EntityId,
     annotations: &Annotations,
-    side: &mut LocalSide,
-) -> Result<(), LocalSideError> {
-    if let Some(loaded) = browse::album(database, scope, album_id).await? {
-        side.albums.push(projection::album_id3(
-            &loaded.detail.album,
-            &loaded.detail.artists,
-            &loaded.detail.tracks,
-            &annotations.album(loaded.detail.album.id),
-        ));
-    }
-    Ok(())
+) -> Result<Option<Object>, LocalSideError> {
+    let Some(loaded) = browse::album(database, scope, album_id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(projection::album_id3(
+        &loaded.detail.album,
+        &loaded.detail.artists,
+        &loaded.detail.tracks,
+        &annotations.album(loaded.detail.album.id),
+    )))
 }
 
-/// Loads one track and appends its projection and hit to the local side.
+/// Loads one stored album and projects it as a directory `Child`.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `scope`: the scope to filter by.
+/// - `album_id`: the album to load.
+/// - `annotations`: the user's annotations for the response.
+///
+/// # Returns
+///
+/// The directory child, or `None` when the album left the scope between the
+/// search and the read.
+///
+/// # Errors
+///
+/// Returns a library failure when a read fails.
+async fn album_dir_object(
+    database: &Database,
+    scope: Scope,
+    album_id: EntityId,
+    annotations: &Annotations,
+) -> Result<Option<Object>, LocalSideError> {
+    let Some(loaded) = browse::album(database, scope, album_id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(projection::album_dir(
+        &loaded.detail.album,
+        &loaded.detail.artists,
+        &loaded.detail.tracks,
+        &annotations.album(loaded.detail.album.id),
+    )))
+}
+
+/// Loads one stored track and projects it as a `Child`.
 ///
 /// # Parameters
 ///
@@ -477,28 +751,30 @@ async fn push_album(
 /// - `scope`: the scope to filter by.
 /// - `view`: the track the local search or listing returned.
 /// - `annotations`: the user's annotations for the response.
-/// - `side`: the side to append to.
+///
+/// # Returns
+///
+/// The song, or `None` when the track left the scope between the search and the
+/// read.
 ///
 /// # Errors
 ///
 /// Returns a library failure when a read fails.
-async fn push_track(
+async fn track_object(
     database: &Database,
     scope: Scope,
     view: TrackView,
     annotations: &Annotations,
-    side: &mut LocalSide,
-) -> Result<(), LocalSideError> {
-    if let Some(loaded) = browse::track(database, scope, view.track.id).await? {
-        side.hits.push(hit(&loaded.view));
-        side.tracks.push(projection::child(
-            &loaded.view,
-            loaded.file.as_ref(),
-            &loaded.album_artists,
-            &annotations.track(loaded.view.track.id),
-        ));
-    }
-    Ok(())
+) -> Result<Option<Object>, LocalSideError> {
+    let Some(loaded) = browse::track(database, scope, view.track.id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(projection::child(
+        &loaded.view,
+        loaded.file.as_ref(),
+        &loaded.album_artists,
+        &annotations.track(loaded.view.track.id),
+    )))
 }
 
 /// Reduces a local track to the fields deduplication compares.
@@ -526,7 +802,7 @@ fn hit(view: &TrackView) -> LocalTrackHit {
 
 /// Searches the catalog for the shortfall of each kind and appends what is new.
 ///
-/// A per-kind failure is logged and skipped, because the local side already
+/// A per-kind failure is logged and skipped, because the local matches already
 /// answered and a catalog instance that is down must not fail the search.
 ///
 /// # Parameters
@@ -536,15 +812,13 @@ fn hit(view: &TrackView) -> LocalTrackHit {
 /// - `text`: the search text.
 /// - `shortfalls`: each kind with its window and how many local results it
 ///   already has.
-/// - `title_suffix`: the suffix appended to catalog titles.
-/// - `side`: the local side to append the catalog results to.
+/// - `matches`: the local matches to append the catalog results to.
 async fn append_catalog(
     call: &Call,
     hits: &[LocalTrackHit],
     text: &str,
     shortfalls: &[(EntityKind, Window, usize)],
-    title_suffix: &str,
-    side: &mut LocalSide,
+    matches: &mut Matches,
 ) {
     let catalog = call.state().catalog();
     let mut found = CatalogSearch::default();
@@ -589,30 +863,29 @@ async fn append_catalog(
     let (_, album_window, _) = shortfalls[1];
     let (_, song_window, _) = shortfalls[2];
 
-    let mut artists: Vec<Object> = deduped
-        .artists
-        .iter()
-        .filter(|artist| deduped.stored_entity(&artist.id).is_none())
-        .take(window_limit(artist_window))
-        .map(|artist| projection::catalog_artist(artist, 0, title_suffix))
-        .collect();
-    let mut albums: Vec<Object> = deduped
-        .albums
-        .iter()
-        .filter(|album| deduped.stored_entity(&album.id).is_none())
-        .take(window_limit(album_window))
-        .map(|album| projection::catalog_album_ref(album, title_suffix))
-        .collect();
-    let mut tracks: Vec<Object> = deduped
-        .tracks
-        .iter()
-        .take(window_limit(song_window))
-        .map(|track| projection::catalog_child(&track.id, &track.track, title_suffix))
-        .collect();
-
-    side.artists.append(&mut artists);
-    side.albums.append(&mut albums);
-    side.tracks.append(&mut tracks);
+    matches.catalog_artists.extend(
+        deduped
+            .artists
+            .iter()
+            .filter(|artist| deduped.stored_entity(&artist.id).is_none())
+            .take(window_limit(artist_window))
+            .cloned(),
+    );
+    matches.catalog_albums.extend(
+        deduped
+            .albums
+            .iter()
+            .filter(|album| deduped.stored_entity(&album.id).is_none())
+            .take(window_limit(album_window))
+            .cloned(),
+    );
+    matches.catalog_tracks.extend(
+        deduped
+            .tracks
+            .iter()
+            .take(window_limit(song_window))
+            .cloned(),
+    );
 }
 
 /// Returns how many catalog results of one kind are worth appending.

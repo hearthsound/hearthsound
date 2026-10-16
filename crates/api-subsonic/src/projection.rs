@@ -341,6 +341,45 @@ pub(crate) fn artist_ref(artist: &Artist) -> Object {
         .set("name", artist.name.clone())
 }
 
+/// Builds the artist reference `search2` lists.
+///
+/// The older search response lists an artist as a bare reference with the
+/// user's star, and nothing else, which is what a client of that response
+/// reads.
+///
+/// # Parameters
+///
+/// - `artist`: the artist row.
+/// - `annotation`: the user's stars for the artist.
+///
+/// # Returns
+///
+/// The reference, with `starred` only when the user starred the artist.
+pub(crate) fn search_artist_ref(artist: &Artist, annotation: &Annotation) -> Object {
+    let object = artist_ref(artist);
+    match annotation.starred_at {
+        Some(at) => object.set("starred", timestamp(at)),
+        None => object,
+    }
+}
+
+/// Builds the artist reference of a catalog artist.
+///
+/// A catalog artist is not stored, so it carries no user annotation.
+///
+/// # Parameters
+///
+/// - `result`: the artist the provider returned, with its catalog id.
+///
+/// # Returns
+///
+/// The reference.
+pub(crate) fn catalog_artist_ref(result: &CatalogArtistResult) -> Object {
+    Object::new()
+        .set("id", result.id.to_string())
+        .set("name", result.artist.name.clone())
+}
+
 /// Builds one `AlbumID3` member.
 ///
 /// # Parameters

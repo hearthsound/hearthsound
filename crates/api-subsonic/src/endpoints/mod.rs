@@ -25,6 +25,6 @@ pub use browse::{
 pub use cover_art::get_cover_art;
 pub use genres::{get_genres, get_random_songs, get_songs_by_genre};
 pub use scrobble::scrobble;
-pub use search::search3;
+pub use search::{search2, search3};
 pub use stream::stream;
 pub use system::{get_license, get_music_folders, get_open_subsonic_extensions, ping, token_info};

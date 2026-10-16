@@ -87,6 +87,7 @@
 //! | `getSong` | one song |
 //! | `getAlbumList` | the albums in scope as folders, in any of the album list orders |
 //! | `getAlbumList2` | the same albums as `AlbumID3`, in any of the album list orders |
+//! | `search2` | the same matches as `search3`, in the older response shape |
 //! | `search3` | local matches first, then catalog matches when `search.catalog.enabled` |
 //! | `stream` | the track's media bytes: the stored file with ranges and validators, or a transcode |
 //! | `getCoverArt` | the stored entity's own image, or the issuing instance's through the catalog layer; local images are served unscaled |
@@ -158,7 +159,7 @@ pub use endpoints::{
     get_album, get_album_list, get_album_list_2, get_artist, get_artists, get_cover_art,
     get_genres, get_indexes, get_license, get_music_directory, get_music_folders,
     get_open_subsonic_extensions, get_random_songs, get_song, get_songs_by_genre, ping, scrobble,
-    search3, stream, token_info,
+    search2, search3, stream, token_info,
 };
 pub use params::{MAX_FORM_BODY_BYTES, Params, ParamsRejection};
 pub use response::{
