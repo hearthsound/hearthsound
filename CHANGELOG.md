@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checklist: both logins, browsing, playback with a range and a transcode, the
   personal data a user changes, the reports a player sends, and the
   administration endpoints.
+- The bundled plugins are pinned to deezer 0.2.0, musicbrainz 0.2.0, and slskd
+  0.1.1, which are the releases built against the plugin interface 0.2.0.
 
 - Project license, contributing guide, security policy, and changelog.
 - Cargo workspace with the `hearthsound-core` crate: layer and entity kind enums,
