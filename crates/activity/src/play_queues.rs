@@ -137,6 +137,9 @@ impl PlayQueues {
 
     /// Returns the queue the user saved most recently.
     ///
+    /// Two queues saved within the same millisecond are ordered by the order
+    /// their rows were written, so the last save wins.
+    ///
     /// # Parameters
     ///
     /// - `user_id`: the account whose queue is read.
@@ -154,7 +157,7 @@ impl PlayQueues {
         let row = sqlx::query!(
             "SELECT client, current_index, position_ms, track_ids, updated_at \
              FROM play_queues WHERE user_id = ? \
-             ORDER BY updated_at DESC, client LIMIT 1",
+             ORDER BY updated_at DESC, rowid DESC LIMIT 1",
             user_id.as_bytes().as_slice(),
         )
         .fetch_optional(&mut *conn)
