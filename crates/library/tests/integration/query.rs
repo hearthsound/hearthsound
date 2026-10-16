@@ -13,7 +13,7 @@ use hearthsound_library::query::{
     self, AlbumSort, Scope, ServerBrowse, content_type_for, sanitize_match,
 };
 use hearthsound_library::{
-    AlbumInput, ArtistCredit, LibraryRepository, ManagedMediaFile, Origin, ScannedMediaFile,
+    Album, AlbumInput, ArtistCredit, LibraryRepository, ManagedMediaFile, Origin, ScannedMediaFile,
     StorageRoots, TrackInput,
 };
 
@@ -839,4 +839,260 @@ fn content_types_follow_the_suffix() {
     assert_eq!(content_type_for("mp3"), "audio/mpeg");
     assert_eq!(content_type_for("m4a"), "audio/mp4");
     assert_eq!(content_type_for("weird"), "application/octet-stream");
+}
+
+/// Inserts an album with a release year and returns both ids.
+async fn make_dated_album(
+    library: &LibraryRepository,
+    artist: &str,
+    title: &str,
+    year: i64,
+) -> (EntityId, EntityId) {
+    let mut album = AlbumInput::new(title, Origin::Local);
+    album.year = Some(year);
+    let credits = [ArtistCredit::new(artist, "main")];
+    let album_id = library.upsert_album(&album, &credits).await.unwrap();
+    let artist_id = library.list_album_artists(album_id).await.unwrap()[0].id;
+    (album_id, artist_id)
+}
+
+/// Inserts a track with one genre and returns its id.
+async fn make_genre_track(
+    library: &LibraryRepository,
+    album: EntityId,
+    title: &str,
+    genre: &str,
+) -> EntityId {
+    let mut input = TrackInput::new(title, Origin::Local, Availability::Local);
+    input.album_id = Some(album);
+    library
+        .insert_track(&input, &[], &[genre.to_owned()])
+        .await
+        .unwrap()
+}
+
+/// Records a rating.
+async fn rate(db: &Database, user: uuid::Uuid, kind: EntityKind, id: EntityId, rating: i64) {
+    sqlx::query(
+        "INSERT INTO user_ratings (user_id, entity_kind, entity_id, rating, at) \
+         VALUES (?, ?, ?, ?, 0)",
+    )
+    .bind(user.as_bytes().as_slice())
+    .bind(kind_literal(kind))
+    .bind(id.uuid().as_bytes().as_slice())
+    .bind(rating)
+    .execute(db.writer())
+    .await
+    .unwrap();
+}
+
+/// Records a play.
+async fn play(db: &Database, user: uuid::Uuid, track: EntityId, started_at: i64) {
+    sqlx::query(
+        "INSERT INTO plays (id, user_id, track_id, started_at, listened_ms, audio_delivered) \
+         VALUES (?, ?, ?, ?, 180000, 1)",
+    )
+    .bind(uuid::Uuid::now_v7().as_bytes().as_slice())
+    .bind(user.as_bytes().as_slice())
+    .bind(track.uuid().as_bytes().as_slice())
+    .bind(started_at)
+    .execute(db.writer())
+    .await
+    .unwrap();
+}
+
+/// The titles of a listing.
+fn titles(albums: &[Album]) -> Vec<&str> {
+    albums.iter().map(|album| album.title.as_str()).collect()
+}
+
+/// The personal scope of one user.
+fn personal(user: uuid::Uuid) -> Scope {
+    Scope::Personal { user_id: user }
+}
+
+/// Opens a database with one account and an empty folder it owns.
+///
+/// The album-list tests build their own library rather than the shared seed, so
+/// the albums a listing returns are exactly the ones the test created.
+async fn album_list_fixture(dir: &Path) -> (Database, LibraryRepository, uuid::Uuid) {
+    let db = migrated(dir).await;
+    let library = LibraryRepository::new(&db);
+    let user = insert_user(&db, "listener").await;
+    (db, library, user)
+}
+
+/// Every album-list order that reads only the albums themselves.
+#[tokio::test]
+async fn album_lists_follow_names_years_and_genres() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, library, user) = album_list_fixture(dir.path()).await;
+    let mut conn = db.readers().acquire().await.unwrap();
+    let owned_dir = dir.path().join("list");
+    std::fs::create_dir(&owned_dir).unwrap();
+    let folder = library
+        .add_library_folder(&owned_dir, Some(user))
+        .await
+        .unwrap();
+
+    // Three albums in the user's own folder, so the personal scope lists them:
+    // a 1995 jazz album by Aardvark, a 1998 rock album by Mike, and a 2001 rock
+    // album by Zulu.
+    let (alpha, _) = make_dated_album(&library, "Aardvark", "Alpha Album", 1995).await;
+    let alpha_track = make_genre_track(&library, alpha, "Alpha Song", "jazz").await;
+    attach_folder(&library, alpha_track, folder.id, "alpha.mp3").await;
+    let (middle, _) = make_dated_album(&library, "Mike", "Middle Album", 1998).await;
+    let middle_track = make_genre_track(&library, middle, "Middle Song", "rock").await;
+    attach_folder(&library, middle_track, folder.id, "middle.mp3").await;
+    let (zed, _) = make_dated_album(&library, "Zulu", "Zed Album", 2001).await;
+    let zed_track = make_genre_track(&library, zed, "Zed Song", "rock").await;
+    attach_folder(&library, zed_track, folder.id, "zed.mp3").await;
+
+    let scope = personal(user);
+    let by_name = query::list_albums(&mut conn, scope, AlbumSort::AlphabeticalByName, -1, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        titles(&by_name),
+        ["Alpha Album", "Middle Album", "Zed Album"]
+    );
+    assert_eq!(
+        titles(
+            &query::list_albums(&mut conn, scope, AlbumSort::AlphabeticalByArtist, -1, 0)
+                .await
+                .unwrap()
+        ),
+        ["Alpha Album", "Middle Album", "Zed Album"],
+        "the albums are ordered by their first credited artist"
+    );
+
+    // ByYear counts up or down with the range it is given.
+    assert_eq!(
+        titles(
+            &query::list_albums(
+                &mut conn,
+                scope,
+                AlbumSort::ByYear {
+                    from: 1990,
+                    to: 1999
+                },
+                -1,
+                0,
+            )
+            .await
+            .unwrap()
+        ),
+        ["Alpha Album", "Middle Album"],
+        "an album outside the range is left out"
+    );
+    assert_eq!(
+        titles(
+            &query::list_albums(
+                &mut conn,
+                scope,
+                AlbumSort::ByYear {
+                    from: 1999,
+                    to: 1990
+                },
+                -1,
+                0,
+            )
+            .await
+            .unwrap()
+        ),
+        ["Middle Album", "Alpha Album"],
+        "a range that counts down is ordered newest first"
+    );
+
+    assert_eq!(
+        titles(
+            &query::list_albums(
+                &mut conn,
+                scope,
+                AlbumSort::ByGenre("rock".to_owned()),
+                -1,
+                0,
+            )
+            .await
+            .unwrap()
+        ),
+        ["Middle Album", "Zed Album"]
+    );
+    assert_eq!(
+        titles(
+            &query::list_albums(
+                &mut conn,
+                scope,
+                AlbumSort::ByGenre("jazz".to_owned()),
+                -1,
+                0,
+            )
+            .await
+            .unwrap()
+        ),
+        ["Alpha Album"]
+    );
+}
+
+/// Every album-list order that reads what the user did.
+#[tokio::test]
+async fn album_lists_follow_the_users_activity() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, library, user) = album_list_fixture(dir.path()).await;
+    let other = insert_user(&db, "other").await;
+    let mut conn = db.readers().acquire().await.unwrap();
+    let owned_dir = dir.path().join("activity");
+    std::fs::create_dir(&owned_dir).unwrap();
+    let folder = library
+        .add_library_folder(&owned_dir, Some(user))
+        .await
+        .unwrap();
+
+    let (first, _) = make_dated_album(&library, "Artist A", "Album A", 2000).await;
+    let first_track = make_track(&library, Some(first), "Song A", Availability::Local).await;
+    attach_folder(&library, first_track, folder.id, "a.mp3").await;
+    let (second, _) = make_dated_album(&library, "Artist B", "Album B", 2000).await;
+    let second_track = make_track(&library, Some(second), "Song B", Availability::Local).await;
+    attach_folder(&library, second_track, folder.id, "b.mp3").await;
+    let (third, _) = make_dated_album(&library, "Artist C", "Album C", 2000).await;
+    let third_track = make_track(&library, Some(third), "Song C", Availability::Local).await;
+    attach_folder(&library, third_track, folder.id, "c.mp3").await;
+
+    rate(&db, user, EntityKind::Album, first, 5).await;
+    rate(&db, user, EntityKind::Album, second, 2).await;
+    // Another user's rating must not move this user's list.
+    rate(&db, other, EntityKind::Album, third, 5).await;
+    play(&db, user, first_track, 1_000).await;
+    play(&db, user, first_track, 2_000).await;
+    play(&db, user, second_track, 3_000).await;
+    like(&db, user, EntityKind::Album, second).await;
+
+    let scope = personal(user);
+    for (sort, expected, reason) in [
+        (
+            AlbumSort::Highest { user },
+            ["Album A", "Album B", "Album C"],
+            "the highest rating comes first and an unrated album last",
+        ),
+        (
+            AlbumSort::Frequent { user },
+            ["Album A", "Album B", "Album C"],
+            "the most played album comes first",
+        ),
+        (
+            AlbumSort::Recent { user },
+            ["Album B", "Album A", "Album C"],
+            "the most recently played album comes first",
+        ),
+        (
+            AlbumSort::Starred { user },
+            ["Album B", "Album A", "Album C"],
+            "the liked album comes first",
+        ),
+    ] {
+        let listed = query::list_albums(&mut conn, scope, sort, -1, 0)
+            .await
+            .unwrap();
+        assert_eq!(titles(&listed), expected, "{reason}");
+    }
 }

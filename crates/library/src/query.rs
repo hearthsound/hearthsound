@@ -21,7 +21,7 @@
 use hearthsound_config::SettingsStore;
 use hearthsound_config::keys;
 use hearthsound_core::{Availability, EntityId, EntityKind, IdPrefix, StorageClass};
-use sqlx::SqliteConnection;
+use sqlx::{QueryBuilder, Sqlite, SqliteConnection};
 use uuid::Uuid;
 
 use crate::error::LibraryError;
@@ -137,14 +137,84 @@ impl ServerBrowse {
 }
 
 /// How an album list is ordered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The variants a user's own activity decides carry the user they are read for,
+/// because a rating, a play, or a like is per user.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_library::query::AlbumSort;
+///
+/// let by_year = AlbumSort::ByYear { from: 1990, to: 1999 };
+/// assert_eq!(by_year.to_year(), Some((1990, 1999)));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlbumSort {
     /// Newest first, by creation time.
     Newest,
     /// Alphabetically by the album's sort title.
     AlphabeticalByName,
+    /// Alphabetically by the album's first credited artist, then by title.
+    AlphabeticalByArtist,
     /// A random sample of the requested size.
     Random,
+    /// The user's highest rated albums first.
+    Highest {
+        /// The account whose ratings are read.
+        user: Uuid,
+    },
+    /// The albums the user played most often first.
+    Frequent {
+        /// The account whose plays are read.
+        user: Uuid,
+    },
+    /// The albums the user played most recently first.
+    Recent {
+        /// The account whose plays are read.
+        user: Uuid,
+    },
+    /// The albums the user liked most recently first.
+    Starred {
+        /// The account whose likes are read.
+        user: Uuid,
+    },
+    /// Albums released in a year range, newest first when the range counts
+    /// down.
+    ByYear {
+        /// One end of the release-year range.
+        from: i64,
+        /// The other end; the range is inclusive either way round.
+        to: i64,
+    },
+    /// Albums with a track of one genre, alphabetically by title.
+    ByGenre(String),
+}
+
+impl AlbumSort {
+    /// Returns the release years this order covers.
+    ///
+    /// # Returns
+    ///
+    /// The inclusive range, or `None` for every other order.
+    pub fn to_year(&self) -> Option<(i64, i64)> {
+        match self {
+            AlbumSort::ByYear { from, to } => Some((*from, *to)),
+            _ => None,
+        }
+    }
+
+    /// Returns the genre this order filters on.
+    ///
+    /// # Returns
+    ///
+    /// The genre, or `None` for every other order.
+    pub fn genre(&self) -> Option<&str> {
+        match self {
+            AlbumSort::ByGenre(genre) => Some(genre),
+            _ => None,
+        }
+    }
 }
 
 /// An artist with the number of albums it has in scope.
@@ -521,138 +591,142 @@ pub async fn list_albums(
     size: i64,
     offset: i64,
 ) -> Result<Vec<Album>, LibraryError> {
-    let rows = match scope {
+    if scope == Scope::Server(ServerBrowse::Disabled) {
+        return Ok(Vec::new());
+    }
+    let mut builder = QueryBuilder::<Sqlite>::new("WITH scope_tracks(track_id) AS (");
+    match scope {
         Scope::Personal { user_id } => {
-            let user = user_id.as_bytes().as_slice();
-            match sort {
-                AlbumSort::Newest => sqlx::query_as!(
-                    albums::AlbumRow,
-                    "WITH scope_tracks(track_id) AS ( \
-                         SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'track' \
-                         UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'track' AND value = 'like' \
-                         UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id \
-                             WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
-                         UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
-                             WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
-                     ) \
-                     SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
-                            al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, \
-                            al.created_at, al.updated_at \
-                     FROM albums al \
-                     WHERE al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id) \
-                        OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ? AND entity_kind = 'album' AND entity_id = al.id) \
-                        OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' \
-                                     AND value = 'like' AND entity_id = al.id) \
-                     ORDER BY al.created_at DESC, al.id DESC LIMIT ? OFFSET ?",
-                    user, user, user, user, user, user, size, offset,
-                )
-                .fetch_all(&mut *conn)
-                .await?,
-                AlbumSort::AlphabeticalByName => sqlx::query_as!(
-                    albums::AlbumRow,
-                    "WITH scope_tracks(track_id) AS ( \
-                         SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'track' \
-                         UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'track' AND value = 'like' \
-                         UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id \
-                             WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
-                         UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
-                             WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
-                     ) \
-                     SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
-                            al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, \
-                            al.created_at, al.updated_at \
-                     FROM albums al \
-                     WHERE al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id) \
-                        OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ? AND entity_kind = 'album' AND entity_id = al.id) \
-                        OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' \
-                                     AND value = 'like' AND entity_id = al.id) \
-                     ORDER BY al.sort_title, al.id LIMIT ? OFFSET ?",
-                    user, user, user, user, user, user, size, offset,
-                )
-                .fetch_all(&mut *conn)
-                .await?,
-                AlbumSort::Random => sqlx::query_as!(
-                    albums::AlbumRow,
-                    "WITH scope_tracks(track_id) AS ( \
-                         SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'track' \
-                         UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'track' AND value = 'like' \
-                         UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id \
-                             WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
-                         UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
-                             WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
-                     ) \
-                     SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
-                            al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, \
-                            al.created_at, al.updated_at \
-                     FROM albums al \
-                     WHERE al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id) \
-                        OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ? AND entity_kind = 'album' AND entity_id = al.id) \
-                        OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' \
-                                     AND value = 'like' AND entity_id = al.id) \
-                     ORDER BY RANDOM() LIMIT ? OFFSET ?",
-                    user, user, user, user, user, user, size, offset,
-                )
-                .fetch_all(&mut *conn)
-                .await?,
-            }
+            let user = user_id.as_bytes().to_vec();
+            builder
+                .push("SELECT entity_id FROM user_library WHERE user_id = ")
+                .push_bind(user.clone())
+                .push(" AND entity_kind = 'track' UNION SELECT entity_id FROM user_feedback WHERE user_id = ")
+                .push_bind(user.clone())
+                .push(" AND entity_kind = 'track' AND value = 'like' UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id WHERE p.owner_user_id = ")
+                .push_bind(user.clone())
+                .push(" AND p.is_temporary = 0 UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id WHERE mf.storage = 'folder' AND lf.owner_user_id = ")
+                .push_bind(user)
+                .push(") ");
         }
         Scope::Server(view) => {
-            if view == ServerBrowse::Disabled {
-                return Ok(Vec::new());
-            }
             let (available, cached) = view.availability_pair();
-            match sort {
-                AlbumSort::Newest => sqlx::query_as!(
-                    albums::AlbumRow,
-                    "WITH scope_tracks(track_id) AS (SELECT id FROM tracks WHERE availability IN (?, ?)) \
-                     SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
-                            al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, \
-                            al.created_at, al.updated_at \
-                     FROM albums al \
-                     WHERE al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id) \
-                     ORDER BY al.created_at DESC, al.id DESC LIMIT ? OFFSET ?",
-                    available,
-                    cached,
-                    size,
-                    offset,
+            builder
+                .push("SELECT id FROM tracks WHERE availability IN (")
+                .push_bind(available)
+                .push(", ")
+                .push_bind(cached)
+                .push(")) ");
+        }
+    }
+    builder.push(
+        "SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
+         al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, \
+         al.created_at, al.updated_at \
+         FROM albums al \
+         WHERE ",
+    );
+    match scope {
+        Scope::Personal { user_id } => {
+            let user = user_id.as_bytes().to_vec();
+            builder
+                .push("(al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id) OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ")
+                .push_bind(user.clone())
+                .push(" AND entity_kind = 'album' AND entity_id = al.id) OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ")
+                .push_bind(user)
+                .push(" AND entity_kind = 'album' AND value = 'like' AND entity_id = al.id))");
+        }
+        Scope::Server(_) => {
+            builder.push(
+                "al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id)",
+            );
+        }
+    }
+    match &sort {
+        AlbumSort::ByYear { from, to } => {
+            let (low, high) = if from <= to {
+                (*from, *to)
+            } else {
+                (*to, *from)
+            };
+            builder
+                .push(" AND al.year BETWEEN ")
+                .push_bind(low)
+                .push(" AND ")
+                .push_bind(high);
+        }
+        AlbumSort::ByGenre(genre) => {
+            builder
+                .push(
+                    " AND EXISTS (SELECT 1 FROM tracks t JOIN track_genres tg ON tg.track_id = t.id \
+                     JOIN genres g ON g.id = tg.genre_id WHERE t.album_id = al.id AND g.name = ",
                 )
-                .fetch_all(&mut *conn)
-                .await?,
-                AlbumSort::AlphabeticalByName => sqlx::query_as!(
-                    albums::AlbumRow,
-                    "WITH scope_tracks(track_id) AS (SELECT id FROM tracks WHERE availability IN (?, ?)) \
-                     SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
-                            al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, \
-                            al.created_at, al.updated_at \
-                     FROM albums al \
-                     WHERE al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id) \
-                     ORDER BY al.sort_title, al.id LIMIT ? OFFSET ?",
-                    available,
-                    cached,
-                    size,
-                    offset,
-                )
-                .fetch_all(&mut *conn)
-                .await?,
-                AlbumSort::Random => sqlx::query_as!(
-                    albums::AlbumRow,
-                    "WITH scope_tracks(track_id) AS (SELECT id FROM tracks WHERE availability IN (?, ?)) \
-                     SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
-                            al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, \
-                            al.created_at, al.updated_at \
-                     FROM albums al \
-                     WHERE al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id) \
-                     ORDER BY RANDOM() LIMIT ? OFFSET ?",
-                    available,
-                    cached,
-                    size,
-                    offset,
-                )
-                .fetch_all(&mut *conn)
-                .await?,
+                .push_bind(genre.clone())
+                .push(")");
+        }
+        _ => {}
+    }
+    builder.push(" ORDER BY ");
+    match &sort {
+        AlbumSort::Newest => {
+            builder.push("al.created_at DESC, al.id DESC");
+        }
+        AlbumSort::AlphabeticalByName => {
+            builder.push("al.sort_title, al.id");
+        }
+        AlbumSort::AlphabeticalByArtist => {
+            builder.push(
+                "(SELECT ar.sort_name FROM album_artists aa JOIN artists ar ON ar.id = aa.artist_id \
+                 WHERE aa.album_id = al.id ORDER BY aa.position LIMIT 1), al.sort_title, al.id",
+            );
+        }
+        AlbumSort::Random => {
+            builder.push("RANDOM()");
+        }
+        AlbumSort::Highest { user } => {
+            builder
+                .push("(SELECT r.rating FROM user_ratings r WHERE r.user_id = ")
+                .push_bind(user.as_bytes().to_vec())
+                .push(" AND r.entity_kind = 'album' AND r.entity_id = al.id) DESC, al.sort_title, al.id");
+        }
+        AlbumSort::Frequent { user } => {
+            builder
+                .push("(SELECT count(*) FROM plays p JOIN tracks t ON t.id = p.track_id WHERE p.user_id = ")
+                .push_bind(user.as_bytes().to_vec())
+                .push(" AND t.album_id = al.id) DESC, al.sort_title, al.id");
+        }
+        AlbumSort::Recent { user } => {
+            builder
+                .push("(SELECT max(p.started_at) FROM plays p JOIN tracks t ON t.id = p.track_id WHERE p.user_id = ")
+                .push_bind(user.as_bytes().to_vec())
+                .push(" AND t.album_id = al.id) DESC, al.sort_title, al.id");
+        }
+        AlbumSort::Starred { user } => {
+            builder
+                .push("(SELECT f.at FROM user_feedback f WHERE f.user_id = ")
+                .push_bind(user.as_bytes().to_vec())
+                .push(" AND f.entity_kind = 'album' AND f.value = 'like' AND f.entity_id = al.id) DESC, al.sort_title, al.id");
+        }
+        AlbumSort::ByYear { from, to } => {
+            if from <= to {
+                builder.push("al.year, al.sort_title, al.id");
+            } else {
+                builder.push("al.year DESC, al.sort_title, al.id");
             }
         }
-    };
+        AlbumSort::ByGenre(_) => {
+            builder.push("al.sort_title, al.id");
+        }
+    }
+    builder
+        .push(" LIMIT ")
+        .push_bind(size)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    let rows = builder
+        .build_query_as::<albums::AlbumRow>()
+        .fetch_all(&mut *conn)
+        .await?;
     rows.into_iter().map(|row| row.into_album()).collect()
 }
 

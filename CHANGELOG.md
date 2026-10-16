@@ -720,6 +720,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Listing endpoints can read a user's stars, ratings, play counts, and last-play
   instants for a whole page of tracks, albums, or artists in a bounded number of
   statements.
+- Album listings are ordered by an artist-aware name, the user's rating, play
+  count or last play, their likes, a release-year range, or a genre, and one
+  query serves every order instead of one query text per order.
 
 ### Security
 
