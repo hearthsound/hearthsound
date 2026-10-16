@@ -283,6 +283,37 @@ pub async fn set_library_folder_owner(
     Ok(affected > 0)
 }
 
+/// Records whether a folder is watched for changes.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `id`: the folder to update.
+/// - `watch`: whether a watcher should watch the folder.
+///
+/// # Returns
+///
+/// `true` when a row was updated, `false` when the folder does not exist.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when the update fails.
+pub async fn set_library_folder_watch(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    watch: bool,
+) -> Result<bool, LibraryError> {
+    let affected = sqlx::query!(
+        "UPDATE library_folders SET watch = ? WHERE id = ?",
+        watch,
+        id.as_bytes().as_slice(),
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
+}
+
 /// Records when a folder was last scanned.
 ///
 /// # Parameters

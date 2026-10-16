@@ -417,6 +417,9 @@ pub mod keys {
     /// How many files a scan probes at once.
     pub const LIBRARY_SCAN_CONCURRENCY: SettingKey<i64> =
         SettingKey::new("library.scan.concurrency");
+    /// Quiet period after a filesystem change, in milliseconds.
+    pub const LIBRARY_WATCH_DEBOUNCE_MS: SettingKey<i64> =
+        SettingKey::new("library.watch.debounce_ms");
 
     /// Upper bound on the total size of the cache directory, in bytes.
     pub const STORAGE_CACHE_MAX_BYTES: SettingKey<i64> = SettingKey::new("storage.cache.max_bytes");
@@ -709,6 +712,15 @@ impl SettingsRegistry {
                     SettingKind::Integer { min: 1, max: 64 },
                     SettingValue::Integer(8),
                     "Files probed at once during a scan",
+                ),
+                def(
+                    keys::LIBRARY_WATCH_DEBOUNCE_MS,
+                    SettingKind::Integer {
+                        min: 200,
+                        max: 60_000,
+                    },
+                    SettingValue::Integer(2_000),
+                    "Quiet period after a filesystem change before a watched folder is rescanned",
                 ),
                 def(
                     keys::STORAGE_CACHE_MAX_BYTES,

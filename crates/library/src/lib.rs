@@ -71,6 +71,7 @@ pub mod query;
 pub mod retention;
 pub mod scan;
 pub mod tracks;
+pub mod watch;
 
 /// The statement a transaction that reads before it writes starts with.
 ///

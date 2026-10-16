@@ -18,6 +18,8 @@ hearthsound-core = { path = "../core" }
 hearthsound-db = { path = "../db" }
 hearthsound-jobs = { path = "../jobs" }
 hearthsound-media = { path = "../media" }
+notify.workspace = true
+notify-debouncer-full.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true

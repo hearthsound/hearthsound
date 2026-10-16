@@ -684,6 +684,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The scanner reports what it is doing: a queued job counts as scanning from the
   moment it is requested, and the files a running scan processed are counted
   too.
+- A library folder whose `watch` flag is set is watched for filesystem changes:
+  after the quiet period in `library.watch.debounce_ms` (2 seconds by default)
+  the changed directories are scanned, never the whole library.
 
 ### Security
 

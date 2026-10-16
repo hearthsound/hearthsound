@@ -9,3 +9,4 @@ mod query;
 mod repository;
 mod retention;
 mod scan;
+mod watch;
