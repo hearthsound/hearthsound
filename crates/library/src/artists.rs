@@ -53,8 +53,12 @@ impl ArtistRow {
 /// Inserts an artist, or refreshes the one that already matches.
 ///
 /// The dedupe rule is: an artist with the same MusicBrainz artist id, when the
-/// input carries one, otherwise an artist with the same name compared
-/// case-insensitively. A matching row has its name, sort key, and `updated_at`
+/// input carries one, and otherwise an artist with the same name compared
+/// case-insensitively. An input with an id no row holds yet adopts a same-named
+/// row that has no id, and an input without an id prefers a same-named row that
+/// has one, so files tagged with and without MusicBrainz ids credit one artist
+/// whichever order they are scanned in. Two same-named artists with different
+/// ids stay apart. A matching row has its name, sort key, and `updated_at`
 /// refreshed and its id returned, so a rescan of an unchanged folder does not
 /// grow the table. A MusicBrainz id the input does not carry is left in place,
 /// so a caller that knows less never clears a column the table already holds,
@@ -88,16 +92,30 @@ pub async fn upsert_artist(
 
     let existing: Option<Vec<u8>> = match artist.mb_artist_id.as_deref() {
         Some(mbid) => {
-            sqlx::query_scalar!(
+            let identified = sqlx::query_scalar!(
                 "SELECT id FROM artists WHERE mb_artist_id = ? LIMIT 1",
                 mbid
             )
             .fetch_optional(&mut *conn)
-            .await?
+            .await?;
+            match identified {
+                Some(id) => Some(id),
+                None => {
+                    sqlx::query_scalar!(
+                        "SELECT id FROM artists \
+                         WHERE mb_artist_id IS NULL AND name = ? COLLATE NOCASE \
+                         ORDER BY id LIMIT 1",
+                        artist.name
+                    )
+                    .fetch_optional(&mut *conn)
+                    .await?
+                }
+            }
         }
         None => {
             sqlx::query_scalar!(
-                "SELECT id FROM artists WHERE name = ? COLLATE NOCASE LIMIT 1",
+                "SELECT id FROM artists WHERE name = ? COLLATE NOCASE \
+                 ORDER BY mb_artist_id IS NULL, id LIMIT 1",
                 artist.name
             )
             .fetch_optional(&mut *conn)

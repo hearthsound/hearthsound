@@ -815,6 +815,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request: the next artwork instance and then the instance that issued the
   entity are still asked, and the request answers `503` only when none of them
   delivers a picture.
+- An artist whose files are tagged with a MusicBrainz artist id in some albums
+  and without one in others is indexed as one artist, whichever files are
+  scanned first.
 
 ### Security
 

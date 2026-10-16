@@ -75,6 +75,48 @@ async fn artists_dedupe_by_mbid_then_by_name() {
     assert_eq!(library.list_artists().await.unwrap().len(), 3);
 }
 
+/// Files of one artist tagged with and without a MusicBrainz id credit the
+/// same artist, whichever kind is stored first.
+#[tokio::test]
+async fn an_artist_tagged_with_and_without_an_mbid_is_one_artist() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+
+    // The untagged file first: the tagged one adopts its row and its id.
+    let plain = library
+        .upsert_artist(&ArtistInput::new("Aphex Twin"))
+        .await
+        .unwrap();
+    let tagged = library
+        .upsert_artist(&ArtistInput::new("Aphex Twin").mb_artist_id("mbid-aphex"))
+        .await
+        .unwrap();
+    assert_eq!(tagged, plain);
+    let stored = library.get_artist(tagged).await.unwrap().unwrap();
+    assert_eq!(stored.mb_artist_id.as_deref(), Some("mbid-aphex"));
+
+    // The tagged file first: the untagged one joins it.
+    let tagged = library
+        .upsert_artist(&ArtistInput::new("Blue Bendy").mb_artist_id("mbid-bendy"))
+        .await
+        .unwrap();
+    let plain = library
+        .upsert_artist(&ArtistInput::new("blue bendy"))
+        .await
+        .unwrap();
+    assert_eq!(plain, tagged);
+
+    // A second id under a name already identified is a different artist, and
+    // an untagged file still credits an identified one rather than a new row.
+    let namesake = library
+        .upsert_artist(&ArtistInput::new("Blue Bendy").mb_artist_id("mbid-namesake"))
+        .await
+        .unwrap();
+    assert_ne!(namesake, tagged);
+    assert_eq!(library.list_artists().await.unwrap().len(), 3);
+}
+
 #[tokio::test]
 async fn albums_dedupe_by_release_id_then_by_title_and_primary_artist() {
     let dir = tempfile::tempdir().unwrap();
