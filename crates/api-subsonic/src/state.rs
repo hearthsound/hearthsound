@@ -16,7 +16,9 @@ use hearthsound_catalog::CatalogService;
 use hearthsound_config::SettingsStore;
 use hearthsound_config::settings::Settings;
 use hearthsound_db::Database;
+use hearthsound_jobs::JobQueue;
 use hearthsound_library::StorageRoots;
+use hearthsound_library::scan::LibraryScanner;
 use hearthsound_media::FfmpegRunner;
 
 use crate::auth::TrustedProxies;
@@ -55,6 +57,10 @@ struct Inner {
     prefetch: Option<Arc<PrefetchScheduler>>,
     /// The proxies whose forwarding headers are trusted.
     trusted_proxies: Arc<TrustedProxies>,
+    /// The library scanner, when the composition root has one.
+    scanner: Option<Arc<LibraryScanner>>,
+    /// The job queue, when the composition root has one.
+    jobs: Option<Arc<JobQueue>>,
 }
 
 impl SubsonicState {
@@ -113,6 +119,8 @@ impl SubsonicState {
                 authenticator,
                 prefetch: None,
                 trusted_proxies: Arc::new(TrustedProxies::default()),
+                scanner: None,
+                jobs: None,
             }),
         }
     }
@@ -141,6 +149,8 @@ impl SubsonicState {
                 authenticator: Arc::clone(&self.inner.authenticator),
                 prefetch: self.inner.prefetch.clone(),
                 trusted_proxies: Arc::new(trusted_proxies),
+                scanner: self.inner.scanner.clone(),
+                jobs: self.inner.jobs.clone(),
             }),
         }
     }
@@ -169,6 +179,8 @@ impl SubsonicState {
                 authenticator: Arc::clone(&self.inner.authenticator),
                 prefetch: self.inner.prefetch.clone(),
                 trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
+                scanner: self.inner.scanner.clone(),
+                jobs: self.inner.jobs.clone(),
             }),
         }
     }
@@ -201,6 +213,8 @@ impl SubsonicState {
                 authenticator: Arc::clone(&self.inner.authenticator),
                 prefetch: Some(prefetch),
                 trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
+                scanner: self.inner.scanner.clone(),
+                jobs: self.inner.jobs.clone(),
             }),
         }
     }
@@ -254,6 +268,57 @@ impl SubsonicState {
     /// The resolver every `/rest` call authenticates through.
     pub fn authenticator(&self) -> &Authenticator {
         &self.inner.authenticator
+    }
+
+    /// Adds the library scanner and the job queue.
+    ///
+    /// The `/rest` surface serves `getScanStatus` and `startScan` through them:
+    /// the scanner reports what it is doing, and a scan a client starts is
+    /// enqueued on the same queue the watcher and the command line use.
+    ///
+    /// # Parameters
+    ///
+    /// - `scanner`: the library scanner, shared with the composition root.
+    /// - `jobs`: the job queue the scan is enqueued on.
+    ///
+    /// # Returns
+    ///
+    /// The state, with the scanner and the queue.
+    pub fn with_scanner(self, scanner: Arc<LibraryScanner>, jobs: Arc<JobQueue>) -> SubsonicState {
+        SubsonicState {
+            inner: Arc::new(Inner {
+                database: Arc::clone(&self.inner.database),
+                settings: self.inner.settings.clone(),
+                user_settings: self.inner.user_settings.clone(),
+                catalog: Arc::clone(&self.inner.catalog),
+                activity: Arc::clone(&self.inner.activity),
+                stream: self.inner.stream.clone(),
+                ffmpeg: Arc::clone(&self.inner.ffmpeg),
+                authenticator: Arc::clone(&self.inner.authenticator),
+                prefetch: self.inner.prefetch.clone(),
+                trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
+                scanner: Some(scanner),
+                jobs: Some(jobs),
+            }),
+        }
+    }
+
+    /// Returns the library scanner, when the composition root added one.
+    ///
+    /// # Returns
+    ///
+    /// The scanner, or `None` in a process that does not scan.
+    pub fn scanner(&self) -> Option<&Arc<LibraryScanner>> {
+        self.inner.scanner.as_ref()
+    }
+
+    /// Returns the job queue, when the composition root added one.
+    ///
+    /// # Returns
+    ///
+    /// The queue, or `None` in a process that does not run jobs.
+    pub fn jobs(&self) -> Option<&Arc<JobQueue>> {
+        self.inner.jobs.as_ref()
     }
 
     /// Returns the proxies whose forwarding headers are trusted.

@@ -23,6 +23,7 @@ hearthsound-catalog = { path = "../catalog" }
 hearthsound-config = { path = "../config" }
 hearthsound-core = { path = "../core" }
 hearthsound-db = { path = "../db" }
+hearthsound-jobs = { path = "../jobs" }
 hearthsound-library = { path = "../library" }
 hearthsound-media = { path = "../media" }
 hearthsound-plugin-host = { path = "../plugin-host" }

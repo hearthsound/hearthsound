@@ -1268,6 +1268,75 @@ pub async fn starred(conn: &mut SqliteConnection, user_id: Uuid) -> Result<Starr
     Ok(starred)
 }
 
+/// Counts the media files the scanned folders hold.
+///
+/// A scan reports how many files it has dealt with while it runs; between
+/// scans this is the number of files the library holds, which is what a client
+/// shows for the library's size.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+///
+/// # Returns
+///
+/// The number of folder media files.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when the query fails.
+pub async fn count_folder_files(conn: &mut SqliteConnection) -> Result<i64, LibraryError> {
+    let counted: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM media_files WHERE storage = 'folder'")
+            .fetch_one(&mut *conn)
+            .await?;
+    Ok(counted)
+}
+
+/// Returns when the library folders were last scanned.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+///
+/// # Returns
+///
+/// The latest `last_scan_at` of the folders, in unix milliseconds, or `None`
+/// when no folder has been scanned.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when the query fails.
+pub async fn last_scan(conn: &mut SqliteConnection) -> Result<Option<i64>, LibraryError> {
+    let scanned: Option<i64> = sqlx::query_scalar("SELECT max(last_scan_at) FROM library_folders")
+        .fetch_one(&mut *conn)
+        .await?;
+    Ok(scanned)
+}
+
+/// Counts the library folders.
+///
+/// The folders a scan walks are the real ones, not the two virtual music
+/// folders a Subsonic client browses.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+///
+/// # Returns
+///
+/// The number of library folders.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when the query fails.
+pub async fn count_folders(conn: &mut SqliteConnection) -> Result<i64, LibraryError> {
+    let counted: i64 = sqlx::query_scalar("SELECT count(*) FROM library_folders")
+        .fetch_one(&mut *conn)
+        .await?;
+    Ok(counted)
+}
+
 /// Returns when the browse index last changed.
 ///
 /// A client that remembers this instant can ask for the indexes and be told

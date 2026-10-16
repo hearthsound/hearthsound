@@ -21,6 +21,7 @@ mod play_queue;
 mod playlists;
 mod report_playback;
 mod request;
+mod scan;
 mod scrobble;
 mod search;
 mod star;

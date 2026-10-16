@@ -765,6 +765,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `privacy.now_playing_visible` deciding whose rows are shown.
 - `reportPlayback` applies the OpenSubsonic playback report, which follows a
   client's session and advertises the playback-report extension.
+- `getScanStatus` reports what the library scanner is doing, and `startScan`
+  lets an administrator enqueue a scan of every library folder.
 
 ### Security
 

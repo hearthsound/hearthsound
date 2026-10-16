@@ -21,9 +21,12 @@ use hearthsound_catalog::CatalogService;
 use hearthsound_config::secret::SecretBox;
 use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingSources, SettingValue, SettingsRegistry, keys};
+use hearthsound_core::events::EventBus;
 use hearthsound_core::{EntityId, IdPrefix, Layer};
 use hearthsound_db::{Database, MIGRATOR};
+use hearthsound_jobs::{JobQueue, QueueOptions};
 use hearthsound_library::StorageRoots;
+use hearthsound_library::scan::LibraryScanner;
 use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::{
     InstanceService, InstanceSpec, PluginHost, PluginRepository, PluginSource, ProviderRegistry,
@@ -83,6 +86,10 @@ pub struct Fixture {
     secrets: SecretBox,
     /// The provider registry the catalog layer resolves instances through.
     registry: Arc<ProviderRegistry>,
+    /// The library scanner the scan endpoints report.
+    pub scanner: Arc<LibraryScanner>,
+    /// The job queue a scan is enqueued on.
+    pub jobs: Arc<JobQueue>,
 }
 
 impl Fixture {
@@ -184,6 +191,14 @@ impl Fixture {
             Some(pending) => state.with_pending_source(pending),
             None => state,
         };
+        // The scanner the scan endpoints report and the queue they enqueue on.
+        let scanner = Arc::new(LibraryScanner::new(
+            &database,
+            Arc::new(EventBus::new()),
+            settings.clone(),
+        ));
+        let jobs = Arc::new(JobQueue::new(&database, QueueOptions::default()));
+        let state = state.with_scanner(Arc::clone(&scanner), Arc::clone(&jobs));
 
         Fixture {
             _dir: dir,
@@ -200,6 +215,8 @@ impl Fixture {
             repository,
             secrets: secret_box,
             registry,
+            scanner,
+            jobs,
         }
     }
 

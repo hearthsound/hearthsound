@@ -276,6 +276,13 @@ pub struct LibraryScanner {
     counters: Arc<ScanCounters>,
 }
 
+impl std::fmt::Debug for LibraryScanner {
+    /// Reports the type without the pools or the settings.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LibraryScanner")
+    }
+}
+
 impl LibraryScanner {
     /// Builds a scanner over a database, an event bus, and the settings.
     ///

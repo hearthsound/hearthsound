@@ -442,6 +442,7 @@ impl Services {
         .with_pending_source(pending)
         .with_prefetch(Arc::clone(&self.prefetch))
         .with_trusted_proxies(self.trusted_proxies.clone())
+        .with_scanner(Arc::clone(&self.scanner), Arc::clone(&self.queue))
     }
 
     /// Returns the CORS layer, or `None` when cross-origin reads are denied.

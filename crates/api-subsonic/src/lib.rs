@@ -78,6 +78,8 @@
 //! | `getMusicFolders` | the personal library, and the server unless `privacy.server_browse` is disabled |
 //! | `createBookmark` | saves where the user left off in a track |
 //! | `deleteBookmark` | removes the user's bookmark of a track |
+//! | `getScanStatus` | what the library scanner is doing |
+//! | `startScan` | enqueues a scan of every library folder |
 //! | `reportPlayback` | applies one OpenSubsonic playback report |
 //! | `getNowPlaying` | what every account the caller may see is playing |
 //! | `getBookmarks` | the user's bookmarks, newest first |
