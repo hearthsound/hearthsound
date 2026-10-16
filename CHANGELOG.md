@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Artist information is looked for in the metadata layer, in the order the
   administrator set, under `metadata.artist_info.timeout_ms`, with both answers
   and misses cached.
+- `getArtistInfo` and `getArtistInfo2` answer an artist's biography, links, and
+  identifiers, and `getAlbumInfo` and `getAlbumInfo2` answer an album's.
 
 ### Added
 

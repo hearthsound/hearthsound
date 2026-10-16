@@ -16,6 +16,7 @@ mod cover_art;
 pub mod download;
 pub mod feedback;
 pub mod genres;
+pub mod info;
 pub mod now_playing;
 pub mod play_queue;
 pub mod playlists;
@@ -40,6 +41,7 @@ pub use genres::{
     get_genres, get_random_songs, get_similar_songs, get_similar_songs_2, get_songs_by_genre,
     get_top_songs,
 };
+pub use info::{get_album_info, get_album_info_2, get_artist_info, get_artist_info_2};
 pub use now_playing::get_now_playing;
 pub use play_queue::{
     get_play_queue, get_play_queue_by_index, save_play_queue, save_play_queue_by_index,

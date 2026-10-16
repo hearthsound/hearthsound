@@ -17,6 +17,7 @@ mod download;
 mod endpoints;
 mod envelope;
 mod genres;
+mod info;
 mod now_playing;
 mod play_queue;
 mod playlists;

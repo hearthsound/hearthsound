@@ -1,0 +1,5 @@
+---
+source: crates/api-subsonic/tests/integration/info.rs
+expression: seeded.stabilize(&album.body)
+---
+{"subsonic-response":{"status":"ok","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.0-alpha.0","openSubsonic":true,"albumInfo":{"notes":"","musicBrainzId":"","lastFmUrl":"","smallImageUrl":"","mediumImageUrl":"","largeImageUrl":""}}}

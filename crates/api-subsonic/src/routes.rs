@@ -102,6 +102,10 @@ pub fn routes() -> Router<SubsonicState> {
         "getTranscodeStream",
         endpoints::get_transcode_stream,
     );
+    let router = register(router, "getArtistInfo", endpoints::get_artist_info);
+    let router = register(router, "getArtistInfo2", endpoints::get_artist_info_2);
+    let router = register(router, "getAlbumInfo", endpoints::get_album_info);
+    let router = register(router, "getAlbumInfo2", endpoints::get_album_info_2);
     let router = register(router, "getTopSongs", endpoints::get_top_songs);
     let router = register(router, "getSimilarSongs", endpoints::get_similar_songs);
     let router = register(router, "getSimilarSongs2", endpoints::get_similar_songs_2);

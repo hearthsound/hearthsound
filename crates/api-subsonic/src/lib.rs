@@ -80,6 +80,10 @@
 //! | `deleteBookmark` | removes the user's bookmark of a track |
 //! | `getTranscodeDecision` | what the server would do with one file for one client |
 //! | `getTranscodeStream` | the bytes a transcode decision asked for |
+//! | `getArtistInfo` | what the metadata layer knows about one artist |
+//! | `getArtistInfo2` | the same answer in the ID3 shape |
+//! | `getAlbumInfo` | the identifiers the library holds for one album |
+//! | `getAlbumInfo2` | the same answer in the ID3 shape |
 //! | `getTopSongs` | the most played songs of one artist |
 //! | `getSimilarSongs` | an empty similar-songs listing |
 //! | `getSimilarSongs2` | the same empty listing in the ID3 shape |
