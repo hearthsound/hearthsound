@@ -54,6 +54,8 @@ pub use scan::{get_scan_status, start_scan};
 pub use scrobble::scrobble;
 pub use search::{search2, search3};
 pub use stream::stream;
-pub use system::{get_license, get_music_folders, get_open_subsonic_extensions, ping, token_info};
+pub use system::{
+    get_license, get_music_folders, get_open_subsonic_extensions, jukebox_control, ping, token_info,
+};
 pub use transcode::{get_transcode_decision, get_transcode_stream};
 pub use users::get_user;

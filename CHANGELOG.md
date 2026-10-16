@@ -818,6 +818,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An artist whose files are tagged with a MusicBrainz artist id in some albums
   and without one in others is indexed as one artist, whichever files are
   scanned first.
+- `jukeboxControl` answers the generic error 0 instead of error 70, so a client
+  that probes it after logging in no longer reports a failure.
 
 ### Security
 

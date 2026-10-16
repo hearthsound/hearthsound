@@ -1,12 +1,12 @@
 //! The system endpoints: liveness, licensing, extensions, token information,
-//! and the virtual music folders.
+//! the virtual music folders, and the jukebox this server does not have.
 
 use hearthsound_auth::Credential;
 use hearthsound_config::keys;
 
 use crate::auth::Call;
 use crate::params::Params;
-use crate::response::{Encoded, Response, SubsonicError};
+use crate::response::{Encoded, Response, SubsonicError, codes};
 use crate::value::{Array, Object};
 
 /// The music folder holding the requesting user's personal library.
@@ -149,6 +149,27 @@ pub async fn get_music_folders(call: Call) -> Encoded {
         "musicFolders",
         Object::new().set("musicFolder", Array::new(folders)),
     ))
+}
+
+/// Answers `jukeboxControl`: this server has no jukebox.
+///
+/// The endpoint is answered with a generic error (code 0) rather than error
+/// 70, because clients probe it after logging in to learn whether to offer
+/// jukebox controls, and they surface every other error code to the user as a
+/// failure. `getUser` reports `jukeboxRole` false for the same reason.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+///
+/// # Returns
+///
+/// A failed envelope with error 0.
+pub async fn jukebox_control(call: Call) -> Encoded {
+    call.encode(Response::failed(SubsonicError::new(
+        codes::GENERIC,
+        "This server has no jukebox.",
+    )))
 }
 
 /// Builds one music folder member.

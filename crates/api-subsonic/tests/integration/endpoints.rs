@@ -151,6 +151,44 @@ async fn get_music_folders_omits_the_server_while_server_browse_is_disabled() {
     assert!(!xml.body.contains("Server"), "{}", xml.body);
 }
 
+/// Clients probe `jukeboxControl` after logging in and report every error but
+/// the generic one as a failure, so the missing jukebox is answered with
+/// error 0.
+#[tokio::test]
+async fn jukebox_control_answers_the_generic_error() {
+    let fixture = Fixture::new().await;
+    let app = fixture.app();
+
+    let json = get(
+        &app,
+        &format!(
+            "/rest/jukeboxControl?action=status&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&json, 0);
+    insta::assert_snapshot!("jukebox-control-json", json.body);
+
+    let xml = get(
+        &app,
+        &format!(
+            "/rest/jukeboxControl.view?action=status&apiKey={}",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&xml, 0);
+    insta::assert_snapshot!("jukebox-control-xml", xml.body);
+
+    let probe = get(
+        &app,
+        "/rest/jukeboxControl?action=status&apiKey=hs_not-a-key&f=json",
+    )
+    .await;
+    assert_error(&probe, 44);
+}
+
 #[tokio::test]
 async fn missing_credentials_answer_error_10() {
     let fixture = Fixture::new().await;
