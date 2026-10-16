@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use clap::{ArgGroup, Args, Parser, Subcommand};
+use clap::{ArgAction, ArgGroup, Args, Parser, Subcommand};
 
 /// The Hearthsound command line.
 #[derive(Debug, Parser)]
@@ -92,6 +92,8 @@ pub enum AdminCommand {
     CreateAppPassword(CreateCredentialArgs),
     /// Add a library folder, owned by a user or generic.
     AddFolder(AddFolderArgs),
+    /// Watch a library folder for filesystem changes, or stop watching it.
+    SetFolderWatch(SetFolderWatchArgs),
 }
 
 /// The arguments of `admin create-user`.
@@ -147,6 +149,20 @@ pub struct AddFolderArgs {
     /// The folder's display name. Defaults to the directory's file name.
     #[arg(long, value_name = "NAME")]
     pub name: Option<String>,
+    /// Do not watch the folder for filesystem changes.
+    #[arg(long)]
+    pub no_watch: bool,
+}
+
+/// The arguments of `admin set-folder-watch`.
+#[derive(Debug, Args)]
+pub struct SetFolderWatchArgs {
+    /// The library folder's id or path.
+    #[arg(long, value_name = "PATH-OR-ID")]
+    pub folder: String,
+    /// Whether to watch the folder for filesystem changes.
+    #[arg(long, value_name = "true|false", action = ArgAction::Set)]
+    pub watch: bool,
 }
 
 /// The arguments of `plugins`.

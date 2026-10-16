@@ -690,6 +690,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The watcher starts with the server, so a watched folder is scanned once at
   startup and a folder added while the server runs is picked up by the reload
   that follows the write.
+- `admin add-folder --no-watch` adds a folder without watching it, and
+  `admin set-folder-watch` turns watching on or off for a folder named by path
+  or id.
 
 ### Security
 

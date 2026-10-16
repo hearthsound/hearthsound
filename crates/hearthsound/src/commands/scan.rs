@@ -88,7 +88,7 @@ pub async fn run(
 ///
 /// Returns an error when the value is neither a known folder id nor a path that
 /// canonicalizes to a configured folder.
-fn resolve_folder<'a>(
+pub(crate) fn resolve_folder<'a>(
     folders: &'a [LibraryFolder],
     selector: &str,
 ) -> anyhow::Result<&'a LibraryFolder> {

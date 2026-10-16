@@ -501,6 +501,26 @@ impl LibraryRepository {
         media_files::list_folder_media_files(&mut conn, folder_id).await
     }
 
+    /// Records whether a library folder is watched for filesystem changes, in
+    /// its own transaction.
+    ///
+    /// The running server picks the change up on its next reload; a stop while
+    /// the folder was watched drops its watcher then, and a start begins one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when the write fails.
+    pub async fn set_library_folder_watch(
+        &self,
+        id: Uuid,
+        watch: bool,
+    ) -> Result<bool, LibraryError> {
+        let mut tx = self.writer.begin().await?;
+        let updated = folders::set_library_folder_watch(&mut tx, id, watch).await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
     /// Reads a library folder.
     ///
     /// # Errors

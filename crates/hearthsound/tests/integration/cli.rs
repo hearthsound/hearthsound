@@ -402,6 +402,10 @@ async fn add_folder_associates_the_folder_with_its_owner() {
     assert_eq!(folders.len(), 1);
     assert_eq!(folders[0].name, "Music");
     assert_eq!(folders[0].path, music.canonicalize().unwrap());
+    assert!(
+        folders[0].watch,
+        "a folder is watched unless asked otherwise"
+    );
     let owner = hearthsound_auth::Users::new(&database)
         .find_by_username("admin")
         .await
@@ -412,6 +416,70 @@ async fn add_folder_associates_the_folder_with_its_owner() {
         created.contains("created administrator account `admin`"),
         "{created}"
     );
+}
+
+/// `add-folder --no-watch` leaves the folder unwatched, and
+/// `set-folder-watch` turns watching on and off by path or by id.
+#[tokio::test(flavor = "multi_thread")]
+async fn folder_watching_is_added_and_toggled() {
+    let sandbox = Sandbox::new("");
+    let music = sandbox.data().join("music");
+    std::fs::create_dir_all(&music).unwrap();
+    let path = music.to_str().unwrap();
+
+    let added = succeeded(&sandbox.run(&[
+        "admin",
+        "add-folder",
+        "--path",
+        path,
+        "--generic",
+        "--no-watch",
+    ]));
+    assert!(added.contains("not watched"), "{added}");
+
+    let config = bootstrap_config(&sandbox);
+    let database = hearthsound_db::Database::open(&config.database.path)
+        .await
+        .unwrap();
+    let repository = hearthsound_library::LibraryRepository::new(&database);
+    let watch = || async { repository.list_library_folders().await.unwrap()[0].watch };
+    assert!(!watch().await);
+
+    let watched = succeeded(&sandbox.run(&[
+        "admin",
+        "set-folder-watch",
+        "--folder",
+        path,
+        "--watch",
+        "true",
+    ]));
+    assert!(watched.contains("now watches"), "{watched}");
+    assert!(watch().await);
+
+    let ignored = succeeded(&sandbox.run(&[
+        "admin",
+        "set-folder-watch",
+        "--folder",
+        path,
+        "--watch",
+        "false",
+    ]));
+    assert!(ignored.contains("now ignores"), "{ignored}");
+    assert!(!watch().await);
+
+    let id = repository.list_library_folders().await.unwrap()[0]
+        .id
+        .to_string();
+    let by_id = succeeded(&sandbox.run(&[
+        "admin",
+        "set-folder-watch",
+        "--folder",
+        &id,
+        "--watch",
+        "true",
+    ]));
+    assert!(by_id.contains("now watches"), "{by_id}");
+    assert!(watch().await);
 }
 
 /// `add-folder --generic` adds a folder nobody owns, and `scan` finds it.

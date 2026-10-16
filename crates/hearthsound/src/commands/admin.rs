@@ -13,7 +13,11 @@ use hearthsound_auth::{ApiKeys, AppPasswords, NewUser, Users};
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_library::LibraryRepository;
 
-use crate::cli::{AddFolderArgs, AdminArgs, AdminCommand, CreateCredentialArgs, CreateUserArgs};
+use crate::cli::{
+    AddFolderArgs, AdminArgs, AdminCommand, CreateCredentialArgs, CreateUserArgs,
+    SetFolderWatchArgs,
+};
+use crate::commands::scan::resolve_folder;
 use crate::context::Context;
 
 /// Runs one `admin` command.
@@ -39,6 +43,7 @@ pub async fn run(
         AdminCommand::CreateApiKey(args) => create_api_key(&context, args).await,
         AdminCommand::CreateAppPassword(args) => create_app_password(&context, args).await,
         AdminCommand::AddFolder(args) => add_folder(&context, args).await,
+        AdminCommand::SetFolderWatch(args) => set_folder_watch(&context, args).await,
     }
 }
 
@@ -174,18 +179,62 @@ async fn add_folder(context: &Context, args: AddFolderArgs) -> anyhow::Result<()
             .await
             .context("could not rename the folder")?;
     }
+    let watch = !args.no_watch;
+    if !watch {
+        repository
+            .set_library_folder_watch(folder.id, false)
+            .await
+            .context("could not stop watching the folder")?;
+    }
 
     let name = args.name.as_deref().unwrap_or(&folder.name);
+    let watched = if watch { "watched" } else { "not watched" };
     match &args.owner {
         Some(owner) => println!(
-            "added library folder `{name}` ({}) owned by `{owner}`",
+            "added library folder `{name}` ({}) owned by `{owner}`, {watched}",
             folder.path.display()
         ),
         None => println!(
-            "added library folder `{name}` ({}) as a generic folder",
+            "added library folder `{name}` ({}) as a generic folder, {watched}",
             folder.path.display()
         ),
     }
+    Ok(())
+}
+
+/// Watches a library folder for filesystem changes, or stops watching it.
+///
+/// # Parameters
+///
+/// - `context`: the open database and settings.
+/// - `args`: the folder to update and the flag to set.
+///
+/// # Errors
+///
+/// Returns an error when the selector names no known folder or the update
+/// fails.
+async fn set_folder_watch(context: &Context, args: SetFolderWatchArgs) -> anyhow::Result<()> {
+    let repository = LibraryRepository::new(context.database());
+    let folders = repository
+        .list_library_folders()
+        .await
+        .context("could not list the library folders")?;
+    let folder = resolve_folder(&folders, &args.folder)?;
+    repository
+        .set_library_folder_watch(folder.id, args.watch)
+        .await
+        .with_context(|| {
+            format!(
+                "could not update the watch flag of {}",
+                folder.path.display()
+            )
+        })?;
+    let state = if args.watch { "watches" } else { "ignores" };
+    println!(
+        "library folder `{}` ({}) now {state} filesystem changes",
+        folder.name,
+        folder.path.display()
+    );
     Ok(())
 }
 
