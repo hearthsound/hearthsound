@@ -17,7 +17,7 @@ use hearthsound_config::secret::{SecretBox, SecretKey};
 use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingSources, SettingValue, SettingsRegistry};
 use hearthsound_core::providers::CatalogQuery;
-use hearthsound_core::{CatalogId, EntityKind, Layer, Slug};
+use hearthsound_core::{CatalogId, EntityId, EntityKind, Layer, Slug};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_plugin_host::{
     InstallError, InstanceService, InstanceSpec, PluginHost, PluginRepository, PluginSource,
@@ -195,6 +195,75 @@ impl Env {
     /// Writes a setting and republishes the snapshot.
     pub async fn set(&self, key: &str, value: SettingValue) {
         self.settings.set(key, value, None).await.unwrap();
+    }
+
+    /// Stores an album with its artist and returns the album's id.
+    ///
+    /// The row is what a scan or a materialization would write: the album
+    /// carries the identifiers an artwork provider matches on, and the artist is
+    /// credited first.
+    ///
+    /// # Parameters
+    ///
+    /// - `title`: the album title.
+    /// - `artist`: the artist name.
+    ///
+    /// # Returns
+    ///
+    /// The stored album's client id.
+    pub async fn stored_album(&self, title: &str, artist: &str) -> EntityId {
+        use hearthsound_library::{
+            AlbumInput, ArtistCredit, ArtistInput, LibraryRepository, Origin,
+        };
+        let library = LibraryRepository::new(&self.database);
+        library
+            .upsert_album(
+                &AlbumInput {
+                    title: title.to_owned(),
+                    sort_title: None,
+                    display_artist: None,
+                    year: Some(2026),
+                    release_date: None,
+                    album_type: None,
+                    mb_release_id: Some("22222222-2222-4222-8222-222222222222".to_owned()),
+                    mb_release_group_id: None,
+                    upc: None,
+                    origin: Origin::Catalog,
+                },
+                &[ArtistCredit {
+                    artist: ArtistInput {
+                        name: artist.to_owned(),
+                        sort_name: None,
+                        mb_artist_id: Some("44444444-4444-4444-8444-444444444444".to_owned()),
+                        origin: Origin::Catalog,
+                    },
+                    role: "main".to_owned(),
+                }],
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Stores an artist and returns its id.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: the artist name.
+    ///
+    /// # Returns
+    ///
+    /// The stored artist's client id.
+    pub async fn stored_artist(&self, name: &str) -> EntityId {
+        use hearthsound_library::{ArtistInput, LibraryRepository, Origin};
+        LibraryRepository::new(&self.database)
+            .upsert_artist(&ArtistInput {
+                name: name.to_owned(),
+                sort_name: None,
+                mb_artist_id: Some("44444444-4444-4444-8444-444444444444".to_owned()),
+                origin: Origin::Catalog,
+            })
+            .await
+            .unwrap()
     }
 
     /// Returns the id of a configured instance.

@@ -165,6 +165,13 @@ pub(crate) struct WireResults {
     pub artists: Vec<WireArtist>,
 }
 
+/// The stored form of a list of images.
+///
+/// A newtype for the same reason as [`WireAlbumRefs`]; a stored answer is a JSON
+/// array of [`WireImage`] objects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireImages(pub Vec<WireImage>);
+
 /// The stored form of a list of album references.
 ///
 /// A newtype because the cache needs a `From` conversion in both directions for

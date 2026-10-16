@@ -26,17 +26,32 @@
 //! line, and the request is answered from the provider instead.
 
 use std::path::Path;
+use std::time::Duration;
 
-use hearthsound_core::providers::Image;
-use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, Slug};
+use hearthsound_core::providers::{ArtworkSubject, ExternalId, Image};
+use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, IdPrefix, Layer, Slug};
+use hearthsound_library::LibraryRepository;
 use hearthsound_library::artwork::mime_for;
 use hearthsound_plugin_host::FetchError;
 use hearthsound_plugin_host::http::HttpError;
 use hearthsound_plugin_host::manifest::ImageCachePolicy;
+use hearthsound_plugin_host::registry::RegistryInstance;
+use uuid::Uuid;
 
+use crate::cache::RequestKey;
 use crate::error::CatalogError;
-use crate::materialize::ProviderAlias;
+use crate::materialize::{MB_ARTIST, MB_RELEASE, MB_RELEASE_GROUP, ProviderAlias, UPC};
 use crate::service::CatalogService;
+use crate::wire::{WireImage, WireImages};
+
+/// How long an artwork answer that found images stays fresh.
+const ARTWORK_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// How long an artwork answer that found none stays fresh.
+///
+/// An empty answer is cached for less time, because an instance that has no
+/// picture of an album today may have one tomorrow.
+const EMPTY_ARTWORK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// What a caller asks for cover art of.
 ///
@@ -65,7 +80,128 @@ pub struct CoverArt {
 }
 
 impl CatalogService {
-    /// Serves the cover art of a catalog entity.
+    /// Serves the cover art of an entity.
+    ///
+    /// The artwork layer is asked first: every instance in the `artwork` layer,
+    /// in the order the administrator set, is asked for the entity's picture
+    /// under `artwork.timeout_ms`, and the first one that answers with an image
+    /// has it fetched and served. An entity no artwork instance knows falls back
+    /// to the instance that issued it, which is where its own images are.
+    ///
+    /// # Parameters
+    ///
+    /// - `request`: the entity and the requested size.
+    ///
+    /// # Returns
+    ///
+    /// The image's MIME type and its bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::NotFound`] when no instance knows an image of the
+    /// entity and when the image's URL answers with a not-found, and
+    /// [`CatalogError::Unavailable`] when an instance could not answer right
+    /// now, which is what a client retries.
+    pub async fn cover_art(&self, request: &CoverArtRequest) -> Result<CoverArt, CatalogError> {
+        match self.artwork_cover(request).await {
+            Ok(Some(cover)) => Ok(cover),
+            Ok(None) => self.issuing_cover_art(request).await,
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Asks the artwork layer for an entity's picture.
+    ///
+    /// # Parameters
+    ///
+    /// - `request`: the entity and the requested size.
+    ///
+    /// # Returns
+    ///
+    /// The image when an instance knows one, and `None` when no instance does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::Unavailable`] when an instance that could have
+    /// known the picture could not answer, because a client that retries may
+    /// get an image then.
+    async fn artwork_cover(
+        &self,
+        request: &CoverArtRequest,
+    ) -> Result<Option<CoverArt>, CatalogError> {
+        let instances = self
+            .registry()
+            .layers(Layer::Artwork)
+            .into_iter()
+            .filter(|instance| instance.artwork().is_some())
+            .collect::<Vec<_>>();
+        if instances.is_empty() {
+            return Ok(None);
+        }
+        let subject = self.subject(&request.id).await?;
+        let timeout = artwork_timeout(&self.settings_snapshot())?;
+        let mut transient = None;
+
+        for instance in instances {
+            let Some(provider) = instance.artwork() else {
+                continue;
+            };
+            let key = RequestKey::artwork(subject.kind, &subject);
+            let images = match self.cached_images(instance.id(), &key).await {
+                Some(images) => images,
+                None => {
+                    let asked =
+                        tokio::time::timeout(timeout, provider.find_artwork(&subject)).await;
+                    match asked {
+                        Ok(Ok(images)) => {
+                            let ttl = if images.is_empty() {
+                                EMPTY_ARTWORK_TTL
+                            } else {
+                                ARTWORK_TTL
+                            };
+                            self.store_images(instance.id(), &key, &images, ttl).await;
+                            images
+                        }
+                        Ok(Err(error)) => {
+                            tracing::debug!(
+                                instance = instance.slug().as_str(),
+                                %error,
+                                "an artwork instance could not answer"
+                            );
+                            transient = Some(instance.slug().as_str().to_owned());
+                            continue;
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                instance = instance.slug().as_str(),
+                                "an artwork instance did not answer in time"
+                            );
+                            transient = Some(instance.slug().as_str().to_owned());
+                            continue;
+                        }
+                    }
+                }
+            };
+            let Some(image) = pick_image(&images, request.size) else {
+                continue;
+            };
+            return match self
+                .fetch_layer_image(&instance, subject.kind, &subject, image)
+                .await
+            {
+                Ok(cover) => Ok(Some(cover)),
+                Err(CatalogError::NotFound) => continue,
+                Err(error) => Err(error),
+            };
+        }
+
+        match transient {
+            Some(instance) => Err(CatalogError::Unavailable { instance }),
+            None => Ok(None),
+        }
+    }
+
+    /// Serves the cover art of a catalog entity through its issuing instance.
     ///
     /// The image is picked from the ones the entity's provider describes for the
     /// requested size, fetched under the issuing instance's HTTP permissions, and
@@ -89,7 +225,7 @@ impl CatalogService {
     /// the image right now, and [`CatalogError::Internal`] when the instance is
     /// not allowed to reach the image's host at all, which is a configuration
     /// problem rather than a transient one.
-    pub async fn cover_art(&self, request: &CoverArtRequest) -> Result<CoverArt, CatalogError> {
+    async fn issuing_cover_art(&self, request: &CoverArtRequest) -> Result<CoverArt, CatalogError> {
         let (slug, kind, provider_id) = self.issuing_instance(&request.id).await?;
         let images = self.entity_images(&slug, kind, &provider_id).await?;
         let image = pick_image(&images, request.size).ok_or(CatalogError::NotFound)?;
@@ -236,6 +372,323 @@ impl CatalogService {
             EntityKind::Artist => Ok(self.artist(&id).await?.artist.images),
             EntityKind::Playlist => Err(CatalogError::NotFound),
         }
+    }
+
+    /// Builds the subject an artwork provider is asked about.
+    ///
+    /// A stored entity is described from its own row: an album by its title, its
+    /// credited artists, and the identifiers the library recorded for it; an
+    /// artist by its name and MusicBrainz id; a track by its album, or by its own
+    /// title as an album when it has none. A catalog entity is described by what
+    /// the catalog reports, which is cached by the catalog layer.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the entity the picture is wanted for.
+    ///
+    /// # Returns
+    ///
+    /// The subject.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::NotFound`] when the id names no entity, when it
+    /// names a kind with no picture, and when a catalog lookup finds nothing, and
+    /// the mapped provider failure when a catalog lookup fails.
+    async fn subject(&self, id: &ClientId) -> Result<ArtworkSubject, CatalogError> {
+        match id {
+            ClientId::Entity(entity) => self.stored_subject(*entity).await,
+            ClientId::Catalog(catalog) => match catalog.kind() {
+                EntityKind::Album => {
+                    let album = self.album(catalog).await?.album;
+                    Ok(ArtworkSubject {
+                        kind: EntityKind::Album,
+                        provider_id: Some(catalog.provider_id().to_owned()),
+                        ids: album.ids,
+                        title: album.title,
+                        artists: album
+                            .artists
+                            .iter()
+                            .map(|credit| credit.name.clone())
+                            .collect(),
+                    })
+                }
+                EntityKind::Artist => {
+                    let artist = self.artist(catalog).await?.artist;
+                    Ok(ArtworkSubject {
+                        kind: EntityKind::Artist,
+                        provider_id: Some(catalog.provider_id().to_owned()),
+                        ids: artist.ids,
+                        title: artist.name,
+                        artists: Vec::new(),
+                    })
+                }
+                // A track has no picture of its own; the picture a client wants
+                // for it is its album's.
+                EntityKind::Track => {
+                    let track = self.track(catalog).await?.track;
+                    let provider_id = Some(catalog.provider_id().to_owned());
+                    match track.album {
+                        Some(album) => Ok(ArtworkSubject {
+                            kind: EntityKind::Album,
+                            provider_id,
+                            ids: Vec::new(),
+                            title: album.title,
+                            artists: album
+                                .artists
+                                .iter()
+                                .map(|credit| credit.name.clone())
+                                .collect(),
+                        }),
+                        None => Ok(ArtworkSubject {
+                            kind: EntityKind::Album,
+                            provider_id,
+                            ids: Vec::new(),
+                            title: track.title,
+                            artists: Vec::new(),
+                        }),
+                    }
+                }
+                _ => Err(CatalogError::NotFound),
+            },
+        }
+    }
+
+    /// Builds the subject of one stored album.
+    ///
+    /// # Parameters
+    ///
+    /// - `album`: the stored album.
+    /// - `provider_id`: the issuing instance's own id for the entity, when the
+    ///   server holds one.
+    ///
+    /// # Returns
+    ///
+    /// The subject.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::NotFound`] when the album does not exist, and
+    /// [`CatalogError::Database`] when a read fails.
+    async fn album_subject(
+        &self,
+        album: EntityId,
+        provider_id: Option<String>,
+    ) -> Result<ArtworkSubject, CatalogError> {
+        let library = LibraryRepository::new(self.database());
+        let Some(album) = library.get_album(album).await? else {
+            return Err(CatalogError::NotFound);
+        };
+        let artists = library
+            .list_album_artists(album.id)
+            .await?
+            .into_iter()
+            .map(|artist| artist.name)
+            .collect();
+        Ok(ArtworkSubject {
+            kind: EntityKind::Album,
+            provider_id,
+            ids: album_ids(&album),
+            title: album.title,
+            artists,
+        })
+    }
+
+    /// Builds the subject of one stored entity.
+    ///
+    /// # Parameters
+    ///
+    /// - `entity`: the stored entity.
+    ///
+    /// # Returns
+    ///
+    /// The subject.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::NotFound`] when the entity does not exist, when
+    /// its kind has no picture, and when a track has no album to describe.
+    async fn stored_subject(&self, entity: EntityId) -> Result<ArtworkSubject, CatalogError> {
+        let library = LibraryRepository::new(self.database());
+        let provider_id = self
+            .first_provider_alias(entity)
+            .await?
+            .map(|alias| alias.provider_id);
+        match entity.kind() {
+            IdPrefix::Album => self.album_subject(entity, provider_id).await,
+            IdPrefix::Artist => {
+                let Some(artist) = library.get_artist(entity).await? else {
+                    return Err(CatalogError::NotFound);
+                };
+                Ok(ArtworkSubject {
+                    kind: EntityKind::Artist,
+                    provider_id,
+                    ids: artist
+                        .mb_artist_id
+                        .filter(|id| !id.is_empty())
+                        .map(|value| ExternalId {
+                            namespace: MB_ARTIST.to_owned(),
+                            value,
+                        })
+                        .into_iter()
+                        .collect(),
+                    title: artist.name,
+                    artists: Vec::new(),
+                })
+            }
+            IdPrefix::Track => {
+                let Some(track) = library.get_track(entity).await? else {
+                    return Err(CatalogError::NotFound);
+                };
+                match track.album_id {
+                    Some(album) => self.album_subject(album, provider_id).await,
+                    None => Ok(ArtworkSubject {
+                        kind: EntityKind::Album,
+                        provider_id,
+                        ids: Vec::new(),
+                        title: track.title,
+                        artists: Vec::new(),
+                    }),
+                }
+            }
+            _ => Err(CatalogError::NotFound),
+        }
+    }
+
+    /// Reads the images an instance answered for a subject.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance`: the instance that answered.
+    /// - `key`: the subject's cache key.
+    ///
+    /// # Returns
+    ///
+    /// The images, or `None` when the cache does not hold them.
+    async fn cached_images(&self, instance: Uuid, key: &RequestKey) -> Option<Vec<Image>> {
+        match self.cache().get::<WireImages>(instance, key).await {
+            Ok(Some(images)) => Some(
+                images
+                    .0
+                    .into_iter()
+                    .map(|image| Image {
+                        url: image.url,
+                        width: image.width,
+                        height: image.height,
+                    })
+                    .collect(),
+            ),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(%error, "a cached artwork answer could not be read");
+                None
+            }
+        }
+    }
+
+    /// Stores the images an instance answered for a subject.
+    ///
+    /// A failure is logged and ignored: the caller already holds the answer, and
+    /// cover art must not fail because its cache could not be written.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance`: the instance that answered.
+    /// - `key`: the subject's cache key.
+    /// - `images`: the images.
+    /// - `ttl`: how long the answer stays fresh.
+    async fn store_images(
+        &self,
+        instance: Uuid,
+        key: &RequestKey,
+        images: &[Image],
+        ttl: Duration,
+    ) {
+        let wire = WireImages(
+            images
+                .iter()
+                .map(|image| WireImage {
+                    url: image.url.clone(),
+                    width: image.width,
+                    height: image.height,
+                })
+                .collect(),
+        );
+        self.cache().put(instance, key, &wire, ttl).await;
+    }
+
+    /// Fetches one image an artwork instance described.
+    ///
+    /// The fetch goes through the instance's own HTTP grant, so an image host the
+    /// instance may not reach is denied here too, and the bytes are stored when
+    /// that instance's manifest allows it.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance`: the instance that described the image.
+    /// - `kind`: the kind of entity the picture is for.
+    /// - `subject`: the subject the image was found for.
+    /// - `image`: the image to fetch.
+    ///
+    /// # Returns
+    ///
+    /// The image's MIME type and its bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::NotFound`] when the URL answers with a not-found,
+    /// [`CatalogError::Unavailable`] when the instance cannot deliver the image
+    /// right now, and [`CatalogError::Internal`] when the instance may not reach
+    /// the URL at all.
+    async fn fetch_layer_image(
+        &self,
+        instance: &RegistryInstance,
+        kind: EntityKind,
+        subject: &ArtworkSubject,
+        image: &Image,
+    ) -> Result<CoverArt, CatalogError> {
+        let slug = instance.slug().clone();
+        let key = layer_cache_key(&slug, kind, subject, image);
+        if let Some(cached) = self.cached_cover(&key).await {
+            return Ok(cached);
+        }
+        let fetched = self
+            .registry()
+            .fetch_image(slug.as_str(), &image.url)
+            .await
+            .map_err(|error| fetch_failure(&slug, &image.url, error))?;
+        if fetched.status == 404 {
+            tracing::debug!(
+                instance = slug.as_str(),
+                url = image.url.as_str(),
+                "an artwork instance has no image at that URL"
+            );
+            return Err(CatalogError::NotFound);
+        }
+        if !(200..300).contains(&fetched.status) {
+            tracing::warn!(
+                instance = slug.as_str(),
+                url = image.url.as_str(),
+                status = fetched.status,
+                "an artwork instance answered an image request with a failure"
+            );
+            return Err(CatalogError::Unavailable {
+                instance: slug.as_str().to_owned(),
+            });
+        }
+
+        let mime_type = fetched
+            .content_type
+            .clone()
+            .unwrap_or_else(|| mime_for(image_url_name(&image.url)));
+        if fetched.cache_policy == ImageCachePolicy::Cache {
+            self.store_cover(&key, &slug, image, &mime_type, &fetched.bytes)
+                .await;
+        }
+        Ok(CoverArt {
+            mime_type,
+            bytes: fetched.bytes,
+        })
     }
 
     /// Reads a stored cover image.
@@ -491,11 +944,98 @@ fn fetch_failure(slug: &Slug, url: &str, error: FetchError) -> CatalogError {
     }
 }
 
-/// Returns the literal an entity kind has in a cache key.
+/// Reads `artwork.timeout_ms` from a snapshot.
 ///
 /// # Parameters
 ///
-/// - `kind`: the entity kind.
+/// - `settings`: the settings in effect.
+///
+/// # Returns
+///
+/// The deadline for one artwork lookup.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::Setting`] when the snapshot no longer holds a valid
+/// value for the key.
+fn artwork_timeout(settings: &hearthsound_config::SettingsStore) -> Result<Duration, CatalogError> {
+    let millis = settings.get(hearthsound_config::keys::ARTWORK_TIMEOUT_MS)?;
+    Ok(Duration::from_millis(u64::try_from(millis).unwrap_or(0)))
+}
+
+/// Returns the identifiers a stored album recorded.
+///
+/// # Parameters
+///
+/// - `album`: the album row.
+///
+/// # Returns
+///
+/// One identifier per canonical namespace the album carries a value for.
+fn album_ids(album: &hearthsound_library::Album) -> Vec<ExternalId> {
+    let mut ids = Vec::new();
+    for (namespace, value) in [
+        (MB_RELEASE, album.mb_release_id.as_deref()),
+        (MB_RELEASE_GROUP, album.mb_release_group_id.as_deref()),
+        (UPC, album.upc.as_deref()),
+    ] {
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            ids.push(ExternalId {
+                namespace: namespace.to_owned(),
+                value: value.to_owned(),
+            });
+        }
+    }
+    ids
+}
+
+/// Returns the cache key of one image an artwork instance described.
+///
+/// The key names the instance, the subject, and the image, so two instances that
+/// describe the same URL keep their own copies under their own cache policies.
+///
+/// # Parameters
+///
+/// - `slug`: the instance that described the image.
+/// - `kind`: the kind of entity the picture is for.
+/// - `subject`: the subject the image was found for.
+/// - `image`: the image.
+///
+/// # Returns
+///
+/// The key.
+fn layer_cache_key(
+    slug: &Slug,
+    kind: EntityKind,
+    subject: &ArtworkSubject,
+    image: &Image,
+) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    subject.title.hash(&mut hash);
+    subject.artists.hash(&mut hash);
+    for id in &subject.ids {
+        id.namespace.hash(&mut hash);
+        id.value.hash(&mut hash);
+    }
+    format!(
+        "artwork|{}|{}|{:x}|{}x{}",
+        slug.as_str(),
+        kind_literal(kind),
+        hash.finish(),
+        image.width.unwrap_or(0),
+        image.height.unwrap_or(0),
+    )
+}
+
+/// Returns the literal one entity kind is written as in a cache key.
+///
+/// The literals are the `entity-kind` literals of the plugin interface. They are
+/// part of a stored key, so they must not be renamed.
+///
+/// # Parameters
+///
+/// - `kind`: the kind to write.
 fn kind_literal(kind: EntityKind) -> &'static str {
     match kind {
         EntityKind::Track => "track",

@@ -14,7 +14,7 @@ use crate::common::{
 };
 use hearthsound_catalog::{CatalogError, CoverArtRequest};
 use hearthsound_core::{ClientId, EntityKind, Layer};
-use hearthsound_test_support::{HELLO_CATALOG, HTTP_CATALOG};
+use hearthsound_test_support::{ARTWORK_FIXTURE, HELLO_CATALOG, HTTP_CATALOG};
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -316,4 +316,180 @@ async fn a_cached_image_that_disappeared_is_fetched_again() {
         "a row whose file is gone is a miss, not a failure"
     );
     assert_eq!(env.artwork_files().len(), 1);
+}
+
+/// The plugin id of the artwork fixture.
+const ARTWORK_FIXTURE_ID: &str = "com.example.artwork-fixture";
+
+/// Builds an environment with an artwork instance whose images the mock server
+/// serves.
+///
+/// # Parameters
+///
+/// - `images`: the paths the instance configures, in the order it lists them.
+///
+/// # Returns
+///
+/// The environment and the server, which the caller keeps alive.
+async fn artwork_env(images: &[&str]) -> (Env, MockServer) {
+    let server = MockServer::start().await;
+    for name in images.iter().chain(["/portrait.png"].iter()) {
+        serve_image(&server, name, 200).await;
+    }
+    let env = Env::new().await;
+    env.instance(
+        "artwork",
+        ARTWORK_FIXTURE,
+        ARTWORK_FIXTURE_ID,
+        json!({
+            "imageUrl": server.uri(),
+            "albums": [{
+                "title": "Hello Album",
+                "mbid": "22222222-2222-4222-8222-222222222222",
+                "images": images
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| json!({"path": name, "width": 250 * (index as u32 + 1)}))
+                    .collect::<Vec<_>>(),
+            }],
+            "artists": [{
+                "title": "Hello Artist",
+                "images": [{ "path": "/portrait.png", "width": 500 }],
+            }],
+        }),
+    )
+    .await;
+    env.assign(Layer::Artwork, &["artwork"]).await;
+    (env, server)
+}
+
+/// A stored album no catalog instance issued is served by the artwork layer.
+#[tokio::test]
+async fn the_artwork_layer_serves_a_stored_album() {
+    let (env, server) = artwork_env(&["/cover-250.png", "/cover-500.png"]).await;
+    let service = env.service();
+    let album = env.stored_album("Hello Album", "Hello Artist").await;
+
+    let cover = service
+        .cover_art(&CoverArtRequest {
+            id: ClientId::Entity(album),
+            size: Some(300),
+        })
+        .await
+        .unwrap();
+    assert_eq!(cover.bytes, IMAGE);
+    assert_eq!(cover.mime_type, "image/png");
+    assert_eq!(
+        requested_paths(&server).await,
+        ["/cover-500.png"],
+        "the smallest image that covers the request was fetched"
+    );
+}
+
+/// A stored artist portrait is served by the artwork layer.
+#[tokio::test]
+async fn the_artwork_layer_serves_a_stored_artist() {
+    let (env, server) = artwork_env(&["/cover-250.png"]).await;
+    let service = env.service();
+    let artist = env.stored_artist("Hello Artist").await;
+
+    let cover = service
+        .cover_art(&CoverArtRequest {
+            id: ClientId::Entity(artist),
+            size: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(cover.bytes, IMAGE);
+    assert_eq!(requested_paths(&server).await, ["/portrait.png"]);
+}
+
+/// An instance that answers nothing leaves the catalog's own images to answer.
+#[tokio::test]
+async fn an_unknown_album_falls_back_to_the_issuing_instance() {
+    let server = MockServer::start().await;
+    serve_image(&server, "/cover-500.png", 200).await;
+    let env = Env::new().await;
+    // The artwork instance knows no image of the album the catalog issued.
+    env.instance(
+        "artwork",
+        ARTWORK_FIXTURE,
+        ARTWORK_FIXTURE_ID,
+        json!({"imageUrl": server.uri(), "albums": [], "artists": []}),
+    )
+    .await;
+    env.assign(Layer::Artwork, &["artwork"]).await;
+    env.instance(
+        "hello",
+        HELLO_CATALOG,
+        HELLO_CATALOG_ID,
+        json!({"coverUrl": format!("{}/cover-{{size}}.png", server.uri())}),
+    )
+    .await;
+    env.assign(Layer::Catalog, &["hello"]).await;
+    let service = env.service();
+
+    let cover = service
+        .cover_art(&CoverArtRequest {
+            id: ClientId::Catalog(catalog_id("hello", EntityKind::Track, "hello-track-1")),
+            size: Some(500),
+        })
+        .await
+        .unwrap();
+    assert_eq!(cover.bytes, IMAGE);
+    assert!(
+        requested_paths(&server)
+            .await
+            .contains(&"/cover-500.png".to_owned()),
+        "the issuing instance's image was fetched"
+    );
+}
+
+/// An instance whose image URL answers 404 leaves the next instance to answer.
+#[tokio::test]
+async fn a_not_found_image_falls_through_to_the_next_instance() {
+    let server = MockServer::start().await;
+    // The first instance describes an image the server does not have.
+    serve_image(&server, "/missing.png", 404).await;
+    serve_image(&server, "/cover-250.png", 200).await;
+    let env = Env::new().await;
+    env.instance(
+        "first",
+        ARTWORK_FIXTURE,
+        ARTWORK_FIXTURE_ID,
+        json!({
+            "imageUrl": server.uri(),
+            "albums": [{ "title": "Hello Album", "images": [{ "path": "/missing.png" }] }],
+            "artists": [],
+        }),
+    )
+    .await;
+    env.instance(
+        "second",
+        ARTWORK_FIXTURE,
+        ARTWORK_FIXTURE_ID,
+        json!({
+            "imageUrl": server.uri(),
+            "albums": [{ "title": "Hello Album", "images": [{ "path": "/cover-250.png" }] }],
+            "artists": [],
+        }),
+    )
+    .await;
+    env.assign(Layer::Artwork, &["first", "second"]).await;
+    let service = env.service();
+    let album = env.stored_album("Hello Album", "Hello Artist").await;
+
+    let cover = service
+        .cover_art(&CoverArtRequest {
+            id: ClientId::Entity(album),
+            size: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(cover.bytes, IMAGE);
+    assert_eq!(
+        requested_paths(&server).await,
+        ["/cover-250.png", "/missing.png"],
+        "the second instance answered after the first one had no image"
+    );
 }

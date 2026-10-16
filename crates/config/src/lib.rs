@@ -516,6 +516,14 @@ pub mod keys {
     pub const SUBSONIC_DEFAULT_SCOPE: SettingKey<String> =
         SettingKey::new("subsonic.default_scope");
     /// Whether a rating of 1 means a dislike.
+    /// The deadline for one artwork-layer lookup, in milliseconds.
+    pub const ARTWORK_TIMEOUT_MS: SettingKey<i64> = SettingKey::new("artwork.timeout_ms");
+
+    /// The deadline for one artist-info lookup, in milliseconds.
+    pub const METADATA_ARTIST_INFO_TIMEOUT_MS: SettingKey<i64> =
+        SettingKey::new("metadata.artist_info.timeout_ms");
+
+    /// Whether a rating of one also counts as a dislike.
     pub const SUBSONIC_RATING_ONE_IS_DISLIKE: SettingKey<bool> =
         SettingKey::new("subsonic.rating_one_is_dislike");
     /// Suffix appended to catalog entity titles.
@@ -953,6 +961,24 @@ impl SettingsRegistry {
                     },
                     SettingValue::String("library".to_owned()),
                     "Default browse scope for users without an override",
+                ),
+                def(
+                    keys::ARTWORK_TIMEOUT_MS,
+                    SettingKind::Integer {
+                        min: 500,
+                        max: 60_000,
+                    },
+                    SettingValue::Integer(5_000),
+                    "Deadline for one artwork-layer lookup, in milliseconds",
+                ),
+                def(
+                    keys::METADATA_ARTIST_INFO_TIMEOUT_MS,
+                    SettingKind::Integer {
+                        min: 500,
+                        max: 60_000,
+                    },
+                    SettingValue::Integer(5_000),
+                    "Deadline for one artist-info lookup, in milliseconds",
                 ),
                 def(
                     keys::SUBSONIC_RATING_ONE_IS_DISLIKE,

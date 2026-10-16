@@ -56,9 +56,9 @@
             "title": "Artists",
             "items": {
               "type": "object",
-              "required": ["name"],
+              "required": ["title"],
               "properties": {
-                "name": { "type": "string", "title": "Name" },
+                "title": { "type": "string", "title": "Name" },
                 "images": {
                   "type": "array",
                   "title": "Images",

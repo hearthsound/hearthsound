@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Artwork plugins are hosted: an instance whose plugin provides `artwork` gets
   an `ArtworkProvider` that answers the images it knows for an album or an
   artist, and the test support ships an artwork fixture.
+- Cover art is looked for in the artwork layer first, under
+  `artwork.timeout_ms`, with the answers and the fetched images cached, and an
+  entity no artwork instance knows still falls back to the instance that issued
+  it.
 
 ### Added
 

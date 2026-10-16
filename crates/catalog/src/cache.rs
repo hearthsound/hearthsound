@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hearthsound_core::EntityKind;
+use hearthsound_core::providers::ArtworkSubject;
 use hearthsound_core::providers::{CatalogQuery, RecordingHint};
 use hearthsound_db::Database;
 use moka::future::Cache as MemoryCache;
@@ -205,6 +206,56 @@ impl RequestKey {
                 .map(|millis| millis.to_string())
                 .unwrap_or_else(|| "-".to_owned()),
             optional(hint.isrc.as_deref()),
+        ))
+    }
+
+    /// Builds the key of an artwork lookup made for a subject.
+    ///
+    /// The key names the kind, the title, and every identifier the subject
+    /// carries, because two instances asked about the same album must share the
+    /// answer while an album and an artist that share a title must not.
+    ///
+    /// # Parameters
+    ///
+    /// - `kind`: the kind of entity the picture is for.
+    /// - `subject`: the subject the instances are asked about.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_catalog::cache::RequestKey;
+    /// use hearthsound_core::providers::ArtworkSubject;
+    /// use hearthsound_core::EntityKind;
+    ///
+    /// let subject = ArtworkSubject {
+    ///     kind: EntityKind::Album,
+    ///     provider_id: None,
+    ///     ids: Vec::new(),
+    ///     title: "Cafe del Mar".to_owned(),
+    ///     artists: vec!["Energy 52".to_owned()],
+    /// };
+    /// assert_eq!(
+    ///     RequestKey::artwork(EntityKind::Album, &subject).as_str(),
+    ///     "artwork|kind=album|title=12:Cafe del Mar|artists=9:Energy 52,|ids="
+    /// );
+    /// ```
+    pub fn artwork(kind: EntityKind, subject: &ArtworkSubject) -> RequestKey {
+        let mut artists = String::new();
+        for artist in &subject.artists {
+            artists.push_str(&encode(artist));
+            artists.push(',');
+        }
+        let mut ids = String::new();
+        for id in &subject.ids {
+            ids.push_str(&encode(&id.namespace));
+            ids.push('=');
+            ids.push_str(&encode(&id.value));
+            ids.push(';');
+        }
+        RequestKey(format!(
+            "artwork|kind={}|title={}|artists={artists}|ids={ids}",
+            kind_literal(kind),
+            encode(&subject.title),
         ))
     }
 
