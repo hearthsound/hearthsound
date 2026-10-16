@@ -1,10 +1,18 @@
-package hearthsound:plugin@0.1.0;
+package hearthsound:plugin@0.2.0;
 
 interface metadata {
   use types.{id-pair, artist-credit, album, provider-error};
   record recording-hint { title: string, artists: list<string>, album: option<string>, duration-ms: option<u32>, isrc: option<string> }
   record release-summary { ids: list<id-pair>, title: string, date: option<string>, track-count: option<u32> }
   record recording-match { ids: list<id-pair>, title: string, artists: list<artist-credit>, duration-ms: option<u32>, releases: list<release-summary>, score: f32 }
+  /// What the server knows about an artist it wants information on.
+  record artist-info-request { name: string, ids: list<id-pair> }
+  /// A web page about an artist; kind is homepage, wikipedia, wikidata, lastfm, discogs, allmusic or bandcamp.
+  record artist-link { kind: string, url: string }
+  /// Information about one artist.
+  record artist-info { ids: list<id-pair>, biography: option<string>, links: list<artist-link> }
   resolve-recording: func(hint: recording-hint) -> result<list<recording-match>, provider-error>;
   get-release: func(ids: list<id-pair>) -> result<album, provider-error>;
+  /// Returns information on an artist, or none when the provider does not know it.
+  get-artist-info: func(request: artist-info-request) -> result<option<artist-info>, provider-error>;
 }

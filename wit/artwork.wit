@@ -1,0 +1,23 @@
+package hearthsound:plugin@0.2.0;
+
+/// Cover images for albums and portraits for artists.
+interface artwork {
+  use types.{entity-kind, id-pair, image, provider-error};
+
+  /// The entity whose picture is wanted.
+  record artwork-subject {
+    /// `album` for a front cover, `artist` for a portrait; any other kind is answered with an empty list.
+    kind: entity-kind,
+    /// This instance's own id for the entity, when the server holds one.
+    provider-id: option<string>,
+    /// Canonical ids the server knows: ("mb-release", ...), ("mb-release-group", ...), ("upc", ...), ("mb-artist", ...).
+    ids: list<id-pair>,
+    /// The album title, or the artist name.
+    title: string,
+    /// The album's artist names in credit order; empty for an artist.
+    artists: list<string>,
+  }
+
+  /// Returns the renditions of the subject's picture, or an empty list when the provider has none.
+  find-artwork: func(subject: artwork-subject) -> result<list<image>, provider-error>;
+}

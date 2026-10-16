@@ -21,15 +21,15 @@ pub(crate) mod imports {
     wasmtime::component::bindgen!({
         path: "../../wit",
         inline: "
-            package hearthsound:host@0.1.0;
+            package hearthsound:host@0.2.0;
 
             world host-imports {
-                import hearthsound:plugin/types@0.1.0;
-                import hearthsound:plugin/host-log@0.1.0;
-                import hearthsound:plugin/host-http@0.1.0;
-                import hearthsound:plugin/host-kv@0.1.0;
-                import hearthsound:plugin/host-config@0.1.0;
-                import hearthsound:plugin/host-files@0.1.0;
+                import hearthsound:plugin/types@0.2.0;
+                import hearthsound:plugin/host-log@0.2.0;
+                import hearthsound:plugin/host-http@0.2.0;
+                import hearthsound:plugin/host-kv@0.2.0;
+                import hearthsound:plugin/host-config@0.2.0;
+                import hearthsound:plugin/host-files@0.2.0;
             }
         ",
         world: "hearthsound:host/host-imports",
@@ -45,11 +45,11 @@ pub(crate) mod catalog {
         imports: { default: async | trappable },
         exports: { default: async },
         with: {
-            "hearthsound:plugin/types@0.1.0": crate::bindings::imports::hearthsound::plugin::types,
-            "hearthsound:plugin/host-log@0.1.0": crate::bindings::imports::hearthsound::plugin::host_log,
-            "hearthsound:plugin/host-http@0.1.0": crate::bindings::imports::hearthsound::plugin::host_http,
-            "hearthsound:plugin/host-kv@0.1.0": crate::bindings::imports::hearthsound::plugin::host_kv,
-            "hearthsound:plugin/host-config@0.1.0": crate::bindings::imports::hearthsound::plugin::host_config,
+            "hearthsound:plugin/types@0.2.0": crate::bindings::imports::hearthsound::plugin::types,
+            "hearthsound:plugin/host-log@0.2.0": crate::bindings::imports::hearthsound::plugin::host_log,
+            "hearthsound:plugin/host-http@0.2.0": crate::bindings::imports::hearthsound::plugin::host_http,
+            "hearthsound:plugin/host-kv@0.2.0": crate::bindings::imports::hearthsound::plugin::host_kv,
+            "hearthsound:plugin/host-config@0.2.0": crate::bindings::imports::hearthsound::plugin::host_config,
         },
     });
 }
@@ -62,11 +62,11 @@ pub(crate) mod metadata {
         imports: { default: async | trappable },
         exports: { default: async },
         with: {
-            "hearthsound:plugin/types@0.1.0": crate::bindings::imports::hearthsound::plugin::types,
-            "hearthsound:plugin/host-log@0.1.0": crate::bindings::imports::hearthsound::plugin::host_log,
-            "hearthsound:plugin/host-http@0.1.0": crate::bindings::imports::hearthsound::plugin::host_http,
-            "hearthsound:plugin/host-kv@0.1.0": crate::bindings::imports::hearthsound::plugin::host_kv,
-            "hearthsound:plugin/host-config@0.1.0": crate::bindings::imports::hearthsound::plugin::host_config,
+            "hearthsound:plugin/types@0.2.0": crate::bindings::imports::hearthsound::plugin::types,
+            "hearthsound:plugin/host-log@0.2.0": crate::bindings::imports::hearthsound::plugin::host_log,
+            "hearthsound:plugin/host-http@0.2.0": crate::bindings::imports::hearthsound::plugin::host_http,
+            "hearthsound:plugin/host-kv@0.2.0": crate::bindings::imports::hearthsound::plugin::host_kv,
+            "hearthsound:plugin/host-config@0.2.0": crate::bindings::imports::hearthsound::plugin::host_config,
         },
     });
 }
@@ -79,12 +79,12 @@ pub(crate) mod acquisition {
         imports: { default: async | trappable },
         exports: { default: async },
         with: {
-            "hearthsound:plugin/types@0.1.0": crate::bindings::imports::hearthsound::plugin::types,
-            "hearthsound:plugin/host-log@0.1.0": crate::bindings::imports::hearthsound::plugin::host_log,
-            "hearthsound:plugin/host-http@0.1.0": crate::bindings::imports::hearthsound::plugin::host_http,
-            "hearthsound:plugin/host-kv@0.1.0": crate::bindings::imports::hearthsound::plugin::host_kv,
-            "hearthsound:plugin/host-config@0.1.0": crate::bindings::imports::hearthsound::plugin::host_config,
-            "hearthsound:plugin/host-files@0.1.0": crate::bindings::imports::hearthsound::plugin::host_files,
+            "hearthsound:plugin/types@0.2.0": crate::bindings::imports::hearthsound::plugin::types,
+            "hearthsound:plugin/host-log@0.2.0": crate::bindings::imports::hearthsound::plugin::host_log,
+            "hearthsound:plugin/host-http@0.2.0": crate::bindings::imports::hearthsound::plugin::host_http,
+            "hearthsound:plugin/host-kv@0.2.0": crate::bindings::imports::hearthsound::plugin::host_kv,
+            "hearthsound:plugin/host-config@0.2.0": crate::bindings::imports::hearthsound::plugin::host_config,
+            "hearthsound:plugin/host-files@0.2.0": crate::bindings::imports::hearthsound::plugin::host_files,
         },
     });
 }

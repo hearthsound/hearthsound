@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO plugins (id, version, api, manifest, sha256, source, enabled, installed_at)\n         VALUES (?, '0.1.0', 'hearthsound:plugin@0.2.0', '{}', X'', 'sideload', 1, 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "1b8303c074a996761b225485a9c5c2df46dee95e1334a3eb581a9a72d5d4d1ab"
+}

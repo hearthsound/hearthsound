@@ -316,7 +316,7 @@ mod tests {
         let instance_id = new_uuid_v7();
         sqlx::query!(
             "INSERT INTO plugins (id, version, api, manifest, sha256, source, enabled, installed_at)
-             VALUES (?, '0.1.0', 'hearthsound:plugin@0.1.0', '{}', X'', 'sideload', 1, 0)",
+             VALUES (?, '0.1.0', 'hearthsound:plugin@0.2.0', '{}', X'', 'sideload', 1, 0)",
             plugin_id,
         )
         .execute(database.writer())

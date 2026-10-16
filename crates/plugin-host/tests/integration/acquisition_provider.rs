@@ -44,7 +44,7 @@ async fn database(dir: &Path) -> Arc<Database> {
 async fn register(database: &Database, instance: Uuid, plugin_id: &str, slug: &str) {
     sqlx::query!(
         "INSERT INTO plugins (id, version, api, manifest, sha256, source, enabled, installed_at)
-         VALUES (?, '0.1.0', 'hearthsound:plugin@0.1.0', '{}', X'', 'sideload', 1, 0)",
+         VALUES (?, '0.1.0', 'hearthsound:plugin@0.2.0', '{}', X'', 'sideload', 1, 0)",
         plugin_id,
     )
     .execute(database.writer())

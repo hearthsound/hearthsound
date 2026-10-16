@@ -13,7 +13,7 @@ use hearthsound_core::Layer;
 use serde::{Deserialize, Serialize};
 
 /// The API version this server hosts.
-pub const SUPPORTED_API: &str = "hearthsound:plugin@0.1.0";
+pub const SUPPORTED_API: &str = "hearthsound:plugin@0.2.0";
 
 /// The largest accepted `id` length.
 const MAX_ID_LENGTH: usize = 128;

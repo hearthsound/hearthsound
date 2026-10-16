@@ -46,7 +46,7 @@ async fn schema_applies_and_accepts_a_plugin_without_a_repository() {
 
     sqlx::query(
         "INSERT INTO plugins (id, version, api, manifest, sha256, source, installed_at)
-         VALUES ('app.hearthsound.deezer', '0.1.0', 'hearthsound:plugin@0.1.0', '{}', x'00',
+         VALUES ('app.hearthsound.deezer', '0.1.0', 'hearthsound:plugin@0.2.0', '{}', x'00',
                  'sideload', 0)",
     )
     .execute(db.writer())

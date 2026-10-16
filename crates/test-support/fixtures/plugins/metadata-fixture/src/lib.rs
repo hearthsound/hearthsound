@@ -8,7 +8,7 @@
 //! matched recording appears on.
 
 use hearthsound_plugin::metadata_provider::exports::hearthsound::plugin::metadata::{
-    RecordingHint, RecordingMatch, ReleaseSummary,
+    ArtistInfo, ArtistInfoRequest, RecordingHint, RecordingMatch, ReleaseSummary,
 };
 use hearthsound_plugin::metadata_provider::exports::hearthsound::plugin::{lifecycle, metadata};
 use hearthsound_plugin::types::{Album, ArtistCredit, IdPair, ProviderError, Track};
@@ -186,6 +186,13 @@ impl metadata::Guest for MetadataFixture {
             .collect();
 
         Ok(matched)
+    }
+
+    fn get_artist_info(request: ArtistInfoRequest) -> Result<Option<ArtistInfo>, ProviderError> {
+        // The fixture answers no artist info yet: the host calls it so the
+        // interface is exercised, and a later change answers from the config.
+        let _ = request;
+        Ok(None)
     }
 
     fn get_release(ids: Vec<IdPair>) -> Result<Album, ProviderError> {

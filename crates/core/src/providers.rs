@@ -8,7 +8,7 @@
 //! WebAssembly anywhere outside the plugin host.
 //!
 //! The mirror covers the `catalog`, `metadata` and `acquisition` interfaces of
-//! `hearthsound:plugin@0.1.0`. Acquisition is the only layer whose calls need
+//! `hearthsound:plugin@0.2.0`. Acquisition is the only layer whose calls need
 //! host state beyond the provider's own configuration: its downloads land in a
 //! per-job staging directory, so every call carries an [`AcquisitionContext`].
 

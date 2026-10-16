@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The plugin host provides `hearthsound:plugin@0.2.0`, the release that adds the
+  artwork provider and artist info to the plugin interface.
+
 ### Added
 
 - Project license, contributing guide, security policy, and changelog.
