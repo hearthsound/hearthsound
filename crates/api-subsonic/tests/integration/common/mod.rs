@@ -31,9 +31,12 @@ use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::{
     InstanceService, InstanceSpec, PluginHost, PluginRepository, PluginSource, ProviderRegistry,
 };
-use hearthsound_test_support::{HELLO_CATALOG, fixture_plugin};
+use hearthsound_test_support::{ARTWORK_FIXTURE, HELLO_CATALOG, fixture_plugin};
 use tempfile::TempDir;
 use tower::ServiceExt;
+
+/// The bytes the artwork layer's mock server serves.
+pub const ARTWORK_IMAGE: &[u8] = b"\x89PNG\r\n\x1a\nartwork layer image";
 
 /// The login name of the test account.
 pub const USERNAME: &str = "echo";
@@ -257,6 +260,81 @@ impl Fixture {
             .await
             .unwrap();
         self.registry.rebuild().await.unwrap();
+    }
+
+    /// Installs the artwork fixture as the artwork layer and serves one image.
+    ///
+    /// The fixture answers a portrait for any artist whose name is `Hello
+    /// Artist` and a cover for `Hello Album`, from the path the caller names,
+    /// which a mock server serves.
+    ///
+    /// # Parameters
+    ///
+    /// - `path`: the image path the fixture configures.
+    /// - `artists`: the artist names the fixture answers a portrait for.
+    ///
+    /// # Returns
+    ///
+    /// The bytes the mock server serves as the image.
+    pub async fn install_artwork_layer(&self, path: &str, artists: &[&str]) -> Vec<u8> {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(path.to_owned()))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(ARTWORK_IMAGE),
+            )
+            .mount(&server)
+            .await;
+        let installed = self
+            .host
+            .install(&fixture_plugin(ARTWORK_FIXTURE))
+            .await
+            .unwrap();
+        let plugin_id = self
+            .repository
+            .register_installed(&installed, PluginSource::Sideload)
+            .await
+            .unwrap()
+            .id;
+        let instances = InstanceService::new(
+            Arc::clone(&self.host),
+            self.repository.clone(),
+            self.secrets.clone(),
+        );
+        instances
+            .create(&InstanceSpec {
+                slug: "artwork".to_owned(),
+                plugin_id,
+                display_name: "Artwork".to_owned(),
+                server_config: serde_json::json!({
+                    "imageUrl": server.uri(),
+                    "albums": [{
+                        "title": "Hello Album",
+                        "images": [{ "path": path, "width": 500 }],
+                    }],
+                    "artists": artists
+                        .iter()
+                        .map(|name| serde_json::json!({
+                            "title": name,
+                            "images": [{ "path": path, "width": 500 }],
+                        }))
+                        .collect::<Vec<_>>(),
+                }),
+                host_config: serde_json::Value::Null,
+            })
+            .await
+            .unwrap();
+        instances
+            .set_layer(Layer::Artwork, &["artwork".to_owned()])
+            .await
+            .unwrap();
+        self.registry.rebuild().await.unwrap();
+        // The server lives as long as the fixture keeps its own runtime alive;
+        // leaking it here is what a test's mock server does in this harness.
+        std::mem::forget(server);
+        ARTWORK_IMAGE.to_vec()
     }
 
     /// Returns the managed storage roots the state resolves files against.

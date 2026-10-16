@@ -246,11 +246,42 @@ async fn an_album_and_an_artist_are_served_the_first_track_that_has_art() {
         "the album is served the first of its tracks that has an image"
     );
 
+    // An artist has no image of its own, so the local fallback walks its albums
+    // and serves the first image it finds. No artwork instance is configured
+    // here, which is the case this covers; the artwork layer is asked first
+    // when one is.
     let artist = request(&app, &url(&fixture, &seeded.artist.to_string()), &[]).await;
     assert_eq!(artist.status, StatusCode::OK);
     assert_eq!(
         artist.bytes, picture,
         "an artist has no image of its own, so its album's is served"
+    );
+}
+
+/// An artwork instance's portrait is served for a stored artist that has local
+/// art of its own, because the layer is asked first for artists.
+#[tokio::test]
+async fn an_artwork_instance_is_asked_before_a_stored_artists_own_art() {
+    let fixture = Fixture::new().await;
+    let seeded = seed_album(
+        &fixture,
+        "Gamma",
+        &[Art::Embedded {
+            size: 32,
+            rgb: 0x00ff_0000,
+        }],
+    )
+    .await;
+    let portrait = fixture
+        .install_artwork_layer("/portrait.png", &["Gamma Artist"])
+        .await;
+    let app = fixture.app();
+
+    let artist = request(&app, &url(&fixture, &seeded.artist.to_string()), &[]).await;
+    assert_eq!(artist.status, StatusCode::OK);
+    assert_eq!(
+        artist.bytes, portrait,
+        "the artwork instance's portrait is what a stored artist is served"
     );
 }
 

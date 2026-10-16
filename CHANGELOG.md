@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `artwork.timeout_ms`, with the answers and the fetched images cached, and an
   entity no artwork instance knows still falls back to the instance that issued
   it.
+- A stored entity with no local art is served from the artwork layer, and a
+  stored artist is asked of the layer before its own albums are walked.
 
 ### Added
 

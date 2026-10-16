@@ -98,7 +98,7 @@ pub async fn get_cover_art(call: BinaryCall) -> HttpResponse {
     match ClientId::parse(value) {
         Ok(ClientId::Catalog(catalog)) => {
             let slug = catalog.slug().clone();
-            proxy(&call, &ClientId::Catalog(catalog), slug, size).await
+            proxy(&call, &ClientId::Catalog(catalog), &slug, size).await
         }
         Ok(ClientId::Entity(entity)) => stored(&call, entity, size).await,
         Err(error) => {
@@ -132,13 +132,64 @@ async fn stored(call: &BinaryCall, entity: EntityId, size: Option<u32>) -> HttpR
     if entity.kind() == IdPrefix::Playlist {
         return playlist(call, entity).await;
     }
+    // An artist has no image of its own, so the artwork layer is asked for a
+    // portrait before the local fallback that walks its albums is tried.
+    if entity.kind() == IdPrefix::Artist
+        && let Some(response) = artwork_layer(call, entity, size).await
+    {
+        return response;
+    }
     match local(call, entity).await {
         Ok(Some(art)) => match load(art).await {
             Ok(served) => image(call.headers(), served),
             Err(error) => internal("reading a local cover image", &error),
         },
-        Ok(None) => catalog_fallback(call, entity, size).await,
+        Ok(None) => match artwork_layer(call, entity, size).await {
+            Some(response) => response,
+            None => not_found(&entity),
+        },
         Err(error) => internal("resolving local cover art", &error),
+    }
+}
+
+/// Asks the artwork layer, and the instance that issued the entity, for a
+/// picture.
+///
+/// This is what a stored entity with no image of its own is served from: the
+/// artwork layer first, in the order the administrator set, and then the
+/// instance that issued the entity, which is where its own images are.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `entity`: the stored entity the request named.
+/// - `size`: the requested size in pixels.
+///
+/// # Returns
+///
+/// The image response, or `None` when no instance knows a picture of the entity,
+/// which leaves the caller to answer its own refusal.
+async fn artwork_layer(
+    call: &BinaryCall,
+    entity: EntityId,
+    size: Option<u32>,
+) -> Option<HttpResponse> {
+    let catalog = call.state().catalog();
+    let request = CoverArtRequest {
+        id: ClientId::Entity(entity),
+        size,
+    };
+    match catalog.cover_art(&request).await {
+        Ok(cover) => Some(image(
+            call.headers(),
+            Served {
+                mime_type: cover.mime_type,
+                bytes: cover.bytes,
+                cache_control: STORED_CACHE_CONTROL,
+            },
+        )),
+        Err(CatalogError::NotFound) => None,
+        Err(error) => Some(catalog_failure(&entity, &error)),
     }
 }
 
@@ -269,32 +320,6 @@ async fn first_track_cover(
     Ok(None)
 }
 
-/// Serves the image the entity's catalog instance describes, when it has one.
-///
-/// The instance is the one of the entity's first `p:<slug>` alias, which is the
-/// same instance the catalog layer resolves the entity through, so a stored
-/// entity and its catalog id reach the same provider.
-///
-/// # Parameters
-///
-/// - `call`: the authenticated call.
-/// - `entity`: the stored entity the request named.
-/// - `size`: the requested size in pixels.
-///
-/// # Returns
-///
-/// The image response, HTTP 404 when no instance issued the entity, or another
-/// refusal code of the module header.
-async fn catalog_fallback(call: &BinaryCall, entity: EntityId, size: Option<u32>) -> HttpResponse {
-    match call.state().catalog().provider_aliases(entity).await {
-        Ok(aliases) => match aliases.first() {
-            Some(alias) => proxy(call, &ClientId::Entity(entity), alias.slug.clone(), size).await,
-            None => not_found(&entity),
-        },
-        Err(error) => internal("reading an entity's catalog aliases", &error),
-    }
-}
-
 /// Serves an image through the catalog instance that issued the entity.
 ///
 /// # Parameters
@@ -309,7 +334,7 @@ async fn catalog_fallback(call: &BinaryCall, entity: EntityId, size: Option<u32>
 /// # Returns
 ///
 /// The image response, or one of the refusal codes of the module header.
-async fn proxy(call: &BinaryCall, id: &ClientId, slug: Slug, size: Option<u32>) -> HttpResponse {
+async fn proxy(call: &BinaryCall, id: &ClientId, slug: &Slug, size: Option<u32>) -> HttpResponse {
     let catalog = call.state().catalog();
     let policy = catalog
         .registry()
@@ -329,7 +354,7 @@ async fn proxy(call: &BinaryCall, id: &ClientId, slug: Slug, size: Option<u32>) 
                 cache_control: cache_control(policy),
             },
         ),
-        Err(error) => catalog_failure(&slug, &error),
+        Err(error) => catalog_failure(slug, &error),
     }
 }
 
@@ -527,18 +552,18 @@ fn requested_size(call: &BinaryCall) -> Result<Option<u32>, ()> {
 /// instance asked for - or [`RETRY_AFTER_SECONDS`] when it named none - for
 /// every failure a later retry may get past. A failure of this server rather
 /// than of the instance is HTTP 500.
-fn catalog_failure(slug: &Slug, error: &CatalogError) -> HttpResponse {
+fn catalog_failure(id: &dyn std::fmt::Display, error: &CatalogError) -> HttpResponse {
     match error {
         CatalogError::NotFound => {
             tracing::debug!(
-                instance = slug.as_str(),
+                id = %id,
                 "the catalog has no cover art for that id"
             );
             StatusCode::NOT_FOUND.into_response()
         }
         CatalogError::RateLimited { retry_after_ms, .. } => {
             tracing::debug!(
-                instance = slug.as_str(),
+                id = %id,
                 retry_after_ms,
                 "the catalog rate limited a cover art request"
             );
@@ -550,7 +575,7 @@ fn catalog_failure(slug: &Slug, error: &CatalogError) -> HttpResponse {
         | CatalogError::Internal { .. }
         | CatalogError::InvalidEntity { .. } => {
             tracing::warn!(
-                instance = slug.as_str(),
+                id = %id,
                 error = %error,
                 "the catalog could not serve a cover image"
             );
