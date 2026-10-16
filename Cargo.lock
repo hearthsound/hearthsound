@@ -1565,6 +1565,7 @@ dependencies = [
  "hearthsound-core",
  "hearthsound-db",
  "hearthsound-library",
+ "serde_json",
  "sqlx",
  "tempfile",
  "thiserror",

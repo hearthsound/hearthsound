@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT client, current_index, position_ms, track_ids, updated_at FROM play_queues WHERE user_id = ? ORDER BY updated_at DESC, client LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "client",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "play_queues",
+            "name": "client"
+          }
+        }
+      },
+      {
+        "name": "current_index",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "play_queues",
+            "name": "current_index"
+          }
+        }
+      },
+      {
+        "name": "position_ms",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "play_queues",
+            "name": "position_ms"
+          }
+        }
+      },
+      {
+        "name": "track_ids",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "play_queues",
+            "name": "track_ids"
+          }
+        }
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "play_queues",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2ee6718f73560c77dd616ca81ef1e0f3bc8e89c1a13cbb29290fbcbb8f578838"
+}

@@ -50,4 +50,17 @@ pub enum ActivityError {
         /// The longest name the server stores.
         max: usize,
     },
+
+    /// A saved play queue names an entry it does not hold.
+    #[error("queue index {index} is outside a queue of {len} entries")]
+    InvalidQueueIndex {
+        /// The index the caller supplied.
+        index: usize,
+        /// How many entries the queue holds.
+        len: usize,
+    },
+
+    /// A stored list of client ids is not valid JSON.
+    #[error("stored list is not valid JSON: {0}")]
+    Json(#[from] serde_json::Error),
 }

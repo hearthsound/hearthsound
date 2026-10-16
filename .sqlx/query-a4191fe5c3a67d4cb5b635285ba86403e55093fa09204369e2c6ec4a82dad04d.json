@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO play_queues (user_id, client, current_index, position_ms, track_ids, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user_id, client) DO UPDATE SET current_index = excluded.current_index, position_ms = excluded.position_ms, track_ids = excluded.track_ids, updated_at = excluded.updated_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "a4191fe5c3a67d4cb5b635285ba86403e55093fa09204369e2c6ec4a82dad04d"
+}

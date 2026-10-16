@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM play_queues WHERE user_id = ? AND client = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "24922da11b5f12332d7e6e8ebf1823bd7b50fef558008f5c082557cc6c50b5d3"
+}

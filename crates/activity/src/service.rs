@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::error::ActivityError;
 use crate::play::Plays;
+use crate::play_queues::PlayQueues;
 use crate::playlists::Playlists;
 use crate::ratings;
 use crate::session::StreamSessions;
@@ -111,6 +112,8 @@ pub struct ActivityService {
     plays: Plays,
     /// The playlist tables.
     playlists: Playlists,
+    /// The saved play queue table.
+    queues: PlayQueues,
     /// The stream sessions the guard reads.
     sessions: StreamSessions,
 }
@@ -133,6 +136,7 @@ impl ActivityService {
             writer: db.writer().clone(),
             plays: Plays::new(db),
             playlists: Playlists::new(db),
+            queues: PlayQueues::new(db),
             sessions: StreamSessions::new(),
         }
     }
@@ -174,6 +178,7 @@ impl ActivityService {
             writer: db.writer().clone(),
             plays: Plays::new(db),
             playlists: Playlists::new(db),
+            queues: PlayQueues::new(db),
             sessions,
         }
     }
@@ -191,6 +196,11 @@ impl ActivityService {
     /// Returns the playlist repository.
     pub fn playlists(&self) -> &Playlists {
         &self.playlists
+    }
+
+    /// Returns the saved play queue repository.
+    pub fn play_queues(&self) -> &PlayQueues {
+        &self.queues
     }
 
     /// Handles a client's scrobble.

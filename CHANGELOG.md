@@ -708,6 +708,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Playlists can be created, renamed, made public, added to, edited by entry
   index, replaced, and deleted; every track whose membership changes has its
   playlist pin updated in the same transaction.
+- A client can save the play queue it is playing per client, and the most
+  recently saved queue is the one the queue endpoints answer.
 
 ### Security
 
