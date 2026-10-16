@@ -717,6 +717,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The OpenSubsonic `reportPlayback` reports are applied: they keep now playing
   current, accumulate the listening time each client reports, record the play a
   stopped session earned, and suppress the scrobble that repeats it.
+- Listing endpoints can read a user's stars, ratings, play counts, and last-play
+  instants for a whole page of tracks, albums, or artists in a bounded number of
+  statements.
 
 ### Security
 

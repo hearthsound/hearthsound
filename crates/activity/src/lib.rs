@@ -27,7 +27,9 @@
 //! each client saved so another client can pick it up, [`Bookmarks`] stores
 //! the position a user left a track at, and [`NowPlaying`] stores what each
 //! client is playing, which [`InMemoryReports`] keeps current from the playback
-//! reports that also earn plays.
+//! reports that also earn plays. [`load_annotations`] reads what a user has done
+//! with a whole page of entities at once, for the listing endpoints that report
+//! stars, ratings, and play counts.
 //!
 //! # Examples
 //!
@@ -61,6 +63,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod annotations;
 mod bookmarks;
 mod error;
 mod feedback;
@@ -73,6 +76,7 @@ mod reports;
 mod service;
 mod session;
 
+pub use annotations::{Annotation, MAX_IDS_PER_QUERY, load as load_annotations};
 pub use bookmarks::{Bookmark, Bookmarks};
 pub use error::ActivityError;
 pub use feedback::{like, refresh_user_library_pin, unlike};
