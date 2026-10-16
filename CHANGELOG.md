@@ -695,6 +695,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or id.
 - An ignored benchmark scans a generated 20,000-file library and rescans it,
   which is how the scan timings are measured.
+- The database gained the per-user activity tables: bookmarks, the current
+  playback entry per client, the saved play queue per client, and ratings.
 
 ### Security
 

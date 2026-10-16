@@ -145,3 +145,81 @@ async fn entity_kinds_with_equal_rowids_do_not_collide() {
 
     db.close().await;
 }
+
+/// The activity tables exist and their constraints hold.
+#[tokio::test]
+async fn activity_tables_exist_and_reject_invalid_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let pool = db.writer();
+
+    for table in ["bookmarks", "now_playing", "play_queues", "user_ratings"] {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+        )
+        .bind(table)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "the {table} table exists");
+    }
+
+    sqlx::query(
+        "INSERT INTO users (id, username, display_name, password_hash, created_at, updated_at)
+         VALUES (x'01', 'echo', 'Echo', 'x', 0, 0)",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    insert_track(pool, &[2], "Bookmarked", "Nobody").await;
+
+    sqlx::query(
+        "INSERT INTO bookmarks (user_id, track_id, position_ms, comment, updated_at)
+         VALUES (x'01', x'02', 1000, 'chapter', 5)",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO now_playing (user_id, client, track_id, started_at, position_ms, state)
+         VALUES (x'01', 'web', x'02', 5, 0, 'playing')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO play_queues (user_id, client, current_index, position_ms, track_ids, updated_at)
+         VALUES (x'01', 'web', 0, 0, '[\"tr_one\"]', 5)",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO user_ratings (user_id, entity_kind, entity_id, rating, at)
+         VALUES (x'01', 'track', x'02', 5, 5)",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    for rating in [0, 6] {
+        let rejected = sqlx::query(
+            "INSERT INTO user_ratings (user_id, entity_kind, entity_id, rating, at)
+             VALUES (x'01', 'album', x'03', ?, 5)",
+        )
+        .bind(rating)
+        .execute(pool)
+        .await;
+        assert!(rejected.is_err(), "a rating of {rating} is rejected");
+    }
+
+    let unknown_kind = sqlx::query(
+        "INSERT INTO user_ratings (user_id, entity_kind, entity_id, rating, at)
+         VALUES (x'01', 'playlist', x'03', 3, 5)",
+    )
+    .execute(pool)
+    .await;
+    assert!(unknown_kind.is_err(), "an unknown entity kind is rejected");
+
+    db.close().await;
+}
