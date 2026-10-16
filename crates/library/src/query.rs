@@ -787,7 +787,8 @@ fn push_scope_tracks(builder: &mut QueryBuilder<Sqlite>, scope: Scope) {
                 .push("SELECT id FROM tracks WHERE availability IN (")
                 .push_bind(available)
                 .push(", ")
-                .push_bind(cached);
+                .push_bind(cached)
+                .push(")");
         }
     }
     builder.push(") ");

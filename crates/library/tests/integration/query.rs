@@ -1188,6 +1188,36 @@ async fn genres_are_counted_and_filtered() {
         "the count and offset page the genre listing"
     );
 
+    // The server scope reads the same way: every stored track the view allows,
+    // in every folder, which the scope expression has to spell out itself.
+    let server = Scope::Server(ServerBrowse::PermanentOnly);
+    let counted = query::list_genres(&mut conn, server).await.unwrap();
+    let listed: Vec<(&str, i64, i64)> = counted
+        .iter()
+        .map(|genre| (genre.name.as_str(), genre.song_count, genre.album_count))
+        .collect();
+    assert_eq!(
+        listed,
+        [("jazz", 2, 2), ("rock", 3, 2)],
+        "the server view counts every stored track"
+    );
+    assert_eq!(
+        query::tracks_by_genre(&mut conn, server, "rock", -1, 0)
+            .await
+            .unwrap()
+            .len(),
+        3,
+        "the server view lists every stored track of a genre"
+    );
+    assert_eq!(
+        query::random_tracks(&mut conn, server, 10, None, None, None)
+            .await
+            .unwrap()
+            .len(),
+        4,
+        "the server view samples every stored track"
+    );
+
     // A random sample honours the size, the genre, and the year range.
     let sample = query::random_tracks(&mut conn, scope, 10, None, None, None)
         .await
@@ -1276,6 +1306,20 @@ async fn top_songs_follow_the_play_counts() {
             .len(),
         2,
         "the count bounds the listing"
+    );
+    let top = query::top_tracks_for_artist(
+        &mut conn,
+        Scope::Server(ServerBrowse::PermanentOnly),
+        artist,
+        10,
+    )
+    .await
+    .unwrap();
+    let titles: Vec<&str> = top.iter().map(|view| view.track.title.as_str()).collect();
+    assert_eq!(
+        titles,
+        ["Second", "First", "Guest", "Third"],
+        "the server view ranks the same plays"
     );
 
     let found = query::find_artist_by_name(&mut conn, "  nova reyes ")
