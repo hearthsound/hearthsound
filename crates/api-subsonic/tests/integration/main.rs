@@ -27,3 +27,4 @@ mod search;
 mod star;
 mod stream;
 mod stream_pending;
+mod users;

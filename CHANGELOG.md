@@ -767,6 +767,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client's session and advertises the playback-report extension.
 - `getScanStatus` reports what the library scanner is doing, and `startScan`
   lets an administrator enqueue a scan of every library folder.
+- `getUser` reports an account's roles and the music folders it may browse, with
+  another account readable only by an administrator.
 
 ### Security
 
