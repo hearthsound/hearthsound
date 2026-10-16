@@ -162,3 +162,32 @@ async fn a_restart_keeps_the_secret_key() {
     assert_eq!(std::fs::read(&key_file).unwrap(), first);
     assert!(services.is_ready().await);
 }
+
+/// The server root answers the JSON body a client probes it with.
+///
+/// A client that asks for the root to learn whether it is talking to a
+/// Hearthsound server must be answered with JSON, not with the web client's
+/// HTML, whatever it put in `Accept`.
+#[tokio::test]
+async fn the_server_root_answers_json() {
+    let fixture = crate::common::Fixture::new().await;
+
+    let response = fixture
+        .client
+        .get(format!("{}/", fixture.base_url()))
+        .header("accept", "text/html,application/xhtml+xml")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("application/json"),
+        "the root is JSON even for a client that asks for HTML"
+    );
+    assert_eq!(response.text().await.unwrap(), r#"{"status":"ok"}"#);
+}
