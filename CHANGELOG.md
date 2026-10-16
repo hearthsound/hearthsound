@@ -730,6 +730,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts, and an artist can be found by name.
 - The entities a user liked can be listed newest first whatever their
   availability, and the instant the browse index last changed is readable.
+- Responses can carry text as a child element or as the element's own content,
+  which JSON writes as a string member and the `value` member.
 
 ### Security
 

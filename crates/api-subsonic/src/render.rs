@@ -24,6 +24,7 @@ pub(crate) fn write_json(out: &mut String, value: &Value) {
         Value::Int(number) => write_number(out, *number),
         Value::Float(number) => write_float(out, *number),
         Value::Str(text) => write_json_string(out, text),
+        Value::Element(text) | Value::Content(text) => write_json_string(out, text),
         Value::Array(array) => {
             out.push('[');
             for (index, item) in array.values().iter().enumerate() {
@@ -123,15 +124,26 @@ fn write_element(out: &mut String, name: &str, value: &Value) {
                     out.push('"');
                 }
             }
-            if object.members().iter().all(|(_, value)| value.is_scalar()) {
+            let content = object.members().iter().find_map(|(_, value)| match value {
+                Value::Content(text) => Some(text.as_str()),
+                _ => None,
+            });
+            let children = object
+                .members()
+                .iter()
+                .any(|(_, value)| !value.is_scalar() && !matches!(value, Value::Content(_)));
+            if !children && content.is_none() {
                 out.push_str("/>");
                 return;
             }
             out.push('>');
             for (member, value) in object.members() {
-                if !value.is_scalar() {
+                if !value.is_scalar() && !matches!(value, Value::Content(_)) {
                     write_member(out, member, value);
                 }
+            }
+            if let Some(content) = content {
+                escape_text(out, content);
             }
             close_element(out, name);
         }
@@ -140,6 +152,13 @@ fn write_element(out: &mut String, name: &str, value: &Value) {
             for value in array.values() {
                 write_element(out, item, value);
             }
+        }
+        Value::Element(text) | Value::Content(text) => {
+            out.push('<');
+            out.push_str(name);
+            out.push('>');
+            escape_text(out, text);
+            close_element(out, name);
         }
         scalar => {
             out.push('<');
@@ -169,7 +188,9 @@ pub(crate) fn write_attribute_value(out: &mut String, value: &Value) {
             }
         }
         Value::Str(text) => escape_attribute(out, text),
-        Value::Array(_) | Value::Object(_) => {}
+        // An element or a content is never an attribute, and the containers
+        // have no attribute form either.
+        Value::Element(_) | Value::Content(_) | Value::Array(_) | Value::Object(_) => {}
     }
 }
 
@@ -184,7 +205,7 @@ fn write_text(out: &mut String, value: &Value) {
                 write_number(out, *number)
             }
         }
-        Value::Str(text) => escape_text(out, text),
+        Value::Str(text) | Value::Element(text) | Value::Content(text) => escape_text(out, text),
         Value::Array(_) | Value::Object(_) => {}
     }
 }
@@ -305,6 +326,59 @@ mod tests {
     fn a_scalar_member_becomes_a_text_element() {
         let object = Object::new().set("name", "Index A");
         assert_eq!(xml_members(&object), "<name>Index A</name>");
+    }
+
+    #[test]
+    fn an_element_member_becomes_a_child_element_and_a_json_string() {
+        let artist = Object::new()
+            .set("id", 1)
+            .set_element("biography", "From Iceland <since 1998>");
+        assert_eq!(
+            xml_members(&artist),
+            "<id>1</id><biography>From Iceland &lt;since 1998&gt;</biography>"
+        );
+        let mut out = String::new();
+        write_json(&mut out, &Value::from(artist));
+        assert_eq!(
+            out,
+            "{\"id\":1,\"biography\":\"From Iceland <since 1998>\"}"
+        );
+    }
+
+    #[test]
+    fn content_is_written_inside_the_element_and_never_self_closes() {
+        let result = Object::new()
+            .set("status", "ok")
+            .set_content("rock, pop & jazz");
+        let mut out = String::new();
+        write_element(&mut out, "genres", &Value::from(result));
+        assert_eq!(
+            out, "<genres status=\"ok\">rock, pop &amp; jazz</genres>",
+            "the content comes after the attributes"
+        );
+
+        let empty = Object::new().set_content("");
+        let mut out = String::new();
+        write_element(&mut out, "genres", &Value::from(empty));
+        assert_eq!(out, "<genres></genres>");
+    }
+
+    #[test]
+    fn content_is_written_as_the_value_member_in_json() {
+        let object = Object::new().set_content("rock");
+        let mut out = String::new();
+        write_json(&mut out, &Value::from(object));
+        assert_eq!(out, "{\"value\":\"rock\"}");
+    }
+
+    #[test]
+    fn content_between_children_keeps_them_in_order() {
+        let object = Object::new()
+            .set_element("album", "Kind of Blue")
+            .set_content("tail");
+        let mut out = String::new();
+        write_element(&mut out, "info", &Value::from(object));
+        assert_eq!(out, "<info><album>Kind of Blue</album>tail</info>");
     }
 
     #[test]

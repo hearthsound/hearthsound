@@ -7,6 +7,9 @@
 
 use std::borrow::Cow;
 
+/// The member name the JSON encoding gives an element's content.
+pub(crate) const CONTENT_MEMBER: &str = "value";
+
 /// A value in a response payload.
 ///
 /// The variants are the four scalar kinds the protocol needs plus the two
@@ -40,6 +43,20 @@ pub enum Value {
     Float(f64),
     /// A string.
     Str(String),
+    /// A string the XML encoding writes as a child element of its parent.
+    ///
+    /// A plain [`Value::Str`] member is an XML attribute, which is right for a
+    /// field the schema describes as an attribute, such as a song's title. A
+    /// field the schema describes as a child element, such as `getArtistInfo`'s
+    /// `biography`, is set with [`Object::set_element`] instead. Both encodings
+    /// write it as a string.
+    Element(String),
+    /// The text content of the element being built.
+    ///
+    /// The XML encoding writes it inside the element, after its attributes, and
+    /// the element is never self-closing. The JSON encoding writes it as the
+    /// member named `value`. [`Object::set_content`] sets it.
+    Content(String),
     /// A list of values.
     Array(Array),
     /// A set of named members.
@@ -54,7 +71,10 @@ impl Value {
     ///
     /// `true` for the boolean, integer, float, and string variants.
     pub(crate) fn is_scalar(&self) -> bool {
-        !matches!(self, Value::Array(_) | Value::Object(_))
+        matches!(
+            self,
+            Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Str(_)
+        )
     }
 }
 
@@ -183,6 +203,64 @@ impl Object {
     /// Returns the members, in order.
     pub fn members(&self) -> &[(Cow<'static, str>, Value)] {
         &self.members
+    }
+
+    /// Adds a member the XML encoding writes as a child element.
+    ///
+    /// The JSON encoding writes it as a string member, exactly like
+    /// [`Object::set`] with a string.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: the member name, which is both the JSON key and the XML
+    ///   element name.
+    /// - `text`: the element's text.
+    ///
+    /// # Returns
+    ///
+    /// The object, with the member added last or replaced where it already was.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_api_subsonic::Object;
+    ///
+    /// let artist = Object::new().set_element("biography", "From Iceland");
+    /// assert_eq!(artist.members()[0].0, "biography");
+    /// ```
+    pub fn set_element<N, S>(self, name: N, text: S) -> Object
+    where
+        N: Into<Cow<'static, str>>,
+        S: Into<String>,
+    {
+        self.set(name, Value::Element(text.into()))
+    }
+
+    /// Sets the element's own text content.
+    ///
+    /// Only one content makes sense, so setting it again replaces the text. The
+    /// XML encoding writes it inside the element, after its attributes, and the
+    /// element is never self-closing; the JSON encoding writes it as the member
+    /// named `value`.
+    ///
+    /// # Parameters
+    ///
+    /// - `text`: the element's content.
+    ///
+    /// # Returns
+    ///
+    /// The object, with its content set.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_api_subsonic::Object;
+    ///
+    /// let genres = Object::new().set_content("rock, pop");
+    /// assert_eq!(genres.members()[0].0, "value");
+    /// ```
+    pub fn set_content(self, text: impl Into<String>) -> Object {
+        self.set(CONTENT_MEMBER, Value::Content(text.into()))
     }
 
     /// Returns the number of members.
