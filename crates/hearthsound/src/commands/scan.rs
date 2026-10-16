@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_core::events::EventBus;
-use hearthsound_library::scan::{LibraryScanner, ScanReport};
+use hearthsound_library::scan::{LibraryScanner, ScanReport, ScanRequest};
 use hearthsound_library::{LibraryFolder, LibraryRepository};
 
 use crate::cli::ScanArgs;
@@ -44,22 +44,20 @@ pub async fn run(
         .await
         .context("could not list the library folders")?;
 
-    let reports = match &args.folder {
-        None => scanner
-            .scan_all()
-            .await
-            .context("could not scan the library folders")?,
+    let request = match &args.folder {
+        None => ScanRequest::all(),
         Some(selector) => {
-            let folder = resolve_folder(&folders, selector)?;
-            let (id, path) = (folder.id, folder.path.clone());
-            let report = scanner
-                .scan_folder(id)
-                .await
-                .with_context(|| format!("could not scan {}", path.display()))?;
-            folders.retain(|candidate| candidate.id == id);
-            vec![report]
+            let folder_id = resolve_folder(&folders, selector)?.id;
+            folders.retain(|candidate| candidate.id == folder_id);
+            ScanRequest::folder(folder_id)
         }
     };
+    let request = if args.full { request.full() } else { request };
+
+    let reports = scanner
+        .scan(&request)
+        .await
+        .context("could not scan the library folders")?;
 
     if reports.is_empty() {
         println!("no library folders are configured");

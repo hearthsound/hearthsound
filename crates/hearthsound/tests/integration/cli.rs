@@ -436,6 +436,45 @@ fn add_folder_generic_is_scanable() {
     assert!(scanned.contains("0 seen"), "{scanned}");
 }
 
+/// `scan --full` probes every file again instead of trusting the stored state.
+#[tokio::test(flavor = "multi_thread")]
+async fn scan_full_reindexes_an_unchanged_file() {
+    use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
+
+    let sandbox = Sandbox::new("");
+    let music = sandbox.data().join("music");
+    std::fs::create_dir_all(&music).unwrap();
+    AudioFixture::new(AudioFormat::Flac)
+        .seconds(0.3)
+        .file_name("track.flac")
+        .tags(
+            TrackTags::new("Track", "Artist")
+                .album("Album")
+                .album_artist("Artist"),
+        )
+        .write_into(&music)
+        .await
+        .unwrap();
+
+    succeeded(&sandbox.run(&[
+        "admin",
+        "add-folder",
+        "--path",
+        music.to_str().unwrap(),
+        "--generic",
+    ]));
+
+    let selector = ["scan", "--folder", music.to_str().unwrap()];
+    let first = succeeded(&sandbox.run(&selector));
+    assert!(first.contains("1 indexed"), "{first}");
+
+    let incremental = succeeded(&sandbox.run(&selector));
+    assert!(incremental.contains("1 skipped"), "{incremental}");
+
+    let full = succeeded(&sandbox.run(&["scan", "--folder", music.to_str().unwrap(), "--full"]));
+    assert!(full.contains("1 indexed"), "{full}");
+}
+
 /// Runs a server over the sandbox's data directory.
 ///
 /// # Parameters

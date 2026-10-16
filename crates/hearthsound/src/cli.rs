@@ -67,6 +67,10 @@ pub struct ScanArgs {
     /// added with `admin add-folder`.
     #[arg(long, value_name = "PATH-OR-ID")]
     pub folder: Option<String>,
+    /// Probe every file instead of trusting the stored size and modification
+    /// time.
+    #[arg(long)]
+    pub full: bool,
 }
 
 /// The arguments of `admin`.

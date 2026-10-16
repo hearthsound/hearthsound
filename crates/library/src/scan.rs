@@ -21,9 +21,9 @@
 //! transaction that writes them, which is what makes an owned folder's content
 //! permanent in its owner's personal library.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
@@ -72,6 +72,11 @@ const AUDIO_EXTENSIONS: [&str; 14] = [
 
 /// The JSON payload of a `library.scan` job.
 ///
+/// A request names the folder to scan, or all of them; whether to re-probe
+/// every file instead of trusting size and modification time; and the subtrees
+/// to restrict the scan to. The fields a queue payload may leave out have
+/// defaults, so a payload enqueued by an older version still parses.
+///
 /// # Examples
 ///
 /// ```
@@ -79,19 +84,31 @@ const AUDIO_EXTENSIONS: [&str; 14] = [
 ///
 /// let request = ScanRequest::all();
 /// assert_eq!(request.folder_id, None);
-/// assert_eq!(serde_json::to_string(&request).unwrap(), "{\"folderId\":null}");
+/// assert!(!request.full);
+/// assert_eq!(
+///     serde_json::to_string(&request).unwrap(),
+///     "{\"folderId\":null,\"full\":false,\"paths\":[]}"
+/// );
 /// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanRequest {
     /// The folder to scan, or `None` to scan every folder.
     pub folder_id: Option<Uuid>,
+    /// Whether to probe every file, ignoring the stored size and modification
+    /// time.
+    #[serde(default)]
+    pub full: bool,
+    /// The directories to restrict the scan to, relative to the folder root,
+    /// `/`-separated and without `..`. An empty list scans the whole folder.
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 impl ScanRequest {
     /// Builds a request that scans every folder.
     pub fn all() -> ScanRequest {
-        ScanRequest { folder_id: None }
+        ScanRequest::default()
     }
 
     /// Builds a request that scans one folder.
@@ -102,7 +119,28 @@ impl ScanRequest {
     pub fn folder(folder_id: Uuid) -> ScanRequest {
         ScanRequest {
             folder_id: Some(folder_id),
+            ..ScanRequest::default()
         }
+    }
+
+    /// Restricts the request to subtrees of its folder.
+    ///
+    /// # Parameters
+    ///
+    /// - `paths`: the directories relative to the folder root.
+    pub fn paths<I, S>(mut self, paths: I) -> ScanRequest
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.paths = paths.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Marks the request as a full scan.
+    pub fn full(mut self) -> ScanRequest {
+        self.full = true;
+        self
     }
 }
 
@@ -201,6 +239,8 @@ pub struct LibraryScanner {
     events: Arc<EventBus>,
     /// The settings service the scan reads its tunables from.
     settings: Settings,
+    /// One lock per folder, so two scans of a folder never overlap.
+    folder_locks: Arc<Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl LibraryScanner {
@@ -223,10 +263,18 @@ impl LibraryScanner {
             readers: db.readers().clone(),
             events,
             settings,
+            folder_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Scans every library folder.
+    /// Scans every folder, or the one a request names.
+    ///
+    /// Scans of one folder never overlap: a request that arrives while its
+    /// folder is being scanned waits for the running scan to finish.
+    ///
+    /// # Parameters
+    ///
+    /// - `request`: the folders, subtrees, and depth to scan.
     ///
     /// # Returns
     ///
@@ -236,14 +284,20 @@ impl LibraryScanner {
     ///
     /// Returns the first folder's error. A scan is idempotent, so the caller can
     /// retry it after fixing what made the folder unreadable.
-    pub async fn scan_all(&self) -> Result<Vec<ScanReport>, LibraryError> {
-        let mut read = self.readers.acquire().await?;
-        let folders = folders::list_library_folders(&mut read).await?;
-        let mut reports = Vec::with_capacity(folders.len());
-        for folder in folders {
-            reports.push(self.scan_folder(folder.id).await?);
+    pub async fn scan(&self, request: &ScanRequest) -> Result<Vec<ScanReport>, LibraryError> {
+        match request.folder_id {
+            Some(folder_id) => Ok(vec![self.scan_one(folder_id, request).await?]),
+            None => {
+                let mut read = self.readers.acquire().await?;
+                let folders = folders::list_library_folders(&mut read).await?;
+                drop(read);
+                let mut reports = Vec::with_capacity(folders.len());
+                for folder in folders {
+                    reports.push(self.scan_one(folder.id, request).await?);
+                }
+                Ok(reports)
+            }
         }
-        Ok(reports)
     }
 
     /// Scans one library folder.
@@ -265,6 +319,74 @@ impl LibraryScanner {
     /// that was indexed by an earlier scan and fails to probe now keeps its
     /// stored row.
     pub async fn scan_folder(&self, folder_id: Uuid) -> Result<ScanReport, LibraryError> {
+        self.scan_one(folder_id, &ScanRequest::folder(folder_id))
+            .await
+    }
+
+    /// Scans one folder under its lock.
+    ///
+    /// # Parameters
+    ///
+    /// - `folder_id`: the folder to scan.
+    /// - `request`: the scan to run; its `folder_id` is ignored.
+    ///
+    /// # Returns
+    ///
+    /// What the scan did.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::UnknownFolder`] when no folder has that id,
+    /// [`LibraryError::Scan`] when the folder cannot be walked or a file cannot
+    /// be read, and [`LibraryError::Setting`] when a scan tunable is not
+    /// registered.
+    async fn scan_one(
+        &self,
+        folder_id: Uuid,
+        request: &ScanRequest,
+    ) -> Result<ScanReport, LibraryError> {
+        let lock = self.folder_lock(folder_id);
+        let _guard = lock.lock().await;
+        self.scan_locked(folder_id, request).await
+    }
+
+    /// Returns the lock of one folder and builds it when it is missing.
+    ///
+    /// # Parameters
+    ///
+    /// - `folder_id`: the folder's id.
+    ///
+    /// # Returns
+    ///
+    /// The folder's lock. The lock outlives the call, so two callers that ask
+    /// for the same folder share one guard.
+    fn folder_lock(&self, folder_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .folder_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(locks.entry(folder_id).or_default())
+    }
+
+    /// Scans one folder, with its lock already held.
+    ///
+    /// # Parameters
+    ///
+    /// - `folder_id`: the folder to scan.
+    /// - `request`: the scan to run; its `folder_id` is ignored.
+    ///
+    /// # Returns
+    ///
+    /// What the scan did.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`LibraryScanner::scan_one`].
+    async fn scan_locked(
+        &self,
+        folder_id: Uuid,
+        request: &ScanRequest,
+    ) -> Result<ScanReport, LibraryError> {
         let settings = self.settings.current();
         let separators = settings.get(keys::LIBRARY_SCAN_ARTIST_SEPARATORS)?;
         let separators = separators.as_slice();
@@ -272,6 +394,7 @@ impl LibraryScanner {
         // The setting is validated to 1..=64; clamping keeps a store built by
         // hand safe as well.
         let concurrency = concurrency.clamp(1, 64) as usize;
+        let subtrees = subtrees(&request.paths);
         let mut read = self.readers.acquire().await?;
         let folder = folders::get_library_folder(&mut read, folder_id)
             .await?
@@ -281,7 +404,8 @@ impl LibraryScanner {
         drop(read);
 
         let walk_root = folder.path.clone();
-        let found = tokio::task::spawn_blocking(move || walk(&walk_root)).await??;
+        let walk_subtrees = subtrees.clone();
+        let found = tokio::task::spawn_blocking(move || walk(&walk_root, &walk_subtrees)).await??;
 
         let mut report = ScanReport {
             folder_id,
@@ -291,13 +415,14 @@ impl LibraryScanner {
         self.progress(&folder, "indexing", &report, None);
 
         // The files whose size or modification time changed, with the track
-        // their stored row belongs to.
+        // their stored row belongs to. A full scan probes every file.
         let mut seen: HashSet<String> = HashSet::with_capacity(found.len());
         let mut changed: Vec<(FoundFile, Option<EntityId>)> = Vec::new();
         for file in found {
             seen.insert(file.rel_path.clone());
             let state = stored.get(&file.rel_path).copied();
-            if let Some(state) = state
+            if !request.full
+                && let Some(state) = state
                 && state.size == file.size
                 && state.mtime_ms == file.mtime_ms
             {
@@ -344,7 +469,7 @@ impl LibraryScanner {
             .await?;
 
         self.progress(&folder, "pruning", &report, None);
-        self.prune(&folder, &seen, &mut report).await?;
+        self.prune(&folder, &seen, &subtrees, &mut report).await?;
 
         let mut tx = self.writer.begin().await?;
         folders::set_library_folder_last_scan(&mut tx, folder.id, now_millis()).await?;
@@ -430,10 +555,15 @@ impl LibraryScanner {
 
     /// Removes the rows of files that are gone from the folder.
     ///
+    /// Only the rows inside the scanned subtrees are considered, so a scan of
+    /// one directory never removes a row outside it.
+    ///
     /// # Parameters
     ///
     /// - `folder`: the folder being scanned.
     /// - `seen`: the relative paths the walk found.
+    /// - `subtrees`: the directories the walk was restricted to; empty means
+    ///   the whole folder.
     /// - `report`: the counters to update.
     ///
     /// # Errors
@@ -443,6 +573,7 @@ impl LibraryScanner {
         &self,
         folder: &LibraryFolder,
         seen: &HashSet<String>,
+        subtrees: &[String],
         report: &mut ScanReport,
     ) -> Result<(), LibraryError> {
         // The prune lists the folder's files before it removes any, so the
@@ -451,7 +582,7 @@ impl LibraryScanner {
         let existing = media_files::list_folder_media_files(&mut tx, folder.id).await?;
         let mut removed: Vec<EntityId> = Vec::new();
         for (rel_path, state) in &existing {
-            if seen.contains(rel_path) {
+            if seen.contains(rel_path) || !in_subtrees(rel_path, subtrees) {
                 continue;
             }
             media_files::delete_media_file(&mut tx, state.id).await?;
@@ -782,28 +913,60 @@ fn scanned_file(folder_id: Uuid, file: &PendingFile) -> ScannedMediaFile {
     }
 }
 
-/// Walks a folder and returns its audio files.
+/// Walks a folder, or the listed subtrees of it, and returns its audio files.
 ///
 /// The walk is depth-first and never follows a symbolic link, so it can never
 /// leave the folder it started in. Hidden files and directories (names starting
 /// with a dot) are skipped. Directories are visited in the order the
 /// filesystem lists them; the result is sorted by relative path so a scan is
-/// reproducible.
+/// reproducible, and a file reachable through two subtrees is returned once.
 ///
 /// # Parameters
 ///
 /// - `root`: the folder root.
+/// - `subtrees`: the directories to walk, relative to the root and already
+///   normalized; empty walks the whole folder. A subtree that does not exist or
+///   is not a directory contributes nothing.
 ///
 /// # Returns
 ///
-/// Every recognised audio file under the root.
+/// Every recognised audio file under the walked directories, with its path
+/// relative to the root.
 ///
 /// # Errors
 ///
 /// Returns [`LibraryError::Scan`] when a directory or an entry cannot be read.
-fn walk(root: &Path) -> Result<Vec<FoundFile>, LibraryError> {
+fn walk(root: &Path, subtrees: &[String]) -> Result<Vec<FoundFile>, LibraryError> {
     let mut found = Vec::new();
-    let mut directories = vec![root.to_path_buf()];
+    if subtrees.is_empty() {
+        walk_into(root, root, &mut found)?;
+    } else {
+        for subtree in subtrees {
+            let start = root.join(subtree);
+            if !start.is_dir() {
+                continue;
+            }
+            walk_into(&start, root, &mut found)?;
+        }
+    }
+    found.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
+    found.dedup_by(|left, right| left.rel_path == right.rel_path);
+    Ok(found)
+}
+
+/// Walks one directory tree and appends its audio files.
+///
+/// # Parameters
+///
+/// - `start`: the directory to walk.
+/// - `root`: the folder root every reported path is relative to.
+/// - `found`: the files found so far, appended to.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Scan`] when a directory or an entry cannot be read.
+fn walk_into(start: &Path, root: &Path, found: &mut Vec<FoundFile>) -> Result<(), LibraryError> {
+    let mut directories = vec![start.to_path_buf()];
     while let Some(directory) = directories.pop() {
         let entries = std::fs::read_dir(&directory).map_err(|source| LibraryError::Scan {
             path: directory.clone(),
@@ -851,8 +1014,82 @@ fn walk(root: &Path) -> Result<Vec<FoundFile>, LibraryError> {
             });
         }
     }
-    found.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
-    Ok(found)
+    Ok(())
+}
+
+/// Normalizes the subtree paths of a request.
+///
+/// A path is `/`-separated and relative to the folder root. Empty parts and `.`
+/// are dropped, a `..` removes the part before it, and a `..` that would leave
+/// the folder discards the whole path, so a request can never name a directory
+/// outside the folder. A path that normalizes to nothing is dropped.
+///
+/// # Parameters
+///
+/// - `paths`: the paths the request carried.
+///
+/// # Returns
+///
+/// The normalized subtrees, in the order they were given and without
+/// duplicates.
+fn subtrees(paths: &[String]) -> Vec<String> {
+    let mut subtrees: Vec<String> = Vec::with_capacity(paths.len());
+    for path in paths {
+        let Some(subtree) = normalize_subtree(path) else {
+            continue;
+        };
+        if !subtrees.contains(&subtree) {
+            subtrees.push(subtree);
+        }
+    }
+    subtrees
+}
+
+/// Normalizes one subtree path.
+///
+/// # Parameters
+///
+/// - `path`: the path from a scan request.
+///
+/// # Returns
+///
+/// The normalized path, or `None` when it names the folder root itself or would
+/// leave the folder.
+fn normalize_subtree(path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => continue,
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join("/"))
+}
+
+/// Reports whether a stored path is inside one of the scanned subtrees.
+///
+/// # Parameters
+///
+/// - `rel_path`: the stored path, relative to the folder root.
+/// - `subtrees`: the normalized subtrees; empty means the whole folder.
+///
+/// # Returns
+///
+/// `true` when the path is inside a subtree or the whole folder is scanned.
+fn in_subtrees(rel_path: &str, subtrees: &[String]) -> bool {
+    subtrees.is_empty()
+        || subtrees
+            .iter()
+            .any(|subtree| match rel_path.strip_prefix(subtree) {
+                Some(rest) => rest.starts_with('/'),
+                None => false,
+            })
 }
 
 /// Reports whether an extension names an audio file the scanner recognises.
@@ -943,10 +1180,10 @@ impl JobHandler for ScanJobHandler {
             .payload_json()
             .map_err(|error| JobError::new(error.to_string()))?
             .unwrap_or_default();
-        let result = match request.folder_id {
-            Some(folder_id) => self.scanner.scan_folder(folder_id).await.map(|_| ()),
-            None => self.scanner.scan_all().await.map(|_| ()),
-        };
-        result.map_err(|error| JobError::new(error.to_string()))
+        self.scanner
+            .scan(&request)
+            .await
+            .map(|_| ())
+            .map_err(|error| JobError::new(error.to_string()))
     }
 }

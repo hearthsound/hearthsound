@@ -678,6 +678,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A scan reads a folder's stored rows in one query and probes the changed files
   several at a time, with the new `library.scan.concurrency` setting (8 by
   default) bounding how many run at once.
+- A scan job carries the directories to scan and `hearthsound scan` gained
+  `--full`, which probes every file instead of trusting the stored size and
+  modification time; scans of one folder never overlap.
 
 ### Security
 

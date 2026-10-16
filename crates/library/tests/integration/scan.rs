@@ -679,6 +679,111 @@ async fn a_compilation_is_credited_to_various_artists() {
 }
 
 #[tokio::test]
+async fn a_full_scan_reprobes_unchanged_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    let request = ScanRequest::folder(folder.id);
+
+    let report = scanner.scan(&request).await.unwrap().remove(0);
+    assert_eq!(report.files_indexed, 1);
+
+    // An incremental rescan trusts the stored size and modification time.
+    let report = scanner.scan(&request).await.unwrap().remove(0);
+    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.files_indexed, 0);
+
+    // A full scan probes the file again and keeps one track and one file.
+    let report = scanner
+        .scan(&request.clone().full())
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(report.files_skipped, 0);
+    assert_eq!(report.files_indexed, 1);
+    assert_eq!(library.list_artists().await.unwrap().len(), 1);
+
+    let track = only_track(&library, "Energy 52").await;
+    assert_eq!(
+        library
+            .list_media_files_for_track(track)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_subtree_scan_only_touches_its_subtree() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir_all(music.join("chosen")).unwrap();
+    std::fs::create_dir_all(music.join("other")).unwrap();
+    write_song(&music.join("other"), "Untouched", "Someone Else", "Other").await;
+    write_song(&music.join("chosen"), "Original", "First Artist", "Chosen").await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    let report = scanner.scan_folder(folder.id).await.unwrap();
+    assert_eq!(report.files_indexed, 2);
+
+    let subtree = ScanRequest::folder(folder.id).paths(["chosen"]);
+    std::fs::remove_file(music.join("chosen/Original.flac")).unwrap();
+    let report = scanner.scan(&subtree).await.unwrap().remove(0);
+    assert_eq!(report.files_seen, 0, "only the chosen subtree is walked");
+    assert_eq!((report.files_removed, report.tracks_removed), (1, 1));
+
+    // A new album inside the subtree is indexed.
+    write_song(&music.join("chosen"), "New", "New Artist", "Chosen").await;
+    let report = scanner.scan(&subtree).await.unwrap().remove(0);
+    assert_eq!((report.files_seen, report.files_indexed), (1, 1));
+
+    // The sibling subtree was never walked, so its rows are untouched.
+    let names: Vec<String> = library
+        .list_artists()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|artist| artist.name)
+        .collect();
+    assert!(names.contains(&"New Artist".to_owned()));
+    assert!(names.contains(&"Someone Else".to_owned()));
+    let untouched = only_track(&library, "Someone Else").await;
+    assert_eq!(
+        library.list_media_files_for_track(untouched).await.unwrap()[0].rel_path,
+        "other/Untouched.flac"
+    );
+}
+
+#[tokio::test]
+async fn a_scan_never_leaves_the_folder_through_its_subtrees() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir(&music).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    write_song(&outside, "Hidden", "Nobody", "Nowhere").await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    let request = ScanRequest::folder(folder.id).paths(["../outside", "/etc", "./"]);
+    let report = scanner.scan(&request).await.unwrap().remove(0);
+    assert_eq!(report.files_seen, 0);
+    assert!(library.list_artists().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn the_scan_job_handler_runs_a_scan() {
     let dir = tempfile::tempdir().unwrap();
     let db = migrated(dir.path()).await;
