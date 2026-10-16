@@ -527,3 +527,241 @@ fn serves_protocol(protocols: &[String], allowed: &[&str]) -> bool {
                 .any(|other| protocol.eq_ignore_ascii_case(other))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Returns a client with one direct-play profile and one transcode profile.
+    fn client(direct: DirectPlayProfile, transcode: TranscodingProfile) -> ClientInfo {
+        ClientInfo {
+            direct_play_profiles: vec![direct],
+            transcoding_profiles: vec![transcode],
+            ..ClientInfo::default()
+        }
+    }
+
+    /// Returns the file most cases use: a 320 kbit/s stereo mp3.
+    fn source() -> SourceStream {
+        SourceStream {
+            container: "mp3".to_owned(),
+            codec: "mp3".to_owned(),
+            audio_channels: 2,
+            audio_bitrate: 320_000,
+            audio_samplerate: 44_100,
+            audio_bitdepth: 16,
+        }
+    }
+
+    /// A profile that lists nothing plays anything.
+    #[test]
+    fn an_empty_profile_plays_anything() {
+        let client = client(DirectPlayProfile::default(), TranscodingProfile::default());
+        let decision = decide(&client, &source());
+        assert!(decision.can_direct_play);
+        assert_eq!(decision.transcode, None);
+        assert!(decision.reasons.is_empty());
+    }
+
+    /// Two spellings of one container are one container.
+    #[test]
+    fn m4a_and_mp4_are_one_container() {
+        let client = client(
+            DirectPlayProfile {
+                containers: vec!["m4a".to_owned()],
+                ..DirectPlayProfile::default()
+            },
+            TranscodingProfile::default(),
+        );
+        let source = SourceStream {
+            container: "mp4".to_owned(),
+            ..source()
+        };
+        assert!(decide(&client, &source).can_direct_play);
+    }
+
+    /// Every direct-play profile that does not cover the file leaves a reason.
+    #[test]
+    fn each_uncovered_profile_leaves_a_reason() {
+        let client = ClientInfo {
+            direct_play_profiles: vec![
+                DirectPlayProfile {
+                    containers: vec!["flac".to_owned()],
+                    ..DirectPlayProfile::default()
+                },
+                DirectPlayProfile {
+                    protocols: vec!["hls".to_owned()],
+                    ..DirectPlayProfile::default()
+                },
+                DirectPlayProfile {
+                    max_audio_channels: 1,
+                    ..DirectPlayProfile::default()
+                },
+                DirectPlayProfile {
+                    audio_codecs: vec!["flac".to_owned()],
+                    ..DirectPlayProfile::default()
+                },
+            ],
+            transcoding_profiles: vec![TranscodingProfile {
+                container: "mp3".to_owned(),
+                audio_codec: "mp3".to_owned(),
+                ..TranscodingProfile::default()
+            }],
+            ..ClientInfo::default()
+        };
+        let decision = decide(&client, &source());
+        assert_eq!(
+            decision.reasons,
+            [
+                TranscodeReason::ContainerNotSupported,
+                TranscodeReason::ProtocolNotSupported,
+                TranscodeReason::AudioChannelsNotSupported,
+                TranscodeReason::AudioCodecNotSupported,
+            ]
+        );
+        let target = decision.transcode.expect("a transcode is offered");
+        assert_eq!(target.format, TranscodeFormat::Mp3);
+        assert_eq!(target.bitrate_kbps, 320, "the format's own default");
+        assert_eq!(target.max_channels, None, "the profile accepts any count");
+    }
+
+    /// A codec limitation the client requires and the server cannot check
+    /// refuses the file; one the client does not require does not.
+    #[test]
+    fn an_uncheckable_limitation_only_refuses_when_it_is_required() {
+        let limitation = CodecLimitation {
+            name: "audioProfile".to_owned(),
+            comparison: "Equals".to_owned(),
+            values: vec!["LC".to_owned()],
+            required: false,
+        };
+        let mut client = client(DirectPlayProfile::default(), TranscodingProfile::default());
+        client.codec_profiles = vec![CodecProfile {
+            kind: "Codec".to_owned(),
+            name: "mp3".to_owned(),
+            limitations: vec![limitation.clone()],
+        }];
+        assert!(
+            decide(&client, &source()).can_direct_play,
+            "an unrequired limitation the server cannot check is not a refusal"
+        );
+
+        client.codec_profiles[0].limitations[0].required = true;
+        let decision = decide(&client, &source());
+        assert!(!decision.can_direct_play);
+        assert_eq!(decision.reasons, [TranscodeReason::CodecLimitationNotMet]);
+    }
+
+    /// The comparisons a codec limitation may carry.
+    #[test]
+    fn limitations_are_compared_as_the_client_asked() {
+        let holds = |comparison: &str, value: &str| {
+            let mut client = client(DirectPlayProfile::default(), TranscodingProfile::default());
+            client.codec_profiles = vec![CodecProfile {
+                kind: "Codec".to_owned(),
+                name: "mp3".to_owned(),
+                limitations: vec![CodecLimitation {
+                    name: "audioChannels".to_owned(),
+                    comparison: comparison.to_owned(),
+                    values: vec![value.to_owned()],
+                    required: true,
+                }],
+            }];
+            decide(&client, &source()).can_direct_play
+        };
+
+        assert!(holds("Equals", "2"), "the file has two channels");
+        assert!(!holds("Equals", "1"));
+        assert!(holds("NotEquals", "1"));
+        assert!(!holds("NotEquals", "2"));
+        assert!(holds("LessThanEqual", "2"));
+        assert!(!holds("LessThanEqual", "1"));
+        assert!(holds("GreaterThanEqual", "2"));
+        assert!(!holds("GreaterThanEqual", "6"));
+        assert!(
+            !holds("SomethingElse", "2"),
+            "a required comparison the server cannot check refuses the file"
+        );
+    }
+
+    /// A transcode takes the lowest of the format, the client's caps, and the
+    /// codec limitation, and the source's channel count when the profile
+    /// accepts more than it has.
+    #[test]
+    fn a_transcode_takes_the_lowest_bitrate_and_the_channel_cap() {
+        let mut client = ClientInfo {
+            max_audio_bitrate: 128_000,
+            max_transcoding_audio_bitrate: 192_000,
+            direct_play_profiles: vec![DirectPlayProfile {
+                containers: vec!["flac".to_owned()],
+                ..DirectPlayProfile::default()
+            }],
+            transcoding_profiles: vec![TranscodingProfile {
+                container: "aac".to_owned(),
+                audio_codec: "aac".to_owned(),
+                max_audio_channels: 6,
+                ..TranscodingProfile::default()
+            }],
+            ..ClientInfo::default()
+        };
+        let target = decide(&client, &source())
+            .transcode
+            .expect("a transcode is offered");
+        assert_eq!(target.format, TranscodeFormat::Aac);
+        assert_eq!(target.bitrate_kbps, 128, "the client's own cap wins");
+        assert_eq!(
+            target.max_channels,
+            Some(2),
+            "the profile allows more channels than the file has"
+        );
+
+        // A profile this server cannot encode falls through to the next one.
+        client.transcoding_profiles = vec![
+            TranscodingProfile {
+                container: "flac".to_owned(),
+                audio_codec: "flac".to_owned(),
+                ..TranscodingProfile::default()
+            },
+            TranscodingProfile {
+                container: "mp3".to_owned(),
+                audio_codec: "mp3".to_owned(),
+                ..TranscodingProfile::default()
+            },
+        ];
+        let target = decide(&client, &source())
+            .transcode
+            .expect("a transcode is offered");
+        assert_eq!(target.format, TranscodeFormat::Mp3);
+    }
+
+    /// A codec limitation lowers the bitrate a transcode asks for.
+    #[test]
+    fn a_codec_limitation_lowers_the_transcode_bitrate() {
+        let mut client = client(
+            DirectPlayProfile {
+                containers: vec!["flac".to_owned()],
+                ..DirectPlayProfile::default()
+            },
+            TranscodingProfile {
+                container: "ogg".to_owned(),
+                audio_codec: "opus".to_owned(),
+                ..TranscodingProfile::default()
+            },
+        );
+        client.codec_profiles = vec![CodecProfile {
+            kind: "Codec".to_owned(),
+            name: "opus".to_owned(),
+            limitations: vec![CodecLimitation {
+                name: "audioBitrate".to_owned(),
+                comparison: "LessThanEqual".to_owned(),
+                values: vec!["64000".to_owned()],
+                required: false,
+            }],
+        }];
+        let target = decide(&client, &source())
+            .transcode
+            .expect("a transcode is offered");
+        assert_eq!(target.format, TranscodeFormat::Opus);
+        assert_eq!(target.bitrate_kbps, 64);
+    }
+}

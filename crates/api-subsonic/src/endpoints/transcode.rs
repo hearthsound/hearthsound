@@ -384,3 +384,59 @@ fn target_stream(target: &TranscodeTarget) -> SourceStream {
         audio_bitdepth: 0,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A target's parameters are what the parser reads back.
+    #[test]
+    fn the_parameters_round_trip() {
+        for target in [
+            TranscodeTarget {
+                format: TranscodeFormat::Mp3,
+                bitrate_kbps: 320,
+                max_channels: None,
+            },
+            TranscodeTarget {
+                format: TranscodeFormat::Opus,
+                bitrate_kbps: 96,
+                max_channels: Some(1),
+            },
+            TranscodeTarget {
+                format: TranscodeFormat::Aac,
+                bitrate_kbps: 256,
+                max_channels: Some(2),
+            },
+        ] {
+            let decision = Decision {
+                can_direct_play: false,
+                transcode: Some(target.clone()),
+                reasons: Vec::new(),
+            };
+            let text = params(&decision);
+            assert_eq!(
+                parse_params(&text),
+                Some(Some(target)),
+                "the parameters read back as the target they describe"
+            );
+        }
+    }
+
+    /// `direct` is a direct play, and anything else this server did not write
+    /// is not a target.
+    #[test]
+    fn only_the_parameters_this_server_writes_parse() {
+        assert_eq!(parse_params("direct"), Some(None));
+        for value in [
+            "flac-320",
+            "mp3",
+            "mp3-",
+            "mp3-320-2-extra",
+            "mp3-high",
+            "opus-96-lots",
+        ] {
+            assert_eq!(parse_params(value), None, "`{value}` is not a target");
+        }
+    }
+}
