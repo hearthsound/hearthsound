@@ -737,6 +737,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a client can ask for the image and be told when there is none.
 - `getAlbumList2` answers every album list type the protocol defines, and
   `getAlbumList` answers the same albums as folders a client browses into.
+- `getIndexes` answers the artist index with the instant it last changed and
+  skips an index a client already has, and `getMusicDirectory` browses an
+  artist's albums, an album's songs, and a catalog artist or album.
 
 ### Security
 

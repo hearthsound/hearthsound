@@ -16,6 +16,7 @@ use crate::catalog;
 use crate::response::{Encoded, Response, SubsonicError, codes};
 use crate::value::{Array, Object};
 use crate::{browse, projection, scope};
+use hearthsound_library::query::ArtistSummary;
 
 /// The number of albums `getAlbumList2` returns without a `size` parameter.
 const DEFAULT_ALBUM_SIZE: i64 = 10;
@@ -406,6 +407,406 @@ pub async fn get_album_list(call: Call) -> Encoded {
         })
         .collect();
     call.encode(Response::ok().member("albumList", Object::new().set("album", Array::new(albums))))
+}
+
+/// Answers `getIndexes`: the artist index with the instant it last changed.
+///
+/// A client that sends `ifModifiedSince` with an instant at or after
+/// `lastModified` is told that nothing changed and gets no index, which is what
+/// makes a repeated browse cheap.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call. `ifModifiedSince` is the instant the
+///   client already has, in unix milliseconds.
+///
+/// # Returns
+///
+/// A successful envelope carrying `indexes`, or a failed envelope.
+///
+/// # Errors
+///
+/// Answers Subsonic error 70 for an unknown `musicFolderId` and a generic error
+/// when a read fails.
+pub async fn get_indexes(call: Call) -> Encoded {
+    let scope = match scope::resolve(&call).await {
+        Ok(scope) => scope,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let database = call.state().database();
+    let last_modified = match browse::last_modified(database).await {
+        Ok(instant) => instant,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure("getIndexes", &error)));
+        }
+    };
+    if let Some(since) = match number(&call, "ifModifiedSince", 0) {
+        Ok(since) => Some(since),
+        Err(error) => return call.encode(Response::failed(error)),
+    } && since >= last_modified
+    {
+        let unchanged = Object::new()
+            .set("lastModified", last_modified)
+            .set("ignoredArticles", projection::IGNORED_ARTICLES);
+        return call.encode(Response::ok().member("indexes", unchanged));
+    }
+
+    let summaries = match browse::artists(database, scope).await {
+        Ok(summaries) => summaries,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure("getIndexes", &error)));
+        }
+    };
+    let annotations = match annotations_for_artists(&call, &summaries).await {
+        Ok(annotations) => annotations,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let indexes = projection::indexes(&summaries, &annotations, last_modified);
+    call.encode(Response::ok().member("indexes", indexes))
+}
+
+/// Answers `getMusicDirectory`: one directory with its children.
+///
+/// An artist lists its albums, an album lists its songs, and a catalog artist
+/// or album lists the same children `getArtist` and `getAlbum` would answer
+/// with, because the catalog is browsed through the same directory shape.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, whose `id` is the directory to read.
+///
+/// # Returns
+///
+/// A successful envelope carrying `directory`, or a failed envelope.
+///
+/// # Errors
+///
+/// Answers Subsonic error 10 when `id` is missing, error 70 when it names
+/// neither an artist nor an album, is not in scope, or names a catalog entity
+/// the catalog does not have, and a generic error when a read fails.
+pub async fn get_music_directory(call: Call) -> Encoded {
+    let scope = match scope::resolve(&call).await {
+        Ok(scope) => scope,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let Some(value) = call.get("id") else {
+        return call.encode(Response::failed(SubsonicError::missing_parameter("id")));
+    };
+    // A directory is an artist or an album, and a client may name either by
+    // its stored id or by a catalog id; anything else is answered as unknown.
+    match ClientId::parse(value) {
+        Ok(ClientId::Entity(id)) => match id.kind() {
+            IdPrefix::Artist => artist_directory(&call, scope, ClientId::Entity(id)).await,
+            IdPrefix::Album => album_directory(&call, scope, ClientId::Entity(id)).await,
+            _ => call.encode(Response::failed(SubsonicError::not_found())),
+        },
+        Ok(ClientId::Catalog(id)) => match id.kind() {
+            EntityKind::Artist | EntityKind::Album => catalog_directory(&call, id).await,
+            _ => call.encode(Response::failed(SubsonicError::not_found())),
+        },
+        Err(error) => {
+            tracing::debug!(%error, "a getMusicDirectory request named an unknown id");
+            call.encode(Response::failed(SubsonicError::not_found()))
+        }
+    }
+}
+
+/// Answers `getMusicDirectory` for a stored artist.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `scope`: the scope to resolve the artist in.
+/// - `id`: the artist's client id.
+///
+/// # Errors
+///
+/// Answers Subsonic error 70 when the artist is not in scope, and a generic
+/// error when a read fails.
+async fn artist_directory(call: &Call, scope: Scope, id: ClientId) -> Encoded {
+    let Some(artist_id) = entity_id(&id) else {
+        return call.encode(Response::failed(SubsonicError::not_found()));
+    };
+    let database = call.state().database();
+    let detail = match browse::artist(database, scope, artist_id).await {
+        Ok(Some(detail)) => detail,
+        Ok(None) => return call.encode(Response::failed(SubsonicError::not_found())),
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure(
+                "getMusicDirectory",
+                &error,
+            )));
+        }
+    };
+    let album_ids: Vec<Uuid> = detail.albums.iter().map(|album| album.id.uuid()).collect();
+    let annotations = match browse::annotations(
+        call.state(),
+        call.principal().user_id.uuid(),
+        EntityKind::Album,
+        &album_ids,
+    )
+    .await
+    {
+        Ok(annotations) => annotations,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure(
+                "getMusicDirectory",
+                &error,
+            )));
+        }
+    };
+    let artist_annotation = match browse::annotation(
+        call.state(),
+        call.principal().user_id.uuid(),
+        EntityKind::Artist,
+        artist_id.uuid(),
+    )
+    .await
+    {
+        Ok(annotation) => annotation,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure(
+                "getMusicDirectory",
+                &error,
+            )));
+        }
+    };
+
+    let mut children = Vec::new();
+    for album in &detail.albums {
+        match browse::album(database, scope, album.id).await {
+            Ok(Some(loaded)) => children.push(projection::album_dir(
+                &loaded.detail.album,
+                &loaded.detail.artists,
+                &loaded.detail.tracks,
+                annotations
+                    .get(&loaded.detail.album.id.uuid())
+                    .unwrap_or(&Annotation::default()),
+            )),
+            Ok(None) => {}
+            Err(error) => {
+                return call.encode(Response::failed(browse::failure(
+                    "getMusicDirectory",
+                    &error,
+                )));
+            }
+        }
+    }
+    let directory = projection::directory(
+        &id.to_string(),
+        "",
+        &detail.artist.name,
+        Some(&artist_annotation),
+        children,
+    );
+    call.encode(Response::ok().member("directory", directory))
+}
+
+/// Answers `getMusicDirectory` for a stored album.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `scope`: the scope to resolve the album in.
+/// - `id`: the album's client id.
+///
+/// # Errors
+///
+/// Answers Subsonic error 70 when the album is not in scope, and a generic error
+/// when a read fails.
+async fn album_directory(call: &Call, scope: Scope, id: ClientId) -> Encoded {
+    let Some(album_id) = entity_id(&id) else {
+        return call.encode(Response::failed(SubsonicError::not_found()));
+    };
+    let loaded = match browse::album(call.state().database(), scope, album_id).await {
+        Ok(Some(loaded)) => loaded,
+        Ok(None) => return call.encode(Response::failed(SubsonicError::not_found())),
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure(
+                "getMusicDirectory",
+                &error,
+            )));
+        }
+    };
+    let annotation = match browse::annotation(
+        call.state(),
+        call.principal().user_id.uuid(),
+        EntityKind::Album,
+        album_id.uuid(),
+    )
+    .await
+    {
+        Ok(annotation) => annotation,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure(
+                "getMusicDirectory",
+                &error,
+            )));
+        }
+    };
+    let track_ids: Vec<Uuid> = loaded
+        .detail
+        .tracks
+        .iter()
+        .map(|view| view.track.id.uuid())
+        .collect();
+    let annotations = match browse::annotations(
+        call.state(),
+        call.principal().user_id.uuid(),
+        EntityKind::Track,
+        &track_ids,
+    )
+    .await
+    {
+        Ok(annotations) => annotations,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure(
+                "getMusicDirectory",
+                &error,
+            )));
+        }
+    };
+
+    let songs: Vec<Object> = loaded
+        .detail
+        .tracks
+        .iter()
+        .zip(&loaded.files)
+        .map(|(view, file)| {
+            projection::child(
+                view,
+                file.as_ref(),
+                &loaded.detail.artists,
+                annotations
+                    .get(&view.track.id.uuid())
+                    .unwrap_or(&Annotation::default()),
+            )
+        })
+        .collect();
+    let parent = loaded
+        .detail
+        .artists
+        .first()
+        .map(|artist| artist.id.to_string())
+        .unwrap_or_default();
+    let directory = projection::directory(
+        &id.to_string(),
+        &parent,
+        &loaded.detail.album.title,
+        Some(&annotation),
+        songs,
+    );
+    call.encode(Response::ok().member("directory", directory))
+}
+
+/// Answers `getMusicDirectory` for an unmaterialized catalog entity.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `id`: the catalog id of an artist or an album.
+///
+/// # Errors
+///
+/// Answers Subsonic error 70 for a catalog id that names something else or an
+/// entity the catalog does not have, and a generic error when the issuing
+/// instance cannot answer.
+async fn catalog_directory(call: &Call, id: CatalogId) -> Encoded {
+    let snapshot = call.state().settings_snapshot();
+    let suffix = match catalog::title_suffix(&snapshot) {
+        Ok(suffix) => suffix,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    match id.kind() {
+        EntityKind::Artist => {
+            let catalog = call.state().catalog();
+            let artist = match catalog.artist(&id).await {
+                Ok(artist) => artist,
+                Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
+            };
+            let albums = match catalog.artist_albums(&id, MAX_CATALOG_ALBUMS, 0).await {
+                Ok(albums) => albums,
+                Err(error) => {
+                    tracing::debug!(error = %error, "could not list a catalog artist's albums");
+                    return call.encode(Response::failed(catalog::failure(&error)));
+                }
+            };
+            // The catalog already named each album with the id a client uses,
+            // so the children need no new ids built for them.
+            let children: Vec<Object> = albums
+                .iter()
+                .map(|album| projection::catalog_album_dir(&album.id, album, &suffix))
+                .collect();
+            let directory =
+                projection::directory(&id.to_string(), "", &artist.artist.name, None, children);
+            call.encode(Response::ok().member("directory", directory))
+        }
+        EntityKind::Album => {
+            let album = match call.state().catalog().album(&id).await {
+                Ok(album) => album,
+                Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
+            };
+            let songs: Vec<Object> = album
+                .album
+                .tracks
+                .iter()
+                .filter_map(|track| {
+                    let track_id =
+                        CatalogId::new(id.slug().clone(), EntityKind::Track, track.id.clone())
+                            .ok()?;
+                    Some(projection::catalog_child(&track_id, track, &suffix))
+                })
+                .collect();
+            let name = projection::catalog_album_name(&album, &suffix);
+            let directory = projection::directory(&id.to_string(), "", &name, None, songs);
+            call.encode(Response::ok().member("directory", directory))
+        }
+        _ => call.encode(Response::failed(SubsonicError::not_found())),
+    }
+}
+
+/// The entity id of a catalog id, which a directory read cannot answer.
+///
+/// # Parameters
+///
+/// - `id`: the client id.
+///
+/// # Returns
+///
+/// The entity id, or `None` when the id names a catalog entity.
+fn entity_id(id: &ClientId) -> Option<EntityId> {
+    match id {
+        ClientId::Entity(id) => Some(*id),
+        ClientId::Catalog(_) => None,
+    }
+}
+
+/// Loads the user's annotations for a page of artists.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `summaries`: the artists of the page.
+///
+/// # Errors
+///
+/// Answers a generic Subsonic error when the read fails.
+async fn annotations_for_artists(
+    call: &Call,
+    summaries: &[ArtistSummary],
+) -> Result<std::collections::HashMap<Uuid, Annotation>, SubsonicError> {
+    let ids: Vec<Uuid> = summaries
+        .iter()
+        .map(|summary| summary.artist.id.uuid())
+        .collect();
+    browse::annotations(
+        call.state(),
+        call.principal().user_id.uuid(),
+        EntityKind::Artist,
+        &ids,
+    )
+    .await
+    .map_err(|error| browse::failure("getIndexes", &error))
 }
 
 /// Loads the albums one album-list request asks for.

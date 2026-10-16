@@ -76,6 +76,8 @@
 //! | `getOpenSubsonicExtensions` | public, no credentials; advertises `apiKeyAuthentication` 1 and `formPost` 1 |
 //! | `tokenInfo` | the user an API key belongs to |
 //! | `getMusicFolders` | the personal library, and the server unless `privacy.server_browse` is disabled |
+//! | `getIndexes` | the artist index with the instant it last changed |
+//! | `getMusicDirectory` | an artist's albums or an album's songs as a browsable directory |
 //! | `getArtists` | the artist index over the accessible scope |
 //! | `getArtist` | one artist with its albums |
 //! | `getAlbum` | one album with its songs |
@@ -151,8 +153,8 @@ mod value;
 pub use auth::{BinaryCall, Call, InvalidProxy, TrustedProxies, forbidden};
 pub use endpoints::{
     get_album, get_album_list, get_album_list_2, get_artist, get_artists, get_cover_art,
-    get_license, get_music_folders, get_open_subsonic_extensions, get_song, ping, scrobble,
-    search3, stream, token_info,
+    get_indexes, get_license, get_music_directory, get_music_folders, get_open_subsonic_extensions,
+    get_song, ping, scrobble, search3, stream, token_info,
 };
 pub use params::{MAX_FORM_BODY_BYTES, Params, ParamsRejection};
 pub use response::{

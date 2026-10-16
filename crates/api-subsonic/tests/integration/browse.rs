@@ -1034,3 +1034,180 @@ async fn a_listed_entity_reports_the_users_annotation() {
         artists.body
     );
 }
+
+/// `getIndexes` answers the index, and a client that is up to date gets the
+/// instant alone.
+#[tokio::test]
+async fn get_indexes_answers_the_index_and_skips_an_unchanged_one() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+
+    let json = get(
+        &app,
+        &format!(
+            "/rest/getIndexes?musicFolderId=2&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&json);
+    assert!(json.body.contains("\"lastModified\":"), "{}", json.body);
+    assert!(json.body.contains("\"ignoredArticles\""), "{}", json.body);
+    assert!(
+        json.body.contains(&seeded.cardinals.to_string()),
+        "{}",
+        json.body
+    );
+    // The instant the index last changed is the moment the test inserted its
+    // rows, so the snapshots hold a fixed marker for it.
+    let mut filters = SNAPSHOT_FILTERS.to_vec();
+    filters.push((r#""lastModified":\d+"#, r#""lastModified":0"#));
+    filters.push((r#"lastModified="\d+""#, r#"lastModified="0""#));
+    insta::with_settings!({filters => filters.clone()}, {
+        insta::assert_snapshot!("indexes-json", seeded.stabilize(&json.body));
+    });
+
+    let xml = get(
+        &app,
+        &format!(
+            "/rest/getIndexes.view?musicFolderId=2&apiKey={}",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&xml);
+    insta::with_settings!({filters => filters}, {
+        insta::assert_snapshot!("indexes-xml", seeded.stabilize(&xml.body));
+    });
+
+    // The instant the answer carried is enough to be told nothing changed.
+    let last_modified = json
+        .body
+        .split("\"lastModified\":")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .expect("the answer carries the instant");
+    let unchanged = get(
+        &app,
+        &format!(
+            "/rest/getIndexes?musicFolderId=2&ifModifiedSince={last_modified}&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&unchanged);
+    assert!(
+        unchanged.body.contains("\"ignoredArticles\""),
+        "{}",
+        unchanged.body
+    );
+    assert!(
+        !unchanged.body.contains("\"index\""),
+        "an unchanged index is not listed again: {}",
+        unchanged.body
+    );
+    assert!(
+        !unchanged.body.contains(&seeded.cardinals.to_string()),
+        "{}",
+        unchanged.body
+    );
+}
+
+/// `getMusicDirectory` answers an artist's albums and an album's songs.
+#[tokio::test]
+async fn get_music_directory_browses_an_artist_and_an_album() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+
+    let artist = get(
+        &app,
+        &format!(
+            "/rest/getMusicDirectory?id={}&musicFolderId=1&apiKey={}&f=json",
+            seeded.cardinals, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&artist);
+    assert!(artist.body.contains("\"directory\""), "{}", artist.body);
+    assert!(
+        artist.body.contains("\"name\":\"The Cardinals\""),
+        "{}",
+        artist.body
+    );
+    assert!(
+        artist.body.contains(&seeded.alpha.to_string()),
+        "{}",
+        artist.body
+    );
+    assert!(
+        artist.body.contains("\"isDir\":true"),
+        "the artist's children are folders: {}",
+        artist.body
+    );
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("directory-artist-json", seeded.stabilize(&artist.body));
+    });
+
+    let album = get(
+        &app,
+        &format!(
+            "/rest/getMusicDirectory?id={}&musicFolderId=1&apiKey={}&f=json",
+            seeded.alpha, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&album);
+    assert!(
+        album
+            .body
+            .contains(&format!("\"parent\":\"{}\"", seeded.cardinals)),
+        "the album directory names its artist: {}",
+        album.body
+    );
+    assert!(
+        album
+            .body
+            .contains(&format!("\"id\":\"{}\"", seeded.alpha_tracks[0])),
+        "its songs are its children: {}",
+        album.body
+    );
+
+    let xml = get(
+        &app,
+        &format!(
+            "/rest/getMusicDirectory.view?id={}&musicFolderId=1&apiKey={}",
+            seeded.alpha, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&xml);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("directory-album-xml", seeded.stabilize(&xml.body));
+    });
+
+    // A track id names no directory, and a malformed one is refused.
+    let refused = get(
+        &app,
+        &format!(
+            "/rest/getMusicDirectory?id={}&apiKey={}&f=json",
+            seeded.alpha_tracks[0], fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&refused, 70);
+    let refused = get(
+        &app,
+        &format!(
+            "/rest/getMusicDirectory?id=nope&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&refused, 70);
+    let missing = get(
+        &app,
+        &format!("/rest/getMusicDirectory?apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_error(&missing, 10);
+}

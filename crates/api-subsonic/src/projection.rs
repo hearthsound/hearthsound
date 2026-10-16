@@ -74,6 +74,29 @@ pub(crate) fn artists_id3(
     summaries: &[ArtistSummary],
     annotations: &HashMap<Uuid, Annotation>,
 ) -> Object {
+    Object::new()
+        .set("ignoredArticles", IGNORED_ARTICLES)
+        .set("index", Array::new(artist_index(summaries, annotations)))
+}
+
+/// Builds the index groups of an artist listing.
+///
+/// The artists are ordered by their article-stripped sort name and grouped by
+/// the letter that name starts with, in one pass, so the letters come out in
+/// order and each artist is projected once.
+///
+/// # Parameters
+///
+/// - `summaries`: the artists, each with its album count.
+/// - `annotations`: the user's annotations for them, keyed by id.
+///
+/// # Returns
+///
+/// One `index` member per letter, each with its artists.
+pub(crate) fn artist_index(
+    summaries: &[ArtistSummary],
+    annotations: &HashMap<Uuid, Annotation>,
+) -> Vec<Object> {
     let mut ordered: Vec<(&str, &ArtistSummary)> = summaries
         .iter()
         .map(|summary| (stripped_sort_name(&summary.artist.sort_name), summary))
@@ -107,18 +130,69 @@ pub(crate) fn artists_id3(
         groups.push((name, vec![artist]));
     }
 
-    let index: Vec<Object> = groups
+    groups
         .into_iter()
         .map(|(name, artists)| {
             Object::new()
                 .set("name", name)
                 .set("artist", Array::new(artists))
         })
-        .collect();
+        .collect()
+}
 
+/// Builds the `indexes` member of `getIndexes`.
+///
+/// # Parameters
+///
+/// - `summaries`: the artists, each with its album count.
+/// - `annotations`: the user's annotations for them, keyed by id.
+/// - `last_modified`: when the browse index last changed, in unix milliseconds.
+///
+/// # Returns
+///
+/// The member, with `lastModified` first, so a client that remembers the
+/// instant can skip the listing.
+pub(crate) fn indexes(
+    summaries: &[ArtistSummary],
+    annotations: &HashMap<Uuid, Annotation>,
+    last_modified: i64,
+) -> Object {
     Object::new()
+        .set("lastModified", last_modified)
         .set("ignoredArticles", IGNORED_ARTICLES)
-        .set("index", Array::new(index))
+        .set("index", Array::new(artist_index(summaries, annotations)))
+}
+
+/// Builds the `directory` member of `getMusicDirectory` for an artist or album.
+///
+/// # Parameters
+///
+/// - `id`: the directory's own client id.
+/// - `parent`: the id of the entity the directory is listed under.
+/// - `name`: the directory's name.
+/// - `annotation`: the user's stars, rating, and play counts for the entity,
+///   when the directory is an artist or an album.
+/// - `children`: the projected children.
+///
+/// # Returns
+///
+/// The directory, with its children last.
+pub(crate) fn directory(
+    id: &str,
+    parent: &str,
+    name: &str,
+    annotation: Option<&Annotation>,
+    children: Vec<Object>,
+) -> Object {
+    let mut object = Object::new()
+        .set("id", id.to_owned())
+        .set("parent", parent.to_owned())
+        .set("name", name.to_owned());
+    if let Some(annotation) = annotation {
+        object = set_annotation(object, annotation);
+        object = object.set("playCount", annotation.play_count);
+    }
+    object.set("child", Array::new(children))
 }
 
 /// Builds one `ArtistID3` member.
@@ -906,6 +980,70 @@ pub(crate) fn catalog_album_ref(result: &CatalogAlbumRefResult, title_suffix: &s
         .set("moods", Array::named("mood", std::iter::empty::<String>()))
         .set("sortName", "")
         .set("explicitStatus", "")
+}
+
+/// Builds one directory `Child` member for a catalog album.
+///
+/// A catalog album is a search result: it has a title, its credits, and its
+/// images, and no tracklist until a client asks for it by id.
+///
+/// # Parameters
+///
+/// - `id`: the album's catalog id.
+/// - `result`: the album reference the provider returned.
+/// - `title_suffix`: the suffix appended to the title.
+///
+/// # Returns
+///
+/// The directory child.
+pub(crate) fn catalog_album_dir(
+    id: &CatalogId,
+    result: &CatalogAlbumRefResult,
+    title_suffix: &str,
+) -> Object {
+    let slug = id.slug();
+    let album = &result.album;
+    let title = format!("{}{title_suffix}", album.title);
+    let artist = display_credits(&album.artists);
+    Object::new()
+        .set("id", id.to_string())
+        .set("parent", "")
+        .set("isDir", true)
+        .set("title", title.clone())
+        .set("name", title.clone())
+        .set("album", title)
+        .set("artist", artist)
+        .set("year", album.year.map(i64::from).unwrap_or(0))
+        .set("genre", "")
+        .set("coverArt", cover_art(id, !album.images.is_empty()))
+        .set("duration", 0)
+        .set("playCount", 0)
+        .set("played", "")
+        .set("created", "")
+        .set(
+            "artistId",
+            album
+                .artists
+                .first()
+                .and_then(|credit| artist_id(slug, credit))
+                .map(|artist| artist.to_string())
+                .unwrap_or_default(),
+        )
+        .set("songCount", 0)
+}
+
+/// Returns the name a catalog album is listed under.
+///
+/// # Parameters
+///
+/// - `result`: the album the provider returned.
+/// - `title_suffix`: the suffix appended to the title.
+///
+/// # Returns
+///
+/// The title with the suffix.
+pub(crate) fn catalog_album_name(result: &CatalogAlbumResult, title_suffix: &str) -> String {
+    format!("{}{title_suffix}", result.album.title)
 }
 
 /// Builds one catalog `AlbumID3` member from a full album lookup.

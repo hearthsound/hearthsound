@@ -136,6 +136,24 @@ pub(crate) fn failure(operation: &'static str, error: &dyn std::fmt::Display) ->
     SubsonicError::generic()
 }
 
+/// Returns when the browse index last changed.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+///
+/// # Returns
+///
+/// The instant, in unix milliseconds.
+///
+/// # Errors
+///
+/// Returns a library failure when the read fails.
+pub(crate) async fn last_modified(database: &Database) -> Result<i64, LibraryError> {
+    let mut conn = database.readers().acquire().await?;
+    query::library_last_modified(&mut conn).await
+}
+
 /// Loads one user's annotations for a page of entities of one kind.
 ///
 /// A response that lists entities carries the user's own stars, ratings, and
