@@ -723,6 +723,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Album listings are ordered by an artist-aware name, the user's rating, play
   count or last play, their likes, a release-year range, or a genre, and one
   query serves every order instead of one query text per order.
+- The stored genres of a scope can be listed with their song and album counts,
+  the songs of one genre can be paged, and a random sample of songs can be
+  narrowed by genre and release year.
 
 ### Security
 

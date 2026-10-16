@@ -730,6 +730,283 @@ pub async fn list_albums(
     rows.into_iter().map(|row| row.into_album()).collect()
 }
 
+/// A genre with how many songs and albums of it are in scope.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_library::query::GenreCount;
+///
+/// let genre = GenreCount {
+///     name: "ambient".to_owned(),
+///     song_count: 3,
+///     album_count: 1,
+/// };
+/// assert_eq!(genre.name, "ambient");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenreCount {
+    /// The genre's name, as it is stored.
+    pub name: String,
+    /// How many songs in scope carry it.
+    pub song_count: i64,
+    /// How many albums in scope hold one of those songs.
+    pub album_count: i64,
+}
+
+/// Appends the scope's track clause to a statement.
+///
+/// The clause is a `WITH scope_tracks(track_id) AS (...)` common table
+/// expression naming every track the scope holds, which the statement's own
+/// `SELECT` joins against. It comes first in the statement, so a caller appends
+/// its own text after it, and every bind the caller adds follows the ones this
+/// pushes.
+///
+/// # Parameters
+///
+/// - `builder`: the builder to append to.
+/// - `scope`: the scope to name.
+fn push_scope_tracks(builder: &mut QueryBuilder<Sqlite>, scope: Scope) {
+    builder.push("WITH scope_tracks(track_id) AS (");
+    match scope {
+        Scope::Personal { user_id } => {
+            let user = user_id.as_bytes().to_vec();
+            builder
+                .push("SELECT entity_id FROM user_library WHERE user_id = ")
+                .push_bind(user.clone())
+                .push(" AND entity_kind = 'track' UNION SELECT entity_id FROM user_feedback WHERE user_id = ")
+                .push_bind(user.clone())
+                .push(" AND entity_kind = 'track' AND value = 'like' UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id WHERE p.owner_user_id = ")
+                .push_bind(user.clone())
+                .push(" AND p.is_temporary = 0 UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id WHERE mf.storage = 'folder' AND lf.owner_user_id = ")
+                .push_bind(user);
+        }
+        Scope::Server(view) => {
+            let (available, cached) = view.availability_pair();
+            builder
+                .push("SELECT id FROM tracks WHERE availability IN (")
+                .push_bind(available)
+                .push(", ")
+                .push_bind(cached);
+        }
+    }
+    builder.push(") ");
+}
+
+/// Lists the genres of the tracks in scope.
+///
+/// The names are the stored ones: a scan folds a tag's spelling into its
+/// lowercase form, so `Ambient` and `ambient` are one genre called `ambient`.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `scope`: the scope to count in.
+///
+/// # Returns
+///
+/// The genres, by name. A genre no track in scope carries is left out, so a
+/// genre only the server's cached tracks have does not appear in a personal
+/// listing.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when the query fails.
+pub async fn list_genres(
+    conn: &mut SqliteConnection,
+    scope: Scope,
+) -> Result<Vec<GenreCount>, LibraryError> {
+    if let Scope::Server(ServerBrowse::Disabled) = scope {
+        return Ok(Vec::new());
+    }
+    let mut builder = QueryBuilder::<Sqlite>::new("");
+    push_scope_tracks(&mut builder, scope);
+    builder.push(
+        "SELECT g.name AS name, count(DISTINCT t.id) AS song_count, \
+                count(DISTINCT t.album_id) AS album_count \
+         FROM genres g \
+         JOIN track_genres tg ON tg.genre_id = g.id \
+         JOIN tracks t ON t.id = tg.track_id \
+         JOIN scope_tracks st ON st.track_id = t.id \
+         GROUP BY g.id \
+         ORDER BY g.name",
+    );
+    let rows = builder
+        .build_query_as::<GenreCountRow>()
+        .fetch_all(&mut *conn)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| GenreCount {
+            name: row.name,
+            song_count: row.song_count,
+            album_count: row.album_count,
+        })
+        .collect())
+}
+
+/// One stored genre count.
+#[derive(sqlx::FromRow)]
+struct GenreCountRow {
+    /// The genre's name.
+    name: String,
+    /// How many songs carry it.
+    song_count: i64,
+    /// How many albums hold one of them.
+    album_count: i64,
+}
+
+/// Lists a random sample of the songs in scope.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `scope`: the scope to sample from.
+/// - `size`: how many songs to return.
+/// - `genre`: only songs of this genre, when given. The name is compared to the
+///   stored, folded form.
+/// - `from_year`: the earliest release year of the song's album, when given.
+/// - `to_year`: the latest release year, when given.
+///
+/// # Returns
+///
+/// The songs, in no order. A song without an album is left out when either year
+/// is given, because its release year is unknown.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn random_tracks(
+    conn: &mut SqliteConnection,
+    scope: Scope,
+    size: i64,
+    genre: Option<&str>,
+    from_year: Option<i64>,
+    to_year: Option<i64>,
+) -> Result<Vec<TrackView>, LibraryError> {
+    if let Scope::Server(ServerBrowse::Disabled) = scope {
+        return Ok(Vec::new());
+    }
+    let mut builder = QueryBuilder::<Sqlite>::new("");
+    push_scope_tracks(&mut builder, scope);
+    builder.push("SELECT t.id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id ");
+    if genre.is_some() || from_year.is_some() || to_year.is_some() {
+        builder.push("JOIN albums al ON al.id = t.album_id ");
+    }
+    if let Some(genre) = genre {
+        builder
+            .push(
+                "JOIN track_genres tg ON tg.track_id = t.id \
+                 JOIN genres g ON g.id = tg.genre_id AND g.name = ",
+            )
+            .push_bind(fold_genre(genre));
+    }
+    builder.push("WHERE 1 = 1");
+    if let Some(from) = from_year {
+        builder.push(" AND al.year >= ").push_bind(from);
+    }
+    if let Some(to) = to_year {
+        builder.push(" AND al.year <= ").push_bind(to);
+    }
+    builder
+        .push(" ORDER BY RANDOM() LIMIT ")
+        .push_bind(size.max(0));
+    let rows = builder
+        .build_query_scalar::<Vec<u8>>()
+        .fetch_all(&mut *conn)
+        .await?;
+    track_views(conn, rows).await
+}
+
+/// Lists the songs in scope that carry a genre.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `scope`: the scope to filter by.
+/// - `genre`: the genre to match, compared to the stored, folded form.
+/// - `count`: the maximum number of songs.
+/// - `offset`: how many songs to skip.
+///
+/// # Returns
+///
+/// The songs, by title and then id, which is the order a track listing uses.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn tracks_by_genre(
+    conn: &mut SqliteConnection,
+    scope: Scope,
+    genre: &str,
+    count: i64,
+    offset: i64,
+) -> Result<Vec<TrackView>, LibraryError> {
+    if let Scope::Server(ServerBrowse::Disabled) = scope {
+        return Ok(Vec::new());
+    }
+    let mut builder = QueryBuilder::<Sqlite>::new("");
+    push_scope_tracks(&mut builder, scope);
+    builder
+        .push(
+            "SELECT t.id FROM tracks t \
+             JOIN scope_tracks st ON st.track_id = t.id \
+             JOIN track_genres tg ON tg.track_id = t.id \
+             JOIN genres g ON g.id = tg.genre_id AND g.name = ",
+        )
+        .push_bind(fold_genre(genre))
+        .push(" ORDER BY t.sort_title, t.id LIMIT ")
+        .push_bind(count)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    let rows = builder
+        .build_query_scalar::<Vec<u8>>()
+        .fetch_all(&mut *conn)
+        .await?;
+    track_views(conn, rows).await
+}
+
+/// Folds a genre name the way a scan stores it.
+///
+/// # Parameters
+///
+/// - `genre`: the name a client asked for.
+///
+/// # Returns
+///
+/// The trimmed, lowercase name.
+fn fold_genre(genre: &str) -> String {
+    genre.trim().to_lowercase()
+}
+
+/// Loads the views of the tracks the given rows name.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `rows`: the stored track ids.
+///
+/// # Returns
+///
+/// The views, in the order of the rows.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a row cannot be read or an id does not decode.
+async fn track_views(
+    conn: &mut SqliteConnection,
+    rows: Vec<Vec<u8>>,
+) -> Result<Vec<TrackView>, LibraryError> {
+    let mut views = Vec::with_capacity(rows.len());
+    for bytes in rows {
+        let id = decode_entity(IdPrefix::Track, &bytes).map_err(LibraryError::from)?;
+        if let Some(track) = tracks::get_track(conn, id).await? {
+            views.push(track_view(conn, track).await?);
+        }
+    }
+    Ok(views)
+}
+
 /// Lists the albums in scope that an artist is credited on.
 ///
 /// # Parameters
@@ -880,14 +1157,7 @@ pub async fn list_tracks(
             .await?
         }
     };
-    let mut views = Vec::with_capacity(rows.len());
-    for bytes in rows {
-        let id = decode_entity(IdPrefix::Track, &bytes).map_err(LibraryError::from)?;
-        if let Some(track) = tracks::get_track(conn, id).await? {
-            views.push(track_view(conn, track).await?);
-        }
-    }
-    Ok(views)
+    track_views(conn, rows).await
 }
 
 /// Searches the local full-text index.

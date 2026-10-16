@@ -871,6 +871,19 @@ async fn make_genre_track(
         .unwrap()
 }
 
+/// Inserts a track with several genres and returns its id.
+async fn make_dated_track(
+    library: &LibraryRepository,
+    album: EntityId,
+    title: &str,
+    genres: &[&str],
+) -> EntityId {
+    let mut input = TrackInput::new(title, Origin::Local, Availability::Local);
+    input.album_id = Some(album);
+    let genres: Vec<String> = genres.iter().map(|genre| (*genre).to_owned()).collect();
+    library.insert_track(&input, &[], &genres).await.unwrap()
+}
+
 /// Records a rating.
 async fn rate(db: &Database, user: uuid::Uuid, kind: EntityKind, id: EntityId, rating: i64) {
     sqlx::query(
@@ -1095,4 +1108,88 @@ async fn album_lists_follow_the_users_activity() {
             .unwrap();
         assert_eq!(titles(&listed), expected, "{reason}");
     }
+}
+
+/// The genres of the songs in scope, the songs of one genre, and a random
+/// sample.
+#[tokio::test]
+async fn genres_are_counted_and_filtered() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, library, user) = album_list_fixture(dir.path()).await;
+    let mut conn = db.readers().acquire().await.unwrap();
+    let owned_dir = dir.path().join("genres");
+    std::fs::create_dir(&owned_dir).unwrap();
+    let folder = library
+        .add_library_folder(&owned_dir, Some(user))
+        .await
+        .unwrap();
+
+    // Two rock songs on one album, one jazz song on another, and a song with
+    // both genres.
+    let (rock, _) = make_dated_album(&library, "Rock Artist", "Rock Album", 1994).await;
+    let rock_one = make_genre_track(&library, rock, "Rock One", "Rock").await;
+    attach_folder(&library, rock_one, folder.id, "rock1.mp3").await;
+    let rock_two = make_genre_track(&library, rock, "Rock Two", "rock").await;
+    attach_folder(&library, rock_two, folder.id, "rock2.mp3").await;
+    let (jazz, _) = make_dated_album(&library, "Jazz Artist", "Jazz Album", 2004).await;
+    let jazz_one = make_genre_track(&library, jazz, "Jazz One", "jazz").await;
+    attach_folder(&library, jazz_one, folder.id, "jazz1.mp3").await;
+    let (both, _) = make_dated_album(&library, "Both Artist", "Both Album", 1999).await;
+    let both_one = make_dated_track(&library, both, "Both One", &["rock", "jazz"]).await;
+    attach_folder(&library, both_one, folder.id, "both.mp3").await;
+
+    let scope = personal(user);
+    let genres = query::list_genres(&mut conn, scope).await.unwrap();
+    let listed: Vec<(&str, i64, i64)> = genres
+        .iter()
+        .map(|genre| (genre.name.as_str(), genre.song_count, genre.album_count))
+        .collect();
+    assert_eq!(
+        listed,
+        [("jazz", 2, 2), ("rock", 3, 2)],
+        "a genre's songs and albums are counted in scope, by folded name"
+    );
+
+    // The genre match is folded too.
+    let by_genre = query::tracks_by_genre(&mut conn, scope, "ROCK", -1, 0)
+        .await
+        .unwrap();
+    let titles: Vec<&str> = by_genre
+        .iter()
+        .map(|view| view.track.title.as_str())
+        .collect();
+    assert_eq!(titles, ["Both One", "Rock One", "Rock Two"]);
+    assert_eq!(
+        query::tracks_by_genre(&mut conn, scope, "rock", 2, 1)
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "the count and offset page the genre listing"
+    );
+
+    // A random sample honours the size, the genre, and the year range.
+    let sample = query::random_tracks(&mut conn, scope, 10, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(sample.len(), 4);
+    let sampled = query::random_tracks(&mut conn, scope, 10, Some("jazz"), None, None)
+        .await
+        .unwrap();
+    assert_eq!(sampled.len(), 2);
+    let sampled = query::random_tracks(&mut conn, scope, 10, None, Some(1995), Some(2005))
+        .await
+        .unwrap();
+    let mut years: Vec<i64> = sampled
+        .iter()
+        .map(|view| view.album.as_ref().and_then(|album| album.year).unwrap())
+        .collect();
+    years.sort_unstable();
+    assert_eq!(years, [1999, 2004], "only the albums in the year range");
+    assert!(
+        query::random_tracks(&mut conn, scope, 0, None, None, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
