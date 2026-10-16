@@ -1,5 +1,6 @@
 //! `hearthsound scan`: index the tags of the library folders' files.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -22,15 +23,22 @@ use crate::context;
 /// # Parameters
 ///
 /// - `config`: the resolved bootstrap configuration.
+/// - `env`: the process environment, keyed by variable name, for the
+///   environment layer of the runtime settings.
 /// - `args`: the folder to scan, or `None` for every folder.
 ///
 /// # Errors
 ///
 /// Returns an error when the database cannot be opened, `--folder` names
 /// neither a folder id nor a folder path, or a scan fails.
-pub async fn run(config: BootstrapConfig, args: ScanArgs) -> anyhow::Result<()> {
+pub async fn run(
+    config: BootstrapConfig,
+    env: &BTreeMap<String, String>,
+    args: ScanArgs,
+) -> anyhow::Result<()> {
     let (database, _outcome) = context::open_database(&config).await?;
-    let scanner = LibraryScanner::new(&database, Arc::new(EventBus::new()));
+    let settings = context::load_settings(&config, env, &database).await?;
+    let scanner = LibraryScanner::new(&database, Arc::new(EventBus::new()), settings);
     let mut folders = LibraryRepository::new(&database)
         .list_library_folders()
         .await

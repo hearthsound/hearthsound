@@ -63,6 +63,39 @@ pub async fn open_database(
     Ok((database, outcome))
 }
 
+/// Loads the runtime settings of one command.
+///
+/// Unlike [`Context::open`] this builds no secret box and no plugin host, so a
+/// command that only reads a setting does not depend on the key file.
+///
+/// # Parameters
+///
+/// - `config`: the resolved bootstrap configuration.
+/// - `env`: the process environment, keyed by variable name, for the
+///   environment layer of the runtime settings.
+/// - `database`: the open, migrated database.
+///
+/// # Returns
+///
+/// The settings service, whose current snapshot is already resolved.
+///
+/// # Errors
+///
+/// Returns an error when a stored setting cannot be read or resolved.
+pub async fn load_settings(
+    config: &BootstrapConfig,
+    env: &BTreeMap<String, String>,
+    database: &Database,
+) -> anyhow::Result<Settings> {
+    Settings::load(
+        database.writer().clone(),
+        SettingsRegistry::builtin(),
+        SettingSources::new(env.clone(), config.settings.clone()),
+    )
+    .await
+    .context("could not load the runtime settings")
+}
+
 /// The database, settings, and secret key of one data-writing command.
 pub struct Context {
     /// The resolved bootstrap configuration.
@@ -94,13 +127,7 @@ impl Context {
         env: &BTreeMap<String, String>,
     ) -> anyhow::Result<Context> {
         let (database, _outcome) = open_database(&config).await?;
-        let settings = Settings::load(
-            database.writer().clone(),
-            SettingsRegistry::builtin(),
-            SettingSources::new(env.clone(), config.settings.clone()),
-        )
-        .await
-        .context("could not load the runtime settings")?;
+        let settings = load_settings(&config, env, &database).await?;
         let secret_box = SecretKey::load(&config.secrets.key_file, env)
             .context("could not load the secret key")?
             .secret_box();

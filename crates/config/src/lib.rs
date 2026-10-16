@@ -411,6 +411,9 @@ pub mod keys {
     /// Whether adding a remote item to a permanent playlist acquires it.
     pub const LIBRARY_ACQUIRE_ON_PLAYLIST_ADD: SettingKey<bool> =
         SettingKey::new("library.acquire_on_playlist_add");
+    /// Separators that split a single-valued artist tag into several artists.
+    pub const LIBRARY_SCAN_ARTIST_SEPARATORS: SettingKey<Vec<String>> =
+        SettingKey::new("library.scan.artist_separators");
 
     /// Upper bound on the total size of the cache directory, in bytes.
     pub const STORAGE_CACHE_MAX_BYTES: SettingKey<i64> = SettingKey::new("storage.cache.max_bytes");
@@ -685,6 +688,18 @@ impl SettingsRegistry {
                     SettingKind::Bool,
                     SettingValue::Bool(true),
                     "Whether adding a remote item to a permanent playlist acquires it",
+                ),
+                def(
+                    keys::LIBRARY_SCAN_ARTIST_SEPARATORS,
+                    SettingKind::StringList { allowed: &[] },
+                    SettingValue::StringList(
+                        [";", "/", "feat.", "ft.", "featuring"]
+                            .iter()
+                            .map(|separator| (*separator).to_owned())
+                            .collect(),
+                    ),
+                    "Separators that split a single-valued artist tag into several artists; \
+                     applies to files indexed after the change, run a full scan to re-split",
                 ),
                 def(
                     keys::STORAGE_CACHE_MAX_BYTES,

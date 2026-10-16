@@ -27,6 +27,8 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
+use hearthsound_config::keys;
+use hearthsound_config::settings::Settings;
 use hearthsound_core::events::{
     EventBus, LibraryChange, LibraryChanged, ScanProgress, ServerEvent,
 };
@@ -38,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::artists_split::split_artists;
 use crate::error::LibraryError;
 use crate::model::{
     AlbumInput, ArtistCredit, ArtistInput, LibraryFolder, Origin, ReplayGain, ScannedMediaFile,
@@ -169,7 +172,13 @@ struct IndexedTags {
 /// use hearthsound_library::scan::LibraryScanner;
 ///
 /// # async fn example(db: &Database, folder_id: uuid::Uuid) -> Result<(), Box<dyn std::error::Error>> {
-/// let scanner = LibraryScanner::new(db, Arc::new(EventBus::new()));
+/// let settings = hearthsound_config::settings::Settings::load(
+///     db.writer().clone(),
+///     hearthsound_config::SettingsRegistry::builtin(),
+///     hearthsound_config::SettingSources::default(),
+/// )
+/// .await?;
+/// let scanner = LibraryScanner::new(db, Arc::new(EventBus::new()), settings);
 /// let report = scanner.scan_folder(folder_id).await?;
 /// println!("indexed {} files", report.files_indexed);
 /// # Ok(())
@@ -183,25 +192,30 @@ pub struct LibraryScanner {
     readers: SqlitePool,
     /// The bus scan progress and library changes are published on.
     events: Arc<EventBus>,
+    /// The settings service the scan reads its tunables from.
+    settings: Settings,
 }
 
 impl LibraryScanner {
-    /// Builds a scanner over a database and an event bus.
+    /// Builds a scanner over a database, an event bus, and the settings.
     ///
     /// # Parameters
     ///
     /// - `db`: the open database.
     /// - `events`: the bus `scan.progress` and `library.changed` are published
     ///   on.
+    /// - `settings`: the settings service; a scan reads its tunables from the
+    ///   snapshot in effect when it starts.
     ///
     /// # Returns
     ///
     /// The scanner.
-    pub fn new(db: &Database, events: Arc<EventBus>) -> LibraryScanner {
+    pub fn new(db: &Database, events: Arc<EventBus>, settings: Settings) -> LibraryScanner {
         LibraryScanner {
             writer: db.writer().clone(),
             readers: db.readers().clone(),
             events,
+            settings,
         }
     }
 
@@ -244,6 +258,11 @@ impl LibraryScanner {
     /// that was indexed by an earlier scan and fails to probe now keeps its
     /// stored row.
     pub async fn scan_folder(&self, folder_id: Uuid) -> Result<ScanReport, LibraryError> {
+        let separators = self
+            .settings
+            .current()
+            .get(keys::LIBRARY_SCAN_ARTIST_SEPARATORS)?;
+        let separators = separators.as_slice();
         let mut read = self.readers.acquire().await?;
         let folder = folders::get_library_folder(&mut read, folder_id)
             .await?
@@ -290,11 +309,13 @@ impl LibraryScanner {
                 track_id: existing.map(|row| row.track_id),
             });
             if pending.len() >= WRITE_BATCH {
-                self.flush(&folder, &mut pending, &mut report).await?;
+                self.flush(&folder, separators, &mut pending, &mut report)
+                    .await?;
                 self.progress(&folder, "indexing", &report, None);
             }
         }
-        self.flush(&folder, &mut pending, &mut report).await?;
+        self.flush(&folder, separators, &mut pending, &mut report)
+            .await?;
 
         self.progress(&folder, "pruning", &report, None);
         self.prune(&folder, &seen, &mut report).await?;
@@ -312,6 +333,7 @@ impl LibraryScanner {
     /// # Parameters
     ///
     /// - `folder`: the folder being scanned.
+    /// - `separators`: the separators that split a single-valued artist tag.
     /// - `pending`: the batch; drained as it is written.
     /// - `report`: the counters to update.
     ///
@@ -322,6 +344,7 @@ impl LibraryScanner {
     async fn flush(
         &self,
         folder: &LibraryFolder,
+        separators: &[String],
         pending: &mut Vec<PendingFile>,
         report: &mut ScanReport,
     ) -> Result<(), LibraryError> {
@@ -334,7 +357,7 @@ impl LibraryScanner {
         let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
         let mut added: Vec<EntityId> = Vec::new();
         for file in pending.drain(..) {
-            let tags = IndexedTags::from_probe(&file.probe, &file.found.rel_path);
+            let tags = IndexedTags::from_probe(&file.probe, &file.found.rel_path, separators);
             let album_id = match &tags.album {
                 Some(album) => {
                     Some(albums::upsert_album(&mut tx, album, &tags.album_credits).await?)
@@ -485,16 +508,21 @@ impl IndexedTags {
     /// artist. Track credits are the tagged artists in order, the first one as
     /// `main` and the rest as `featured`.
     ///
+    /// A single-valued artist or album artist tag is split on the configured
+    /// separators first, so one value that lists several artists becomes
+    /// several credits; a multi-valued tag is used as it stands.
+    ///
     /// # Parameters
     ///
     /// - `probe`: the probe result.
     /// - `rel_path`: the path relative to the folder root, used for the title
     ///   fallback.
+    /// - `separators`: the separators that split a single-valued artist tag.
     ///
     /// # Returns
     ///
     /// The inputs to write.
-    fn from_probe(probe: &ProbeResult, rel_path: &str) -> IndexedTags {
+    fn from_probe(probe: &ProbeResult, rel_path: &str, separators: &[String]) -> IndexedTags {
         let tags = &probe.tags;
         let stem = Path::new(rel_path)
             .file_stem()
@@ -504,32 +532,26 @@ impl IndexedTags {
             Some(title) if !title.trim().is_empty() => title.to_owned(),
             _ => stem.to_owned(),
         };
-        let album_artist = tags
-            .album_artist
-            .clone()
-            .or_else(|| tags.artists.first().cloned());
-        let display_artist = if tags.artists.is_empty() {
-            None
-        } else {
-            Some(tags.artists.join(", "))
+        let artists = split_credit(&tags.artists, separators);
+        let album_artists = match &tags.album_artist {
+            Some(name) => split_artists(name, separators),
+            None => artists.iter().take(1).cloned().collect(),
         };
+        let display_artist = join_credit(&artists);
 
-        let mut credits: Vec<ArtistCredit> = tags
-            .artists
+        let mut credits: Vec<ArtistCredit> = artists
             .iter()
             .enumerate()
             .map(|(position, name)| {
                 credit(
                     name,
                     if position == 0 { "main" } else { "featured" },
-                    artist_mbid(&tags.mb_artist_ids, tags.artists.len(), position),
+                    artist_mbid(&tags.mb_artist_ids, artists.len(), position),
                 )
             })
             .collect();
-        if credits.is_empty()
-            && let Some(name) = &album_artist
-        {
-            credits.push(ArtistCredit::new(name, "main"));
+        if credits.is_empty() {
+            credits = album_credits_for(&album_artists, &tags.mb_album_artist_ids);
         }
 
         let genres: Vec<String> = tags
@@ -545,21 +567,16 @@ impl IndexedTags {
             .filter(|album| !album.trim().is_empty())
             .map(|album_title| {
                 let mut album = AlbumInput::new(album_title, Origin::Local);
-                album.display_artist = album_artist.clone();
+                album.display_artist = join_credit(&album_artists);
                 album.year = tags.year().map(i64::from);
                 album.release_date = tags.date.clone();
                 album.mb_release_id = tags.mb_release_id.clone();
                 album.mb_release_group_id = tags.mb_release_group_id.clone();
                 album
             });
-        let album_credits = match (&album, &album_artist) {
-            (Some(_), Some(name)) => vec![credit(
-                name,
-                "main",
-                tags.mb_album_artist_ids.first().cloned(),
-            )],
-            (Some(_), None) => credits.clone(),
-            (None, _) => Vec::new(),
+        let album_credits = match album {
+            Some(_) => album_credits_for(&album_artists, &tags.mb_album_artist_ids),
+            None => Vec::new(),
         };
 
         let mut track = TrackInput::new(title, Origin::Local, Availability::Local);
@@ -577,6 +594,69 @@ impl IndexedTags {
             credits,
             genres,
         }
+    }
+}
+
+/// Splits one artist list into credits.
+///
+/// A tag that carries one artist is a single value that may list several
+/// artists, so it is split on the configured separators. A tag that already
+/// carries several values is used as it stands: its authors separated them
+/// themselves.
+///
+/// # Parameters
+///
+/// - `artists`: the artists the tags carried.
+/// - `separators`: the separators that split a single-valued artist tag.
+///
+/// # Returns
+///
+/// The artists to credit, in order.
+fn split_credit(artists: &[String], separators: &[String]) -> Vec<String> {
+    match artists {
+        [single] => split_artists(single, separators),
+        several => several.to_vec(),
+    }
+}
+
+/// Builds the credits of an album artist list.
+///
+/// # Parameters
+///
+/// - `artists`: the album artists, in order.
+/// - `ids`: the MusicBrainz album artist ids the tags carried.
+///
+/// # Returns
+///
+/// One credit per artist, the first as `main` and the rest as `featured`.
+fn album_credits_for(artists: &[String], ids: &[String]) -> Vec<ArtistCredit> {
+    artists
+        .iter()
+        .enumerate()
+        .map(|(position, name)| {
+            credit(
+                name,
+                if position == 0 { "main" } else { "featured" },
+                artist_mbid(ids, artists.len(), position),
+            )
+        })
+        .collect()
+}
+
+/// Joins an artist list the way a display name spells it.
+///
+/// # Parameters
+///
+/// - `artists`: the credited artists, in order.
+///
+/// # Returns
+///
+/// The names joined with `, `, or `None` when there are none.
+fn join_credit(artists: &[String]) -> Option<String> {
+    if artists.is_empty() {
+        None
+    } else {
+        Some(artists.join(", "))
     }
 }
 

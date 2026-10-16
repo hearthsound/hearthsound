@@ -62,6 +62,7 @@ pub use repository::LibraryRepository;
 
 pub mod albums;
 pub mod artists;
+pub mod artists_split;
 pub mod artwork;
 pub mod folders;
 pub mod media_files;

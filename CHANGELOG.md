@@ -669,6 +669,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   artist's id and a compilation can be recognised.
 - A scan stores the ReplayGain values a file carries and gives every credited
   artist its own MusicBrainz id, both of which the Subsonic projection reports.
+- A single-valued artist tag is split into its credited artists on the
+  separators in the new `library.scan.artist_separators` setting, so `AC/DC`
+  stays one artist while `A feat. B` becomes two.
 
 ### Security
 

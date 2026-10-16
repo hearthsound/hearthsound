@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use hearthsound_config::{SettingsRegistry, SettingsStore};
+use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore, settings::Settings};
 use hearthsound_core::events::EventBus;
 use hearthsound_core::{Availability, StorageClass};
 use hearthsound_db::{Database, MIGRATOR};
@@ -19,6 +19,18 @@ async fn migrated(dir: &Path) -> Database {
     let db = Database::open(&dir.join("hearthsound.db")).await.unwrap();
     db.migrate(&MIGRATOR, &dir.join("backups")).await.unwrap();
     db
+}
+
+/// Builds a scanner over a database, with the built-in settings.
+async fn scanner_for(db: &Database, events: Arc<EventBus>) -> LibraryScanner {
+    let settings = Settings::load(
+        db.writer().clone(),
+        SettingsRegistry::builtin(),
+        SettingSources::default(),
+    )
+    .await
+    .unwrap();
+    LibraryScanner::new(db, events, settings)
 }
 
 /// Writes a short FLAC named after `title` into `dir`.
@@ -79,7 +91,7 @@ async fn scan_indexes_every_audio_file_and_skips_unchanged_ones() {
 
     let events = Arc::new(EventBus::new());
     let mut subscriber = events.subscribe();
-    let scanner = LibraryScanner::new(&db, events.clone());
+    let scanner = scanner_for(&db, events.clone()).await;
     let folder = library.add_library_folder(&music, None).await.unwrap();
 
     let report = scanner.scan_folder(folder.id).await.unwrap();
@@ -153,7 +165,7 @@ async fn hidden_metadata_files_are_ignored_and_unreadable_files_do_not_stop_the_
     // A visible file whose content is not audio is reported, not fatal.
     std::fs::write(album.join("03 - Broken.flac"), b"this is not a flac file").unwrap();
 
-    let scanner = LibraryScanner::new(&db, Arc::new(EventBus::new()));
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
     let folder = library
         .add_library_folder(&dir.path().join("music"), None)
         .await
@@ -185,7 +197,7 @@ async fn a_changed_file_is_reindexed_without_duplicating_the_track() {
     std::fs::create_dir(&music).unwrap();
     let path = write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
 
-    let scanner = LibraryScanner::new(&db, Arc::new(EventBus::new()));
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
     let folder = library.add_library_folder(&music, None).await.unwrap();
     scanner.scan_folder(folder.id).await.unwrap();
     let track = only_track(&library, "Energy 52").await;
@@ -235,7 +247,7 @@ async fn vanished_files_drop_their_rows() {
     write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
     let doomed = write_song(&music, "Sunset", "Someone Else", "Evening").await;
 
-    let scanner = LibraryScanner::new(&db, Arc::new(EventBus::new()));
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
     let folder = library.add_library_folder(&music, None).await.unwrap();
     scanner.scan_folder(folder.id).await.unwrap();
     assert_eq!(library.list_artists().await.unwrap().len(), 2);
@@ -273,7 +285,7 @@ async fn an_owned_folder_pins_its_tracks() {
     std::fs::create_dir(&music).unwrap();
     write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
 
-    let scanner = LibraryScanner::new(&db, Arc::new(EventBus::new()));
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
     let folder = library
         .add_library_folder(&music, Some(owner))
         .await
@@ -321,7 +333,7 @@ async fn the_walk_stays_inside_the_folder() {
     std::os::unix::fs::symlink(&outside, music.join("link")).unwrap();
     write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
 
-    let scanner = LibraryScanner::new(&db, Arc::new(EventBus::new()));
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
     let folder = library.add_library_folder(&music, None).await.unwrap();
     let report = scanner.scan_folder(folder.id).await.unwrap();
     assert_eq!(report.files_seen, 1, "the symlink is not followed");
@@ -399,7 +411,7 @@ async fn cover_art_comes_from_the_embedded_picture_or_a_sidecar() {
     ));
 
     // Through the repository: the preferred file of a scanned track.
-    let scanner = LibraryScanner::new(&db, Arc::new(EventBus::new()));
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
     let folder = library.add_library_folder(&music, None).await.unwrap();
     scanner.scan_folder(folder.id).await.unwrap();
     let track = only_track(&library, "Energy 52").await;
@@ -444,7 +456,7 @@ async fn a_scan_stores_replay_gain_and_artist_music_brainz_ids() {
         .await
         .unwrap();
 
-    let scanner = LibraryScanner::new(&db, Arc::new(EventBus::new()));
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
     let folder = library.add_library_folder(&music, None).await.unwrap();
     scanner.scan_folder(folder.id).await.unwrap();
 
@@ -472,6 +484,118 @@ async fn a_scan_stores_replay_gain_and_artist_music_brainz_ids() {
 }
 
 #[tokio::test]
+async fn a_single_valued_artist_tag_splits_on_the_shipped_separators() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+
+    AudioFixture::new(AudioFormat::Flac)
+        .seconds(0.3)
+        .file_name("credit.flac")
+        .tags(
+            TrackTags::new("Split Credit", "Nova Reyes feat. Ida Frost")
+                .album("Nightfall")
+                .album_artist("Nova Reyes")
+                .track(1, 1),
+        )
+        .write_into(&music)
+        .await
+        .unwrap();
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(folder.id).await.unwrap();
+
+    let names = |artists: Vec<hearthsound_library::Artist>| {
+        let mut names: Vec<String> = artists.into_iter().map(|artist| artist.name).collect();
+        names.sort();
+        names
+    };
+    assert_eq!(
+        names(library.list_artists().await.unwrap()),
+        ["Ida Frost", "Nova Reyes"]
+    );
+
+    let artist = library
+        .list_artists()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|artist| artist.name == "Nova Reyes")
+        .unwrap();
+    let album = library.list_albums_for_artist(artist.id).await.unwrap()[0].clone();
+    assert_eq!(
+        names(library.list_album_artists(album.id).await.unwrap()),
+        ["Nova Reyes"],
+        "the album is credited to its album artist alone"
+    );
+
+    let track = library.list_tracks_for_album(album.id).await.unwrap()[0].id;
+    let stored = library.get_track(track).await.unwrap().unwrap();
+    assert_eq!(
+        stored.display_artist.as_deref(),
+        Some("Nova Reyes, Ida Frost")
+    );
+}
+
+#[tokio::test]
+async fn a_single_valued_artist_tag_respects_a_changed_separator_list() {
+    use hearthsound_config::keys;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+
+    AudioFixture::new(AudioFormat::Flac)
+        .seconds(0.3)
+        .file_name("ampersand.flac")
+        .tags(
+            TrackTags::new("Ampersand", "A & B")
+                .album("Together")
+                .album_artist("A & B")
+                .track(1, 1),
+        )
+        .write_into(&music)
+        .await
+        .unwrap();
+
+    let settings = Settings::load(
+        db.writer().clone(),
+        SettingsRegistry::builtin(),
+        SettingSources::default(),
+    )
+    .await
+    .unwrap();
+    // The ampersand is not a shipped separator, so only this list splits on it.
+    settings
+        .set(
+            keys::LIBRARY_SCAN_ARTIST_SEPARATORS.name(),
+            hearthsound_config::SettingValue::StringList(vec!["&".to_owned()]),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let scanner = LibraryScanner::new(&db, Arc::new(EventBus::new()), settings);
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(folder.id).await.unwrap();
+
+    let mut names: Vec<String> = library
+        .list_artists()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|artist| artist.name)
+        .collect();
+    names.sort();
+    assert_eq!(names, ["A", "B"]);
+}
+
+#[tokio::test]
 async fn the_scan_job_handler_runs_a_scan() {
     let dir = tempfile::tempdir().unwrap();
     let db = migrated(dir.path()).await;
@@ -481,7 +605,7 @@ async fn the_scan_job_handler_runs_a_scan() {
     write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
     let folder = library.add_library_folder(&music, None).await.unwrap();
 
-    let scanner = Arc::new(LibraryScanner::new(&db, Arc::new(EventBus::new())));
+    let scanner = Arc::new(scanner_for(&db, Arc::new(EventBus::new())).await);
     let handler = ScanJobHandler::new(scanner);
     let job = |payload: Option<String>| hearthsound_jobs::Job {
         id: uuid::Uuid::now_v7(),

@@ -233,7 +233,11 @@ impl Services {
         ));
         orchestrator.start();
         let prefetch = Arc::new(PrefetchScheduler::new(Arc::clone(&orchestrator)));
-        let scanner = Arc::new(LibraryScanner::new(&database, Arc::clone(&events)));
+        let scanner = Arc::new(LibraryScanner::new(
+            &database,
+            Arc::clone(&events),
+            settings.clone(),
+        ));
 
         let queue = Arc::new(JobQueue::new(&database, QueueOptions::default()));
         let mut runner = JobRunner::new(Arc::clone(&queue), JobRunnerOptions::default());
