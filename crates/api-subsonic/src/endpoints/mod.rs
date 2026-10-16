@@ -13,6 +13,7 @@
 pub mod bookmarks;
 pub mod browse;
 mod cover_art;
+pub mod download;
 pub mod feedback;
 pub mod genres;
 pub mod now_playing;
@@ -32,6 +33,7 @@ pub use browse::{
     get_music_directory, get_song,
 };
 pub use cover_art::get_cover_art;
+pub use download::download;
 pub use feedback::{get_starred, get_starred2, set_rating, star, unstar};
 pub use genres::{get_genres, get_random_songs, get_songs_by_genre};
 pub use now_playing::get_now_playing;

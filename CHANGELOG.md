@@ -769,6 +769,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lets an administrator enqueue a scan of every library folder.
 - `getUser` reports an account's roles and the music folders it may browse, with
   another account readable only by an administrator.
+- `download` serves the stored file of one track as an attachment to an account
+  that may download, with no stream session and no acquisition behind it.
 
 ### Security
 

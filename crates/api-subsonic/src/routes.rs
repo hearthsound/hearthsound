@@ -93,6 +93,7 @@ pub fn routes() -> Router<SubsonicState> {
     let router = register(router, "getMusicFolders", endpoints::get_music_folders);
     let router = register(router, "getArtists", endpoints::get_artists);
     let router = register(router, "getUser", endpoints::get_user);
+    let router = register(router, "download", endpoints::download);
     let router = register(router, "getScanStatus", endpoints::get_scan_status);
     let router = register(router, "startScan", endpoints::start_scan);
     let router = register(router, "getNowPlaying", endpoints::get_now_playing);

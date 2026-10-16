@@ -13,6 +13,7 @@ mod browse;
 mod catalog;
 mod common;
 mod cover_art;
+mod download;
 mod endpoints;
 mod envelope;
 mod genres;

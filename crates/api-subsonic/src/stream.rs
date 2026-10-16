@@ -409,6 +409,54 @@ impl StreamService {
         }
     }
 
+    /// Serves the stored file of one track as a download.
+    ///
+    /// A download is not playback: the file is served with the range and
+    /// validator handling a stream has, and no stream session is registered and
+    /// no access is recorded, so the activity guard and the prefetch scheduler
+    /// never see it. Only a stored track with a preferred file is served: a
+    /// catalog id is not materialized, because downloading a track the server
+    /// does not have is not something a client can ask for.
+    ///
+    /// # Parameters
+    ///
+    /// - `request`: the request being served. Its format, bitrate cap, and
+    ///   offset are ignored: a download is always the stored file whole.
+    ///
+    /// # Returns
+    ///
+    /// The file's bytes, with its validators and the range handling a client
+    /// that resumes a download needs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamError::NotFound`] when the id names no stored track,
+    /// when the track has no file, and when the file is missing from disk, and
+    /// a server-side error when the library or the file cannot be read.
+    pub async fn download(&self, request: &StreamRequest) -> Result<Response, StreamError> {
+        let track = match ClientId::parse(&request.id) {
+            Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::Track => id,
+            _ => {
+                tracing::debug!(id = %request.id, "a download named no stored track");
+                return Err(StreamError::NotFound);
+            }
+        };
+        let file = {
+            let mut connection = self
+                .database
+                .readers()
+                .acquire()
+                .await
+                .map_err(LibraryError::from)?;
+            query::preferred_media_file(&mut connection, &self.roots, track).await?
+        };
+        let Some(file) = file else {
+            tracing::debug!(track = %track, "a download named a track with no file");
+            return Err(StreamError::NotFound);
+        };
+        self.serve_file(request, track, &file, false).await
+    }
+
     /// Serves the track's stored file when it has one.
     ///
     /// The lookup connection is released before the file is served, so a long
@@ -452,7 +500,7 @@ impl StreamService {
         match file {
             Some(file) => {
                 let response = match delivery(request, &file.media_file) {
-                    Delivery::File => self.serve_file(request, track, &file).await?,
+                    Delivery::File => self.serve_file(request, track, &file, true).await?,
                     Delivery::Transcode(plan) => {
                         self.serve_transcode(request, track, &file, &plan).await?
                     }
@@ -727,6 +775,8 @@ impl StreamService {
     ///   the answer.
     /// - `track`: the track the file belongs to, for the stream session.
     /// - `file`: the media file row and the absolute path it resolves to.
+    /// - `session`: whether the delivery is a stream, which registers the
+    ///   session the activity guard reads; a download passes `false`.
     ///
     /// # Errors
     ///
@@ -737,6 +787,7 @@ impl StreamService {
         request: &StreamRequest,
         track: EntityId,
         file: &PreferredFile,
+        session: bool,
     ) -> Result<Response, StreamError> {
         let path = file.absolute_path.as_path();
         let metadata = match tokio::fs::metadata(path).await {
@@ -778,7 +829,8 @@ impl StreamService {
         // Only a response that carries the file or a part of it is a stream the
         // user hears: a `HEAD`, a refused range, and a revalidation send no
         // audio, so none of them registers a session or records an access.
-        let streaming = matches!(parts.status, StatusCode::OK | StatusCode::PARTIAL_CONTENT)
+        let streaming = session
+            && matches!(parts.status, StatusCode::OK | StatusCode::PARTIAL_CONTENT)
             && request.method != Method::HEAD;
 
         // The container or codec decides the content type, not the file name

@@ -78,6 +78,7 @@
 //! | `getMusicFolders` | the personal library, and the server unless `privacy.server_browse` is disabled |
 //! | `createBookmark` | saves where the user left off in a track |
 //! | `deleteBookmark` | removes the user's bookmark of a track |
+//! | `download` | the stored file of one track, as an attachment |
 //! | `getUser` | one account's name, roles, and music folders |
 //! | `getScanStatus` | what the library scanner is doing |
 //! | `startScan` | enqueues a scan of every library folder |
