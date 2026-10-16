@@ -175,6 +175,21 @@ struct ScanCounters {
     files_processed: AtomicU64,
 }
 
+/// Marks one scan as running for as long as it is held.
+///
+/// Dropping the guard ends the scan, so a scan that fails, panics, or is
+/// cancelled is never left counted as running.
+struct RunningScan<'a> {
+    /// The counters the scan is counted in.
+    counters: &'a ScanCounters,
+}
+
+impl Drop for RunningScan<'_> {
+    fn drop(&mut self) {
+        self.counters.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// What one folder scan did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanReport {
@@ -329,9 +344,9 @@ impl LibraryScanner {
 
     /// Enqueues a scan and returns the queued job.
     ///
-    /// The request counts as queued until a [`ScanJobHandler`] starts it, so
-    /// [`LibraryScanner::status`] reports a scan from the moment it is
-    /// requested.
+    /// The request counts as queued from before the job can be claimed until a
+    /// [`ScanJobHandler`] starts it, so [`LibraryScanner::status`] reports a
+    /// scan from the moment it is requested.
     ///
     /// # Parameters
     ///
@@ -350,17 +365,26 @@ impl LibraryScanner {
         queue: &JobQueue,
         request: &ScanRequest,
     ) -> Result<Job, LibraryError> {
-        let job = queue
-            .enqueue(NewJob::new(SCAN_JOB_KIND).payload(request)?)
-            .await?;
+        let job = NewJob::new(SCAN_JOB_KIND).payload(request)?;
+        // Counted before the job is visible to the runner, so a handler that
+        // claims it at once always finds its request to release.
         self.counters.queued.fetch_add(1, Ordering::SeqCst);
-        Ok(job)
+        match queue.enqueue(job).await {
+            Ok(job) => Ok(job),
+            Err(error) => {
+                self.request_started();
+                Err(error.into())
+            }
+        }
     }
 
     /// Scans every folder, or the one a request names.
     ///
-    /// Scans of one folder never overlap: a request that arrives while its
-    /// folder is being scanned waits for the running scan to finish.
+    /// The whole request counts as one running scan, from before the folders
+    /// are listed until the last one is done, so the status never reads idle
+    /// between two folders. Scans of one folder never overlap: a request that
+    /// arrives while its folder is being scanned waits for the running scan to
+    /// finish.
     ///
     /// # Parameters
     ///
@@ -375,6 +399,7 @@ impl LibraryScanner {
     /// Returns the first folder's error. A scan is idempotent, so the caller can
     /// retry it after fixing what made the folder unreadable.
     pub async fn scan(&self, request: &ScanRequest) -> Result<Vec<ScanReport>, LibraryError> {
+        let _running = self.begin_scan();
         match request.folder_id {
             Some(folder_id) => Ok(vec![self.scan_one(folder_id, request).await?]),
             None => {
@@ -409,6 +434,7 @@ impl LibraryScanner {
     /// that was indexed by an earlier scan and fails to probe now keeps its
     /// stored row.
     pub async fn scan_folder(&self, folder_id: Uuid) -> Result<ScanReport, LibraryError> {
+        let _running = self.begin_scan();
         self.scan_one(folder_id, &ScanRequest::folder(folder_id))
             .await
     }
@@ -435,12 +461,9 @@ impl LibraryScanner {
         folder_id: Uuid,
         request: &ScanRequest,
     ) -> Result<ScanReport, LibraryError> {
-        self.begin_scan();
         let lock = self.folder_lock(folder_id);
         let _guard = lock.lock().await;
-        let report = self.scan_locked(folder_id, request).await;
-        self.end_scan();
-        report
+        self.scan_locked(folder_id, request).await
     }
 
     /// Records that a queued request is starting.
@@ -457,19 +480,21 @@ impl LibraryScanner {
             });
     }
 
-    /// Records that a scan started.
+    /// Records that a scan started, until the returned guard is dropped.
     ///
     /// The file counter is cleared when the first scan of a run starts, so
     /// [`LibraryScanner::status`] reports what the current run has done.
-    fn begin_scan(&self) {
+    ///
+    /// # Returns
+    ///
+    /// The guard that ends the scan when dropped.
+    fn begin_scan(&self) -> RunningScan<'_> {
         if self.counters.active.fetch_add(1, Ordering::SeqCst) == 0 {
             self.counters.files_processed.store(0, Ordering::SeqCst);
         }
-    }
-
-    /// Records that a scan finished.
-    fn end_scan(&self) {
-        self.counters.active.fetch_sub(1, Ordering::SeqCst);
+        RunningScan {
+            counters: &self.counters,
+        }
     }
 
     /// Records that one file was dealt with.
@@ -1315,6 +1340,9 @@ impl JobHandler for ScanJobHandler {
             .payload_json()
             .map_err(|error| JobError::new(error.to_string()))?
             .unwrap_or_default();
+        // The scan counts as running before its request stops counting as
+        // queued, so a status read in between never sees an idle scanner.
+        let _running = self.scanner.begin_scan();
         self.scanner.request_started();
         self.scanner
             .scan(&request)

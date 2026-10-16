@@ -820,6 +820,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scanned first.
 - `jukeboxControl` answers the generic error 0 instead of error 70, so a client
   that probes it after logging in no longer reports a failure.
+- `getScanStatus` no longer reports an idle scanner while a requested scan is
+  starting or moving between folders, and a scan claimed the moment it was
+  queued no longer leaves the status busy forever.
 
 ### Security
 
