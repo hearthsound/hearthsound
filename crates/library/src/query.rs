@@ -1091,6 +1091,124 @@ pub async fn find_artist_by_name(
     row.map(|row| row.into_artist()).transpose()
 }
 
+/// The entities one user liked.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_library::query::Starred;
+///
+/// let none = Starred::default();
+/// assert!(none.tracks.is_empty());
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Starred {
+    /// The liked artists, most recently liked first.
+    pub artists: Vec<Artist>,
+    /// The liked albums, most recently liked first.
+    pub albums: Vec<Album>,
+    /// The liked tracks, most recently liked first.
+    pub tracks: Vec<TrackView>,
+}
+
+/// Lists the entities a user liked.
+///
+/// A like is the only thing this reads: an entity is listed whatever its
+/// availability, so a liked track that is not stored still appears, and one
+/// user's likes never appear in another user's listing.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `user_id`: the account whose likes are read.
+///
+/// # Returns
+///
+/// The liked artists, albums, and tracks, each most recently liked first.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn starred(conn: &mut SqliteConnection, user_id: Uuid) -> Result<Starred, LibraryError> {
+    let mut starred = Starred::default();
+    let rows = sqlx::query_scalar!(
+        "SELECT entity_id FROM user_feedback \
+         WHERE user_id = ? AND value = 'like' AND entity_kind = 'artist' \
+         ORDER BY at DESC, entity_id",
+        user_id.as_bytes().as_slice(),
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    for bytes in rows {
+        let id = decode_entity(IdPrefix::Artist, &bytes).map_err(LibraryError::from)?;
+        if let Some(artist) = artists::get_artist(conn, id).await? {
+            starred.artists.push(artist);
+        }
+    }
+    let rows = sqlx::query_scalar!(
+        "SELECT entity_id FROM user_feedback \
+         WHERE user_id = ? AND value = 'like' AND entity_kind = 'album' \
+         ORDER BY at DESC, entity_id",
+        user_id.as_bytes().as_slice(),
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    for bytes in rows {
+        let id = decode_entity(IdPrefix::Album, &bytes).map_err(LibraryError::from)?;
+        if let Some(album) = albums::get_album(conn, id).await? {
+            starred.albums.push(album);
+        }
+    }
+    let rows = sqlx::query_scalar!(
+        "SELECT entity_id FROM user_feedback \
+         WHERE user_id = ? AND value = 'like' AND entity_kind = 'track' \
+         ORDER BY at DESC, entity_id",
+        user_id.as_bytes().as_slice(),
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    for bytes in rows {
+        let id = decode_entity(IdPrefix::Track, &bytes).map_err(LibraryError::from)?;
+        if let Some(track) = tracks::get_track(conn, id).await? {
+            starred.tracks.push(track_view(conn, track).await?);
+        }
+    }
+    Ok(starred)
+}
+
+/// Returns when the browse index last changed.
+///
+/// A client that remembers this instant can ask for the indexes and be told
+/// nothing has changed since, which is what `getIndexes`' `ifModifiedSince`
+/// does.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+///
+/// # Returns
+///
+/// The latest of the artists', albums', and tracks' `updated_at` and the
+/// folders' `last_scan_at`, in unix milliseconds, or `0` when the library is
+/// empty.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when the query fails.
+pub async fn library_last_modified(conn: &mut SqliteConnection) -> Result<i64, LibraryError> {
+    let modified: Option<i64> = sqlx::query_scalar(
+        "SELECT max(updated_at) FROM ( \
+             SELECT max(updated_at) AS updated_at FROM artists \
+             UNION ALL SELECT max(updated_at) FROM albums \
+             UNION ALL SELECT max(updated_at) FROM tracks \
+             UNION ALL SELECT max(last_scan_at) FROM library_folders \
+         )",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(modified.unwrap_or(0))
+}
+
 /// Lists the albums in scope that an artist is credited on.
 ///
 /// # Parameters

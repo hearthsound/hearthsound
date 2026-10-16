@@ -728,6 +728,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   narrowed by genre and release year.
 - The most played songs of an artist can be listed from the server's own play
   counts, and an artist can be found by name.
+- The entities a user liked can be listed newest first whatever their
+  availability, and the instant the browse index last changed is readable.
 
 ### Security
 

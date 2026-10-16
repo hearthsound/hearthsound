@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT entity_id FROM user_feedback WHERE user_id = ? AND value = 'like' AND entity_kind = 'artist' ORDER BY at DESC, entity_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "entity_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "user_feedback",
+            "name": "entity_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "558cdeba0271fa6f2e1a09f127c9771ecf627b7dfc0afef036dabf46dea5a731"
+}

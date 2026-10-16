@@ -138,12 +138,18 @@ fn kind_literal(kind: EntityKind) -> &'static str {
 
 /// Records a like.
 async fn like(db: &Database, user: uuid::Uuid, kind: EntityKind, id: EntityId) {
+    like_at(db, user, kind, id, 0).await;
+}
+
+/// Records a like at one instant.
+async fn like_at(db: &Database, user: uuid::Uuid, kind: EntityKind, id: EntityId, at: i64) {
     sqlx::query(
-        "INSERT INTO user_feedback (user_id, entity_kind, entity_id, value, at) VALUES (?, ?, ?, 'like', 0)",
+        "INSERT INTO user_feedback (user_id, entity_kind, entity_id, value, at) VALUES (?, ?, ?, 'like', ?)",
     )
     .bind(user.as_bytes().as_slice())
     .bind(kind_literal(kind))
     .bind(id.uuid().as_bytes().as_slice())
+    .bind(at)
     .execute(db.writer())
     .await
     .unwrap();
@@ -1282,5 +1288,87 @@ async fn top_songs_follow_the_play_counts() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+/// Starred entities come back newest first, per user, and the library's
+/// last-modified instant follows its rows.
+#[tokio::test]
+async fn starred_entities_and_the_last_modified_instant() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, library, user) = album_list_fixture(dir.path()).await;
+    let other = insert_user(&db, "other").await;
+    let mut conn = db.readers().acquire().await.unwrap();
+
+    let (first_album, first_artist) = make_album(&library, "Nova Reyes", "Nightfall").await;
+    let first_track = make_track(&library, Some(first_album), "First", Availability::Remote).await;
+    let (second_album, _) = make_album(&library, "Ida Frost", "Frostwork").await;
+    let second_track =
+        make_track(&library, Some(second_album), "Second", Availability::Remote).await;
+    let before = query::library_last_modified(&mut conn).await.unwrap();
+    assert!(before > 0, "the created rows carry an instant");
+
+    // The likes are one instant apart, so the order is not a tie.
+    like_at(&db, user, EntityKind::Track, first_track, 100).await;
+    like_at(&db, user, EntityKind::Track, second_track, 300).await;
+    like_at(&db, user, EntityKind::Album, first_album, 200).await;
+    like_at(&db, user, EntityKind::Artist, first_artist, 150).await;
+    // Another user's like never appears in this user's listing.
+    like_at(&db, other, EntityKind::Album, second_album, 400).await;
+
+    let starred = query::starred(&mut conn, user).await.unwrap();
+    assert_eq!(
+        starred
+            .tracks
+            .iter()
+            .map(|view| view.track.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Second", "First"],
+        "the most recently liked track comes first"
+    );
+    assert_eq!(
+        starred
+            .albums
+            .iter()
+            .map(|album| album.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Nightfall"]
+    );
+    assert_eq!(
+        starred
+            .artists
+            .iter()
+            .map(|artist| artist.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Nova Reyes"]
+    );
+    assert!(
+        starred
+            .tracks
+            .iter()
+            .all(|view| view.track.availability == Availability::Remote),
+        "a liked track is listed whatever its availability"
+    );
+
+    // A scan moves the instant forward.
+    let scanned = query::library_last_modified(&mut conn).await.unwrap();
+    assert!(scanned >= before);
+    let folder_dir = dir.path().join("scan");
+    std::fs::create_dir(&folder_dir).unwrap();
+    let folder = library
+        .add_library_folder(&folder_dir, Some(user))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE library_folders SET last_scan_at = ? WHERE id = ?")
+        .bind(scanned + 1_000)
+        .bind(folder.id.as_bytes().as_slice())
+        .execute(db.writer())
+        .await
+        .unwrap();
+    let mut conn = db.readers().acquire().await.unwrap();
+    assert_eq!(
+        query::library_last_modified(&mut conn).await.unwrap(),
+        scanned + 1_000,
+        "the folder's last scan is part of the instant"
     );
 }
