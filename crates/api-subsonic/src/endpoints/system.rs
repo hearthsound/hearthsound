@@ -24,12 +24,14 @@ const SERVER_BROWSE_DISABLED: &str = "disabled";
 /// are implemented, because advertising an extension that does nothing is worse
 /// for a client than omitting it. The vendor `hearthsound` extension is added
 /// when its fields and endpoints exist.
-const EXTENSIONS: [(&str, &[i64]); 5] = [
+const EXTENSIONS: [(&str, &[i64]); 7] = [
     ("apiKeyAuthentication", &[1]),
     ("formPost", &[1]),
     ("indexBasedQueue", &[1]),
     ("playbackReport", &[1]),
     ("topSongsByArtistId", &[1]),
+    ("transcodeOffset", &[1]),
+    ("transcoding", &[1]),
 ];
 
 /// Answers `ping`: the protocol's liveness check.

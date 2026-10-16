@@ -284,3 +284,31 @@ async fn parses_the_format_names() {
     let chunks = drain(boxed).await.unwrap();
     assert!(!chunks.is_empty());
 }
+
+/// A channel cap reaches the encoder as `-ac`.
+#[tokio::test]
+async fn honours_the_channel_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = AudioFixture::new(AudioFormat::Flac)
+        .seconds(2.0)
+        .write_into(dir.path())
+        .await
+        .unwrap();
+    let runner = FfmpegRunner::new(None, 4);
+
+    let request = TranscodeRequest::new(&source, TranscodeFormat::Mp3).max_channels(Some(1));
+    let stream = runner.transcode(&request).await.unwrap();
+    let collected = drain(stream).await.unwrap();
+    let path = write_encoded(dir.path(), "mono.mp3", &collected).unwrap();
+
+    let channels: u32 = ffprobe(&path, "stream", "channels")
+        .await
+        .expect("ffprobe reports a channel count")
+        .parse()
+        .unwrap();
+    assert_eq!(channels, 1, "a one-channel request produced {channels}");
+
+    // Zero is the protocol's "any", so it is no cap at all.
+    let request = TranscodeRequest::new(&source, TranscodeFormat::Mp3).max_channels(Some(0));
+    assert_eq!(request.max_channels, None);
+}

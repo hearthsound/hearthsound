@@ -78,6 +78,8 @@
 //! | `getMusicFolders` | the personal library, and the server unless `privacy.server_browse` is disabled |
 //! | `createBookmark` | saves where the user left off in a track |
 //! | `deleteBookmark` | removes the user's bookmark of a track |
+//! | `getTranscodeDecision` | what the server would do with one file for one client |
+//! | `getTranscodeStream` | the bytes a transcode decision asked for |
 //! | `getTopSongs` | the most played songs of one artist |
 //! | `getSimilarSongs` | an empty similar-songs listing |
 //! | `getSimilarSongs2` | the same empty listing in the ID3 shape |
@@ -178,9 +180,10 @@ mod routes;
 mod scope;
 mod state;
 mod stream;
+mod transcode_decision;
 mod value;
 
-pub use auth::{BinaryCall, Call, InvalidProxy, TrustedProxies, forbidden};
+pub use auth::{BinaryCall, Call, InvalidProxy, JsonCall, TrustedProxies, forbidden};
 pub use endpoints::{
     get_album, get_album_list, get_album_list_2, get_artist, get_artists, get_bookmarks,
     get_cover_art, get_genres, get_indexes, get_license, get_music_directory, get_music_folders,
@@ -196,5 +199,9 @@ pub use routes::{register, router, routes};
 pub use state::SubsonicState;
 pub use stream::{
     PendingOutcome, PendingSource, StreamError, StreamFormat, StreamRequest, StreamService,
+};
+pub use transcode_decision::{
+    ClientInfo, CodecLimitation, CodecProfile, Decision, DirectPlayProfile, SourceStream,
+    TranscodeReason, TranscodeTarget, TranscodingProfile, decide,
 };
 pub use value::{Array, Object, Value};

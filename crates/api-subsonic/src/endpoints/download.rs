@@ -44,6 +44,7 @@ pub async fn download(call: BinaryCall) -> Response {
         format: crate::stream::StreamFormat::Raw,
         max_bitrate_kbps: None,
         offset: None,
+        max_channels: None,
         estimate_content_length: false,
         can_acquire: false,
     };

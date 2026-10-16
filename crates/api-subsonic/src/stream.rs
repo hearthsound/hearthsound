@@ -119,6 +119,8 @@ pub struct StreamRequest {
     pub max_bitrate_kbps: Option<u32>,
     /// The `timeOffset` parameter: how far into the track the stream starts.
     pub offset: Option<Duration>,
+    /// How many channels a transcode carries, when the request caps them.
+    pub max_channels: Option<u8>,
     /// Whether `estimateContentLength` asked for an estimated `Content-Length`
     /// on a transcode rather than no length at all.
     pub estimate_content_length: bool,
@@ -918,6 +920,9 @@ impl StreamService {
         if let Some(offset) = plan.offset {
             transcode = transcode.offset(offset);
         }
+        if plan.max_channels.is_some() {
+            transcode = transcode.max_channels(plan.max_channels);
+        }
         let encoded = self.ffmpeg.transcode(&transcode).await.map_err(internal)?;
 
         let (delivered, flag) = AudioDelivered::flag();
@@ -1162,6 +1167,8 @@ struct TranscodePlan {
     max_bitrate_kbps: Option<u32>,
     /// How far into the track the stream starts.
     offset: Option<Duration>,
+    /// How many channels the output carries, or `None` for the source's own.
+    max_channels: Option<u8>,
 }
 
 /// Decides whether a request is served from the file or through ffmpeg.
@@ -1261,6 +1268,7 @@ fn plan(format: TranscodeFormat, request: &StreamRequest) -> TranscodePlan {
         format,
         max_bitrate_kbps: request.max_bitrate_kbps,
         offset: request.offset,
+        max_channels: request.max_channels,
     }
 }
 

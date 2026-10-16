@@ -776,6 +776,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `topSongsByArtistId` extension is advertised.
 - `getSimilarSongs` and `getSimilarSongs2` answer an empty listing, because this
   server has no similarity model to answer with.
+- `getTranscodeDecision` answers what the server would do with one file for one
+  client's description, and `getTranscodeStream` serves the bytes those
+  parameters ask for, with a transcode's channel count reaching ffmpeg; the
+  `transcoding` and `transcodeOffset` extensions are advertised.
 
 ### Security
 

@@ -2,4 +2,4 @@
 source: crates/api-subsonic/tests/integration/endpoints.rs
 expression: json.body
 ---
-{"subsonic-response":{"status":"ok","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.0-alpha.0","openSubsonic":true,"openSubsonicExtensions":[{"name":"apiKeyAuthentication","versions":[1]},{"name":"formPost","versions":[1]},{"name":"indexBasedQueue","versions":[1]},{"name":"playbackReport","versions":[1]},{"name":"topSongsByArtistId","versions":[1]}]}}
+{"subsonic-response":{"status":"ok","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.0-alpha.0","openSubsonic":true,"openSubsonicExtensions":[{"name":"apiKeyAuthentication","versions":[1]},{"name":"formPost","versions":[1]},{"name":"indexBasedQueue","versions":[1]},{"name":"playbackReport","versions":[1]},{"name":"topSongsByArtistId","versions":[1]},{"name":"transcodeOffset","versions":[1]},{"name":"transcoding","versions":[1]}]}}

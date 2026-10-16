@@ -217,6 +217,9 @@ pub enum ParamsRejection {
     /// while it was being read.
     #[error("the request body could not be read")]
     Unreadable,
+    /// A body declared as JSON is not a JSON document.
+    #[error("the request body is not a JSON document")]
+    InvalidJson,
 }
 
 impl IntoResponse for ParamsRejection {
@@ -225,7 +228,7 @@ impl IntoResponse for ParamsRejection {
     fn into_response(self) -> HttpResponse {
         let status = match self {
             ParamsRejection::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            ParamsRejection::Unreadable => StatusCode::BAD_REQUEST,
+            ParamsRejection::Unreadable | ParamsRejection::InvalidJson => StatusCode::BAD_REQUEST,
         };
         tracing::debug!(status = status.as_u16(), reason = %self, "rejected a /rest request");
         status.into_response()
@@ -286,6 +289,76 @@ pub(crate) async fn read_values(
     }
 
     Ok(values)
+}
+
+/// Reads the parameters and the JSON body of a request.
+///
+/// The parameters come from the query string alone: the body of a request that
+/// carries a JSON document is the client description the transcoding extension
+/// defines, not a set of parameters, so reading it as parameters would invent
+/// them.
+///
+/// # Parameters
+///
+/// - `parts`: the request's head.
+/// - `body`: the request's body, which is read only when the content type is
+///   JSON.
+///
+/// # Returns
+///
+/// The parameter values and the parsed body, which is `None` when the request
+/// carried no JSON document.
+///
+/// # Errors
+///
+/// Returns [`ParamsRejection::BodyTooLarge`] when the body declares more bytes
+/// than [`MAX_FORM_BODY_BYTES`], [`ParamsRejection::Unreadable`] when it cannot
+/// be read, and [`ParamsRejection::InvalidJson`] when it is not a JSON
+/// document.
+pub(crate) async fn read_json_body(
+    parts: &Parts,
+    body: Body,
+) -> Result<(Vec<(String, String)>, Option<serde_json::Value>), ParamsRejection> {
+    let values = match parts.uri.query() {
+        Some(query) => parse_encoded(query),
+        None => Vec::new(),
+    };
+    if !is_json(parts.headers.get(header::CONTENT_TYPE)) {
+        return Ok((values, None));
+    }
+    if let Some(length) = declared_length(parts)
+        && length > MAX_FORM_BODY_BYTES
+    {
+        return Err(ParamsRejection::BodyTooLarge);
+    }
+    let bytes = to_bytes(body, MAX_FORM_BODY_BYTES)
+        .await
+        .map_err(|_| ParamsRejection::Unreadable)?;
+    let document = serde_json::from_slice(&bytes).map_err(|_| ParamsRejection::InvalidJson)?;
+    Ok((values, Some(document)))
+}
+
+/// Reports whether a request's content type is a JSON document.
+///
+/// # Parameters
+///
+/// - `content_type`: the request's content type header, when it has one.
+///
+/// # Returns
+///
+/// `true` when the type is `application/json`, with any parameters after it.
+fn is_json(content_type: Option<&axum::http::HeaderValue>) -> bool {
+    match content_type {
+        None => false,
+        Some(value) => value
+            .to_str()
+            .map(|text| {
+                text.trim_start()
+                    .to_ascii_lowercase()
+                    .starts_with("application/json")
+            })
+            .unwrap_or(false),
+    }
 }
 
 /// Reports whether a request's content type is a form post.

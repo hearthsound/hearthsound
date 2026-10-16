@@ -67,6 +67,7 @@ pub async fn stream(call: BinaryCall) -> Response {
         format,
         max_bitrate_kbps,
         offset,
+        max_channels: None,
         estimate_content_length: flag(&call, "estimateContentLength"),
         can_acquire: call.principal().can_acquire,
     };

@@ -25,6 +25,7 @@ mod scrobble;
 mod search;
 mod stream;
 mod system;
+pub mod transcode;
 pub mod users;
 
 pub use bookmarks::{create_bookmark, delete_bookmark, get_bookmarks};
@@ -52,4 +53,5 @@ pub use scrobble::scrobble;
 pub use search::{search2, search3};
 pub use stream::stream;
 pub use system::{get_license, get_music_folders, get_open_subsonic_extensions, ping, token_info};
+pub use transcode::{get_transcode_decision, get_transcode_stream};
 pub use users::get_user;

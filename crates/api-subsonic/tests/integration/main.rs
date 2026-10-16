@@ -28,4 +28,5 @@ mod search;
 mod star;
 mod stream;
 mod stream_pending;
+mod transcode;
 mod users;

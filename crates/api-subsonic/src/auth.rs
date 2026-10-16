@@ -25,7 +25,7 @@ use axum::response::{IntoResponse, Response as HttpResponse};
 use hearthsound_auth::Principal;
 
 use crate::params::{Params, read_values};
-use crate::response::{Encoded, Response};
+use crate::response::{Encoded, Response, SubsonicError};
 use crate::state::SubsonicState;
 
 /// The header a proxy appends the address it received a request from.
@@ -334,6 +334,133 @@ impl FromRequest<SubsonicState> for Call {
                 state: state.clone(),
                 principal,
                 params,
+            }),
+            Err(error) => Err(params.encode(Response::failed(error)).into_response()),
+        }
+    }
+}
+
+/// A `/rest` call whose body may be a JSON document.
+///
+/// The transcoding extension posts a client description as a JSON body, so this
+/// extractor reads the query string for parameters and the body as a document,
+/// and hands both to the handler. Everything else - the credentials, the
+/// principal, the encoding of the answer - is what [`Call`] does.
+#[derive(Debug, Clone)]
+pub struct JsonCall {
+    /// The call, with the parameters the query string carried.
+    call: Call,
+    /// The request's method, which decides whether a body could be read.
+    method: axum::http::Method,
+    /// The JSON document the body carried, when there was one.
+    body: Option<serde_json::Value>,
+}
+
+impl JsonCall {
+    /// Returns the shared services.
+    pub fn state(&self) -> &SubsonicState {
+        self.call.state()
+    }
+
+    /// Returns the authenticated principal.
+    pub fn principal(&self) -> &Principal {
+        self.call.principal()
+    }
+
+    /// Returns the request's parameters.
+    pub fn params(&self) -> &Params {
+        self.call.params()
+    }
+
+    /// Returns the request's method.
+    pub fn method(&self) -> &axum::http::Method {
+        &self.method
+    }
+
+    /// Deserializes the request's body.
+    ///
+    /// # Parameters
+    ///
+    /// - `member`: the body's name, for the error message.
+    ///
+    /// # Returns
+    ///
+    /// The body, deserialized into `T`.
+    ///
+    /// # Errors
+    ///
+    /// Answers Subsonic error 10 when the request carried no body and error 0
+    /// when the body is not the document the extension defines.
+    pub fn body<T: serde::de::DeserializeOwned>(
+        &self,
+        member: &'static str,
+    ) -> Result<T, SubsonicError> {
+        let Some(document) = &self.body else {
+            return Err(SubsonicError::missing_parameter(member));
+        };
+        serde_json::from_value(document.clone()).map_err(|error| {
+            tracing::debug!(%error, member, "a request body is not the document it must be");
+            SubsonicError::new(
+                crate::response::codes::GENERIC,
+                format!("The request body is not a valid {member}."),
+            )
+        })
+    }
+
+    /// Renders a response in the encoding the client asked for.
+    ///
+    /// # Parameters
+    ///
+    /// - `response`: the response to render.
+    ///
+    /// # Returns
+    ///
+    /// The encoded response, ready to be returned from the handler.
+    pub fn encode(&self, response: Response) -> Encoded {
+        self.call.encode(response)
+    }
+}
+
+impl Deref for JsonCall {
+    type Target = Call;
+
+    /// Borrows the call, so a handler reads its parameters as it does on
+    /// [`Call`].
+    fn deref(&self) -> &Call {
+        &self.call
+    }
+}
+
+impl FromRequest<SubsonicState> for JsonCall {
+    type Rejection = HttpResponse;
+
+    /// Parses a request's parameters and body, and resolves its credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bare HTTP status code when the body cannot be read, a failed
+    /// envelope at HTTP 200 when the credentials are absent, contradictory, or
+    /// wrong, and a failed envelope at HTTP 200 with error 0 when a body
+    /// declared as JSON is not one.
+    async fn from_request(
+        request: Request,
+        state: &SubsonicState,
+    ) -> Result<JsonCall, HttpResponse> {
+        let (parts, body) = request.into_parts();
+        let (values, document) = match crate::params::read_json_body(&parts, body).await {
+            Ok(read) => read,
+            Err(rejection) => return Err(rejection.into_response()),
+        };
+        let params = Params::from_values(values);
+        match authenticate(state, &parts, &params).await {
+            Ok(principal) => Ok(JsonCall {
+                call: Call {
+                    state: state.clone(),
+                    principal,
+                    params,
+                },
+                method: parts.method.clone(),
+                body: document,
             }),
             Err(error) => Err(params.encode(Response::failed(error)).into_response()),
         }

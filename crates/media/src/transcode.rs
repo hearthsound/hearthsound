@@ -196,6 +196,8 @@ pub struct TranscodeRequest {
     pub max_bitrate_kbps: Option<u32>,
     /// How far into the file the stream starts.
     pub offset: Option<Duration>,
+    /// How many channels the output carries, or `None` for the source's own.
+    pub max_channels: Option<u8>,
 }
 
 impl TranscodeRequest {
@@ -211,6 +213,7 @@ impl TranscodeRequest {
             format,
             max_bitrate_kbps: None,
             offset: None,
+            max_channels: None,
         }
     }
 
@@ -223,6 +226,18 @@ impl TranscodeRequest {
     ///   the encoders accept.
     pub fn max_bitrate_kbps(mut self, max_bitrate_kbps: Option<u32>) -> Self {
         self.max_bitrate_kbps = max_bitrate_kbps;
+        self
+    }
+
+    /// Sets how many channels the output carries.
+    ///
+    /// # Parameters
+    ///
+    /// - `max_channels`: the channel count, or `None` for the source's own. A
+    ///   count of zero is read as no limit, because the protocol uses zero for
+    ///   "any" and an encoder accepts no zero channels.
+    pub fn max_channels(mut self, max_channels: Option<u8>) -> Self {
+        self.max_channels = max_channels.filter(|channels| *channels > 0);
         self
     }
 
@@ -346,6 +361,10 @@ pub(crate) fn transcode_args(request: &TranscodeRequest) -> Vec<OsString> {
     args.push(request.path.as_os_str().to_owned());
     args.push("-vn".into());
     args.extend(request.format.encoder_args(request.bitrate_kbps()));
+    if let Some(channels) = request.max_channels {
+        args.push("-ac".into());
+        args.push(channels.to_string().into());
+    }
     args.push("-flush_packets".into());
     args.push("1".into());
     args.push("pipe:1".into());
