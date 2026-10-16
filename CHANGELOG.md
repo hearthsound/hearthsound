@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A full-stack checklist test drives a real server through the client
+  checklist: both logins, browsing, playback with a range and a transcode, the
+  personal data a user changes, the reports a player sends, and the
+  administration endpoints.
+
 - Project license, contributing guide, security policy, and changelog.
 - Cargo workspace with the `hearthsound-core` crate: layer and entity kind enums,
   the shared provider error, and provider instance slugs.

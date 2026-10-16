@@ -5,6 +5,7 @@
 //! One binary per crate means the crate and its test support are compiled and
 //! linked once per test run, which is what keeps the test build and CI short.
 
+mod client_checklist;
 mod common;
 mod cors;
 mod health;

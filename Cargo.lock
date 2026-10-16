@@ -1816,6 +1816,7 @@ dependencies = [
  "hearthsound-media",
  "hearthsound-plugin-host",
  "hearthsound-test-support",
+ "md-5",
  "reqwest",
  "rustls",
  "serde",

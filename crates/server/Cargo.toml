@@ -34,6 +34,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 hearthsound-test-support = { path = "../test-support" }
+md-5.workspace = true
+serde_json.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 sqlx.workspace = true

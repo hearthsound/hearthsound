@@ -13,8 +13,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use hearthsound_auth::{ApiKeys, NewUser, Users};
+use hearthsound_auth::{ApiKeys, AppPasswords, NewUser, Users};
 use hearthsound_config::bootstrap::BootstrapConfig;
+use hearthsound_config::secret::SecretKey;
 use hearthsound_server::{Server, Services};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -35,6 +36,9 @@ pub struct Fixture {
     pub services: Arc<Services>,
     /// The API key of the test account, usable as `/rest`'s `apiKey`.
     pub api_key: String,
+    /// An app password of the test account, which is what a client that uses
+    /// `u` + `t` + `s` signs in with.
+    pub app_password: String,
     /// The test account's id, which the ledger records as a requester.
     pub user_id: Uuid,
     /// The HTTP client every test request goes through.
@@ -59,6 +63,7 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let mut config = write_config(dir.path());
         adjust(&mut config);
+        let secret_key = SecretKey::load(&config.secrets.key_file, &BTreeMap::new()).unwrap();
         let services = Services::build(config, &BTreeMap::new()).await.unwrap();
         let user = Users::new(services.database())
             .create(
@@ -68,6 +73,13 @@ impl Fixture {
             .await
             .unwrap();
         let api_key = ApiKeys::new(services.database())
+            .generate(user.id, "test")
+            .await
+            .unwrap()
+            .plaintext;
+        // The secret box is the one the composition root loaded, so the app
+        // password this writes is one the running server can decrypt.
+        let app_password = AppPasswords::new(services.database(), secret_key.secret_box())
             .generate(user.id, "test")
             .await
             .unwrap()
@@ -82,6 +94,7 @@ impl Fixture {
             server,
             services,
             api_key,
+            app_password,
             user_id: user.id,
             client: reqwest::Client::new(),
         }
@@ -133,6 +146,12 @@ impl Fixture {
     /// - `dir`: the directory a [`Fixture::stop`] returned.
     /// - `api_key`: the api key of the account the directory holds, whose
     ///   plaintext is only known when it is created.
+    ///
+    /// # Returns
+    ///
+    /// The fixture. Its app password is empty: an app password's plaintext is
+    /// only known when it is created, and a test that reopens a directory has
+    /// the API key it created it with instead.
     pub async fn reopen(dir: TempDir, api_key: String) -> Fixture {
         install_crypto_provider();
         let services = Services::build(load_config(dir.path()), &BTreeMap::new())
@@ -151,6 +170,7 @@ impl Fixture {
             server,
             services,
             api_key,
+            app_password: String::new(),
             user_id: user.id,
             client: reqwest::Client::new(),
         }
