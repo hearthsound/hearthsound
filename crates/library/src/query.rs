@@ -1007,6 +1007,90 @@ async fn track_views(
     Ok(views)
 }
 
+/// Lists the most played songs that credit an artist.
+///
+/// The play counts are the server's own: every play any user recorded, which is
+/// what makes this a *top* listing rather than a personal one.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `scope`: the scope to filter by.
+/// - `artist_id`: the artist the songs credit, in any position.
+/// - `count`: the maximum number of songs.
+///
+/// # Returns
+///
+/// The songs, most played first, then the oldest album, disc, and track; a song
+/// with no plays still appears, after the played ones.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn top_tracks_for_artist(
+    conn: &mut SqliteConnection,
+    scope: Scope,
+    artist_id: EntityId,
+    count: i64,
+) -> Result<Vec<TrackView>, LibraryError> {
+    if let Scope::Server(ServerBrowse::Disabled) = scope {
+        return Ok(Vec::new());
+    }
+    let mut builder = QueryBuilder::<Sqlite>::new("");
+    push_scope_tracks(&mut builder, scope);
+    builder
+        .push(
+            "SELECT t.id FROM tracks t \
+             JOIN scope_tracks st ON st.track_id = t.id \
+             JOIN track_artists ta ON ta.track_id = t.id \
+             LEFT JOIN albums al ON al.id = t.album_id \
+             WHERE ta.artist_id = ",
+        )
+        .push_bind(entity_key(artist_id))
+        .push(
+            " ORDER BY (SELECT count(*) FROM plays p WHERE p.track_id = t.id) DESC, \
+             al.year, t.disc_number, t.track_number, t.id LIMIT ",
+        )
+        .push_bind(count);
+    let rows = builder
+        .build_query_scalar::<Vec<u8>>()
+        .fetch_all(&mut *conn)
+        .await?;
+    track_views(conn, rows).await
+}
+
+/// Finds an artist by name.
+///
+/// The name is folded the way the scanner folds it before it stores the sort
+/// name, so a caller may pass the spelling a client sent.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `name`: the artist's name.
+///
+/// # Returns
+///
+/// The artist, or `None` when no artist has that name.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when the query fails.
+pub async fn find_artist_by_name(
+    conn: &mut SqliteConnection,
+    name: &str,
+) -> Result<Option<Artist>, LibraryError> {
+    let row = sqlx::query_as!(
+        artists::ArtistRow,
+        "SELECT id, name, sort_name, mb_artist_id, origin, created_at, updated_at \
+         FROM artists WHERE sort_name = ? ORDER BY sort_name, id LIMIT 1",
+        crate::sort_key(name),
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    row.map(|row| row.into_artist()).transpose()
+}
+
 /// Lists the albums in scope that an artist is credited on.
 ///
 /// # Parameters

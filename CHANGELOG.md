@@ -726,6 +726,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The stored genres of a scope can be listed with their song and album counts,
   the songs of one genre can be paged, and a random sample of songs can be
   narrowed by genre and release year.
+- The most played songs of an artist can be listed from the server's own play
+  counts, and an artist can be found by name.
 
 ### Security
 

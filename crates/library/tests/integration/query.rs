@@ -871,6 +871,20 @@ async fn make_genre_track(
         .unwrap()
 }
 
+/// Records a track credit.
+async fn credit(db: &Database, track: EntityId, artist: EntityId, position: i64, role: &str) {
+    sqlx::query(
+        "INSERT INTO track_artists (track_id, artist_id, position, role) VALUES (?, ?, ?, ?)",
+    )
+    .bind(track.uuid().as_bytes().as_slice())
+    .bind(artist.uuid().as_bytes().as_slice())
+    .bind(position)
+    .bind(role)
+    .execute(db.writer())
+    .await
+    .unwrap();
+}
+
 /// Inserts a track with several genres and returns its id.
 async fn make_dated_track(
     library: &LibraryRepository,
@@ -1191,5 +1205,82 @@ async fn genres_are_counted_and_filtered() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+/// The top songs of an artist follow the server's play counts, and an artist
+/// is found by name.
+#[tokio::test]
+async fn top_songs_follow_the_play_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let (db, library, user) = album_list_fixture(dir.path()).await;
+    let other = insert_user(&db, "other").await;
+    let mut conn = db.readers().acquire().await.unwrap();
+    let owned_dir = dir.path().join("tops");
+    std::fs::create_dir(&owned_dir).unwrap();
+    let folder = library
+        .add_library_folder(&owned_dir, Some(user))
+        .await
+        .unwrap();
+
+    let (album, artist) = make_dated_album(&library, "Nova Reyes", "Nightfall", 2001).await;
+    let first = make_track(&library, Some(album), "First", Availability::Local).await;
+    attach_folder(&library, first, folder.id, "first.mp3").await;
+    let second = make_track(&library, Some(album), "Second", Availability::Local).await;
+    attach_folder(&library, second, folder.id, "second.mp3").await;
+    let third = make_track(&library, Some(album), "Third", Availability::Local).await;
+    attach_folder(&library, third, folder.id, "third.mp3").await;
+    for (position, track) in [first, second, third].iter().enumerate() {
+        credit(&db, *track, artist, position as i64, "main").await;
+    }
+
+    // Another artist's song credits the same artist as a featured credit.
+    let (guest_album, _) = make_dated_album(&library, "Ida Frost", "Split", 2005).await;
+    let guest = make_track(&library, Some(guest_album), "Guest", Availability::Local).await;
+    attach_folder(&library, guest, folder.id, "guest.mp3").await;
+    sqlx::query(
+        "INSERT INTO track_artists (track_id, artist_id, position, role) VALUES (?, ?, 1, 'featured')",
+    )
+    .bind(guest.uuid().as_bytes().as_slice())
+    .bind(artist.uuid().as_bytes().as_slice())
+    .execute(db.writer())
+    .await
+    .unwrap();
+
+    // Every user's plays count: Second twice, Guest once, First once, Third
+    // never.
+    play(&db, user, second, 1_000).await;
+    play(&db, other, second, 2_000).await;
+    play(&db, user, guest, 3_000).await;
+    play(&db, user, first, 4_000).await;
+
+    let top = query::top_tracks_for_artist(&mut conn, personal(user), artist, 10)
+        .await
+        .unwrap();
+    let titles: Vec<&str> = top.iter().map(|view| view.track.title.as_str()).collect();
+    assert_eq!(
+        titles,
+        ["Second", "First", "Guest", "Third"],
+        "the most played song comes first, then the oldest album and the track order"
+    );
+    assert_eq!(
+        query::top_tracks_for_artist(&mut conn, personal(user), artist, 2)
+            .await
+            .unwrap()
+            .len(),
+        2,
+        "the count bounds the listing"
+    );
+
+    let found = query::find_artist_by_name(&mut conn, "  nova reyes ")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.id, artist);
+    assert!(
+        query::find_artist_by_name(&mut conn, "Nobody")
+            .await
+            .unwrap()
+            .is_none()
     );
 }
