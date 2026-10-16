@@ -8,12 +8,16 @@
 //! false play. When the call carries `submission=false` it is a now-playing
 //! report, which is accepted and discarded because now-playing is not stored.
 
+use hearthsound_core::EntityKind;
 use hearthsound_db::Database;
+use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::error::ActivityError;
+use crate::feedback;
 use crate::play::Plays;
 use crate::session::StreamSessions;
+use crate::{READ_THEN_WRITE, now_millis};
 
 /// A client's scrobble request.
 ///
@@ -100,6 +104,8 @@ pub enum ScrobbleOutcome {
 /// ```
 #[derive(Debug, Clone)]
 pub struct ActivityService {
+    /// The writer pool every mutation goes through.
+    writer: SqlitePool,
     /// The `plays` table.
     plays: Plays,
     /// The stream sessions the guard reads.
@@ -121,6 +127,7 @@ impl ActivityService {
     /// The service.
     pub fn new(db: &Database) -> ActivityService {
         ActivityService {
+            writer: db.writer().clone(),
             plays: Plays::new(db),
             sessions: StreamSessions::new(),
         }
@@ -160,6 +167,7 @@ impl ActivityService {
     /// ```
     pub fn with_sessions(db: &Database, sessions: StreamSessions) -> ActivityService {
         ActivityService {
+            writer: db.writer().clone(),
             plays: Plays::new(db),
             sessions,
         }
@@ -228,5 +236,59 @@ impl ActivityService {
             )
             .await?;
         Ok(ScrobbleOutcome::Recorded(id))
+    }
+
+    /// Records likes for the named entities.
+    ///
+    /// The whole request is one transaction with the pin refresh it implies, so
+    /// a like and the personal-library pin either both land or neither does.
+    /// Nothing is acquired: a liked track that is not stored stays `remote`.
+    ///
+    /// # Parameters
+    ///
+    /// - `user_id`: the account that likes the entities.
+    /// - `entities`: the entities to like, each with its kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActivityError`] when a like, a pin, or the commit fails.
+    pub async fn star(
+        &self,
+        user_id: Uuid,
+        entities: &[(EntityKind, Uuid)],
+    ) -> Result<(), ActivityError> {
+        let at = now_millis();
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+        for (kind, entity_id) in entities {
+            feedback::like(&mut tx, user_id, *kind, *entity_id, at).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Removes likes for the named entities.
+    ///
+    /// The whole request is one transaction with the pin refresh it implies.
+    /// Unliking something the user had not liked is not an error.
+    ///
+    /// # Parameters
+    ///
+    /// - `user_id`: the account that no longer likes the entities.
+    /// - `entities`: the entities to unlike, each with its kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActivityError`] when a like, a pin, or the commit fails.
+    pub async fn unstar(
+        &self,
+        user_id: Uuid,
+        entities: &[(EntityKind, Uuid)],
+    ) -> Result<(), ActivityError> {
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+        for (kind, entity_id) in entities {
+            feedback::unlike(&mut tx, user_id, *kind, *entity_id).await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 }

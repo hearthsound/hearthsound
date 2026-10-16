@@ -1,4 +1,5 @@
-//! Listener activity: play history and the guard that decides what counts.
+//! Listener activity: play history, likes, and the guard that decides what
+//! counts.
 //!
 //! The crate owns the `plays` table. A play is recorded by
 //! [`ActivityService::scrobble`] when a client submits one, but only if the
@@ -15,6 +16,11 @@
 //! itself. Only the latest session per user and track is kept, and the registry
 //! is bounded by a lifetime and a capacity so a client that never scrobbles
 //! cannot grow it forever.
+//!
+//! The crate also owns the per-user rows a Subsonic client writes directly:
+//! [`ActivityService::star`] and [`ActivityService::unstar`] record likes and
+//! keep the personal-library pin of every track they affect in step, so a liked
+//! track is permanent in that user's library.
 //!
 //! # Examples
 //!
@@ -49,11 +55,33 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod feedback;
 mod play;
 mod service;
 mod session;
 
 pub use error::ActivityError;
+pub use feedback::{like, refresh_user_library_pin, unlike};
 pub use play::Plays;
 pub use service::{ActivityService, Scrobble, ScrobbleOutcome};
 pub use session::{AudioDelivered, SessionOptions, StreamSession, StreamSessions};
+
+/// The statement a transaction that reads before it writes starts with.
+///
+/// Every statement of the activity tables reaches its decision by reading a row
+/// first, so the transaction takes the write lock immediately instead of
+/// upgrading it later, which is what keeps two of them from deadlocking on
+/// SQLite's single writer.
+pub(crate) const READ_THEN_WRITE: &str = "BEGIN IMMEDIATE";
+
+/// Returns the current time in unix milliseconds.
+///
+/// Every timestamp this crate writes shares one clock and one unit.
+///
+/// # Returns
+///
+/// The number of milliseconds since the Unix epoch.
+pub(crate) fn now_millis() -> i64 {
+    let nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
+    (nanos / 1_000_000) as i64
+}

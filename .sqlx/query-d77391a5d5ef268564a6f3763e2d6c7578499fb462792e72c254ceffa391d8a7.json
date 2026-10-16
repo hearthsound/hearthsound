@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM user_feedback WHERE user_id = ? AND entity_kind = ? AND entity_id = ? AND value = 'like'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "d77391a5d5ef268564a6f3763e2d6c7578499fb462792e72c254ceffa391d8a7"
+}

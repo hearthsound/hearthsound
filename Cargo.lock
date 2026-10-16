@@ -1564,9 +1564,11 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "hearthsound-core",
  "hearthsound-db",
+ "hearthsound-library",
  "sqlx",
  "tempfile",
  "thiserror",
+ "time",
  "tokio",
  "uuid",
 ]

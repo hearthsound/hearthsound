@@ -700,6 +700,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The media probe searches much further for a file's first frame, so a file
   whose tagger left a second ID3v2 tag in place is read instead of being
   reported as an unknown container.
+- Liking a track or an album records the like and pins the tracks it covers in
+  the user's personal library, in one transaction; unliking releases a pin the
+  user's saved rows no longer hold.
 
 ### Security
 
