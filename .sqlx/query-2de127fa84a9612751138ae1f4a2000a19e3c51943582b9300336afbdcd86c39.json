@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM bookmarks WHERE user_id = ? AND track_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "2de127fa84a9612751138ae1f4a2000a19e3c51943582b9300336afbdcd86c39"
+}

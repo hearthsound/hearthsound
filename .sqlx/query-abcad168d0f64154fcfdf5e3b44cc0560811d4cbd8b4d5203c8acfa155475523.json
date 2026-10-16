@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO bookmarks (user_id, track_id, position_ms, comment, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (user_id, track_id) DO UPDATE SET position_ms = excluded.position_ms, comment = excluded.comment, updated_at = excluded.updated_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "abcad168d0f64154fcfdf5e3b44cc0560811d4cbd8b4d5203c8acfa155475523"
+}

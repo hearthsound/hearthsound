@@ -13,6 +13,7 @@ use hearthsound_db::Database;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::bookmarks::Bookmarks;
 use crate::error::ActivityError;
 use crate::play::Plays;
 use crate::play_queues::PlayQueues;
@@ -114,6 +115,8 @@ pub struct ActivityService {
     playlists: Playlists,
     /// The saved play queue table.
     queues: PlayQueues,
+    /// The bookmark table.
+    bookmarks: Bookmarks,
     /// The stream sessions the guard reads.
     sessions: StreamSessions,
 }
@@ -137,6 +140,7 @@ impl ActivityService {
             plays: Plays::new(db),
             playlists: Playlists::new(db),
             queues: PlayQueues::new(db),
+            bookmarks: Bookmarks::new(db),
             sessions: StreamSessions::new(),
         }
     }
@@ -179,6 +183,7 @@ impl ActivityService {
             plays: Plays::new(db),
             playlists: Playlists::new(db),
             queues: PlayQueues::new(db),
+            bookmarks: Bookmarks::new(db),
             sessions,
         }
     }
@@ -201,6 +206,11 @@ impl ActivityService {
     /// Returns the saved play queue repository.
     pub fn play_queues(&self) -> &PlayQueues {
         &self.queues
+    }
+
+    /// Returns the bookmark repository.
+    pub fn bookmarks(&self) -> &Bookmarks {
+        &self.bookmarks
     }
 
     /// Handles a client's scrobble.

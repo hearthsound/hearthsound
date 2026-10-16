@@ -23,8 +23,9 @@
 //! track is permanent in that user's library, and
 //! [`ActivityService::set_rating`] stores a rating of 1 to 5 or clears one.
 //! [`Playlists`] creates and edits playlists, keeping the playlist pin of every
-//! track whose membership changed in step, and [`PlayQueues`] stores the queue
-//! each client saved so another client can pick it up.
+//! track whose membership changed in step, [`PlayQueues`] stores the queue
+//! each client saved so another client can pick it up, and [`Bookmarks`] stores
+//! the position a user left a track at.
 //!
 //! # Examples
 //!
@@ -58,6 +59,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod bookmarks;
 mod error;
 mod feedback;
 mod play;
@@ -67,6 +69,7 @@ mod ratings;
 mod service;
 mod session;
 
+pub use bookmarks::{Bookmark, Bookmarks};
 pub use error::ActivityError;
 pub use feedback::{like, refresh_user_library_pin, unlike};
 pub use play::Plays;

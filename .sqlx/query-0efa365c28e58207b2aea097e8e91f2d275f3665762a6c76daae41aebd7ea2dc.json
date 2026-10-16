@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT client, current_index, position_ms, track_ids, updated_at FROM play_queues WHERE user_id = ? ORDER BY updated_at DESC, client LIMIT 1",
+  "query": "SELECT client, current_index, position_ms, track_ids, updated_at FROM play_queues WHERE user_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -70,5 +70,5 @@
       false
     ]
   },
-  "hash": "2ee6718f73560c77dd616ca81ef1e0f3bc8e89c1a13cbb29290fbcbb8f578838"
+  "hash": "0efa365c28e58207b2aea097e8e91f2d275f3665762a6c76daae41aebd7ea2dc"
 }

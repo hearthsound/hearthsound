@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT track_id, position_ms, comment, updated_at FROM bookmarks WHERE user_id = ? ORDER BY updated_at DESC, rowid DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "track_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "bookmarks",
+            "name": "track_id"
+          }
+        }
+      },
+      {
+        "name": "position_ms",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "bookmarks",
+            "name": "position_ms"
+          }
+        }
+      },
+      {
+        "name": "comment",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "bookmarks",
+            "name": "comment"
+          }
+        }
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "bookmarks",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "ec93b7d3dfa64bfe616f603ff814029780f9763d5a5876179e3bd2b5d41d7662"
+}
