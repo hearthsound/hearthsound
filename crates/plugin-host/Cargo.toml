@@ -19,6 +19,7 @@ hearthsound-core = { path = "../core" }
 hearthsound-db = { path = "../db" }
 jsonschema.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 semver = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

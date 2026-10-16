@@ -55,6 +55,7 @@ impl Fixture {
     /// - `adjust`: changes the configuration the default config file loads to,
     ///   before the services are built from it.
     pub async fn with_config(adjust: impl FnOnce(&mut BootstrapConfig)) -> Fixture {
+        install_crypto_provider();
         let dir = tempfile::tempdir().unwrap();
         let mut config = write_config(dir.path());
         adjust(&mut config);
@@ -133,6 +134,7 @@ impl Fixture {
     /// - `api_key`: the api key of the account the directory holds, whose
     ///   plaintext is only known when it is created.
     pub async fn reopen(dir: TempDir, api_key: String) -> Fixture {
+        install_crypto_provider();
         let services = Services::build(load_config(dir.path()), &BTreeMap::new())
             .await
             .unwrap();
@@ -153,6 +155,13 @@ impl Fixture {
             client: reqwest::Client::new(),
         }
     }
+}
+
+/// Installs ring as the process's TLS provider, which reqwest needs before it
+/// builds the test client because the workspace builds it without one. The
+/// plugin host installs the same provider; whichever runs first wins.
+fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 /// Loads the config file a previous [`write_config`] wrote.

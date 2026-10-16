@@ -56,7 +56,10 @@ md-5 = "0.11.0"
 moka = { version = "0.12.16", features = ["future"] }
 lofty = "0.25.4"
 rand = "0.10.3"
-reqwest = { version = "0.13.5", features = ["stream"] }
+# rustls with the ring provider instead of aws-lc-rs, whose C build dominated a
+# cold compile. `rustls-no-provider` leaves the provider to the caller.
+reqwest = { version = "0.13.5", default-features = false, features = ["charset", "http2", "rustls-no-provider", "stream", "system-proxy"] }
+rustls = { version = "0.23.46", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rpassword = "7.5.4"
 semver = "1.0.28"
 serde = "1.0.229"
@@ -78,8 +81,10 @@ tracing-subscriber = "0.3.23"
 unicode-normalization = "0.1.25"
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 uuid = { version = "1.28.0", features = ["v7"] }
-wasmtime = "49.0.3"
-wasmtime-wasi = "49.0.3"
+# Only the features the plugin host uses: the defaults add a WAT parser, a
+# compile cache with zstd, GC, threads, profiling and debugging support.
+wasmtime = { version = "49.0.3", default-features = false, features = ["anyhow", "async", "backtrace", "component-model", "cranelift", "parallel-compilation", "runtime", "std"] }
+wasmtime-wasi = { version = "49.0.3", default-features = false, features = ["p2"] }
 wiremock = "0.6"
 zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
 

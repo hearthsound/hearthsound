@@ -305,6 +305,10 @@ impl HttpClient {
             plugin_version
         );
 
+        // reqwest is built without a bundled TLS provider; ring is installed as
+        // the process default the first time a client is built. Installing
+        // fails harmlessly when a default is already in place.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let client = Client::builder()
             .user_agent(user_agent)
             .redirect(reqwest::redirect::Policy::none())
