@@ -15,6 +15,7 @@ mod cover_art;
 pub mod genres;
 mod scrobble;
 mod search;
+pub mod star;
 mod stream;
 mod system;
 
@@ -26,5 +27,6 @@ pub use cover_art::get_cover_art;
 pub use genres::{get_genres, get_random_songs, get_songs_by_genre};
 pub use scrobble::scrobble;
 pub use search::{search2, search3};
+pub use star::{get_starred, get_starred2, star, unstar};
 pub use stream::stream;
 pub use system::{get_license, get_music_folders, get_open_subsonic_extensions, ping, token_info};

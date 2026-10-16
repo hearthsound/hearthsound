@@ -249,7 +249,7 @@ pub async fn search2(call: Call) -> Encoded {
 
     let mut artists = Vec::with_capacity(matches.artists.len() + matches.catalog_artists.len());
     for matched in &matches.artists {
-        artists.push(projection::search_artist_ref(
+        artists.push(projection::starred_artist_ref(
             &matched.artist,
             &annotations.artist(matched.artist.id),
         ));

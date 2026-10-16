@@ -430,6 +430,97 @@ pub async fn album_detail(
     }))
 }
 
+/// Reads one album with its artists and tracks, whatever its availability.
+///
+/// A starred listing reports the entities a user liked however they are stored,
+/// so it reads an album without the scope filter the browse endpoints apply.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `album_id`: the album to read.
+///
+/// # Returns
+///
+/// The album detail, or `None` when the album does not exist.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn album_detail_any(
+    conn: &mut SqliteConnection,
+    album_id: EntityId,
+) -> Result<Option<AlbumDetail>, LibraryError> {
+    let Some(album) = albums::get_album(conn, album_id).await? else {
+        return Ok(None);
+    };
+    let artists = artists::list_album_artists(conn, album_id).await?;
+    let mut tracks = Vec::new();
+    for track in tracks::list_tracks_for_album(conn, album_id).await? {
+        tracks.push(track_view(conn, track).await?);
+    }
+    Ok(Some(AlbumDetail {
+        album,
+        artists,
+        tracks,
+    }))
+}
+
+/// Reads one artist with its albums, whatever their availability.
+///
+/// A starred listing reports the entities a user liked however they are stored,
+/// so it reads an artist without the scope filter the browse endpoints apply.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `artist_id`: the artist to read.
+///
+/// # Returns
+///
+/// The artist detail, or `None` when the artist does not exist.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn artist_detail_any(
+    conn: &mut SqliteConnection,
+    artist_id: EntityId,
+) -> Result<Option<ArtistDetail>, LibraryError> {
+    let Some(artist) = artists::get_artist(conn, artist_id).await? else {
+        return Ok(None);
+    };
+    let albums = albums::list_albums_for_artist(conn, artist_id).await?;
+    Ok(Some(ArtistDetail { artist, albums }))
+}
+
+/// Reads one track, whatever its availability.
+///
+/// A starred listing reports the entities a user liked however they are stored,
+/// so it reads a track without the scope filter the browse endpoints apply.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `track_id`: the track to read.
+///
+/// # Returns
+///
+/// The track view, or `None` when the track does not exist.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn track_any(
+    conn: &mut SqliteConnection,
+    track_id: EntityId,
+) -> Result<Option<TrackView>, LibraryError> {
+    let Some(track) = tracks::get_track(conn, track_id).await? else {
+        return Ok(None);
+    };
+    Ok(Some(track_view(conn, track).await?))
+}
+
 /// Reads one artist with its albums, if the scope contains it.
 ///
 /// # Parameters

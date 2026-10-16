@@ -18,5 +18,6 @@ mod genres;
 mod request;
 mod scrobble;
 mod search;
+mod star;
 mod stream;
 mod stream_pending;

@@ -745,6 +745,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   narrowed by genre and release year.
 - `search2` answers the same local and catalog matches as `search3` in the
   older response shape: bare artist references, album folders, and songs.
+- `star` and `unstar` record and remove a user's like of the artists, albums,
+  and songs a request names, materializing a catalog id first, and
+  `getStarred` and `getStarred2` list what the user liked however it is stored.
 
 ### Security
 

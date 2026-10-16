@@ -1352,6 +1352,40 @@ async fn starred_entities_and_the_last_modified_instant() {
     let before = query::library_last_modified(&mut conn).await.unwrap();
     assert!(before > 0, "the created rows carry an instant");
 
+    // A liked entity is read however it is stored: the unscoped reads report a
+    // track the server browse view leaves out, because it has no file yet.
+    let server = Scope::Server(ServerBrowse::All);
+    assert!(
+        query::track(&mut conn, server, first_track)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        query::track_any(&mut conn, first_track)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        query::album_detail(&mut conn, server, first_album)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        query::album_detail_any(&mut conn, first_album)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        query::artist_detail_any(&mut conn, first_artist)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
     // The likes are one instant apart, so the order is not a tie.
     like_at(&db, user, EntityKind::Track, first_track, 100).await;
     like_at(&db, user, EntityKind::Track, second_track, 300).await;

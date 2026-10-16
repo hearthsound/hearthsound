@@ -341,10 +341,10 @@ pub(crate) fn artist_ref(artist: &Artist) -> Object {
         .set("name", artist.name.clone())
 }
 
-/// Builds the artist reference `search2` lists.
+/// Builds the artist reference an older listing carries.
 ///
-/// The older search response lists an artist as a bare reference with the
-/// user's star, and nothing else, which is what a client of that response
+/// `search2` and `getStarred` list an artist as a bare reference with the
+/// user's star, and nothing else, which is what a client of those responses
 /// reads.
 ///
 /// # Parameters
@@ -355,7 +355,7 @@ pub(crate) fn artist_ref(artist: &Artist) -> Object {
 /// # Returns
 ///
 /// The reference, with `starred` only when the user starred the artist.
-pub(crate) fn search_artist_ref(artist: &Artist, annotation: &Annotation) -> Object {
+pub(crate) fn starred_artist_ref(artist: &Artist, annotation: &Annotation) -> Object {
     let object = artist_ref(artist);
     match annotation.starred_at {
         Some(at) => object.set("starred", timestamp(at)),

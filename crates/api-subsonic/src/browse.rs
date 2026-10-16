@@ -118,6 +118,102 @@ pub(crate) async fn album(
     Ok(Some(LoadedAlbum { detail, files }))
 }
 
+/// Reads one album without an availability filter.
+///
+/// A starred listing reports the entities a user liked however they are stored,
+/// so it reads an album the browse scope would leave out.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `album_id`: the album to read.
+///
+/// # Returns
+///
+/// The album with its tracks and their preferred files, or `None` when the
+/// album does not exist.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub(crate) async fn album_any(
+    database: &Database,
+    album_id: EntityId,
+) -> Result<Option<LoadedAlbum>, LibraryError> {
+    let mut conn = database.readers().acquire().await?;
+    let Some(detail) = query::album_detail_any(&mut conn, album_id).await? else {
+        return Ok(None);
+    };
+    let mut files = Vec::with_capacity(detail.tracks.len());
+    for view in &detail.tracks {
+        files.push(media_files::preferred_media_file(&mut conn, view.track.id).await?);
+    }
+    Ok(Some(LoadedAlbum { detail, files }))
+}
+
+/// Reads one artist without an availability filter.
+///
+/// A starred listing reports the entities a user liked however they are stored,
+/// so it reads an artist the browse scope would leave out.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `artist_id`: the artist to read.
+///
+/// # Returns
+///
+/// The artist with its albums, or `None` when the artist does not exist.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub(crate) async fn artist_any(
+    database: &Database,
+    artist_id: EntityId,
+) -> Result<Option<ArtistDetail>, LibraryError> {
+    let mut conn = database.readers().acquire().await?;
+    query::artist_detail_any(&mut conn, artist_id).await
+}
+
+/// Reads one track without an availability filter.
+///
+/// A starred listing reports the entities a user liked however they are stored,
+/// so it reads a track the browse scope would leave out.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `track_id`: the track to read.
+///
+/// # Returns
+///
+/// The track with its file and its album's artists, or `None` when the track
+/// does not exist.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub(crate) async fn track_any(
+    database: &Database,
+    track_id: EntityId,
+) -> Result<Option<LoadedTrack>, LibraryError> {
+    let mut conn = database.readers().acquire().await?;
+    let Some(view) = query::track_any(&mut conn, track_id).await? else {
+        return Ok(None);
+    };
+    let file = media_files::preferred_media_file(&mut conn, track_id).await?;
+    let album_artists = match view.album.as_ref() {
+        Some(album) => artists::list_album_artists(&mut conn, album.id).await?,
+        None => Vec::new(),
+    };
+    Ok(Some(LoadedTrack {
+        view,
+        file,
+        album_artists,
+    }))
+}
+
 /// Reports a read failure on the Subsonic failure envelope.
 ///
 /// The cause is for the server's log; the client is told only that the call

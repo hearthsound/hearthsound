@@ -1,0 +1,250 @@
+//! Integration tests for the star endpoints: the like a `star` records and an
+//! `unstar` removes, the two starred listings, and the ids each endpoint
+//! refuses.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use hearthsound_core::{EntityId, IdPrefix};
+
+use crate::common::seed::{Seeded, library};
+use crate::common::{Fixture, SNAPSHOT_FILTERS, assert_error, assert_ok, get};
+
+/// Builds a fixture with the seeded library.
+///
+/// # Returns
+///
+/// The fixture and the ids of the seeded entities; the fixture keeps its
+/// temporary directory alive.
+async fn fixture() -> (Fixture, Seeded) {
+    let fixture = Fixture::new().await;
+    let seeded = library(
+        &fixture.database,
+        &fixture.subdir("owned"),
+        &fixture.subdir("generic"),
+        fixture.user_id,
+    )
+    .await;
+    (fixture, seeded)
+}
+
+/// Returns the first id that starts with a marker.
+///
+/// # Parameters
+///
+/// - `body`: the response body.
+/// - `marker`: the prefix of the id.
+///
+/// # Returns
+///
+/// The id, or `None` when the body does not carry one.
+fn id_after(body: &str, marker: &str) -> Option<String> {
+    let start = body.find(marker)?;
+    let rest = &body[start..];
+    let end = rest.find('"').unwrap_or(rest.len());
+    Some(rest[..end].to_owned())
+}
+
+/// `star` records a like that `getStarred2` lists and `unstar` removes.
+#[tokio::test]
+async fn star_and_unstar_change_what_the_listings_show() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+
+    // Nothing is liked yet, so both listings are empty.
+    let empty = get(
+        &app,
+        &format!("/rest/getStarred2?apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_ok(&empty);
+    assert!(
+        empty
+            .body
+            .contains("\"starred2\":{\"artist\":[],\"album\":[],\"song\":[]}"),
+        "{}",
+        empty.body
+    );
+
+    let starred = get(
+        &app,
+        &format!(
+            "/rest/star?id={}&albumId={}&artistId={}&apiKey={}&f=json",
+            seeded.alpha_tracks[0], seeded.alpha, seeded.cardinals, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&starred);
+    assert!(
+        starred.body.contains("\"status\":\"ok\""),
+        "{}",
+        starred.body
+    );
+
+    let json = get(
+        &app,
+        &format!("/rest/getStarred2?apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_ok(&json);
+    assert!(
+        json.body
+            .contains(&format!("\"id\":\"{}\"", seeded.cardinals)),
+        "the liked artist is listed: {}",
+        json.body
+    );
+    assert!(
+        json.body.contains(&format!("\"id\":\"{}\"", seeded.alpha)),
+        "the liked album is listed: {}",
+        json.body
+    );
+    assert!(
+        json.body
+            .contains(&format!("\"id\":\"{}\"", seeded.alpha_tracks[0])),
+        "the liked song is listed: {}",
+        json.body
+    );
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("starred2-json", seeded.stabilize(&json.body));
+    });
+
+    let xml = get(
+        &app,
+        &format!("/rest/getStarred.view?apiKey={}", fixture.api_key),
+    )
+    .await;
+    assert_ok(&xml);
+    assert!(xml.body.contains("isDir=\"true\""), "{}", xml.body);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("starred-xml", seeded.stabilize(&xml.body));
+    });
+
+    let unstarred = get(
+        &app,
+        &format!(
+            "/rest/unstar?id={}&apiKey={}&f=json",
+            seeded.alpha_tracks[0], fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&unstarred);
+    let after = get(
+        &app,
+        &format!("/rest/getStarred2?apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_ok(&after);
+    assert!(
+        !after
+            .body
+            .contains(&format!("\"id\":\"{}\"", seeded.alpha_tracks[0])),
+        "the unstarred song is gone: {}",
+        after.body
+    );
+    assert!(
+        after.body.contains(&format!("\"id\":\"{}\"", seeded.alpha)),
+        "the album is still liked: {}",
+        after.body
+    );
+}
+
+/// `star` materializes a catalog id, so a search result can be liked.
+#[tokio::test]
+async fn star_materializes_a_catalog_id() {
+    let (fixture, _seeded) = fixture().await;
+    fixture.install_hello_catalog().await;
+    let app = fixture.app();
+
+    let found = get(
+        &app,
+        &format!(
+            "/rest/search3?query=cardinals&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&found);
+    let track = id_after(&found.body, "x_hello_t_").expect("the search lists a catalog track");
+
+    let starred = get(
+        &app,
+        &format!("/rest/star?id={track}&apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_ok(&starred);
+
+    // The like is recorded against the stored row the catalog id materialized
+    // into, so the listing names a stored id and no catalog one.
+    let listed = get(
+        &app,
+        &format!("/rest/getStarred2?apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_ok(&listed);
+    assert!(
+        listed.body.contains("\"song\":[{"),
+        "the materialized song is listed: {}",
+        listed.body
+    );
+    assert!(
+        !listed.body.contains("x_hello_t_"),
+        "the listing names the stored row: {}",
+        listed.body
+    );
+}
+
+/// `star` refuses a request that names no entity and an id it cannot resolve.
+#[tokio::test]
+async fn star_refuses_unusable_ids() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+
+    let missing = get(
+        &app,
+        &format!("/rest/star?apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_error(&missing, 10);
+    let empty = get(
+        &app,
+        &format!("/rest/star?id=&apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_error(&empty, 10);
+
+    let unknown = get(
+        &app,
+        &format!("/rest/star?id=nonsense&apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_error(&unknown, 70);
+
+    // A valid id of another kind, and a valid id of the right kind that names
+    // no stored entity, are both refused.
+    let other_kind = get(
+        &app,
+        &format!(
+            "/rest/star?id={}&apiKey={}&f=json",
+            seeded.alpha, fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&other_kind, 70);
+    let absent = EntityId::new(IdPrefix::Track);
+    let no_such = get(
+        &app,
+        &format!("/rest/star?id={absent}&apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_error(&no_such, 70);
+
+    // A catalog id no instance resolves is unknown, not a server failure.
+    let unserved = get(
+        &app,
+        &format!(
+            "/rest/star?id=x_nowhere_t_abc&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&unserved, 70);
+}
