@@ -329,13 +329,17 @@ async fn waiters_observe_the_acquisition_at_every_attach_point() {
     let mut late = env.orchestrator.subscribe(id).unwrap();
     env.start();
     env.wait_for_state(id, AcquisitionState::Completed).await;
-    // The channel carries the same advance the ledger does, and it is written
-    // after the row, so a loaded machine can need longer than a fixed window.
-    tokio::time::timeout(crate::common::WAIT_TIMEOUT, late.changed())
-        .await
-        .expect("the channel carries the pipeline's advance")
-        .unwrap();
-    let snapshot: AcquisitionProgress = late.borrow_and_update().clone();
+    // The channel carries the same advance the ledger does, but it is written
+    // after the row, so the newest value can still be an earlier state when
+    // the ledger already reads completed; wait for the channel itself.
+    let snapshot: AcquisitionProgress = tokio::time::timeout(
+        crate::common::WAIT_TIMEOUT,
+        late.wait_for(|progress| progress.state == AcquisitionState::Completed),
+    )
+    .await
+    .expect("the channel carries the pipeline's advance")
+    .unwrap()
+    .clone();
     assert_eq!(snapshot.state, AcquisitionState::Completed);
     assert_eq!(snapshot.priority, Priority::Play);
     assert_eq!(snapshot.acquisition_id, id);
