@@ -204,7 +204,7 @@ async fn the_decision_refuses_unusable_requests() {
         ),
     )
     .await;
-    assert_error(&get_response, 10);
+    assert_error(&get_response, 0);
 
     // A body that is not the client description is a generic error.
     let bad_body = decide(

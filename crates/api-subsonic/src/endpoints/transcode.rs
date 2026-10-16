@@ -36,16 +36,16 @@ const DIRECT: &str = "direct";
 ///
 /// # Errors
 ///
-/// Answers Subsonic error 10 when `mediaId` is missing, when the request carried
-/// no client description, or when it was made with `GET`, error 0 when
-/// `mediaType` is not a value the extension defines or the body is not a client
-/// description, error 70 when `mediaType` is `podcast` and when `mediaId` names
-/// no stored track, and a generic error when a read fails.
+/// Answers Subsonic error 10 when `mediaId` is missing or when the request
+/// carried no client description, error 0 when the request was made with `GET`,
+/// when `mediaType` is not a value the extension defines, or when the body is
+/// not a client description, error 70 when `mediaType` is `podcast` and when
+/// `mediaId` names no stored track, and a generic error when a read fails.
 pub async fn get_transcode_decision(call: JsonCall) -> Encoded {
     if call.method() != axum::http::Method::POST {
         tracing::debug!("a transcode decision was asked for with a method that carries no body");
         return call.encode(Response::failed(SubsonicError::new(
-            crate::response::codes::MISSING_PARAMETER,
+            crate::response::codes::GENERIC,
             "A transcode decision is a POST with the client's description.",
         )));
     }
