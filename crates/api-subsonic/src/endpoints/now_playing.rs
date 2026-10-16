@@ -19,19 +19,6 @@ use crate::response::{Encoded, Response};
 use crate::value::{Array, Object};
 use crate::{browse, projection};
 
-/// Returns the current time in unix milliseconds.
-///
-/// # Returns
-///
-/// The instant, from the system clock.
-fn now_millis() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 /// Answers `getNowPlaying`: the fresh now-playing rows the caller may see.
 ///
 /// # Parameters
@@ -46,7 +33,7 @@ fn now_millis() -> i64 {
 ///
 /// Answers a generic error when a read fails.
 pub async fn get_now_playing(call: Call) -> Encoded {
-    let now = now_millis();
+    let now = crate::params::now_millis();
     let activity = call.state().activity();
     let players = match activity.now_playing().players(now).await {
         Ok(players) => players,

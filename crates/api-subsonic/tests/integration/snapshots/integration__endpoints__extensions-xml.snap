@@ -2,4 +2,4 @@
 source: crates/api-subsonic/tests/integration/endpoints.rs
 expression: xml.body
 ---
-<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="hearthsound" serverVersion="0.1.0-alpha.0" openSubsonic="true"><openSubsonicExtension name="apiKeyAuthentication"><versions>1</versions></openSubsonicExtension><openSubsonicExtension name="formPost"><versions>1</versions></openSubsonicExtension><openSubsonicExtension name="indexBasedQueue"><versions>1</versions></openSubsonicExtension></subsonic-response>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="hearthsound" serverVersion="0.1.0-alpha.0" openSubsonic="true"><openSubsonicExtension name="apiKeyAuthentication"><versions>1</versions></openSubsonicExtension><openSubsonicExtension name="formPost"><versions>1</versions></openSubsonicExtension><openSubsonicExtension name="indexBasedQueue"><versions>1</versions></openSubsonicExtension><openSubsonicExtension name="playbackReport"><versions>1</versions></openSubsonicExtension></subsonic-response>

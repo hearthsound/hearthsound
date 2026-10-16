@@ -19,6 +19,7 @@ mod genres;
 mod now_playing;
 mod play_queue;
 mod playlists;
+mod report_playback;
 mod request;
 mod scrobble;
 mod search;

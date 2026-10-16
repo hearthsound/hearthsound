@@ -47,7 +47,7 @@ pub async fn scrobble(call: Call) -> Encoded {
     if ids.is_empty() {
         return call.encode(Response::failed(SubsonicError::missing_parameter("id")));
     }
-    let started_at = match number(&call, "time", now_millis()) {
+    let started_at = match number(&call, "time", crate::params::now_millis()) {
         Ok(started_at) => started_at,
         Err(error) => return call.encode(Response::failed(error)),
     };
@@ -99,7 +99,7 @@ pub async fn scrobble(call: Call) -> Encoded {
 ///
 /// Returns `Err(())` when the alias lookup itself fails, which is a failure of
 /// this server and is logged with its cause.
-async fn resolve(call: &Call, value: &str) -> Result<Option<EntityId>, ()> {
+pub(super) async fn resolve(call: &Call, value: &str) -> Result<Option<EntityId>, ()> {
     match ClientId::parse(value) {
         Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::Track => Ok(Some(id)),
         Ok(ClientId::Entity(id)) => {
@@ -176,15 +176,4 @@ fn submission(call: &Call) -> bool {
         call.get("submission"),
         Some(value) if matches!(value.trim().to_ascii_lowercase().as_str(), "false" | "0")
     )
-}
-
-/// Returns the current time in unix milliseconds.
-///
-/// # Returns
-///
-/// The number of milliseconds since the Unix epoch, or zero when the clock is
-/// outside the representable range.
-fn now_millis() -> i64 {
-    let nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
-    i64::try_from(nanos / 1_000_000).unwrap_or(0)
 }

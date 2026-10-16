@@ -16,6 +16,16 @@ use hearthsound_auth::SubsonicCredentials;
 
 use crate::response::{Encoded, Response, ResponseFormat};
 
+/// Returns the current time in unix milliseconds.
+///
+/// # Returns
+///
+/// The instant, from the system clock.
+pub(crate) fn now_millis() -> i64 {
+    let nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
+    i64::try_from(nanos / 1_000_000).unwrap_or(0)
+}
+
 /// The largest `application/x-www-form-urlencoded` body this server reads.
 pub const MAX_FORM_BODY_BYTES: usize = 1024 * 1024;
 

@@ -18,6 +18,7 @@ pub mod genres;
 pub mod now_playing;
 pub mod play_queue;
 pub mod playlists;
+pub mod report_playback;
 mod scrobble;
 mod search;
 mod stream;
@@ -38,6 +39,7 @@ pub use play_queue::{
 pub use playlists::{
     create_playlist, delete_playlist, get_playlist, get_playlists, update_playlist,
 };
+pub use report_playback::report_playback;
 pub use scrobble::scrobble;
 pub use search::{search2, search3};
 pub use stream::stream;
