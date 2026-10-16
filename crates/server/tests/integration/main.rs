@@ -12,3 +12,4 @@ mod on_demand;
 mod prefetch;
 mod reload;
 mod stream_pending;
+mod watch;

@@ -64,6 +64,7 @@ use hearthsound_jobs::{
 };
 use hearthsound_library::StorageRoots;
 use hearthsound_library::scan::{LibraryScanner, SCAN_JOB_KIND, ScanJobHandler};
+use hearthsound_library::watch::LibraryWatcher;
 use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::instances::InstanceService;
 use hearthsound_plugin_host::{PluginHost, PluginRepository, ProviderRegistry};
@@ -108,6 +109,8 @@ pub struct Services {
     queue: Arc<JobQueue>,
     /// The job runner with every handler registered.
     runner: Arc<JobRunner>,
+    /// The library folder watcher.
+    watcher: Arc<LibraryWatcher>,
     /// The cron scheduler with the system schedules stored.
     scheduler: Arc<Scheduler>,
     /// The activity service: play recording and stream sessions.
@@ -251,6 +254,13 @@ impl Services {
         );
         let runner = Arc::new(runner);
 
+        let watcher = Arc::new(LibraryWatcher::new(
+            &database,
+            Arc::clone(&scanner),
+            Arc::clone(&queue),
+            settings.clone(),
+        ));
+
         let scheduler = Arc::new(Scheduler::new(
             &database,
             Arc::clone(&queue),
@@ -291,6 +301,7 @@ impl Services {
             scanner,
             queue,
             runner,
+            watcher,
             scheduler,
             activity,
             storage_roots,
@@ -387,6 +398,14 @@ impl Services {
     /// Returns the job runner.
     pub fn runner(&self) -> &Arc<JobRunner> {
         &self.runner
+    }
+
+    /// Returns the library folder watcher.
+    ///
+    /// `admin set-folder-watch` writes the flag the watcher reconciles against,
+    /// and the reload on an external write is what starts or stops the watchers.
+    pub fn watcher(&self) -> &Arc<LibraryWatcher> {
+        &self.watcher
     }
 
     /// Returns the cron scheduler.

@@ -687,6 +687,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A library folder whose `watch` flag is set is watched for filesystem changes:
   after the quiet period in `library.watch.debounce_ms` (2 seconds by default)
   the changed directories are scanned, never the whole library.
+- The watcher starts with the server, so a watched folder is scanned once at
+  startup and a folder added while the server runs is picked up by the reload
+  that follows the write.
 
 ### Security
 

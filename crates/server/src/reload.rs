@@ -69,6 +69,7 @@ impl Services {
                         break;
                     }
                     self.apply_cached_settings();
+                    self.reconcile_watchers().await;
                 }
                 () = shutdown.wait() => break,
             }
@@ -100,7 +101,25 @@ impl Services {
             Ok(()) => {}
             Err(error) => tracing::error!(%error, "could not reconcile the acquisitions"),
         }
+        self.reconcile_watchers().await;
         tracing::info!("reloaded the settings and providers after an external write");
+    }
+
+    /// Brings the folder watchers in line with the stored folders.
+    ///
+    /// The watched flag, the folder paths, and the debounce period are all
+    /// runtime state, so a write that changes one of them takes effect here
+    /// rather than at the next restart. A failure is logged and the watchers
+    /// keep watching what they already watch.
+    ///
+    /// # Parameters
+    ///
+    /// - `self`: the services whose watchers are reconciled.
+    async fn reconcile_watchers(&self) {
+        match self.watcher().reconcile().await {
+            Ok(()) => {}
+            Err(error) => tracing::error!(%error, "could not reconcile the folder watchers"),
+        }
     }
 
     /// Reapplies the settings the services keep a copy of.

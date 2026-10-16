@@ -1,21 +1,23 @@
 //! The serving process: the HTTP listener, the background workers, shutdown.
 //!
 //! [`Server::start`] binds the configured address, spawns the job runner, the
-//! scheduler, and the worker that reacts to writes made by other connections,
-//! and serves the axum application. [`Server::run`] adds the signal handling a
-//! deployment needs: it starts, waits for `SIGINT` or `SIGTERM`, and then stops
-//! the listener and every worker.
+//! scheduler, the folder watcher, and the worker that reacts to writes made by
+//! other connections, and serves the axum application. [`Server::run`] adds the
+//! signal handling a deployment needs: it starts, waits for `SIGINT` or
+//! `SIGTERM`, and then stops the listener and every worker.
 //!
 //! Shutdown is orderly in one direction: the HTTP server stops accepting new
 //! connections and finishes the responses in flight, the job runner finishes the
 //! jobs it holds (up to its shutdown grace period), the scheduler stops between
-//! ticks, and the data-version watcher stops polling. A handler abandoned by the
-//! runner's grace period keeps its claim and runs again after its lock expires,
-//! which is why handlers must tolerate running twice.
+//! ticks, the folder watcher drops its watchers, and the data-version watcher
+//! stops polling. A handler abandoned by the runner's grace period keeps its
+//! claim and runs again after its lock expires, which is why handlers must
+//! tolerate running twice.
 
 use std::sync::Arc;
 
 use hearthsound_jobs::Shutdown;
+use hearthsound_library::scan::ScanRequest;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -219,10 +221,60 @@ fn spawn_workers(services: &Arc<Services>, shutdown: Shutdown) -> Vec<JoinHandle
     let scheduler_shutdown = shutdown.clone();
     let scheduler_task = tokio::spawn(async move { scheduler.run(scheduler_shutdown).await });
 
-    let watcher = Arc::clone(services);
-    let watcher_task = tokio::spawn(async move { watcher.watch_external_changes(shutdown).await });
+    let watchers = Arc::clone(services);
+    let watchers_shutdown = shutdown.clone();
+    let watchers_task =
+        tokio::spawn(async move { watch_folders(watchers, watchers_shutdown).await });
 
-    vec![runner_task, scheduler_task, watcher_task]
+    let external = Arc::clone(services);
+    let external_task =
+        tokio::spawn(async move { external.watch_external_changes(shutdown).await });
+
+    vec![runner_task, scheduler_task, watchers_task, external_task]
+}
+
+/// Watches the folders flagged for watching, scanning each once at startup.
+///
+/// A filesystem watcher only reports what happens while it runs, so every
+/// watched folder is scanned once when the server starts: whatever changed
+/// while it was stopped is found by that incremental scan.
+///
+/// # Parameters
+///
+/// - `services`: the services the watcher and the scan requests come from.
+/// - `shutdown`: the signal that stops the watcher.
+async fn watch_folders(services: Arc<Services>, shutdown: Shutdown) {
+    let watcher = services.watcher();
+    if let Err(error) = watcher.reconcile().await {
+        tracing::error!(%error, "could not reconcile the folder watchers");
+    }
+    let folders = match hearthsound_library::LibraryRepository::new(services.database())
+        .list_library_folders()
+        .await
+    {
+        Ok(folders) => folders,
+        Err(error) => {
+            tracing::error!(%error, "could not list the library folders for a startup scan");
+            Vec::new()
+        }
+    };
+    for folder in folders.iter().filter(|folder| folder.watch) {
+        let request = ScanRequest::folder(folder.id);
+        if let Err(error) = services
+            .scanner()
+            .request_scan(services.queue(), &request)
+            .await
+        {
+            tracing::warn!(
+                folder = %folder.id,
+                %error,
+                "could not request the startup scan of a watched folder"
+            );
+        }
+    }
+
+    shutdown.wait().await;
+    watcher.stop();
 }
 
 /// Waits for `SIGINT` or `SIGTERM`.
