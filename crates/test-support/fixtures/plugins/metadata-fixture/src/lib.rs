@@ -8,7 +8,7 @@
 //! matched recording appears on.
 
 use hearthsound_plugin::metadata_provider::exports::hearthsound::plugin::metadata::{
-    ArtistInfo, ArtistInfoRequest, RecordingHint, RecordingMatch, ReleaseSummary,
+    ArtistInfo, ArtistInfoRequest, ArtistLink, RecordingHint, RecordingMatch, ReleaseSummary,
 };
 use hearthsound_plugin::metadata_provider::exports::hearthsound::plugin::{lifecycle, metadata};
 use hearthsound_plugin::types::{Album, ArtistCredit, IdPair, ProviderError, Track};
@@ -33,6 +33,36 @@ struct Config {
     /// The recordings the plugin knows.
     #[serde(default)]
     recordings: Vec<Recording>,
+    /// The artists the plugin knows information about.
+    #[serde(default)]
+    artists: Vec<ConfiguredArtist>,
+}
+
+/// One artist and what the plugin knows about them.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfiguredArtist {
+    /// The artist's name.
+    name: String,
+    /// The artist's MusicBrainz id.
+    #[serde(default)]
+    mbid: Option<String>,
+    /// The artist's biography.
+    #[serde(default)]
+    biography: Option<String>,
+    /// The pages about the artist.
+    #[serde(default)]
+    links: Vec<ConfiguredLink>,
+}
+
+/// One page about a configured artist.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfiguredLink {
+    /// The kind of page.
+    kind: String,
+    /// The page's URL.
+    url: String,
 }
 
 /// One recording and the releases it appears on.
@@ -189,9 +219,41 @@ impl metadata::Guest for MetadataFixture {
     }
 
     fn get_artist_info(request: ArtistInfoRequest) -> Result<Option<ArtistInfo>, ProviderError> {
-        // The fixture answers no artist info yet: the host calls it so the
-        // interface is exercised, and a later change answers from the config.
-        let _ = request;
+        let config = config()?;
+        let requested_mbid = request
+            .ids
+            .iter()
+            .find(|id| id.namespace == ARTIST_NAMESPACE)
+            .map(|id| id.value.as_str());
+        for artist in config.artists {
+            let known = artist.name.eq_ignore_ascii_case(&request.name)
+                || match (&artist.mbid, requested_mbid) {
+                    (Some(configured), Some(requested)) => configured == requested,
+                    _ => false,
+                };
+            if !known {
+                continue;
+            }
+            return Ok(Some(ArtistInfo {
+                ids: artist
+                    .mbid
+                    .map(|mbid| IdPair {
+                        namespace: ARTIST_NAMESPACE.to_string(),
+                        value: mbid,
+                    })
+                    .into_iter()
+                    .collect(),
+                biography: artist.biography,
+                links: artist
+                    .links
+                    .into_iter()
+                    .map(|link| ArtistLink {
+                        kind: link.kind,
+                        url: link.url,
+                    })
+                    .collect(),
+            }));
+        }
         Ok(None)
     }
 

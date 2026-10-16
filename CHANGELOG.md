@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The plugin host provides `hearthsound:plugin@0.2.0`, the release that adds the
   artwork provider and artist info to the plugin interface.
+- Metadata plugins can be asked for an artist's biography and links through
+  `MetadataProvider::artist_info`.
 
 ### Added
 

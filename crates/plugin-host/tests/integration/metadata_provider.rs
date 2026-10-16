@@ -6,14 +6,25 @@ use std::path::Path;
 use std::sync::Arc;
 
 use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore};
-use hearthsound_core::providers::{ExternalId, MetadataProvider, RecordingHint};
+use hearthsound_core::providers::{ArtistInfoRequest, ExternalId, MetadataProvider, RecordingHint};
 use hearthsound_core::{ProviderError, Slug};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_plugin_host::{InstanceConfig, PluginHost};
 use hearthsound_test_support::{METADATA_FIXTURE, fixture_plugin};
 
-/// The recordings the fixture is configured with.
+/// The recordings and artists the fixture is configured with.
 const CONFIG: &str = r#"{
+  "artists": [
+    {
+      "name": "Hello Artist",
+      "mbid": "44444444-4444-4444-8444-444444444444",
+      "biography": "A greeting in human form.",
+      "links": [
+        { "kind": "wikipedia", "url": "https://en.wikipedia.org/wiki/Hello" },
+        { "kind": "lastfm", "url": "https://www.last.fm/music/Hello+Artist" }
+      ]
+    }
+  ],
   "recordings": [
     {
       "title": "Hello Song",
@@ -164,4 +175,63 @@ async fn reports_configuration_problems() {
     let (_dir, provider) = provider().await;
     assert!(provider.validate_config("not json").await.unwrap().len() == 1);
     assert!(provider.validate_config(CONFIG).await.unwrap().is_empty());
+}
+
+/// A configured artist is answered with its biography and links, by name and by
+/// identifier, and an artist the fixture does not know is `None`.
+#[tokio::test]
+async fn artist_info_is_answered_from_the_config() {
+    let (_dir, provider) = provider().await;
+
+    let by_name = provider
+        .artist_info(&ArtistInfoRequest {
+            name: "hello artist".to_owned(),
+            ids: Vec::new(),
+        })
+        .await
+        .unwrap()
+        .expect("the configured artist is known");
+    assert_eq!(
+        by_name.ids,
+        [ExternalId {
+            namespace: "mb-artist".to_owned(),
+            value: "44444444-4444-4444-8444-444444444444".to_owned(),
+        }]
+    );
+    assert_eq!(
+        by_name.biography.as_deref(),
+        Some("A greeting in human form.")
+    );
+    let kinds: Vec<&str> = by_name
+        .links
+        .iter()
+        .map(|link| link.kind.as_str())
+        .collect();
+    assert_eq!(kinds, ["wikipedia", "lastfm"]);
+    assert_eq!(
+        by_name.links[1].url,
+        "https://www.last.fm/music/Hello+Artist"
+    );
+
+    // The identifier alone matches too, whatever the name says.
+    let by_id = provider
+        .artist_info(&ArtistInfoRequest {
+            name: "Something Else".to_owned(),
+            ids: vec![ExternalId {
+                namespace: "mb-artist".to_owned(),
+                value: "44444444-4444-4444-8444-444444444444".to_owned(),
+            }],
+        })
+        .await
+        .unwrap();
+    assert!(by_id.is_some(), "the identifier matched the artist");
+
+    let unknown = provider
+        .artist_info(&ArtistInfoRequest {
+            name: "Nobody".to_owned(),
+            ids: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert!(unknown.is_none(), "an unknown artist is not an error");
 }

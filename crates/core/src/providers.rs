@@ -422,6 +422,39 @@ pub struct RecordingMatch {
     pub score: f32,
 }
 
+/// What the server knows about an artist it wants information on.
+///
+/// The name is what a person reads; the identifiers are what a provider
+/// matches on, because a name alone is ambiguous.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArtistInfoRequest {
+    /// The artist's name.
+    pub name: String,
+    /// The identifiers the server already has for the artist.
+    pub ids: Vec<ExternalId>,
+}
+
+/// One web page about an artist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtistLink {
+    /// The kind of page: `homepage`, `wikipedia`, `wikidata`, `lastfm`,
+    /// `discogs`, `allmusic`, or `bandcamp`.
+    pub kind: String,
+    /// The page's URL.
+    pub url: String,
+}
+
+/// What a provider knows about an artist.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArtistInfo {
+    /// The identifiers the provider matched the artist by.
+    pub ids: Vec<ExternalId>,
+    /// The artist's biography, when the provider has one.
+    pub biography: Option<String>,
+    /// The pages about the artist.
+    pub links: Vec<ArtistLink>,
+}
+
 /// Track and release metadata enrichment.
 ///
 /// Identity resolution goes through this layer: the core passes what it knows
@@ -460,8 +493,30 @@ pub trait MetadataProvider: ProviderLifecycle {
     /// Returns [`ProviderError::NotFound`] when the provider knows no such
     /// release.
     async fn get_release(&self, ids: &[ExternalId]) -> Result<CatalogAlbum, ProviderError>;
+
+    /// Returns what the provider knows about an artist.
+    ///
+    /// # Parameters
+    ///
+    /// - `request`: the artist's name and the identifiers the server has for
+    ///   it.
+    ///
+    /// # Returns
+    ///
+    /// The information, or `None` when the provider does not know the artist,
+    /// which is not an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when the lookup could not be performed.
+    async fn artist_info(
+        &self,
+        request: &ArtistInfoRequest,
+    ) -> Result<Option<ArtistInfo>, ProviderError>;
 }
 
+/// What the server knows about an artist it wants information on.
+///
 /// What an acquisition provider can do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcquisitionCapabilities {

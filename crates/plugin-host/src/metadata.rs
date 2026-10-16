@@ -7,8 +7,8 @@
 
 use async_trait::async_trait;
 use hearthsound_core::providers::{
-    CatalogAlbum, ExternalId, MetadataProvider, ProviderLifecycle, RecordingHint, RecordingMatch,
-    ReleaseSummary,
+    ArtistInfo, ArtistInfoRequest, ArtistLink, CatalogAlbum, ExternalId, MetadataProvider,
+    ProviderLifecycle, RecordingHint, RecordingMatch, ReleaseSummary,
 };
 use hearthsound_core::{ProviderError, Slug};
 
@@ -128,6 +128,47 @@ impl MetadataProvider for WasmMetadataProvider {
         outcome
             .map(to_core_album)
             .map_err(|error| self.map_error(error))
+    }
+
+    async fn artist_info(
+        &self,
+        request: &ArtistInfoRequest,
+    ) -> Result<Option<ArtistInfo>, ProviderError> {
+        let request = metadata::ArtistInfoRequest {
+            name: request.name.clone(),
+            ids: request.ids.iter().map(to_wit_id).collect(),
+        };
+        let outcome = self
+            .pool
+            .call(move |store, instance| {
+                Box::pin(async move {
+                    instance
+                        .hearthsound_plugin_metadata()
+                        .call_get_artist_info(store, &request)
+                        .await
+                })
+            })
+            .await?;
+
+        outcome
+            .map(|info| info.map(to_core_artist_info))
+            .map_err(|error| self.map_error(error))
+    }
+}
+
+/// Converts the plugin's artist information into core artist information.
+fn to_core_artist_info(info: metadata::ArtistInfo) -> ArtistInfo {
+    ArtistInfo {
+        ids: info.ids.into_iter().map(to_core_id).collect(),
+        biography: info.biography,
+        links: info
+            .links
+            .into_iter()
+            .map(|link| ArtistLink {
+                kind: link.kind,
+                url: link.url,
+            })
+            .collect(),
     }
 }
 
