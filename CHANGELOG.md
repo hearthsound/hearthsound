@@ -672,6 +672,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A single-valued artist tag is split into its credited artists on the
   separators in the new `library.scan.artist_separators` setting, so `AC/DC`
   stays one artist while `A feat. B` becomes two.
+- An album whose compilation flag is set, or whose album artist is named
+  `Various Artists`, is stored as a compilation, credited to `Various Artists`
+  when the file names no album artist, and reported with `isCompilation`.
 
 ### Security
 

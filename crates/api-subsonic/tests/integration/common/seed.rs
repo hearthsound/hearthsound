@@ -75,7 +75,7 @@ pub async fn library(database: &Database, owned: &Path, generic: &Path, owner: E
         .unwrap();
     let generic = library.add_library_folder(generic, None).await.unwrap();
 
-    let alpha = album(&library, "Alpha", 1999, "The Cardinals").await;
+    let alpha = album(&library, "Alpha", 1999, "The Cardinals", "album").await;
     let cardinals = artist_of(&library, alpha).await;
     let zero = track(
         &library,
@@ -111,7 +111,7 @@ pub async fn library(database: &Database, owned: &Path, generic: &Path, owner: E
     )
     .await;
 
-    let bright = album(&library, "Bright", 2001, "2 Mello").await;
+    let bright = album(&library, "Bright", 2001, "2 Mello", "album").await;
     let mello = artist_of(&library, bright).await;
     let signal = track(
         &library,
@@ -128,7 +128,7 @@ pub async fn library(database: &Database, owned: &Path, generic: &Path, owner: E
     )
     .await;
 
-    let cache_album = album(&library, "Cache", 2010, "Charlotte").await;
+    let cache_album = album(&library, "Cache", 2010, "Charlotte", "album").await;
     let charlotte = artist_of(&library, cache_album).await;
     let gone = track(
         &library,
@@ -144,7 +144,7 @@ pub async fn library(database: &Database, owned: &Path, generic: &Path, owner: E
     )
     .await;
 
-    let delta = album(&library, "Delta", 2005, "El Mar").await;
+    let delta = album(&library, "Delta", 2005, "El Mar", "compilation").await;
     let elmar = artist_of(&library, delta).await;
     let ocean = track(
         &library,
@@ -217,10 +217,24 @@ impl Seeded {
 }
 
 /// Inserts an album credited to one artist and returns its id.
-async fn album(library: &LibraryRepository, title: &str, year: i64, artist: &str) -> EntityId {
+///
+/// # Parameters
+///
+/// - `library`: the repository to write through.
+/// - `title`: the album title.
+/// - `year`: the release year.
+/// - `artist`: the album artist.
+/// - `album_type`: the release type, for example `album` or `compilation`.
+async fn album(
+    library: &LibraryRepository,
+    title: &str,
+    year: i64,
+    artist: &str,
+    album_type: &str,
+) -> EntityId {
     let mut input = AlbumInput::new(title, Origin::Local);
     input.year = Some(year);
-    input.album_type = Some("album".to_owned());
+    input.album_type = Some(album_type.to_owned());
     input.display_artist = Some(artist.to_owned());
     library
         .upsert_album(&input, &[ArtistCredit::new(artist, "main")])

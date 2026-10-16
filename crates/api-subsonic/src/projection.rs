@@ -35,6 +35,9 @@ use hearthsound_library::{Album, Artist, MediaFile, ReplayGain};
 use crate::catalog::{artist_id, music_brainz_id};
 use crate::value::{Array, Object};
 
+/// The `albums.album_type` literal a compilation is stored with.
+const COMPILATION_ALBUM_TYPE: &str = "compilation";
+
 /// The ignored articles `getArtists` reports.
 ///
 /// The string is part of the response contract: a client shows it beside the
@@ -213,6 +216,10 @@ pub(crate) fn album_id3(
         .set(
             "releaseTypes",
             Array::named("releaseType", album.album_type.iter().cloned()),
+        )
+        .set(
+            "isCompilation",
+            album.album_type.as_deref() == Some(COMPILATION_ALBUM_TYPE),
         )
         .set("moods", Array::named("mood", std::iter::empty::<String>()))
         .set("sortName", album.sort_title.clone())

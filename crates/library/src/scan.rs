@@ -57,6 +57,12 @@ pub const SCAN_JOB_KIND: &str = "library.scan";
 /// of a big folder does not commit once per file.
 const WRITE_BATCH: usize = 64;
 
+/// The album artist a compilation without one is credited to.
+const VARIOUS_ARTISTS: &str = "Various Artists";
+
+/// The `albums.album_type` literal a compilation is stored with.
+const COMPILATION_ALBUM_TYPE: &str = "compilation";
+
 /// The file extensions the scanner treats as audio.
 const AUDIO_EXTENSIONS: [&str; 14] = [
     "aac", "aif", "aiff", "ape", "flac", "m4a", "mp3", "mp4", "mpc", "oga", "ogg", "opus", "wav",
@@ -533,10 +539,26 @@ impl IndexedTags {
             _ => stem.to_owned(),
         };
         let artists = split_credit(&tags.artists, separators);
-        let album_artists = match &tags.album_artist {
+        let mut album_artists = match &tags.album_artist {
             Some(name) => split_artists(name, separators),
-            None => artists.iter().take(1).cloned().collect(),
+            None => Vec::new(),
         };
+        // An album is a compilation when the file says so or when its album
+        // artist is `Various Artists`, which is how a tagger spells the same
+        // thing. A compilation the file gives no album artist for is credited
+        // to `Various Artists`, so its tracks do not land under one of the
+        // performers.
+        let compilation = tags.compilation == Some(true)
+            || album_artists
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(VARIOUS_ARTISTS));
+        if album_artists.is_empty() {
+            album_artists = if compilation {
+                vec![VARIOUS_ARTISTS.to_owned()]
+            } else {
+                artists.iter().take(1).cloned().collect()
+            };
+        }
         let display_artist = join_credit(&artists);
 
         let mut credits: Vec<ArtistCredit> = artists
@@ -572,6 +594,7 @@ impl IndexedTags {
                 album.release_date = tags.date.clone();
                 album.mb_release_id = tags.mb_release_id.clone();
                 album.mb_release_group_id = tags.mb_release_group_id.clone();
+                album.album_type = compilation.then(|| COMPILATION_ALBUM_TYPE.to_owned());
                 album
             });
         let album_credits = match album {

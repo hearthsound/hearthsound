@@ -596,6 +596,89 @@ async fn a_single_valued_artist_tag_respects_a_changed_separator_list() {
 }
 
 #[tokio::test]
+async fn a_compilation_is_credited_to_various_artists() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+
+    for (index, artist) in ["Nova Reyes", "Ida Frost", "Elmar Voss"].iter().enumerate() {
+        AudioFixture::new(AudioFormat::Flac)
+            .seconds(0.3)
+            .file_name(format!("track{index}.flac"))
+            .tags(
+                TrackTags::new(format!("Song {index}"), *artist)
+                    .album("Late Night Mix")
+                    .track(index as u32 + 1, 3)
+                    .compilation(true),
+            )
+            .write_into(&music)
+            .await
+            .unwrap();
+    }
+    // A second album without the flag and without an album artist keeps the
+    // behavior it had: it is credited to its first track's artist.
+    AudioFixture::new(AudioFormat::Flac)
+        .seconds(0.3)
+        .file_name("single.flac")
+        .tags(
+            TrackTags::new("Alone", "Nova Reyes")
+                .album("Nightfall")
+                .track(1, 1),
+        )
+        .write_into(&music)
+        .await
+        .unwrap();
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(folder.id).await.unwrap();
+
+    let various = library
+        .list_artists()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|artist| artist.name == "Various Artists")
+        .expect("the compilation is credited to Various Artists");
+    let compilation = library
+        .list_albums_for_artist(various.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|album| album.title == "Late Night Mix")
+        .expect("the compilation album is credited to Various Artists");
+    assert_eq!(compilation.album_type.as_deref(), Some("compilation"));
+    assert_eq!(
+        library
+            .list_tracks_for_album(compilation.id)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+
+    let nightfall = library
+        .list_albums_for_artist(
+            library
+                .list_artists()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|artist| artist.name == "Nova Reyes")
+                .unwrap()
+                .id,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|album| album.title == "Nightfall")
+        .expect("the plain album keeps its first artist");
+    assert_eq!(nightfall.album_type, None);
+}
+
+#[tokio::test]
 async fn the_scan_job_handler_runs_a_scan() {
     let dir = tempfile::tempdir().unwrap();
     let db = migrated(dir.path()).await;
