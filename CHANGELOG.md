@@ -756,6 +756,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `getCoverArt` with the art of its first entry.
 - The prefetch scheduler prefers the play queue a client saved over the listing
   it last read, so look-ahead follows the queue a client reports.
+- `savePlayQueue`, `getPlayQueue`, `savePlayQueueByIndex`, and
+  `getPlayQueueByIndex` store and report the queue each client of an account is
+  playing, and the index-based queue extension is advertised.
 
 ### Security
 

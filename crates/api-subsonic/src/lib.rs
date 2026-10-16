@@ -76,6 +76,10 @@
 //! | `getOpenSubsonicExtensions` | public, no credentials; advertises `apiKeyAuthentication` 1 and `formPost` 1 |
 //! | `tokenInfo` | the user an API key belongs to |
 //! | `getMusicFolders` | the personal library, and the server unless `privacy.server_browse` is disabled |
+//! | `savePlayQueue` | stores the queue a client is playing |
+//! | `getPlayQueue` | the queue the account saved most recently |
+//! | `savePlayQueueByIndex` | stores a queue whose current entry is named by position |
+//! | `getPlayQueueByIndex` | the saved queue with its position in it |
 //! | `getPlaylists` | the playlists the caller may see |
 //! | `getPlaylist` | one playlist with its entries |
 //! | `createPlaylist` | creates a playlist, or replaces an owned one's tracks |

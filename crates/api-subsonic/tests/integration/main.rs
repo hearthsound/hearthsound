@@ -15,6 +15,7 @@ mod cover_art;
 mod endpoints;
 mod envelope;
 mod genres;
+mod play_queue;
 mod playlists;
 mod request;
 mod scrobble;

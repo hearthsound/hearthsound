@@ -14,6 +14,7 @@ pub mod browse;
 mod cover_art;
 pub mod feedback;
 pub mod genres;
+pub mod play_queue;
 pub mod playlists;
 mod scrobble;
 mod search;
@@ -27,6 +28,9 @@ pub use browse::{
 pub use cover_art::get_cover_art;
 pub use feedback::{get_starred, get_starred2, set_rating, star, unstar};
 pub use genres::{get_genres, get_random_songs, get_songs_by_genre};
+pub use play_queue::{
+    get_play_queue, get_play_queue_by_index, save_play_queue, save_play_queue_by_index,
+};
 pub use playlists::{
     create_playlist, delete_playlist, get_playlist, get_playlists, update_playlist,
 };
