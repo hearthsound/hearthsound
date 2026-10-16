@@ -81,7 +81,7 @@ uuid = { version = "1.28.0", features = ["v7"] }
 wasmtime = "49.0.3"
 wasmtime-wasi = "49.0.3"
 wiremock = "0.6"
-zip = { version = "9.0.2", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
 
 # Dependencies are optimized even in development builds: the test suite hashes
 # passwords with Argon2, compiles plugin components with Cranelift, and decodes
