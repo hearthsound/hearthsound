@@ -761,6 +761,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   playing, and the index-based queue extension is advertised.
 - `createBookmark`, `deleteBookmark`, and `getBookmarks` record and report where
   a user left off in a track, with their note about the position.
+- `getNowPlaying` reports what every account the caller may see is playing, with
+  `privacy.now_playing_visible` deciding whose rows are shown.
 
 ### Security
 
