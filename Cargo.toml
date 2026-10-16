@@ -88,10 +88,102 @@ wasmtime-wasi = { version = "49.0.3", default-features = false, features = ["p2"
 wiremock = "0.6"
 zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
 
-# Dependencies are optimized even in development builds: the test suite hashes
-# passwords with Argon2, compiles plugin components with Cranelift, and decodes
-# audio, all of which are many times slower unoptimized. Dependencies are built
-# once and cached, so only the first build pays for it.
+# Development builds optimize only the dependencies the tests spend their time
+# in: password hashing, plugin compilation, SQLite, manifest validation, and
+# audio parsing. Everything else, including build scripts and proc macros,
+# stays unoptimized so a cold build is fast. No dependency carries debug info.
 [profile.dev.package."*"]
-opt-level = 3
 debug = false
+
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.dev.package.cranelift-bforest]
+opt-level = 3
+
+[profile.dev.package.cranelift-bitset]
+opt-level = 3
+
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+
+[profile.dev.package.cranelift-control]
+opt-level = 3
+
+[profile.dev.package.cranelift-entity]
+opt-level = 3
+
+[profile.dev.package.cranelift-frontend]
+opt-level = 3
+
+[profile.dev.package.fancy-regex]
+opt-level = 3
+
+[profile.dev.package.jsonschema]
+opt-level = 3
+
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
+
+[profile.dev.package.lofty]
+opt-level = 3
+
+[profile.dev.package.md-5]
+opt-level = 3
+
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+
+[profile.dev.package.regalloc2]
+opt-level = 3
+
+[profile.dev.package.regex-automata]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.symphonia-bundle-flac]
+opt-level = 3
+
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-aac]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-alac]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-pcm]
+opt-level = 3
+
+[profile.dev.package.symphonia-core]
+opt-level = 3
+
+[profile.dev.package.symphonia-format-isomp4]
+opt-level = 3
+
+[profile.dev.package.symphonia-format-ogg]
+opt-level = 3
+
+[profile.dev.package.symphonia-format-riff]
+opt-level = 3
+
+[profile.dev.package.symphonia-metadata]
+opt-level = 3
+
+[profile.dev.package.wasmparser]
+opt-level = 3
+
+[profile.dev.package.wasmtime]
+opt-level = 3
+
+[profile.dev.package.wasmtime-environ]
+opt-level = 3
+
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 3
