@@ -14,10 +14,10 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::error::ActivityError;
-use crate::feedback;
 use crate::play::Plays;
+use crate::ratings;
 use crate::session::StreamSessions;
-use crate::{READ_THEN_WRITE, now_millis};
+use crate::{READ_THEN_WRITE, feedback, now_millis};
 
 /// A client's scrobble request.
 ///
@@ -236,6 +236,31 @@ impl ActivityService {
             )
             .await?;
         Ok(ScrobbleOutcome::Recorded(id))
+    }
+
+    /// Sets or clears one user's rating of an entity.
+    ///
+    /// # Parameters
+    ///
+    /// - `user_id`: the account whose rating changes.
+    /// - `kind`: the kind of entity that is rated.
+    /// - `entity_id`: the entity's id.
+    /// - `rating`: the rating, 1 to 5, or 0 to clear it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActivityError::InvalidRating`] when `rating` is above
+    /// [`crate::MAX_RATING`], and [`ActivityError::Database`] when the row
+    /// cannot be written.
+    pub async fn set_rating(
+        &self,
+        user_id: Uuid,
+        kind: EntityKind,
+        entity_id: Uuid,
+        rating: u8,
+    ) -> Result<(), ActivityError> {
+        let mut conn = self.writer.acquire().await?;
+        ratings::set_rating(&mut conn, user_id, kind, entity_id, rating, now_millis()).await
     }
 
     /// Records likes for the named entities.

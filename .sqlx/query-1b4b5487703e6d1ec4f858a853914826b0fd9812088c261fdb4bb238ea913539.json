@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_ratings (user_id, entity_kind, entity_id, rating, at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (user_id, entity_kind, entity_id) DO UPDATE SET rating = excluded.rating, at = excluded.at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "1b4b5487703e6d1ec4f858a853914826b0fd9812088c261fdb4bb238ea913539"
+}

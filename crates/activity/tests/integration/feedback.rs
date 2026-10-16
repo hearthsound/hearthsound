@@ -2,77 +2,24 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::Path;
-
 use hearthsound_activity::ActivityService;
 use hearthsound_core::EntityKind;
 use hearthsound_db::Database;
-use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, Origin, TrackInput};
+use hearthsound_library::LibraryRepository;
 use uuid::Uuid;
 
-/// Opens a fresh temporary database with the server schema applied.
-async fn open_database(dir: &Path) -> Database {
-    let database = Database::open(&dir.join("hearthsound.db")).await.unwrap();
-    database
-        .migrate(&hearthsound_db::MIGRATOR, &dir.join("backups"))
-        .await
-        .unwrap();
-    database
-}
+use crate::common::{insert_album, insert_user, is_pinned, open_database};
 
-/// Inserts a user and returns its id.
-async fn insert_user(database: &Database) -> Uuid {
-    let id = Uuid::now_v7();
-    sqlx::query(
-        "INSERT INTO users (id, username, display_name, password_hash, created_at, updated_at)
-         VALUES (?, ?, 'Test User', 'not-a-hash', 0, 0)",
+/// Returns how many artist likes one user holds.
+async fn artist_likes(database: &Database, user: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM user_feedback \
+         WHERE user_id = ? AND entity_kind = 'artist' AND value = 'like'",
     )
-    .bind(id.as_bytes().as_slice())
-    .bind(format!("user-{id}"))
-    .execute(database.writer())
+    .bind(user.as_bytes().as_slice())
+    .fetch_one(database.readers())
     .await
-    .unwrap();
-    id
-}
-
-/// Inserts a remote album with two tracks and returns its id and their ids.
-///
-/// A remote track has no file of its own, which is what makes the difference
-/// between a pin and an acquisition visible.
-async fn insert_album(library: &LibraryRepository) -> (Uuid, Vec<Uuid>) {
-    let mut album = AlbumInput::new("Remote Album", Origin::Catalog);
-    album.display_artist = Some("Remote Artist".to_owned());
-    let album_id = library
-        .upsert_album(&album, &[ArtistCredit::new("Remote Artist", "main")])
-        .await
-        .unwrap();
-    let mut tracks = Vec::new();
-    for (index, title) in ["First", "Second"].iter().enumerate() {
-        let mut input = TrackInput::new(
-            *title,
-            Origin::Catalog,
-            hearthsound_core::Availability::Remote,
-        );
-        input.album_id = Some(album_id);
-        input.track_number = Some(index as i64 + 1);
-        let track = library
-            .insert_track(&input, &[ArtistCredit::new("Remote Artist", "main")], &[])
-            .await
-            .unwrap();
-        tracks.push(track.uuid());
-    }
-    (album_id.uuid(), tracks)
-}
-
-/// Returns whether a track carries the personal-library pin.
-async fn is_pinned(library: &LibraryRepository, track: Uuid) -> bool {
-    library
-        .track_is_pinned(hearthsound_core::EntityId::from_uuid(
-            hearthsound_core::IdPrefix::Track,
-            track,
-        ))
-        .await
-        .unwrap()
+    .unwrap()
 }
 
 /// A like pins the track, and unliking it releases the pin.
@@ -164,8 +111,7 @@ async fn one_users_like_keeps_another_users_pin() {
     assert!(!is_pinned(&library, tracks[0]).await);
 }
 
-/// An artist like is recorded and pins nothing, and a playlist like is not a
-/// track pin either.
+/// An artist like is recorded and pins nothing.
 #[tokio::test]
 async fn an_artist_like_pins_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -181,14 +127,11 @@ async fn an_artist_like_pins_nothing() {
         .await
         .unwrap();
 
-    let liked: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM user_feedback WHERE user_id = ? AND entity_kind = 'artist'",
-    )
-    .bind(user.as_bytes().as_slice())
-    .fetch_one(database.readers())
-    .await
-    .unwrap();
-    assert_eq!(liked, 1, "the like is recorded");
+    assert_eq!(
+        artist_likes(&database, user).await,
+        1,
+        "the like is recorded"
+    );
     for track in &tracks {
         assert!(!is_pinned(&library, *track).await);
     }
@@ -197,14 +140,7 @@ async fn an_artist_like_pins_nothing() {
         .unstar(user, &[(EntityKind::Artist, artist)])
         .await
         .unwrap();
-    let liked: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM user_feedback WHERE user_id = ? AND entity_kind = 'artist'",
-    )
-    .bind(user.as_bytes().as_slice())
-    .fetch_one(database.readers())
-    .await
-    .unwrap();
-    assert_eq!(liked, 0);
+    assert_eq!(artist_likes(&database, user).await, 0);
 }
 
 /// A `user_library` row pins a track through the same refresh.

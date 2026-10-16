@@ -18,4 +18,13 @@ pub enum ActivityError {
     /// A 16-byte identifier stored as a BLOB did not decode as a UUID.
     #[error("stored identifier is not a UUID: {0}")]
     CorruptId(#[from] uuid::Error),
+
+    /// A rating is outside the range a client may set.
+    #[error("rating {rating} is not between 0 and {max}")]
+    InvalidRating {
+        /// The rating the caller asked for.
+        rating: u8,
+        /// The highest rating a client may set.
+        max: u8,
+    },
 }

@@ -703,6 +703,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Liking a track or an album records the like and pins the tracks it covers in
   the user's personal library, in one transaction; unliking releases a pin the
   user's saved rows no longer hold.
+- A client can rate tracks, albums, and artists from 1 to 5, and a rating of 0
+  clears the rating.
 
 ### Security
 

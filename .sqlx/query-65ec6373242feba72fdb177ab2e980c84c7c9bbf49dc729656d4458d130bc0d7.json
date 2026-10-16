@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT user_id, entity_kind, rating FROM user_ratings ORDER BY rating",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "user_ratings",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "name": "entity_kind",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_ratings",
+            "name": "entity_kind"
+          }
+        }
+      },
+      {
+        "name": "rating",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "user_ratings",
+            "name": "rating"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "65ec6373242feba72fdb177ab2e980c84c7c9bbf49dc729656d4458d130bc0d7"
+}

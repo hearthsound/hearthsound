@@ -20,7 +20,8 @@
 //! The crate also owns the per-user rows a Subsonic client writes directly:
 //! [`ActivityService::star`] and [`ActivityService::unstar`] record likes and
 //! keep the personal-library pin of every track they affect in step, so a liked
-//! track is permanent in that user's library.
+//! track is permanent in that user's library, and
+//! [`ActivityService::set_rating`] stores a rating of 1 to 5 or clears one.
 //!
 //! # Examples
 //!
@@ -57,12 +58,14 @@
 mod error;
 mod feedback;
 mod play;
+mod ratings;
 mod service;
 mod session;
 
 pub use error::ActivityError;
 pub use feedback::{like, refresh_user_library_pin, unlike};
 pub use play::Plays;
+pub use ratings::{MAX_RATING, set_rating};
 pub use service::{ActivityService, Scrobble, ScrobbleOutcome};
 pub use session::{AudioDelivered, SessionOptions, StreamSession, StreamSessions};
 

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM user_ratings WHERE user_id = ? AND entity_kind = ? AND entity_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "4ba7282b08209edf613bdd137669ec5d838d0841c2e34b8de9d71967b9bc2bd2"
+}
