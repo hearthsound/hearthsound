@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO media_files (id, track_id, storage, folder_id, rel_path, size, mtime_ms, format, codec, bitrate_kbps, sample_rate, bit_depth, channels, duration_ms, lossless, replaygain, has_embedded_art, added_at, is_preferred) VALUES (?, ?, 'folder', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 17
+    },
+    "nullable": []
+  },
+  "hash": "87db9fc9e7d6f373487f72eed602f0f31508c0ad6d4ae35c4340398d42838295"
+}

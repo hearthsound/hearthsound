@@ -23,7 +23,7 @@ use hearthsound_core::{Availability, EntityId, StorageClass};
 use hearthsound_db::Database;
 use hearthsound_library::{
     AlbumInput, ArtistCredit, LibraryFolder, LibraryRepository, ManagedMediaFile, Origin,
-    ScannedMediaFile, TrackInput,
+    ReplayGain, ScannedMediaFile, TrackInput,
 };
 
 /// The ids of the seeded entities.
@@ -284,6 +284,7 @@ async fn attach_folder(
                 channels: spec.channels,
                 duration_ms: Some(spec.duration_ms),
                 lossless: Some(spec.lossless),
+                replaygain: spec.replaygain,
                 has_embedded_art: Some(spec.has_embedded_art),
             },
         )
@@ -402,6 +403,8 @@ struct FileSpec {
     duration_ms: i64,
     /// Whether the codec stores samples without loss.
     lossless: bool,
+    /// The ReplayGain values the file's tags carried.
+    replaygain: Option<ReplayGain>,
     /// Whether the file carries an embedded picture.
     has_embedded_art: bool,
 }
@@ -420,6 +423,12 @@ impl FileSpec {
             channels: Some(2),
             duration_ms,
             lossless: false,
+            replaygain: Some(ReplayGain {
+                track_gain: Some(-6.54),
+                track_peak: Some(0.988861),
+                album_gain: Some(-5.2),
+                album_peak: Some(0.999_969),
+            }),
             has_embedded_art,
         }
     }
@@ -437,6 +446,7 @@ impl FileSpec {
             channels: Some(2),
             duration_ms,
             lossless: true,
+            replaygain: None,
             has_embedded_art: false,
         }
     }
@@ -454,6 +464,7 @@ impl FileSpec {
             channels: Some(2),
             duration_ms,
             lossless: false,
+            replaygain: None,
             has_embedded_art: false,
         }
     }

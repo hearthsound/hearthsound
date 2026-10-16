@@ -115,6 +115,7 @@ async fn streamed_as(
                 channels: Some(2),
                 duration_ms: Some((seconds * 1000.0) as i64),
                 lossless: Some(false),
+                replaygain: None,
                 has_embedded_art: Some(false),
             },
         )

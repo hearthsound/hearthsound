@@ -27,8 +27,8 @@ use uuid::Uuid;
 
 use crate::error::LibraryError;
 use crate::model::{
-    ManagedMediaFile, MediaFile, MediaFileInput, ScannedMediaFile, decode_entity, decode_uuid,
-    entity_key,
+    ManagedMediaFile, MediaFile, MediaFileInput, ReplayGain, ScannedMediaFile, decode_entity,
+    decode_uuid, entity_key,
 };
 use crate::now_millis;
 
@@ -259,10 +259,12 @@ pub async fn upsert_folder_media_file(
     let id = match existing {
         Some(bytes) => {
             let id = decode_uuid(&bytes)?;
+            let replaygain = file.replaygain.as_ref().and_then(ReplayGain::to_json);
             sqlx::query!(
                 "UPDATE media_files SET size = ?, mtime_ms = ?, format = ?, codec = ?, \
                         bitrate_kbps = ?, sample_rate = ?, bit_depth = ?, channels = ?, \
-                        duration_ms = ?, lossless = ?, has_embedded_art = ? WHERE id = ?",
+                        duration_ms = ?, lossless = ?, replaygain = ?, has_embedded_art = ? \
+                        WHERE id = ?",
                 file.size,
                 file.mtime_ms,
                 file.format,
@@ -273,6 +275,7 @@ pub async fn upsert_folder_media_file(
                 file.channels,
                 file.duration_ms,
                 file.lossless,
+                replaygain,
                 file.has_embedded_art,
                 id.as_bytes().as_slice(),
             )
@@ -283,12 +286,13 @@ pub async fn upsert_folder_media_file(
         None => {
             let id = Uuid::now_v7();
             let now = now_millis();
+            let replaygain = file.replaygain.as_ref().and_then(ReplayGain::to_json);
             sqlx::query!(
                 "INSERT INTO media_files (id, track_id, storage, folder_id, rel_path, size, \
                                           mtime_ms, format, codec, bitrate_kbps, sample_rate, \
-                                          bit_depth, channels, duration_ms, lossless, \
+                                          bit_depth, channels, duration_ms, lossless, replaygain, \
                                           has_embedded_art, added_at, is_preferred) \
-                 VALUES (?, ?, 'folder', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                 VALUES (?, ?, 'folder', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
                 id.as_bytes().as_slice(),
                 entity_key(track_id),
                 file.folder_id.as_bytes().as_slice(),
@@ -303,6 +307,7 @@ pub async fn upsert_folder_media_file(
                 file.channels,
                 file.duration_ms,
                 file.lossless,
+                replaygain,
                 file.has_embedded_art,
                 now,
             )

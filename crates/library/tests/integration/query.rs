@@ -118,6 +118,7 @@ async fn attach_folder(
                 channels: Some(2),
                 duration_ms: Some(61_000),
                 lossless: Some(false),
+                replaygain: None,
                 has_embedded_art: Some(false),
             },
         )

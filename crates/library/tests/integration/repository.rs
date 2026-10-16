@@ -235,6 +235,7 @@ async fn the_preferred_file_is_the_permanent_managed_one() {
                 channels: Some(2),
                 duration_ms: Some(1_000),
                 lossless: Some(true),
+                replaygain: None,
                 has_embedded_art: Some(true),
             },
         )

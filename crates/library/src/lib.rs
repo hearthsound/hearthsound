@@ -55,8 +55,8 @@ mod repository;
 pub use error::LibraryError;
 pub use model::{
     Album, AlbumInput, Artist, ArtistCredit, ArtistInput, Credit, Genre, LibraryFolder,
-    ManagedMediaFile, MediaFile, MediaFileInput, MediaRoot, Origin, ScannedMediaFile, StorageRoots,
-    Track, TrackInput, UnknownOrigin, sort_key,
+    ManagedMediaFile, MediaFile, MediaFileInput, MediaRoot, Origin, ReplayGain, ScannedMediaFile,
+    StorageRoots, Track, TrackInput, UnknownOrigin, sort_key,
 };
 pub use repository::LibraryRepository;
 

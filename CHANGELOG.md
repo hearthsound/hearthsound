@@ -667,6 +667,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The tag reader collects every MusicBrainz artist id a file carries and reads
   the compilation flag, so a track credited to several artists keeps each
   artist's id and a compilation can be recognised.
+- A scan stores the ReplayGain values a file carries and gives every credited
+  artist its own MusicBrainz id, both of which the Subsonic projection reports.
 
 ### Security
 

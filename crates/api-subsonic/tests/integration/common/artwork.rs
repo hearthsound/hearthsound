@@ -166,6 +166,7 @@ pub async fn seed_album(fixture: &Fixture, title: &str, files: &[Art]) -> Seeded
                     channels: Some(2),
                     duration_ms: Some(1_000),
                     lossless: Some(false),
+                    replaygain: None,
                     has_embedded_art: Some(has_embedded),
                 },
             )

@@ -12,7 +12,7 @@ use hearthsound_core::{Availability, StorageClass};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_library::artwork::{CoverArt, cover_for_file, track_cover};
 use hearthsound_library::scan::{LibraryScanner, ScanJobHandler, ScanRequest};
-use hearthsound_library::{LibraryRepository, Origin, StorageRoots};
+use hearthsound_library::{LibraryRepository, Origin, ReplayGain, StorageRoots};
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
 
 async fn migrated(dir: &Path) -> Database {
@@ -412,6 +412,63 @@ async fn cover_art_comes_from_the_embedded_picture_or_a_sidecar() {
         Some(CoverArt::Embedded { mime_type, .. }) => assert_eq!(mime_type, "image/png"),
         other => panic!("expected the embedded picture, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn a_scan_stores_replay_gain_and_artist_music_brainz_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+
+    AudioFixture::new(AudioFormat::Flac)
+        .seconds(0.3)
+        .file_name("split.flac")
+        .tags(
+            TrackTags::new("Split Credit", "Nova Reyes")
+                .artists(["Ida Frost"])
+                .album("Nightfall")
+                .album_artist("Nova Reyes")
+                .track(1, 2)
+                .mb_ids(
+                    "1f2d7c50-4a4f-4c58-9d0c-1a4b1f2c3d4e",
+                    "2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d",
+                    "3b4c5d6e-7f8a-4b9c-8d0e-1f2a3b4c5d6e",
+                    ["mb-nova", "mb-ida"],
+                    ["mb-nova"],
+                )
+                .replaygain("-3.21 dB", "0.988861", "-3.05 dB", "1.000000"),
+        )
+        .write_into(&music)
+        .await
+        .unwrap();
+
+    let scanner = LibraryScanner::new(&db, Arc::new(EventBus::new()));
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(folder.id).await.unwrap();
+
+    let track = only_track(&library, "Nova Reyes").await;
+    let files = library.list_media_files_for_track(track).await.unwrap();
+    assert_eq!(
+        files[0].replay_gain(),
+        Some(ReplayGain {
+            track_gain: Some(-3.21),
+            track_peak: Some(0.988861),
+            album_gain: Some(-3.05),
+            album_peak: Some(1.0),
+        })
+    );
+
+    let artists = library.list_artists().await.unwrap();
+    let mbid = |name: &str| {
+        artists
+            .iter()
+            .find(|artist| artist.name == name)
+            .and_then(|artist| artist.mb_artist_id.clone())
+    };
+    assert_eq!(mbid("Nova Reyes").as_deref(), Some("mb-nova"));
+    assert_eq!(mbid("Ida Frost").as_deref(), Some("mb-ida"));
 }
 
 #[tokio::test]

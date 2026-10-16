@@ -236,6 +236,7 @@ async fn permanent_files_and_acquiring_tracks_keep_their_availability() {
                 channels: None,
                 duration_ms: None,
                 lossless: None,
+                replaygain: None,
                 has_embedded_art: None,
             },
         )
@@ -324,6 +325,7 @@ async fn a_folder_owner_change_repins_every_track() {
                     channels: None,
                     duration_ms: None,
                     lossless: None,
+                    replaygain: None,
                     has_embedded_art: None,
                 },
             )

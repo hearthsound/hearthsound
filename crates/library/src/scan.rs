@@ -40,7 +40,8 @@ use uuid::Uuid;
 
 use crate::error::LibraryError;
 use crate::model::{
-    AlbumInput, ArtistCredit, ArtistInput, LibraryFolder, Origin, ScannedMediaFile, TrackInput,
+    AlbumInput, ArtistCredit, ArtistInput, LibraryFolder, Origin, ReplayGain, ScannedMediaFile,
+    TrackInput,
 };
 use crate::{READ_THEN_WRITE, albums, folders, media_files, now_millis, retention, tracks};
 
@@ -517,9 +518,12 @@ impl IndexedTags {
             .artists
             .iter()
             .enumerate()
-            .map(|(position, name)| ArtistCredit {
-                artist: ArtistInput::new(name),
-                role: if position == 0 { "main" } else { "featured" }.to_owned(),
+            .map(|(position, name)| {
+                credit(
+                    name,
+                    if position == 0 { "main" } else { "featured" },
+                    artist_mbid(&tags.mb_artist_ids, tags.artists.len(), position),
+                )
             })
             .collect();
         if credits.is_empty()
@@ -549,7 +553,11 @@ impl IndexedTags {
                 album
             });
         let album_credits = match (&album, &album_artist) {
-            (Some(_), Some(name)) => vec![ArtistCredit::new(name, "main")],
+            (Some(_), Some(name)) => vec![credit(
+                name,
+                "main",
+                tags.mb_album_artist_ids.first().cloned(),
+            )],
             (Some(_), None) => credits.clone(),
             (None, _) => Vec::new(),
         };
@@ -570,6 +578,54 @@ impl IndexedTags {
             genres,
         }
     }
+}
+
+/// Builds an artist credit, carrying the MusicBrainz id when the file gave one.
+///
+/// # Parameters
+///
+/// - `name`: the credited artist's name.
+/// - `role`: the credit role.
+/// - `mbid`: the MusicBrainz artist id, when the file identifies the credit.
+///
+/// # Returns
+///
+/// The credit to write.
+fn credit(name: &str, role: &str, mbid: Option<String>) -> ArtistCredit {
+    let mut artist = ArtistInput::new(name);
+    if let Some(mbid) = mbid {
+        artist = artist.mb_artist_id(mbid);
+    }
+    ArtistCredit {
+        artist,
+        role: role.to_owned(),
+    }
+}
+
+/// Picks the MusicBrainz id that belongs to one credit position.
+///
+/// A file that carries one id per credited artist maps them by position. A file
+/// that carries a single id while naming several artists only identifies the
+/// first one, so the later credits stay unknown. Any other count is ambiguous
+/// and identifies nobody.
+///
+/// # Parameters
+///
+/// - `ids`: the ids the file carried.
+/// - `artists`: how many artists the file credits.
+/// - `position`: the credit's zero-based position.
+///
+/// # Returns
+///
+/// The id, or `None` when the file does not identify this credit.
+fn artist_mbid(ids: &[String], artists: usize, position: usize) -> Option<String> {
+    if ids.len() == artists {
+        return ids.get(position).cloned();
+    }
+    if ids.len() == 1 && position == 0 {
+        return ids.first().cloned();
+    }
+    None
 }
 
 /// Builds the media file row for a probed file.
@@ -597,6 +653,7 @@ fn scanned_file(folder_id: Uuid, file: &PendingFile) -> ScannedMediaFile {
         channels: probe.channels.map(i64::from),
         duration_ms: Some(probe.duration_ms as i64),
         lossless: Some(probe.lossless),
+        replaygain: ReplayGain::from_tags(&probe.tags),
         has_embedded_art: Some(probe.has_embedded_art),
     }
 }

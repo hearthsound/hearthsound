@@ -30,7 +30,7 @@ use hearthsound_core::providers::{ArtistCredit, CatalogTrack};
 use hearthsound_core::{CatalogId, EntityKind, Slug};
 use hearthsound_library::query::ArtistSummary;
 use hearthsound_library::query::{TrackView, content_type_for};
-use hearthsound_library::{Album, Artist, MediaFile};
+use hearthsound_library::{Album, Artist, MediaFile, ReplayGain};
 
 use crate::catalog::{artist_id, music_brainz_id};
 use crate::value::{Array, Object};
@@ -361,7 +361,10 @@ pub(crate) fn child(
         .set("displayComposer", "")
         .set("moods", Array::named("mood", std::iter::empty::<String>()))
         .set("explicitStatus", explicit_status(track.explicit))
-        .set("replayGain", replay_gain())
+        .set(
+            "replayGain",
+            replay_gain(file.and_then(MediaFile::replay_gain)),
+        )
         .set("works", Array::named("work", std::iter::empty::<Object>()))
         .set(
             "movements",
@@ -386,19 +389,24 @@ fn genre(name: &str) -> Object {
     Object::new().set("name", name.to_owned())
 }
 
-/// Builds the `replayGain` member, all zeros until ReplayGain is read from tags.
+/// Builds the `replayGain` member from the file's stored values.
+///
+/// # Parameters
+///
+/// - `gain`: the preferred file's ReplayGain values, or `None` when the track
+///   has no file or its file carries none.
 ///
 /// # Returns
 ///
-/// Every gain and peak at zero, because the tag reader's ReplayGain values are
-/// not projected into the library rows yet. The member is still emitted, so a
-/// client knows the server supports the field.
-fn replay_gain() -> Object {
+/// The member, with every unset gain and peak at zero. The member is always
+/// emitted, so a client knows the server supports the field.
+fn replay_gain(gain: Option<ReplayGain>) -> Object {
+    let gain = gain.unwrap_or_default();
     Object::new()
-        .set("trackGain", 0.0)
-        .set("albumGain", 0.0)
-        .set("trackPeak", 0.0)
-        .set("albumPeak", 0.0)
+        .set("trackGain", gain.track_gain.unwrap_or(0.0))
+        .set("albumGain", gain.album_gain.unwrap_or(0.0))
+        .set("trackPeak", gain.track_peak.unwrap_or(0.0))
+        .set("albumPeak", gain.album_peak.unwrap_or(0.0))
         .set("baseGain", 0.0)
 }
 
@@ -707,7 +715,7 @@ pub(crate) fn catalog_child(id: &CatalogId, track: &CatalogTrack, title_suffix: 
         .set("displayComposer", "")
         .set("moods", Array::named("mood", std::iter::empty::<String>()))
         .set("explicitStatus", explicit_status(track.explicit))
-        .set("replayGain", replay_gain())
+        .set("replayGain", replay_gain(None))
         .set("works", Array::named("work", std::iter::empty::<Object>()))
         .set(
             "movements",
@@ -977,7 +985,29 @@ mod tests {
 
     #[test]
     fn a_replay_gain_member_defaults_every_gain_to_zero() {
-        assert_eq!(replay_gain().len(), 5);
+        assert_eq!(replay_gain(None).len(), 5);
+    }
+
+    #[test]
+    fn a_replay_gain_member_reports_the_stored_values() {
+        use crate::value::Value;
+
+        let gain = replay_gain(Some(ReplayGain {
+            track_gain: Some(-6.54),
+            track_peak: Some(0.988861),
+            album_gain: Some(-5.2),
+            album_peak: None,
+        }));
+        assert_eq!(
+            gain.members(),
+            [
+                ("trackGain".into(), Value::Float(-6.54)),
+                ("albumGain".into(), Value::Float(-5.2)),
+                ("trackPeak".into(), Value::Float(0.988861)),
+                ("albumPeak".into(), Value::Float(0.0)),
+                ("baseGain".into(), Value::Float(0.0)),
+            ]
+        );
     }
 
     #[test]

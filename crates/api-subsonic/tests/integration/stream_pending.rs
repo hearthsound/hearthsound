@@ -144,6 +144,7 @@ impl Importer {
                     channels: Some(2),
                     duration_ms: Some(self.duration_ms),
                     lossless: Some(true),
+                    replaygain: None,
                     has_embedded_art: Some(false),
                 },
             )

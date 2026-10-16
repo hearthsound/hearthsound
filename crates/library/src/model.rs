@@ -359,6 +359,129 @@ pub struct MediaFile {
     pub is_preferred: bool,
 }
 
+/// The ReplayGain values a media file carries.
+///
+/// A file may carry any subset of the four tags, so every value is optional. The
+/// values are stored as a JSON object in the `media_files.replaygain` column,
+/// which is `NULL` when the file carries none.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_library::ReplayGain;
+///
+/// let gain = ReplayGain {
+///     track_gain: Some(-6.54),
+///     track_peak: Some(0.988861),
+///     album_gain: None,
+///     album_peak: None,
+/// };
+/// assert_eq!(gain.to_json().as_deref(), Some("{\"trackGain\":-6.54,\"trackPeak\":0.988861}"));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplayGain {
+    /// The track gain in decibels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_gain: Option<f64>,
+    /// The track peak, a linear sample value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub track_peak: Option<f64>,
+    /// The album gain in decibels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_gain: Option<f64>,
+    /// The album peak, a linear sample value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub album_peak: Option<f64>,
+}
+
+impl ReplayGain {
+    /// Reads the ReplayGain values out of a file's tags.
+    ///
+    /// Each tag is read as the float it starts with, so `-6.54 dB` and
+    /// `0.988861` both parse and a value written some other way is left out.
+    /// Non-finite values are rejected, so the result always serializes.
+    ///
+    /// # Parameters
+    ///
+    /// - `tags`: the tags the probe read.
+    ///
+    /// # Returns
+    ///
+    /// The values, or `None` when no tag carried a readable one.
+    pub fn from_tags(tags: &hearthsound_media::TrackTags) -> Option<ReplayGain> {
+        let gain = ReplayGain {
+            track_gain: leading_float(tags.replaygain_track_gain.as_deref()),
+            track_peak: leading_float(tags.replaygain_track_peak.as_deref()),
+            album_gain: leading_float(tags.replaygain_album_gain.as_deref()),
+            album_peak: leading_float(tags.replaygain_album_peak.as_deref()),
+        };
+        if gain.is_empty() { None } else { Some(gain) }
+    }
+
+    /// Reports whether no value is set.
+    ///
+    /// # Returns
+    ///
+    /// `true` when all four values are `None`.
+    pub fn is_empty(&self) -> bool {
+        self.track_gain.is_none()
+            && self.track_peak.is_none()
+            && self.album_gain.is_none()
+            && self.album_peak.is_none()
+    }
+
+    /// Serializes the values into the JSON object the `media_files` column
+    /// holds.
+    ///
+    /// # Returns
+    ///
+    /// The JSON object, or `None` when no value is set.
+    pub fn to_json(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+        serde_json::to_string(self).ok()
+    }
+
+    /// Parses the JSON object stored in `media_files.replaygain`.
+    ///
+    /// # Parameters
+    ///
+    /// - `json`: the stored object.
+    ///
+    /// # Returns
+    ///
+    /// The values, or `None` when the object holds none or cannot be parsed.
+    pub fn from_json(json: &str) -> Option<ReplayGain> {
+        let gain: ReplayGain = serde_json::from_str(json).ok()?;
+        if gain.is_empty() { None } else { Some(gain) }
+    }
+}
+
+/// Reads the float a ReplayGain tag starts with.
+///
+/// # Parameters
+///
+/// - `value`: the tag value, for example `-6.54 dB`.
+///
+/// # Returns
+///
+/// The leading finite float, or `None` when the value does not start with one.
+fn leading_float(value: Option<&str>) -> Option<f64> {
+    let value = value?.trim();
+    let end = value
+        .char_indices()
+        .find(|(_, ch)| !(ch.is_ascii_digit() || matches!(ch, '.' | '-' | '+')))
+        .map(|(index, _)| index)
+        .unwrap_or(value.len());
+    value
+        .get(..end)?
+        .parse::<f64>()
+        .ok()
+        .filter(|number| number.is_finite())
+}
+
 /// One artist credit of an album or a track.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Credit {
@@ -615,7 +738,7 @@ pub struct MediaFileInput {
 /// The scanner builds one per recognised audio file it probes and hands it to
 /// [`crate::media_files::upsert_folder_media_file`], which inserts the row the
 /// first time and refreshes it when the file changed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ScannedMediaFile {
     /// The library folder the file lives in.
     pub folder_id: Uuid,
@@ -641,6 +764,8 @@ pub struct ScannedMediaFile {
     pub duration_ms: Option<i64>,
     /// Whether the codec stores samples without loss.
     pub lossless: Option<bool>,
+    /// The ReplayGain values the file's tags carried.
+    pub replaygain: Option<ReplayGain>,
     /// Whether the file carries an embedded picture.
     pub has_embedded_art: Option<bool>,
 }
@@ -747,6 +872,15 @@ impl MediaFile {
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.to_ascii_lowercase())
             .unwrap_or_default()
+    }
+
+    /// Parses the ReplayGain object stored for the file.
+    ///
+    /// # Returns
+    ///
+    /// The values, or `None` when the file carries none.
+    pub fn replay_gain(&self) -> Option<ReplayGain> {
+        self.replaygain.as_deref().and_then(ReplayGain::from_json)
     }
 }
 
