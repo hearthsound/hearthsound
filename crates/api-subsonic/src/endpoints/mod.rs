@@ -10,6 +10,7 @@
 //! Register a handler in [`crate::routes`], which serves it at both
 //! `/rest/<name>` and `/rest/<name>.view`.
 
+pub mod bookmarks;
 pub mod browse;
 mod cover_art;
 pub mod feedback;
@@ -21,6 +22,7 @@ mod search;
 mod stream;
 mod system;
 
+pub use bookmarks::{create_bookmark, delete_bookmark, get_bookmarks};
 pub use browse::{
     get_album, get_album_list, get_album_list_2, get_artist, get_artists, get_indexes,
     get_music_directory, get_song,

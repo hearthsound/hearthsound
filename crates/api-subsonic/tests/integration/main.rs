@@ -8,6 +8,7 @@
 //! The `insta` snapshots of those modules live in `tests/integration/snapshots`
 //! and are named after the module path this binary gives them.
 
+mod bookmarks;
 mod browse;
 mod catalog;
 mod common;
