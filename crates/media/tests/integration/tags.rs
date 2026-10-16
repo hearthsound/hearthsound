@@ -25,8 +25,12 @@ fn tag_set(acquired_via: &Slug) -> TrackTags {
         mb_recording_id: Some("1f2d7c50-4a4f-4c58-9d0c-1a4b1f2c3d4e".to_owned()),
         mb_release_id: Some("2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d".to_owned()),
         mb_release_group_id: Some("3b4c5d6e-7f8a-4b9c-8d0e-1f2a3b4c5d6e".to_owned()),
-        mb_artist_id: Some("4c5d6e7f-8a9b-4c0d-9e1f-2a3b4c5d6e7f".to_owned()),
-        mb_album_artist_id: Some("5d6e7f8a-9b0c-4d1e-8f2a-3b4c5d6e7f8a".to_owned()),
+        mb_artist_ids: vec![
+            "4c5d6e7f-8a9b-4c0d-9e1f-2a3b4c5d6e7f".to_owned(),
+            "6e7f8a9b-0c1d-4e2f-8a3b-4c5d6e7f8a9b".to_owned(),
+        ],
+        mb_album_artist_ids: vec!["5d6e7f8a-9b0c-4d1e-8f2a-3b4c5d6e7f8a".to_owned()],
+        compilation: Some(true),
         replaygain_track_gain: Some("-3.21 dB".to_owned()),
         replaygain_track_peak: Some("0.988861".to_owned()),
         replaygain_album_gain: Some("-3.05 dB".to_owned()),
@@ -145,6 +149,94 @@ async fn round_trips_the_full_tag_set_through_every_container() {
             .await
             .unwrap();
         assert!(verified.damaged_packets == 0, "{}", format.extension());
+    }
+}
+
+/// The fixture writer and the probe agree on the MusicBrainz ids and the
+/// compilation flag, which is what the library scan tests rely on.
+#[tokio::test]
+async fn round_trips_fixture_music_brainz_ids_and_compilation() {
+    use hearthsound_test_support::audio::{
+        TrackTags as FixtureTags, write_tags as write_fixture_tags,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let recording = "1f2d7c50-4a4f-4c58-9d0c-1a4b1f2c3d4e";
+    let release = "2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d";
+    let release_group = "3b4c5d6e-7f8a-4b9c-8d0e-1f2a3b4c5d6e";
+    let artist_ids = [
+        "4c5d6e7f-8a9b-4c0d-9e1f-2a3b4c5d6e7f",
+        "6e7f8a9b-0c1d-4e2f-8a3b-4c5d6e7f8a9b",
+    ];
+    let album_artist_ids = ["5d6e7f8a-9b0c-4d1e-8f2a-3b4c5d6e7f8a"];
+
+    for format in [AudioFormat::Flac, AudioFormat::Mp3Cbr] {
+        let path = AudioFixture::new(format)
+            .seconds(0.3)
+            .write_into(dir.path())
+            .await
+            .unwrap();
+        let tags = FixtureTags::new("Split Credit", "Nova Reyes")
+            .mb_ids(
+                recording,
+                release,
+                release_group,
+                artist_ids,
+                album_artist_ids,
+            )
+            .replaygain("-3.21 dB", "0.988861", "-3.05 dB", "1.000000")
+            .compilation(true);
+        write_fixture_tags(&path, &tags, None).await.unwrap();
+
+        let probed = probe(&path).await.unwrap().tags;
+        assert_eq!(
+            probed.mb_recording_id.as_deref(),
+            Some(recording),
+            "{} recording id",
+            format.extension()
+        );
+        assert_eq!(
+            probed.mb_release_id.as_deref(),
+            Some(release),
+            "{} release id",
+            format.extension()
+        );
+        assert_eq!(
+            probed.mb_release_group_id.as_deref(),
+            Some(release_group),
+            "{} release group id",
+            format.extension()
+        );
+        assert_eq!(
+            probed.mb_artist_ids,
+            artist_ids,
+            "{} artist ids",
+            format.extension()
+        );
+        assert_eq!(
+            probed.mb_album_artist_ids,
+            album_artist_ids,
+            "{} album artist ids",
+            format.extension()
+        );
+        assert_eq!(
+            probed.replaygain_track_gain.as_deref(),
+            Some("-3.21 dB"),
+            "{} track gain",
+            format.extension()
+        );
+        assert_eq!(
+            probed.replaygain_album_peak.as_deref(),
+            Some("1.000000"),
+            "{} album peak",
+            format.extension()
+        );
+        assert_eq!(
+            probed.compilation,
+            Some(true),
+            "{} compilation flag",
+            format.extension()
+        );
     }
 }
 

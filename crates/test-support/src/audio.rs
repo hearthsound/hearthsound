@@ -640,6 +640,26 @@ pub struct TrackTags {
     pub genres: Vec<String>,
     /// The International Standard Recording Code.
     pub isrc: Option<String>,
+    /// The MusicBrainz recording id.
+    pub mb_recording_id: Option<String>,
+    /// The MusicBrainz release id.
+    pub mb_release_id: Option<String>,
+    /// The MusicBrainz release group id.
+    pub mb_release_group_id: Option<String>,
+    /// The MusicBrainz artist ids, one per credited artist.
+    pub mb_artist_ids: Vec<String>,
+    /// The MusicBrainz album artist ids, one per credited album artist.
+    pub mb_album_artist_ids: Vec<String>,
+    /// The ReplayGain track gain, for example `-3.21 dB`.
+    pub replaygain_track_gain: Option<String>,
+    /// The ReplayGain track peak.
+    pub replaygain_track_peak: Option<String>,
+    /// The ReplayGain album gain.
+    pub replaygain_album_gain: Option<String>,
+    /// The ReplayGain album peak.
+    pub replaygain_album_peak: Option<String>,
+    /// The compilation flag.
+    pub compilation: Option<bool>,
 }
 
 impl TrackTags {
@@ -759,6 +779,69 @@ impl TrackTags {
         self
     }
 
+    /// Sets the MusicBrainz identifiers.
+    ///
+    /// # Parameters
+    ///
+    /// - `recording`: the recording id.
+    /// - `release`: the release id.
+    /// - `release_group`: the release group id.
+    /// - `artists`: the performing artist ids, one per credited artist.
+    /// - `album_artists`: the album artist ids, one per credited album artist.
+    pub fn mb_ids<I, S, J, T>(
+        mut self,
+        recording: impl Into<String>,
+        release: impl Into<String>,
+        release_group: impl Into<String>,
+        artists: I,
+        album_artists: J,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+        J: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        self.mb_recording_id = Some(recording.into());
+        self.mb_release_id = Some(release.into());
+        self.mb_release_group_id = Some(release_group.into());
+        self.mb_artist_ids = artists.into_iter().map(Into::into).collect();
+        self.mb_album_artist_ids = album_artists.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets the ReplayGain values.
+    ///
+    /// # Parameters
+    ///
+    /// - `track_gain`: the track gain, for example `-3.21 dB`.
+    /// - `track_peak`: the track peak.
+    /// - `album_gain`: the album gain.
+    /// - `album_peak`: the album peak.
+    pub fn replaygain(
+        mut self,
+        track_gain: impl Into<String>,
+        track_peak: impl Into<String>,
+        album_gain: impl Into<String>,
+        album_peak: impl Into<String>,
+    ) -> Self {
+        self.replaygain_track_gain = Some(track_gain.into());
+        self.replaygain_track_peak = Some(track_peak.into());
+        self.replaygain_album_gain = Some(album_gain.into());
+        self.replaygain_album_peak = Some(album_peak.into());
+        self
+    }
+
+    /// Sets the compilation flag.
+    ///
+    /// # Parameters
+    ///
+    /// - `compilation`: whether the track belongs to a compilation.
+    pub fn compilation(mut self, compilation: bool) -> Self {
+        self.compilation = Some(compilation);
+        self
+    }
+
     /// Returns the pending tag items, without the cover.
     ///
     /// # Returns
@@ -806,6 +889,43 @@ impl TrackTags {
         );
         if let Some(isrc) = &self.isrc {
             items.push((ItemKey::Isrc, isrc.clone()));
+        }
+        if let Some(recording) = &self.mb_recording_id {
+            items.push((ItemKey::MusicBrainzRecordingId, recording.clone()));
+        }
+        if let Some(release) = &self.mb_release_id {
+            items.push((ItemKey::MusicBrainzReleaseId, release.clone()));
+        }
+        if let Some(release_group) = &self.mb_release_group_id {
+            items.push((ItemKey::MusicBrainzReleaseGroupId, release_group.clone()));
+        }
+        items.extend(
+            self.mb_artist_ids
+                .iter()
+                .map(|id| (ItemKey::MusicBrainzArtistId, id.clone())),
+        );
+        items.extend(
+            self.mb_album_artist_ids
+                .iter()
+                .map(|id| (ItemKey::MusicBrainzReleaseArtistId, id.clone())),
+        );
+        if let Some(gain) = &self.replaygain_track_gain {
+            items.push((ItemKey::ReplayGainTrackGain, gain.clone()));
+        }
+        if let Some(peak) = &self.replaygain_track_peak {
+            items.push((ItemKey::ReplayGainTrackPeak, peak.clone()));
+        }
+        if let Some(gain) = &self.replaygain_album_gain {
+            items.push((ItemKey::ReplayGainAlbumGain, gain.clone()));
+        }
+        if let Some(peak) = &self.replaygain_album_peak {
+            items.push((ItemKey::ReplayGainAlbumPeak, peak.clone()));
+        }
+        if let Some(compilation) = self.compilation {
+            items.push((
+                ItemKey::FlagCompilation,
+                if compilation { "1" } else { "0" }.to_owned(),
+            ));
         }
         items
     }

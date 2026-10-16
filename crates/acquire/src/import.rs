@@ -782,12 +782,14 @@ impl AcquisitionOrchestrator {
             mb_release_group_id: album
                 .as_ref()
                 .and_then(|album| album.mb_release_group_id.clone()),
-            mb_artist_id: artists
-                .first()
-                .and_then(|artist| artist.mb_artist_id.clone()),
-            mb_album_artist_id: album_artists
-                .first()
-                .and_then(|artist| artist.mb_artist_id.clone()),
+            mb_artist_ids: artists
+                .iter()
+                .filter_map(|artist| artist.mb_artist_id.clone())
+                .collect(),
+            mb_album_artist_ids: album_artists
+                .iter()
+                .filter_map(|artist| artist.mb_artist_id.clone())
+                .collect(),
             acquired_via: Some(instance.slug().clone()),
             ..Default::default()
         };

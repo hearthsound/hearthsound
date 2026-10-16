@@ -664,6 +664,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for downloads, `acquisition.search_poll_interval_ms` (1000) for searches, and
   `acquisition.completion_check_interval_ms` (1000) for the size checks before
   an import. They were fixed intervals before.
+- The tag reader collects every MusicBrainz artist id a file carries and reads
+  the compilation flag, so a track credited to several artists keeps each
+  artist's id and a compilation can be recognised.
 
 ### Security
 

@@ -51,11 +51,20 @@ pub struct TrackTags {
     /// The MusicBrainz release group id, written as
     /// `MUSICBRAINZ_RELEASEGROUPID`.
     pub mb_release_group_id: Option<String>,
-    /// The MusicBrainz artist id, written as `MUSICBRAINZ_ARTISTID`.
-    pub mb_artist_id: Option<String>,
-    /// The MusicBrainz album artist id, written as
-    /// `MUSICBRAINZ_ALBUMARTISTID`.
-    pub mb_album_artist_id: Option<String>,
+    /// The MusicBrainz artist ids, written as `MUSICBRAINZ_ARTISTID`, one per
+    /// credited artist in the same order as [`artists`].
+    ///
+    /// [`artists`]: TrackTags::artists
+    pub mb_artist_ids: Vec<String>,
+    /// The MusicBrainz album artist ids, written as
+    /// `MUSICBRAINZ_ALBUMARTISTID`, one per credited album artist in the same
+    /// order as [`album_artist`].
+    ///
+    /// [`album_artist`]: TrackTags::album_artist
+    pub mb_album_artist_ids: Vec<String>,
+    /// Whether the track belongs to a compilation, written as the
+    /// `COMPILATION` flag (`TCMP` for ID3v2, `cpil` for MP4).
+    pub compilation: Option<bool>,
     /// The ReplayGain track gain, for example `-3.21 dB`.
     pub replaygain_track_gain: Option<String>,
     /// The ReplayGain track peak.
@@ -379,16 +388,19 @@ fn generic_tag(tag_type: TagType, tags: &TrackTags, cover: Option<&Artwork>) -> 
         ItemKey::MusicBrainzReleaseGroupId,
         tags.mb_release_group_id.as_deref(),
     );
-    set(
-        &mut tag,
-        ItemKey::MusicBrainzArtistId,
-        tags.mb_artist_id.as_deref(),
-    );
-    set(
+    append(&mut tag, ItemKey::MusicBrainzArtistId, &tags.mb_artist_ids);
+    append(
         &mut tag,
         ItemKey::MusicBrainzReleaseArtistId,
-        tags.mb_album_artist_id.as_deref(),
+        &tags.mb_album_artist_ids,
     );
+    if let Some(compilation) = tags.compilation {
+        set(
+            &mut tag,
+            ItemKey::FlagCompilation,
+            Some(if compilation { "1" } else { "0" }),
+        );
+    }
     set(
         &mut tag,
         ItemKey::ReplayGainTrackGain,

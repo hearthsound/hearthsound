@@ -757,8 +757,9 @@ fn read_tags(tagged: &TaggedFile) -> TrackTags {
         mb_recording_id: text(tag, ItemKey::MusicBrainzRecordingId),
         mb_release_id: text(tag, ItemKey::MusicBrainzReleaseId),
         mb_release_group_id: text(tag, ItemKey::MusicBrainzReleaseGroupId),
-        mb_artist_id: text(tag, ItemKey::MusicBrainzArtistId),
-        mb_album_artist_id: text(tag, ItemKey::MusicBrainzReleaseArtistId),
+        mb_artist_ids: trimmed(tag.get_strings(ItemKey::MusicBrainzArtistId)),
+        mb_album_artist_ids: trimmed(tag.get_strings(ItemKey::MusicBrainzReleaseArtistId)),
+        compilation: read_flag(tag, ItemKey::FlagCompilation),
         replaygain_track_gain: text(tag, ItemKey::ReplayGainTrackGain),
         replaygain_track_peak: text(tag, ItemKey::ReplayGainTrackPeak),
         replaygain_album_gain: text(tag, ItemKey::ReplayGainAlbumGain),
@@ -781,6 +782,45 @@ fn text(tag: &Tag, key: ItemKey) -> Option<String> {
     tag.get_string(key)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+/// Reads one boolean flag tag.
+///
+/// Tag formats spell a flag differently: Vorbis, ID3v2 and APE usually carry
+/// `1` or `0`, MP4 carries `true` or `false`, and taggers write `true` or
+/// `false` in Vorbis comments too.
+///
+/// # Parameters
+///
+/// - `tag`: the tag to read from.
+/// - `key`: the flag key.
+///
+/// # Returns
+///
+/// The flag value, or `None` when the key is absent or does not hold a
+/// recognized spelling.
+fn read_flag(tag: &Tag, key: ItemKey) -> Option<bool> {
+    match tag.get_string(key)?.trim() {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// Collects the trimmed, non-empty values of a repeated tag.
+///
+/// Identifiers read from a file often carry stray whitespace, so values are
+/// trimmed before the empty ones are dropped.
+///
+/// # Parameters
+///
+/// - `values`: the values to trim and filter.
+fn trimmed<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
+    values
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Collects the non-empty values of a repeated tag.
