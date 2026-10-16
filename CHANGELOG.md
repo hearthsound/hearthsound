@@ -735,6 +735,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stored artists, albums, and songs report the user's own stars, rating, play
   count, and last play, and every stored entity names itself as its cover art so
   a client can ask for the image and be told when there is none.
+- `getAlbumList2` answers every album list type the protocol defines, and
+  `getAlbumList` answers the same albums as folders a client browses into.
 
 ### Security
 

@@ -364,20 +364,243 @@ async fn get_album_list_2_returns_a_random_album() {
 }
 
 #[tokio::test]
-async fn get_album_list_2_rejects_an_unsupported_type() {
+async fn get_album_list_2_rejects_an_unknown_type() {
     let (fixture, _) = fixture().await;
     let app = fixture.app();
 
     let probe = get(
         &app,
         &format!(
-            "/rest/getAlbumList2?type=frequent&apiKey={}&f=json",
+            "/rest/getAlbumList2?type=sideways&apiKey={}&f=json",
             fixture.api_key
         ),
     )
     .await;
     assert_error(&probe, 0);
     assert!(probe.body.contains("Unsupported album list type."));
+}
+
+/// The album list orders that read the user's own activity.
+#[tokio::test]
+async fn get_album_list_2_orders_by_the_users_activity() {
+    use hearthsound_core::EntityKind;
+
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+    let user = fixture.user_id.uuid();
+    let activity = fixture.state.activity();
+
+    // The user rated and played Delta most, then Alpha, and liked Bright.
+    activity
+        .set_rating(user, EntityKind::Album, seeded.delta.uuid(), 5)
+        .await
+        .unwrap();
+    activity
+        .set_rating(user, EntityKind::Album, seeded.alpha.uuid(), 2)
+        .await
+        .unwrap();
+    activity
+        .plays()
+        .record_play(
+            user,
+            seeded.alpha_tracks[0].uuid(),
+            Some("dsub"),
+            1_000,
+            180_000,
+            true,
+        )
+        .await
+        .unwrap();
+    activity
+        .plays()
+        .record_play(
+            user,
+            seeded.delta_track.uuid(),
+            Some("dsub"),
+            2_000,
+            300_000,
+            true,
+        )
+        .await
+        .unwrap();
+    activity
+        .plays()
+        .record_play(
+            user,
+            seeded.delta_track.uuid(),
+            Some("dsub"),
+            3_000,
+            300_000,
+            true,
+        )
+        .await
+        .unwrap();
+    activity
+        .star(user, &[(EntityKind::Album, seeded.bright.uuid())])
+        .await
+        .unwrap();
+
+    let listed = |list_type: &str| {
+        let app = app.clone();
+        let api_key = fixture.api_key.clone();
+        let list_type = list_type.to_owned();
+        async move {
+            get(
+                &app,
+                &format!(
+                    "/rest/getAlbumList2?type={list_type}&musicFolderId=2&apiKey={api_key}&f=json"
+                ),
+            )
+            .await
+            .body
+        }
+    };
+
+    // Each order is checked by the position of the albums it moves.
+    for (list_type, first, second) in [
+        ("highest", seeded.delta, seeded.alpha),
+        ("frequent", seeded.delta, seeded.alpha),
+        ("recent", seeded.delta, seeded.alpha),
+    ] {
+        let body = listed(list_type).await;
+        let first_at = body
+            .find(&first.to_string())
+            .expect("the first album is listed");
+        let second_at = body
+            .find(&second.to_string())
+            .expect("the second album is listed");
+        assert!(first_at < second_at, "{list_type}: {body}");
+        assert!(
+            body.contains("\"userRating\""),
+            "{list_type} reports the rating: {body}"
+        );
+    }
+
+    // The liked album comes first in the starred order, with the unliked ones
+    // after it in name order.
+    let body = listed("starred").await;
+    let bright = body.find(&seeded.bright.to_string()).unwrap();
+    let alpha = body.find(&seeded.alpha.to_string()).unwrap();
+    let delta = body.find(&seeded.delta.to_string()).unwrap();
+    assert!(bright < alpha && alpha < delta, "starred: {body}");
+    assert!(body.contains("\"starred\""), "starred: {body}");
+
+    // Every album of another order carries no rating of its own except where
+    // the user set one: Alpha's is 2 and Delta's is 5.
+    let body = listed("alphabeticalByName").await;
+    assert!(body.contains("\"userRating\":5"), "{body}");
+    assert!(body.contains("\"userRating\":2"), "{body}");
+}
+
+/// The year and genre filters, and the parameters they need.
+#[tokio::test]
+async fn get_album_list_2_filters_by_year_and_genre() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+
+    let order = |query: &str| {
+        let app = app.clone();
+        let api_key = fixture.api_key.clone();
+        let query = query.to_owned();
+        async move {
+            let response = get(
+                &app,
+                &format!("/rest/getAlbumList2?{query}&musicFolderId=2&apiKey={api_key}&f=json"),
+            )
+            .await;
+            response.body
+        }
+    };
+
+    // Delta is from 2005, Bright from 2001, Alpha from 1999.
+    let body = order("type=byYear&fromYear=2001&toYear=2005").await;
+    let bright = body.find(&seeded.bright.to_string()).unwrap();
+    let delta = body.find(&seeded.delta.to_string()).unwrap();
+    assert!(
+        bright < delta,
+        "a range that counts up is oldest first: {body}"
+    );
+    assert!(
+        !body.contains(&seeded.alpha.to_string()),
+        "1999 is out: {body}"
+    );
+
+    let body = order("type=byYear&fromYear=2005&toYear=2001").await;
+    let bright = body.find(&seeded.bright.to_string()).unwrap();
+    let delta = body.find(&seeded.delta.to_string()).unwrap();
+    assert!(
+        delta < bright,
+        "a range that counts down is newest first: {body}"
+    );
+
+    // One end of the range alone lists that year.
+    let body = order("type=byYear&fromYear=2001").await;
+    assert!(body.contains(&seeded.bright.to_string()), "{body}");
+    assert!(!body.contains(&seeded.delta.to_string()), "{body}");
+
+    let body = order("type=byGenre&genre=rock").await;
+    assert!(body.contains(&seeded.alpha.to_string()), "{body}");
+    assert!(!body.contains(&seeded.bright.to_string()), "{body}");
+    let body = order("type=byGenre&genre=ROCK").await;
+    assert!(
+        body.contains(&seeded.alpha.to_string()),
+        "the genre is matched folded: {body}"
+    );
+
+    let missing = get(
+        &app,
+        &format!(
+            "/rest/getAlbumList2?type=byYear&musicFolderId=2&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&missing, 10);
+    let missing = get(
+        &app,
+        &format!(
+            "/rest/getAlbumList2?type=byGenre&musicFolderId=2&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&missing, 10);
+}
+
+/// `getAlbumList` answers the same albums as folders a client browses into.
+#[tokio::test]
+async fn get_album_list_answers_albums_as_folders() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+
+    let json = get(
+        &app,
+        &format!(
+            "/rest/getAlbumList?type=alphabeticalByName&musicFolderId=2&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&json);
+    assert!(json.body.contains("\"albumList\""), "{}", json.body);
+    assert!(json.body.contains("\"isDir\":true"), "{}", json.body);
+    assert!(json.body.contains("\"songCount\":1"), "{}", json.body);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("album-list-dir-json", seeded.stabilize(&json.body));
+    });
+
+    let xml = get(
+        &app,
+        &format!(
+            "/rest/getAlbumList.view?type=alphabeticalByName&musicFolderId=2&apiKey={}",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&xml);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("album-list-dir-xml", seeded.stabilize(&xml.body));
+    });
 }
 
 #[tokio::test]

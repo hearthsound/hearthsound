@@ -8,7 +8,7 @@
 
 use hearthsound_activity::Annotation;
 use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, IdPrefix};
-use hearthsound_library::query::AlbumSort;
+use hearthsound_library::query::{AlbumSort, Scope};
 use uuid::Uuid;
 
 use crate::auth::Call;
@@ -346,69 +346,183 @@ pub async fn get_album_list_2(call: Call) -> Encoded {
         Ok(scope) => scope,
         Err(error) => return call.encode(Response::failed(error)),
     };
-    let Some(list_type) = call.get("type") else {
-        return call.encode(Response::failed(SubsonicError::missing_parameter("type")));
+    let listed = match listed_albums(&call, scope, "getAlbumList2").await {
+        Ok(listed) => listed,
+        Err(error) => return call.encode(Response::failed(error)),
     };
-    let sort = match list_type {
-        "newest" => AlbumSort::Newest,
-        "alphabeticalByName" => AlbumSort::AlphabeticalByName,
-        "random" => AlbumSort::Random,
+
+    let albums: Vec<Object> = listed
+        .iter()
+        .map(|(loaded, annotation)| {
+            projection::album_id3(
+                &loaded.detail.album,
+                &loaded.detail.artists,
+                &loaded.detail.tracks,
+                annotation,
+            )
+        })
+        .collect();
+    call.encode(Response::ok().member("albumList2", Object::new().set("album", Array::new(albums))))
+}
+
+/// Answers `getAlbumList`: the albums in scope as folders.
+///
+/// The list types are the ones `getAlbumList2` accepts; the difference is the
+/// shape of the answer, which reports each album as a directory `Child` that a
+/// client browses into with `getMusicDirectory`.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call. `type` selects the order or filter, `size`
+///   the number of albums (default 10, capped at 500), `offset` how many to
+///   skip, and `fromYear`/`toYear`/`genre` narrow a `byYear` or `byGenre` list.
+///
+/// # Returns
+///
+/// A successful envelope carrying `albumList`, or a failed envelope.
+///
+/// # Errors
+///
+/// Answers the errors [`get_album_list_2`] documents.
+pub async fn get_album_list(call: Call) -> Encoded {
+    let scope = match scope::resolve(&call).await {
+        Ok(scope) => scope,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let listed = match listed_albums(&call, scope, "getAlbumList").await {
+        Ok(listed) => listed,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+
+    let albums: Vec<Object> = listed
+        .iter()
+        .map(|(loaded, annotation)| {
+            projection::album_dir(
+                &loaded.detail.album,
+                &loaded.detail.artists,
+                &loaded.detail.tracks,
+                annotation,
+            )
+        })
+        .collect();
+    call.encode(Response::ok().member("albumList", Object::new().set("album", Array::new(albums))))
+}
+
+/// Loads the albums one album-list request asks for.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, whose parameters decide the order and the
+///   window.
+/// - `scope`: the scope to list.
+/// - `operation`: the endpoint name a failure is logged under.
+///
+/// # Returns
+///
+/// The albums with their details, in the order the request asked for, each with
+/// the user's annotation.
+///
+/// # Errors
+///
+/// Answers Subsonic error 10 when `type` is missing or a parameter the type
+/// needs is missing, error 0 when `type` names no known list type or a number
+/// cannot be parsed, and a generic error when a read fails.
+async fn listed_albums(
+    call: &Call,
+    scope: Scope,
+    operation: &'static str,
+) -> Result<Vec<(browse::LoadedAlbum, Annotation)>, SubsonicError> {
+    let Some(list_type) = call.get("type") else {
+        return Err(SubsonicError::missing_parameter("type"));
+    };
+    let sort = album_sort(call, list_type)?;
+    let size = number(call, "size", DEFAULT_ALBUM_SIZE)?.clamp(0, MAX_ALBUM_SIZE);
+    let offset = number(call, "offset", 0)?.max(0);
+
+    let database = call.state().database();
+    let listed = browse::albums(database, scope, sort, size, offset)
+        .await
+        .map_err(|error| browse::failure(operation, &error))?;
+
+    let user_id = call.principal().user_id.uuid();
+    let ids: Vec<Uuid> = listed.iter().map(|album| album.id.uuid()).collect();
+    let annotations = browse::annotations(call.state(), user_id, EntityKind::Album, &ids)
+        .await
+        .map_err(|error| browse::failure(operation, &error))?;
+
+    let mut albums = Vec::with_capacity(listed.len());
+    for album in listed {
+        match browse::album(database, scope, album.id).await {
+            Ok(Some(loaded)) => {
+                let annotation = annotations
+                    .get(&loaded.detail.album.id.uuid())
+                    .copied()
+                    .unwrap_or_default();
+                albums.push((loaded, annotation));
+            }
+            Ok(None) => {}
+            Err(error) => return Err(browse::failure(operation, &error)),
+        }
+    }
+    Ok(albums)
+}
+
+/// Reads the list type of an album-list request.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, whose `type` is the list type and whose
+///   `fromYear`, `toYear`, and `genre` narrow two of them.
+/// - `list_type`: the value of `type`.
+///
+/// # Returns
+///
+/// The order to list the albums in.
+///
+/// # Errors
+///
+/// Answers Subsonic error 10 when a type needs a parameter that is missing, and
+/// error 0 when the type is not one this server supports.
+fn album_sort(call: &Call, list_type: &str) -> Result<AlbumSort, SubsonicError> {
+    let user = call.principal().user_id.uuid();
+    match list_type {
+        "newest" => Ok(AlbumSort::Newest),
+        "alphabeticalByName" => Ok(AlbumSort::AlphabeticalByName),
+        "alphabeticalByArtist" => Ok(AlbumSort::AlphabeticalByArtist),
+        "random" => Ok(AlbumSort::Random),
+        "highest" => Ok(AlbumSort::Highest { user }),
+        "frequent" => Ok(AlbumSort::Frequent { user }),
+        "recent" => Ok(AlbumSort::Recent { user }),
+        "starred" => Ok(AlbumSort::Starred { user }),
+        "byYear" => {
+            let from = number(call, "fromYear", 0)?;
+            let to = number(call, "toYear", 0)?;
+            if from == 0 && to == 0 {
+                return Err(SubsonicError::missing_parameter("fromYear"));
+            }
+            // One year given alone lists that year, so a client may send either
+            // end of the range.
+            let (from, to) = if from == 0 {
+                (to, to)
+            } else if to == 0 {
+                (from, from)
+            } else {
+                (from, to)
+            };
+            Ok(AlbumSort::ByYear { from, to })
+        }
+        "byGenre" => match call.get("genre") {
+            Some(genre) if !genre.is_empty() => Ok(AlbumSort::ByGenre(genre.to_owned())),
+            _ => Err(SubsonicError::missing_parameter("genre")),
+        },
         other => {
             tracing::debug!(
                 list_type = other,
                 "an unsupported album list type was requested"
             );
-            return call.encode(Response::failed(SubsonicError::new(
-                codes::GENERIC,
-                UNSUPPORTED_LIST_TYPE,
-            )));
-        }
-    };
-    let size = match number(&call, "size", DEFAULT_ALBUM_SIZE) {
-        Ok(size) => size.clamp(0, MAX_ALBUM_SIZE),
-        Err(error) => return call.encode(Response::failed(error)),
-    };
-    let offset = match number(&call, "offset", 0) {
-        Ok(offset) => offset.max(0),
-        Err(error) => return call.encode(Response::failed(error)),
-    };
-
-    let database = call.state().database();
-    let listed = match browse::albums(database, scope, sort, size, offset).await {
-        Ok(listed) => listed,
-        Err(error) => {
-            return call.encode(Response::failed(browse::failure("getAlbumList2", &error)));
-        }
-    };
-
-    let user_id = call.principal().user_id.uuid();
-    let ids: Vec<Uuid> = listed.iter().map(|album| album.id.uuid()).collect();
-    let annotations =
-        match browse::annotations(call.state(), user_id, EntityKind::Album, &ids).await {
-            Ok(annotations) => annotations,
-            Err(error) => {
-                return call.encode(Response::failed(browse::failure("getAlbumList2", &error)));
-            }
-        };
-    let mut albums = Vec::new();
-    for album in listed {
-        match browse::album(database, scope, album.id).await {
-            Ok(Some(loaded)) => albums.push(projection::album_id3(
-                &loaded.detail.album,
-                &loaded.detail.artists,
-                &loaded.detail.tracks,
-                annotations
-                    .get(&loaded.detail.album.id.uuid())
-                    .unwrap_or(&Annotation::default()),
-            )),
-            Ok(None) => {}
-            Err(error) => {
-                return call.encode(Response::failed(browse::failure("getAlbumList2", &error)));
-            }
+            Err(SubsonicError::new(codes::GENERIC, UNSUPPORTED_LIST_TYPE))
         }
     }
-
-    call.encode(Response::ok().member("albumList2", Object::new().set("album", Array::new(albums))))
 }
 
 /// The id a browse request named.

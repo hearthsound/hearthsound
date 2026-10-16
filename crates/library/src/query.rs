@@ -661,7 +661,7 @@ pub async fn list_albums(
                     " AND EXISTS (SELECT 1 FROM tracks t JOIN track_genres tg ON tg.track_id = t.id \
                      JOIN genres g ON g.id = tg.genre_id WHERE t.album_id = al.id AND g.name = ",
                 )
-                .push_bind(genre.clone())
+                .push_bind(fold_genre(genre))
                 .push(")");
         }
         _ => {}

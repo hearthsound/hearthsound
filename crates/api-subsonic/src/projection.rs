@@ -196,6 +196,59 @@ fn set_plays(object: Object, annotation: &Annotation) -> Object {
     set_annotation(object, annotation)
 }
 
+/// Builds one directory `Child` member for an album.
+///
+/// The base protocol's `getAlbumList` reports an album as a folder rather than
+/// as an `AlbumID3`, so its songs are a listing below it rather than a member
+/// of it.
+///
+/// # Parameters
+///
+/// - `album`: the album row.
+/// - `artists`: the album's credited artists, in credit order.
+/// - `tracks`: the album's tracks in scope, in playing order.
+/// - `annotation`: the user's stars, rating, and play counts for the album.
+///
+/// # Returns
+///
+/// The directory child, with `isDir` set and the album's own id as its
+/// `coverArt`.
+pub(crate) fn album_dir(
+    album: &Album,
+    artists: &[Artist],
+    tracks: &[TrackView],
+    annotation: &Annotation,
+) -> Object {
+    let genres = album_genres(tracks);
+    let duration_secs = tracks.iter().map(track_duration_ms).sum::<i64>() / 1000;
+    let display_artist = display_name(album.display_artist.as_deref(), artists);
+    let artist_id = artists
+        .first()
+        .map(|artist| artist.id.to_string())
+        .unwrap_or_default();
+    let object = Object::new()
+        .set("id", album.id.to_string())
+        .set("parent", artist_id.clone())
+        .set("isDir", true)
+        .set("title", album.title.clone())
+        .set("name", album.title.clone())
+        .set("album", album.title.clone())
+        .set("artist", display_artist)
+        .set("year", album.year.unwrap_or(0))
+        .set("genre", genres.first().cloned().unwrap_or_default())
+        .set("coverArt", album.id.to_string())
+        .set("duration", duration_secs)
+        .set("playCount", annotation.play_count)
+        .set(
+            "played",
+            annotation.last_played.map(timestamp).unwrap_or_default(),
+        )
+        .set("created", timestamp(album.created_at))
+        .set("artistId", artist_id)
+        .set("songCount", tracks.len() as i64);
+    set_annotation(object, annotation)
+}
+
 /// Builds the minimal `ArtistID3` reference embedded in another member.
 ///
 /// The OpenSubsonic reference asks an embedded artist to carry only the
