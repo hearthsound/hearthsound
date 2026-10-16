@@ -218,18 +218,18 @@ async fn an_external_cancel_is_picked_up_by_reconcile() {
     wait_for_download(&env, id).await;
     place_staged_file(&env, id).await;
 
-    // The CLI writes the cancellation through a connection of its own; the
-    // orchestrator has no idea until it is told to look.
+    // The CLI writes the cancellation through a connection of its own, the way
+    // `acquisitions cancel` does; the orchestrator has no idea until it is told
+    // to look.
     let other = Database::open(&env.directory().join("hearthsound.db"))
         .await
         .unwrap();
-    let mut tx = other.writer().begin().await.unwrap();
     assert!(
-        repo::cancel(&mut tx, id, Some("cancelled from the CLI"))
+        repo::AcquisitionRepository::new(&other)
+            .cancel(id, Some("cancelled from the CLI"))
             .await
             .unwrap()
     );
-    tx.commit().await.unwrap();
     drop(other);
     assert_eq!(
         env.acquisition(id).await.state,
