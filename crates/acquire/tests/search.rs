@@ -198,8 +198,10 @@ async fn an_interactive_search_stops_at_the_first_instance_with_a_candidate() {
 
 #[tokio::test]
 async fn a_search_slot_bounds_the_concurrent_searches_of_an_instance() {
+    // Twenty polls 50 ms apart: each search runs for about a second, longer than
+    // the window the test watches for a second search.
     let env = Env::new(
-        config(json!([]), "no-candidates", 2, "downloads", ".flac"),
+        config(json!([]), "no-candidates", 20, "downloads", ".flac"),
         InstanceLimits {
             max_concurrent_searches: 1,
             ..InstanceLimits::default()
@@ -299,8 +301,10 @@ async fn the_hourly_budget_throttles_bulk_searches_but_not_interactive_ones() {
 
 #[tokio::test]
 async fn the_global_concurrency_bound_serves_the_most_urgent_acquisition_first() {
+    // Twenty polls 50 ms apart keep the play request's search running for
+    // about a second, longer than the window the test watches the queue.
     let env = Env::new(
-        config(json!([]), "no-candidates", 3, "downloads", ".flac"),
+        config(json!([]), "no-candidates", 20, "downloads", ".flac"),
         InstanceLimits::default(),
         &[("HEARTHSOUND__ACQUISITION__MAX_CONCURRENT", "1")],
     )

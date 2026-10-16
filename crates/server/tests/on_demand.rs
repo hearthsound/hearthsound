@@ -801,10 +801,9 @@ async fn a_restart_mid_download_finishes_the_acquisition() {
             let services = Arc::clone(&fixture.services);
             let downloads = downloads_dir(&fixture);
             install_catalog(&services).await;
-            // Three polls two seconds apart: long enough to be stopped in the
-            // middle of the download, short enough for the next process to
-            // finish it.
-            install_acquisition(&services, &downloads, "normal", 3).await;
+            // Forty polls 50 ms apart: long enough to be stopped in the middle
+            // of the download, short enough for the next process to finish it.
+            install_acquisition(&services, &downloads, "normal", 40).await;
             services.registry().rebuild().await.unwrap();
             place_audio(&downloads).await;
 

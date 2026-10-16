@@ -448,6 +448,18 @@ pub mod keys {
     /// Seconds a background transfer may sit queued.
     pub const ACQUISITION_QUEUE_TIMEOUT_SECS_BACKGROUND: SettingKey<i64> =
         SettingKey::new("acquisition.queue_timeout_secs.background");
+    /// Milliseconds between two polls of an interactive download.
+    pub const ACQUISITION_POLL_INTERVAL_MS_INTERACTIVE: SettingKey<i64> =
+        SettingKey::new("acquisition.poll_interval_ms.interactive");
+    /// Milliseconds between two polls of a background download.
+    pub const ACQUISITION_POLL_INTERVAL_MS_BACKGROUND: SettingKey<i64> =
+        SettingKey::new("acquisition.poll_interval_ms.background");
+    /// Milliseconds between two polls of a running search.
+    pub const ACQUISITION_SEARCH_POLL_INTERVAL_MS: SettingKey<i64> =
+        SettingKey::new("acquisition.search_poll_interval_ms");
+    /// Milliseconds between two size checks of a downloaded file before import.
+    pub const ACQUISITION_COMPLETION_CHECK_INTERVAL_MS: SettingKey<i64> =
+        SettingKey::new("acquisition.completion_check_interval_ms");
     /// Candidates tried before moving to the next instance.
     pub const ACQUISITION_MAX_CANDIDATES: SettingKey<i64> =
         SettingKey::new("acquisition.max_candidates");
@@ -772,6 +784,42 @@ impl SettingsRegistry {
                     },
                     SettingValue::Integer(1_800),
                     "Seconds a background transfer may sit queued",
+                ),
+                def(
+                    keys::ACQUISITION_POLL_INTERVAL_MS_INTERACTIVE,
+                    SettingKind::Integer {
+                        min: 10,
+                        max: 600_000,
+                    },
+                    SettingValue::Integer(2_000),
+                    "Milliseconds between two polls of an interactive download",
+                ),
+                def(
+                    keys::ACQUISITION_POLL_INTERVAL_MS_BACKGROUND,
+                    SettingKind::Integer {
+                        min: 10,
+                        max: 600_000,
+                    },
+                    SettingValue::Integer(10_000),
+                    "Milliseconds between two polls of a background download",
+                ),
+                def(
+                    keys::ACQUISITION_SEARCH_POLL_INTERVAL_MS,
+                    SettingKind::Integer {
+                        min: 10,
+                        max: 600_000,
+                    },
+                    SettingValue::Integer(1_000),
+                    "Milliseconds between two polls of a running search",
+                ),
+                def(
+                    keys::ACQUISITION_COMPLETION_CHECK_INTERVAL_MS,
+                    SettingKind::Integer {
+                        min: 10,
+                        max: 600_000,
+                    },
+                    SettingValue::Integer(1_000),
+                    "Milliseconds between two size checks of a downloaded file",
                 ),
                 def(
                     keys::ACQUISITION_MAX_CANDIDATES,

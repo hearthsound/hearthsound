@@ -46,15 +46,6 @@ use crate::orchestrator::AcquisitionOrchestrator;
 use crate::repo::AcquisitionRow;
 use crate::select::{AttemptPlan, RequestClass, ScoredCandidate};
 
-/// How long an interactive download waits between two polls.
-const INTERACTIVE_POLL_INTERVAL: Duration = Duration::from_secs(2);
-
-/// How long a bulk download waits between two polls.
-const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(10);
-
-/// How long the completion rule waits between two size checks.
-const COMPLETION_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-
 /// How long the completion rule waits for a file to stop growing.
 const COMPLETION_MAX_WAIT: Duration = Duration::from_secs(30);
 
@@ -783,11 +774,14 @@ impl AcquisitionOrchestrator {
         let snapshot = self.settings().current();
         let interactive = RequestClass::from_priority(row.priority).is_interactive();
         Ok(AttemptLimits {
-            poll_interval: if interactive {
-                INTERACTIVE_POLL_INTERVAL
-            } else {
-                BACKGROUND_POLL_INTERVAL
-            },
+            poll_interval: Duration::from_millis(
+                if interactive {
+                    snapshot.get(keys::ACQUISITION_POLL_INTERVAL_MS_INTERACTIVE)?
+                } else {
+                    snapshot.get(keys::ACQUISITION_POLL_INTERVAL_MS_BACKGROUND)?
+                }
+                .max(0) as u64,
+            ),
             stall_timeout: Duration::from_secs(
                 snapshot.get(keys::ACQUISITION_STALL_TIMEOUT_SECS)?.max(0) as u64,
             ),
@@ -1194,7 +1188,8 @@ impl AcquisitionOrchestrator {
 
     /// Waits until a file's size stops changing.
     ///
-    /// The import stage runs the same check after a resume, which is why it is
+    /// The size is checked every `acquisition.completion_check_interval_ms`. The
+    /// import stage runs the same check after a resume, which is why it is
     /// shared.
     ///
     /// # Parameters
@@ -1208,15 +1203,22 @@ impl AcquisitionOrchestrator {
     /// # Errors
     ///
     /// Returns [`AcquireError::Io`] when the file cannot be stat-ed, which
-    /// includes a file the backend reported but never wrote.
+    /// includes a file the backend reported but never wrote, and the settings
+    /// error when the check interval cannot be read.
     pub(crate) async fn wait_for_stable_size(
         &self,
         path: &Path,
     ) -> Result<(u64, bool), AcquireError> {
+        let interval = Duration::from_millis(
+            self.settings()
+                .current()
+                .get(keys::ACQUISITION_COMPLETION_CHECK_INTERVAL_MS)?
+                .max(0) as u64,
+        );
         let mut previous = file_size(path).await?;
         let deadline = Instant::now() + COMPLETION_MAX_WAIT;
         loop {
-            tokio::time::sleep(COMPLETION_CHECK_INTERVAL).await;
+            tokio::time::sleep(interval).await;
             let current = file_size(path).await?;
             if current == previous {
                 return Ok((current, true));

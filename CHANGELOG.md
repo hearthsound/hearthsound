@@ -658,6 +658,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `server.cors_origins` now takes effect: the listed origins, or every origin
   for `*`, may read any response, which browser-engine clients such as the
   Feishin desktop app need. The development stack allows every origin.
+- Settings for how often the acquisition orchestrator polls its backends:
+  `acquisition.poll_interval_ms.interactive` (2000) and `.background` (10000)
+  for downloads, `acquisition.search_poll_interval_ms` (1000) for searches, and
+  `acquisition.completion_check_interval_ms` (1000) for the size checks before
+  an import. They were fixed intervals before.
 
 ### Security
 

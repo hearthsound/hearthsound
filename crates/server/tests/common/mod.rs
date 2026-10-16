@@ -56,7 +56,7 @@ impl Fixture {
     ///   before the services are built from it.
     pub async fn with_config(adjust: impl FnOnce(&mut BootstrapConfig)) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = write_config(dir.path(), None);
+        let mut config = write_config(dir.path());
         adjust(&mut config);
         let services = Services::build(config, &BTreeMap::new()).await.unwrap();
         let user = Users::new(services.database())
@@ -164,21 +164,29 @@ pub fn load_config(dir: &Path) -> BootstrapConfig {
     BootstrapConfig::load(Some(&dir.join("hearthsound.toml")), &BTreeMap::new()).unwrap()
 }
 
+/// The `[settings]` table every test config pins: the orchestrator polls a
+/// backend every 50 ms instead of every second or more, so a simulated
+/// acquisition takes milliseconds.
+const FAST_POLLING: [(&str, &str); 4] = [
+    ("acquisition.poll_interval_ms.interactive", "50"),
+    ("acquisition.poll_interval_ms.background", "50"),
+    ("acquisition.search_poll_interval_ms", "50"),
+    ("acquisition.completion_check_interval_ms", "50"),
+];
+
 /// Writes a config file into `dir` and loads it.
 ///
 /// # Parameters
 ///
 /// - `dir`: the directory holding the data tree and the config file.
-/// - `settings`: the `[settings]` table to write, as `(key, TOML value)` pairs,
-///   or `None` for no table.
-pub fn write_config(dir: &Path, settings: Option<&[(&str, &str)]>) -> BootstrapConfig {
+pub fn write_config(dir: &Path) -> BootstrapConfig {
     let data: PathBuf = dir.join("data");
-    let mut text = format!("paths.data = \"{}\"\n", data.to_string_lossy());
-    if let Some(settings) = settings {
-        text.push_str("\n[settings]\n");
-        for (key, value) in settings {
-            text.push_str(&format!("\"{key}\" = {value}\n"));
-        }
+    let mut text = format!(
+        "paths.data = \"{}\"\n\n[settings]\n",
+        data.to_string_lossy()
+    );
+    for (key, value) in FAST_POLLING {
+        text.push_str(&format!("\"{key}\" = {value}\n"));
     }
     let path = dir.join("hearthsound.toml");
     std::fs::write(&path, text).unwrap();

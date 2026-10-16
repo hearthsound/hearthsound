@@ -101,7 +101,7 @@ async fn a_list_allows_only_the_origins_it_names() {
 #[tokio::test]
 async fn a_value_that_is_not_an_origin_stops_startup() {
     let dir = tempfile::tempdir().unwrap();
-    let mut config = common::write_config(dir.path(), None);
+    let mut config = common::write_config(dir.path());
     config.server.cors_origins = vec!["https://music.example/".to_owned()];
 
     let error = Services::build(config, &BTreeMap::new())

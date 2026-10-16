@@ -42,9 +42,6 @@ use crate::select::{
     AttemptPlan, CandidateSlot, RequestClass, SelectionRequest, select_candidates,
 };
 
-/// How long the search stage waits between two polls of a running search.
-const SEARCH_POLL_INTERVAL: Duration = Duration::from_secs(1);
-
 /// What one search produced.
 pub(crate) enum SearchOutcome {
     /// Candidates to try, best first, and the instances that were searched in
@@ -141,6 +138,11 @@ impl AcquisitionOrchestrator {
             ),
             max_candidates: snapshot.get(keys::ACQUISITION_MAX_CANDIDATES)?.max(0) as usize,
         };
+        let poll_interval = Duration::from_millis(
+            snapshot
+                .get(keys::ACQUISITION_SEARCH_POLL_INTERVAL_MS)?
+                .max(0) as u64,
+        );
         let query = AcquisitionQuery {
             granularity: Granularity::Track,
             album: album.as_ref().map(|album| album.title.clone()),
@@ -158,6 +160,7 @@ impl AcquisitionOrchestrator {
             context: AcquisitionContext::new(self.staging_dir(row.id)),
             query,
             selection,
+            poll_interval,
             instances: Vec::new(),
             slots: Vec::new(),
             backend_failed: false,
@@ -262,6 +265,9 @@ struct LayerSearch<'a> {
     query: AcquisitionQuery,
     /// The thresholds and the profile the candidates are judged by.
     selection: SelectionRequest,
+    /// How long to wait between two polls of a running search
+    /// (`acquisition.search_poll_interval_ms`).
+    poll_interval: Duration,
     /// The instances that were searched, in layer order.
     instances: Vec<Arc<RegistryInstance>>,
     /// The candidates accumulated so far.
@@ -416,7 +422,7 @@ impl LayerSearch<'_> {
                 return Ok(());
             }
 
-            if Instant::now() + SEARCH_POLL_INTERVAL >= deadline {
+            if Instant::now() + self.poll_interval >= deadline {
                 tracing::warn!(
                     instance = instance.slug().as_str(),
                     "the search deadline passed"
@@ -425,7 +431,7 @@ impl LayerSearch<'_> {
                 return Ok(());
             }
             tokio::select! {
-                () = tokio::time::sleep(SEARCH_POLL_INTERVAL) => {}
+                () = tokio::time::sleep(self.poll_interval) => {}
                 () = stop.notified() => {
                     // The acquisition was cancelled: the search is no longer
                     // wanted, and the backend should hear about it.

@@ -237,7 +237,8 @@ async fn a_stalled_candidate_is_abandoned_and_the_next_one_is_tried() {
 #[tokio::test]
 async fn a_download_that_sits_queued_is_abandoned() {
     let mut server_config = config(one_candidate(), "normal", 0, "downloads", ".flac");
-    server_config["downloadQueuedPolls"] = json!(5);
+    // A hundred queued polls 50 ms apart outlast the one second queue timeout.
+    server_config["downloadQueuedPolls"] = json!(100);
     let env = Env::new(
         server_config,
         InstanceLimits::default(),

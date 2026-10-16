@@ -112,6 +112,25 @@ pub struct Env {
     pub orchestrator: Arc<AcquisitionOrchestrator>,
 }
 
+/// The settings that make the orchestrator poll a backend every 50 ms instead
+/// of every second or more, so a simulated download takes milliseconds. A test's
+/// own `env` entries come later and override these.
+pub const FAST_POLLING: [(&str, &str); 4] = [
+    (
+        "HEARTHSOUND__ACQUISITION__POLL_INTERVAL_MS__INTERACTIVE",
+        "50",
+    ),
+    (
+        "HEARTHSOUND__ACQUISITION__POLL_INTERVAL_MS__BACKGROUND",
+        "50",
+    ),
+    ("HEARTHSOUND__ACQUISITION__SEARCH_POLL_INTERVAL_MS", "50"),
+    (
+        "HEARTHSOUND__ACQUISITION__COMPLETION_CHECK_INTERVAL_MS",
+        "50",
+    ),
+];
+
 impl Env {
     /// Builds an environment and configures the fixture instance.
     ///
@@ -252,7 +271,9 @@ impl Env {
             database.writer().clone(),
             SettingsRegistry::builtin(),
             SettingSources::new(
-                env.iter()
+                FAST_POLLING
+                    .iter()
+                    .chain(env)
                     .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
                     .collect::<BTreeMap<_, _>>(),
                 BTreeMap::new(),
@@ -499,10 +520,12 @@ impl Env {
         tracks::set_track_availability(&mut tx, track, Availability::Acquiring, None)
             .await
             .unwrap();
+        // Claimed in the inserting transaction, so a running orchestrator never
+        // sees the row queued and cannot claim it first.
+        assert!(repo::claim(&mut tx, id).await.unwrap());
         tx.commit().await.unwrap();
 
         let repository = self.orchestrator.repository();
-        assert!(repository.claim(id).await.unwrap());
         for step in [
             AcquisitionState::Searching,
             AcquisitionState::Downloading,
