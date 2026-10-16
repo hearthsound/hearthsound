@@ -22,6 +22,8 @@
 //! keep the personal-library pin of every track they affect in step, so a liked
 //! track is permanent in that user's library, and
 //! [`ActivityService::set_rating`] stores a rating of 1 to 5 or clears one.
+//! [`Playlists`] creates and edits playlists, keeping the playlist pin of every
+//! track whose membership changed in step.
 //!
 //! # Examples
 //!
@@ -58,6 +60,7 @@
 mod error;
 mod feedback;
 mod play;
+mod playlists;
 mod ratings;
 mod service;
 mod session;
@@ -65,6 +68,9 @@ mod session;
 pub use error::ActivityError;
 pub use feedback::{like, refresh_user_library_pin, unlike};
 pub use play::Plays;
+pub use playlists::{
+    MAX_PLAYLIST_NAME, Playlist, PlaylistEntry, PlaylistUpdate, Playlists, refresh_playlist_pin,
+};
 pub use ratings::{MAX_RATING, set_rating};
 pub use service::{ActivityService, Scrobble, ScrobbleOutcome};
 pub use session::{AudioDelivered, SessionOptions, StreamSession, StreamSessions};

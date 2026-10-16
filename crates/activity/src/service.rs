@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::error::ActivityError;
 use crate::play::Plays;
+use crate::playlists::Playlists;
 use crate::ratings;
 use crate::session::StreamSessions;
 use crate::{READ_THEN_WRITE, feedback, now_millis};
@@ -108,6 +109,8 @@ pub struct ActivityService {
     writer: SqlitePool,
     /// The `plays` table.
     plays: Plays,
+    /// The playlist tables.
+    playlists: Playlists,
     /// The stream sessions the guard reads.
     sessions: StreamSessions,
 }
@@ -129,6 +132,7 @@ impl ActivityService {
         ActivityService {
             writer: db.writer().clone(),
             plays: Plays::new(db),
+            playlists: Playlists::new(db),
             sessions: StreamSessions::new(),
         }
     }
@@ -169,6 +173,7 @@ impl ActivityService {
         ActivityService {
             writer: db.writer().clone(),
             plays: Plays::new(db),
+            playlists: Playlists::new(db),
             sessions,
         }
     }
@@ -181,6 +186,11 @@ impl ActivityService {
     /// Returns the `plays` repository.
     pub fn plays(&self) -> &Plays {
         &self.plays
+    }
+
+    /// Returns the playlist repository.
+    pub fn playlists(&self) -> &Playlists {
+        &self.playlists
     }
 
     /// Handles a client's scrobble.

@@ -27,4 +27,27 @@ pub enum ActivityError {
         /// The highest rating a client may set.
         max: u8,
     },
+
+    /// A playlist was named that has no row.
+    #[error("playlist `{id}` does not exist")]
+    UnknownPlaylist {
+        /// The playlist's client id.
+        id: String,
+    },
+
+    /// An edit was attempted by an account that does not own the playlist.
+    #[error("playlist `{id}` belongs to another account")]
+    NotOwner {
+        /// The playlist's client id.
+        id: String,
+    },
+
+    /// A playlist name is empty or too long.
+    #[error("playlist name `{name}` is empty or longer than {max} bytes")]
+    InvalidName {
+        /// The name the caller supplied.
+        name: String,
+        /// The longest name the server stores.
+        max: usize,
+    },
 }

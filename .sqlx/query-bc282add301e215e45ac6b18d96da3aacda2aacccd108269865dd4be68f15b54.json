@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT position, track_id, added_at FROM playlist_tracks WHERE playlist_id = ? ORDER BY position",
+  "describe": {
+    "columns": [
+      {
+        "name": "position",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "playlist_tracks",
+            "name": "position"
+          }
+        }
+      },
+      {
+        "name": "track_id",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "playlist_tracks",
+            "name": "track_id"
+          }
+        }
+      },
+      {
+        "name": "added_at",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "playlist_tracks",
+            "name": "added_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bc282add301e215e45ac6b18d96da3aacda2aacccd108269865dd4be68f15b54"
+}

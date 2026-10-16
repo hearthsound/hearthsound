@@ -94,6 +94,34 @@ pub fn track_id(track: Uuid) -> EntityId {
     EntityId::from_uuid(IdPrefix::Track, track)
 }
 
+/// Adds a remote track to an album.
+///
+/// # Parameters
+///
+/// - `library`: the repository to write through.
+/// - `album`: the album's id.
+/// - `title`: the track title.
+/// - `number`: the track number within the album.
+///
+/// # Returns
+///
+/// The new track's id.
+pub async fn insert_track(
+    library: &LibraryRepository,
+    album: Uuid,
+    title: &str,
+    number: i64,
+) -> Uuid {
+    let mut input = TrackInput::new(title, Origin::Catalog, Availability::Remote);
+    input.album_id = Some(EntityId::from_uuid(IdPrefix::Album, album));
+    input.track_number = Some(number);
+    library
+        .insert_track(&input, &[ArtistCredit::new("Remote Artist", "main")], &[])
+        .await
+        .unwrap()
+        .uuid()
+}
+
 /// Returns whether a track carries any pin.
 ///
 /// # Parameters

@@ -6,5 +6,6 @@
 
 mod common;
 mod feedback;
+mod playlists;
 mod plays;
 mod ratings;
