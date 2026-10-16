@@ -517,6 +517,45 @@ pub trait MetadataProvider: ProviderLifecycle {
 
 /// What the server knows about an artist it wants information on.
 ///
+/// The entity whose picture is wanted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtworkSubject {
+    /// The kind of entity the picture is for.
+    pub kind: EntityKind,
+    /// The issuing instance's own id for the entity, when the server holds one.
+    pub provider_id: Option<String>,
+    /// The canonical identifiers the server knows for the entity.
+    pub ids: Vec<ExternalId>,
+    /// The album title, or the artist name.
+    pub title: String,
+    /// The album's artist names in credit order; empty for an artist.
+    pub artists: Vec<String>,
+}
+
+/// What an artwork provider can do.
+///
+/// A provider answers the renditions of one entity's picture; picking one, and
+/// fetching it, is the caller's work, because the caller knows the size it
+/// needs and the policy of the instance that issued the image.
+#[async_trait]
+pub trait ArtworkProvider: ProviderLifecycle {
+    /// Returns the renditions of the subject's picture.
+    ///
+    /// # Parameters
+    ///
+    /// - `subject`: the entity whose picture is wanted.
+    ///
+    /// # Returns
+    ///
+    /// The images, best first. An empty vector means the provider has no
+    /// picture of the entity, which is not an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when the lookup could not be performed.
+    async fn find_artwork(&self, subject: &ArtworkSubject) -> Result<Vec<Image>, ProviderError>;
+}
+
 /// What an acquisition provider can do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcquisitionCapabilities {

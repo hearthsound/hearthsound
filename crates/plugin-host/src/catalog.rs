@@ -241,7 +241,7 @@ fn to_wit_query(query: &CatalogQuery) -> SearchQuery {
 }
 
 /// Converts a core entity kind into the plugin's enum.
-fn to_wit_kind(kind: EntityKind) -> wit::EntityKind {
+pub(crate) fn to_wit_kind(kind: EntityKind) -> wit::EntityKind {
     match kind {
         EntityKind::Track => wit::EntityKind::Track,
         EntityKind::Album => wit::EntityKind::Album,

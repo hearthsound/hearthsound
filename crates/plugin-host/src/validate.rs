@@ -34,7 +34,12 @@ pub const LIFECYCLE_INTERFACE: &str = "hearthsound:plugin/lifecycle@0.2.0";
 ///
 /// Every other layer's manifest validates but its component is refused, because
 /// the host has no adapter to call it through.
-pub const HOSTED_LAYERS: [Layer; 3] = [Layer::Catalog, Layer::Metadata, Layer::Acquisition];
+pub const HOSTED_LAYERS: [Layer; 4] = [
+    Layer::Catalog,
+    Layer::Metadata,
+    Layer::Acquisition,
+    Layer::Artwork,
+];
 
 /// Validates a compiled component against the host's rules.
 ///
@@ -79,6 +84,7 @@ pub fn validate(component: &Component, manifest: &Manifest) -> Result<(), Instal
             "catalog" => exported_layers.push(Layer::Catalog),
             "metadata" => exported_layers.push(Layer::Metadata),
             "acquisition" => exported_layers.push(Layer::Acquisition),
+            "artwork" => exported_layers.push(Layer::Artwork),
             _ => return Err(InstallError::UndeclaredExport(name.to_owned())),
         }
     }

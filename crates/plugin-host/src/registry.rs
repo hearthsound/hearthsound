@@ -16,7 +16,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 
 use hearthsound_config::secret::SecretBox;
-use hearthsound_core::providers::{AcquisitionProvider, CatalogProvider, MetadataProvider};
+use hearthsound_core::providers::{
+    AcquisitionProvider, ArtworkProvider, CatalogProvider, MetadataProvider,
+};
 use hearthsound_core::{Layer, Slug};
 
 use crate::host::{InstalledPlugin, PluginHost, instance_http_client};
@@ -43,6 +45,7 @@ pub struct RegistryInstance {
     catalog: Option<Arc<dyn CatalogProvider>>,
     metadata: Option<Arc<dyn MetadataProvider>>,
     acquisition: Option<Arc<dyn AcquisitionProvider>>,
+    artwork: Option<Arc<dyn ArtworkProvider>>,
 }
 
 impl RegistryInstance {
@@ -102,6 +105,11 @@ impl RegistryInstance {
     /// acquisition.
     pub fn acquisition(&self) -> Option<&Arc<dyn AcquisitionProvider>> {
         self.acquisition.as_ref()
+    }
+
+    /// Returns the artwork provider of this instance, when it provides artwork.
+    pub fn artwork(&self) -> Option<&Arc<dyn ArtworkProvider>> {
+        self.artwork.as_ref()
     }
 
     /// Fetches one image under the instance's HTTP permissions.
@@ -467,6 +475,7 @@ impl ProviderRegistry {
         let mut catalog = None;
         let mut metadata = None;
         let mut acquisition = None;
+        let mut artwork = None;
         for layer in layers {
             match layer {
                 Layer::Catalog => {
@@ -490,6 +499,13 @@ impl ProviderRegistry {
                             .map_err(|error| error.to_string())?,
                     );
                 }
+                Layer::Artwork => {
+                    artwork = Some(
+                        self.host
+                            .artwork_provider(&component, instance.clone())
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
                 other => {
                     return Err(format!("this server cannot host `{other}` plugins yet"));
                 }
@@ -507,6 +523,7 @@ impl ProviderRegistry {
             catalog,
             metadata,
             acquisition,
+            artwork,
         })
     }
 

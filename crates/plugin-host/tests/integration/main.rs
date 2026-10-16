@@ -6,6 +6,7 @@
 
 mod acquisition_provider;
 mod artwork;
+mod artwork_provider;
 mod catalog_provider;
 mod deadline;
 mod http_catalog;

@@ -551,6 +551,10 @@ impl InstanceService {
                 let provider = self.host.acquisition_provider(plugin, instance.clone())?;
                 provider.validate_config(config).await
             }
+            Layer::Artwork => {
+                let provider = self.host.artwork_provider(plugin, instance.clone())?;
+                provider.validate_config(config).await
+            }
             other => return Err(InstanceError::UnsupportedCapability(other)),
         };
 

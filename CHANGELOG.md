@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   artwork provider and artist info to the plugin interface.
 - Metadata plugins can be asked for an artist's biography and links through
   `MetadataProvider::artist_info`.
+- Artwork plugins are hosted: an instance whose plugin provides `artwork` gets
+  an `ArtworkProvider` that answers the images it knows for an album or an
+  artist, and the test support ships an artwork fixture.
 
 ### Added
 

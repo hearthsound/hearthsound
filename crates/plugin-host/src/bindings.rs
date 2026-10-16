@@ -71,6 +71,23 @@ pub(crate) mod metadata {
     });
 }
 
+/// The artwork provider world.
+pub(crate) mod artwork {
+    wasmtime::component::bindgen!({
+        path: "../../wit",
+        world: "hearthsound:plugin/artwork-provider",
+        imports: { default: async | trappable },
+        exports: { default: async },
+        with: {
+            "hearthsound:plugin/types@0.2.0": crate::bindings::imports::hearthsound::plugin::types,
+            "hearthsound:plugin/host-log@0.2.0": crate::bindings::imports::hearthsound::plugin::host_log,
+            "hearthsound:plugin/host-http@0.2.0": crate::bindings::imports::hearthsound::plugin::host_http,
+            "hearthsound:plugin/host-kv@0.2.0": crate::bindings::imports::hearthsound::plugin::host_kv,
+            "hearthsound:plugin/host-config@0.2.0": crate::bindings::imports::hearthsound::plugin::host_config,
+        },
+    });
+}
+
 /// The acquisition provider world.
 pub(crate) mod acquisition {
     wasmtime::component::bindgen!({
@@ -90,6 +107,7 @@ pub(crate) mod acquisition {
 }
 
 pub(crate) use acquisition::{AcquisitionProvider, AcquisitionProviderPre};
+pub(crate) use artwork::{ArtworkProvider, ArtworkProviderPre};
 pub(crate) use catalog::{CatalogProvider, CatalogProviderPre};
 pub(crate) use metadata::{MetadataProvider, MetadataProviderPre};
 

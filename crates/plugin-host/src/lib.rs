@@ -28,6 +28,7 @@
 
 mod acquisition;
 pub mod archive;
+mod artwork;
 mod bindings;
 mod catalog;
 mod engine;

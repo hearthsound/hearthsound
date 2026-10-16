@@ -13,7 +13,9 @@ use std::sync::Arc;
 use hearthsound_config::SettingsStore;
 use hearthsound_core::Layer;
 use hearthsound_core::events::EventBus;
-use hearthsound_core::providers::{AcquisitionProvider, CatalogProvider, MetadataProvider};
+use hearthsound_core::providers::{
+    AcquisitionProvider, ArtworkProvider, CatalogProvider, MetadataProvider,
+};
 use hearthsound_db::Database;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -22,8 +24,10 @@ use wasmtime::component::{Component, HasSelf, Linker};
 
 use crate::acquisition::WasmAcquisitionProvider;
 use crate::archive::PluginArchive;
+use crate::artwork::WasmArtworkProvider;
 use crate::bindings::{
-    self, AcquisitionProviderPre, CatalogProviderPre, MetadataProviderPre, imports,
+    self, AcquisitionProviderPre, ArtworkProviderPre, CatalogProviderPre, MetadataProviderPre,
+    imports,
 };
 use crate::catalog::WasmCatalogProvider;
 use crate::engine::PluginEngine;
@@ -278,6 +282,33 @@ impl PluginHost {
     ) -> Result<Arc<dyn MetadataProvider>, HostError> {
         let pool = self.store_pool::<bindings::MetadataProvider>(plugin, &instance)?;
         Ok(Arc::new(WasmMetadataProvider::new(
+            pool,
+            plugin.manifest().id.clone(),
+            instance.slug,
+        )))
+    }
+
+    /// Wraps an installed plugin as an artwork provider.
+    ///
+    /// # Parameters
+    ///
+    /// - `plugin`: the installed plugin to drive.
+    /// - `instance`: the instance's configuration.
+    ///
+    /// # Returns
+    ///
+    /// The provider, as the core trait object the rest of the server uses.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`PluginHost::catalog_provider`].
+    pub fn artwork_provider(
+        &self,
+        plugin: &InstalledPlugin,
+        instance: InstanceConfig,
+    ) -> Result<Arc<dyn ArtworkProvider>, HostError> {
+        let pool = self.store_pool::<bindings::ArtworkProvider>(plugin, &instance)?;
+        Ok(Arc::new(WasmArtworkProvider::new(
             pool,
             plugin.manifest().id.clone(),
             instance.slug,
@@ -566,6 +597,9 @@ fn ensure_instantiable(
             }
             Layer::Acquisition => {
                 AcquisitionProviderPre::new(pre).map_err(incompatible)?;
+            }
+            Layer::Artwork => {
+                ArtworkProviderPre::new(pre).map_err(incompatible)?;
             }
             other => return Err(InstallError::UnsupportedCapability(*other)),
         }

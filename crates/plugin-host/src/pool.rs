@@ -24,8 +24,8 @@ use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
 use crate::bindings::{
-    AcquisitionProvider, AcquisitionProviderPre, CatalogProvider, CatalogProviderPre,
-    MetadataProvider, MetadataProviderPre,
+    AcquisitionProvider, AcquisitionProviderPre, ArtworkProvider, ArtworkProviderPre,
+    CatalogProvider, CatalogProviderPre, MetadataProvider, MetadataProviderPre,
 };
 use crate::files::FileAccess;
 use crate::http::HttpClient;
@@ -105,6 +105,25 @@ impl World for MetadataProvider {
         component: &Component,
     ) -> Result<Self::Pre, wasmtime::Error> {
         MetadataProviderPre::new(linker.instantiate_pre(component)?)
+    }
+
+    async fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> Result<Self::Instance, wasmtime::Error> {
+        pre.instantiate_async(store).await
+    }
+}
+
+impl World for ArtworkProvider {
+    type Pre = ArtworkProviderPre<InstanceState>;
+    type Instance = ArtworkProvider;
+
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error> {
+        ArtworkProviderPre::new(linker.instantiate_pre(component)?)
     }
 
     async fn instantiate(
