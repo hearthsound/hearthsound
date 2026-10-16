@@ -625,7 +625,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through the normal failure path - `failed` with `all-candidates-failed` and
   the import error as the detail, and the track in cooldown - so no worker is
   left holding a row in `importing`.
-- Full-stack tests of on-demand playback in `crates/server/tests/on_demand.rs`,
+- Full-stack tests of on-demand playback in
+  `crates/server/tests/integration/on_demand.rs`,
   which start the real server over a temporary data directory and drive it over
   HTTP with the album catalog and acquisition fixtures: `search3` answers the
   requester's own library first and the catalog after it; a stream of an

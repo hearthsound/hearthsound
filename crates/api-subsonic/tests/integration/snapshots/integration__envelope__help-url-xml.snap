@@ -1,0 +1,5 @@
+---
+source: crates/api-subsonic/tests/integration/envelope.rs
+expression: "response.render(ResponseFormat::Xml)"
+---
+<subsonic-response xmlns="http://subsonic.org/restapi" status="failed" version="1.16.1" type="hearthsound" serverVersion="0.1.0-alpha.0" openSubsonic="true"><error code="40" message="Wrong username or password." helpUrl="https://hearthsound.app/docs/clients/app-passwords"/></subsonic-response>
