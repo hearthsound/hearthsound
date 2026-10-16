@@ -308,6 +308,54 @@ pub(crate) async fn annotation(
     Ok(annotations.remove(&id).unwrap_or_default())
 }
 
+/// Lists the most played songs crediting an artist.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `scope`: the scope to count in.
+/// - `artist_id`: the artist whose songs are listed.
+/// - `count`: the maximum number of songs.
+///
+/// # Returns
+///
+/// The songs, most played first.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a read fails.
+pub(crate) async fn top_tracks_for_artist(
+    database: &Database,
+    scope: Scope,
+    artist_id: EntityId,
+    count: i64,
+) -> Result<Vec<TrackView>, LibraryError> {
+    let mut conn = database.readers().acquire().await?;
+    query::top_tracks_for_artist(&mut conn, scope, artist_id, count).await
+}
+
+/// Finds one artist by name.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `name`: the name to find, compared without regard to case.
+///
+/// # Returns
+///
+/// The artist, or `None` when no artist has that name.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a read fails.
+pub(crate) async fn find_artist_by_name(
+    database: &Database,
+    name: &str,
+) -> Result<Option<Artist>, LibraryError> {
+    let mut conn = database.readers().acquire().await?;
+    query::find_artist_by_name(&mut conn, name).await
+}
+
 /// Lists the genres of the tracks in scope.
 ///
 /// # Parameters

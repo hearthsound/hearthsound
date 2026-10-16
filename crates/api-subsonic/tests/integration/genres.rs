@@ -271,3 +271,121 @@ async fn get_random_songs_samples_the_scope() {
     .await;
     assert_error(&unknown, 70);
 }
+
+/// `getTopSongs` ranks an artist's songs by how often they were played.
+#[tokio::test]
+async fn top_songs_follow_the_play_counts() {
+    let (fixture, seeded) = fixture().await;
+    let activity = fixture.state.activity();
+    let user = fixture.user_id.uuid();
+    // The second song is played twice and the first once, and the other album's
+    // song is played as often as the second one.
+    for (track, times) in [
+        (seeded.alpha_tracks[1], 2),
+        (seeded.alpha_tracks[0], 1),
+        (seeded.bright_track, 2),
+    ] {
+        for index in 0..times {
+            activity
+                .plays()
+                .record_play(
+                    user,
+                    track.uuid(),
+                    Some("Rufin"),
+                    1_000 + index,
+                    200_000,
+                    true,
+                )
+                .await
+                .unwrap();
+        }
+    }
+    let app = fixture.app();
+
+    let listed = get(
+        &app,
+        &format!(
+            "/rest/getTopSongs?id={}&apiKey={}&f=json",
+            seeded.cardinals, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&listed);
+    assert!(listed.body.contains("\"topSongs\""), "{}", listed.body);
+    assert!(
+        listed.body.contains(&seeded.alpha_tracks[0].to_string()),
+        "the artist's songs are listed: {}",
+        listed.body
+    );
+    assert!(
+        !listed.body.contains(&seeded.bright_track.to_string()),
+        "another artist's song is not listed: {}",
+        listed.body
+    );
+    let first = listed.body.find("One").expect("the most played song");
+    let second = listed.body.find("Zero").expect("the least played song");
+    assert!(
+        first < second,
+        "the most played song comes first: {}",
+        listed.body
+    );
+
+    // A name that no artist has answers an empty listing rather than an error.
+    let unknown = get(
+        &app,
+        &format!(
+            "/rest/getTopSongs?artist=Nobody&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&unknown);
+    assert!(unknown.body.contains("\"song\":[]"), "{}", unknown.body);
+
+    let missing = get(
+        &app,
+        &format!("/rest/getTopSongs?apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_error(&missing, 10);
+}
+
+/// `getSimilarSongs` answers an empty listing and requires an id.
+#[tokio::test]
+async fn similar_songs_answer_an_empty_listing() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+
+    let listed = get(
+        &app,
+        &format!(
+            "/rest/getSimilarSongs?id={}&apiKey={}&f=json",
+            seeded.alpha_tracks[0], fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&listed);
+    assert!(
+        listed.body.contains("\"similarSongs\":{\"song\":[]}"),
+        "{}",
+        listed.body
+    );
+
+    let listed = get(
+        &app,
+        &format!(
+            "/rest/getSimilarSongs2.view?id={}&apiKey={}",
+            seeded.alpha_tracks[0], fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&listed);
+    assert!(listed.body.contains("similarSongs2"), "{}", listed.body);
+
+    let missing = get(
+        &app,
+        &format!("/rest/getSimilarSongs?apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_error(&missing, 10);
+}

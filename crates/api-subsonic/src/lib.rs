@@ -78,6 +78,9 @@
 //! | `getMusicFolders` | the personal library, and the server unless `privacy.server_browse` is disabled |
 //! | `createBookmark` | saves where the user left off in a track |
 //! | `deleteBookmark` | removes the user's bookmark of a track |
+//! | `getTopSongs` | the most played songs of one artist |
+//! | `getSimilarSongs` | an empty similar-songs listing |
+//! | `getSimilarSongs2` | the same empty listing in the ID3 shape |
 //! | `download` | the stored file of one track, as an attachment |
 //! | `getUser` | one account's name, roles, and music folders |
 //! | `getScanStatus` | what the library scanner is doing |

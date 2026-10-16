@@ -1,6 +1,6 @@
 //! The genre endpoints: `getGenres`, `getSongsByGenre`, and `getRandomSongs`.
 
-use hearthsound_core::EntityKind;
+use hearthsound_core::{ClientId, EntityKind, IdPrefix};
 use hearthsound_library::query::{Scope, TrackView};
 use uuid::Uuid;
 
@@ -9,7 +9,7 @@ use crate::endpoints::browse::number;
 use crate::response::{Encoded, Response, SubsonicError};
 use crate::scope;
 use crate::value::{Array, Object};
-use crate::{browse, projection};
+use crate::{browse, catalog, projection};
 
 /// The number of songs a genre or random listing returns when `count` or `size`
 /// is absent.
@@ -17,6 +17,9 @@ const DEFAULT_SONGS: i64 = 10;
 
 /// The largest number of songs a genre or random listing returns.
 const MAX_SONGS: i64 = 500;
+
+/// The number of songs `getTopSongs` returns without a count parameter.
+const DEFAULT_TOP_SONGS: i64 = 50;
 
 /// Answers `getGenres`: the genres of the tracks in scope with their counts.
 ///
@@ -162,6 +165,175 @@ pub async fn get_random_songs(call: Call) -> Encoded {
         Err(error) => return call.encode(Response::failed(error)),
     };
     call.encode(Response::ok().member("randomSongs", Object::new().set("song", Array::new(songs))))
+}
+
+/// Answers `getTopSongs`: the most played songs of one artist.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call. `id` names a stored artist or a catalog
+///   artist and takes precedence over `artist`, a name; `count` is the number of
+///   songs (default 50, capped at 500).
+///
+/// # Returns
+///
+/// A successful envelope carrying `topSongs`, or a failed envelope.
+///
+/// # Errors
+///
+/// Answers Subsonic error 10 when neither `id` nor `artist` is given, error 0
+/// when `count` is not a number, error 70 when `id` is not an artist id, and a
+/// generic error when a catalog artist cannot be reached or a read fails. A
+/// name no artist has answers an empty listing.
+pub async fn get_top_songs(call: Call) -> Encoded {
+    let count = match number(&call, "count", DEFAULT_TOP_SONGS) {
+        Ok(count) => count.clamp(0, MAX_SONGS),
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let scope = match scope::resolve(&call).await {
+        Ok(scope) => scope,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let database = call.state().database();
+
+    let views = match call.get("id").filter(|value| !value.is_empty()) {
+        Some(value) => match ClientId::parse(value) {
+            Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::Artist => {
+                match browse::top_tracks_for_artist(database, scope, id, count).await {
+                    Ok(views) => views,
+                    Err(error) => {
+                        return call
+                            .encode(Response::failed(browse::failure("getTopSongs", &error)));
+                    }
+                }
+            }
+            Ok(ClientId::Catalog(id)) if id.kind() == EntityKind::Artist => {
+                let catalog = call.state().catalog();
+                let limit = u32::try_from(count.max(0)).unwrap_or(u32::MAX);
+                match catalog.artist_top_tracks(&id, limit).await {
+                    Ok(tracks) => {
+                        let suffix = match catalog::title_suffix(&call.state().settings_snapshot())
+                        {
+                            Ok(suffix) => suffix,
+                            Err(error) => return call.encode(Response::failed(error)),
+                        };
+                        let songs: Vec<Object> = tracks
+                            .iter()
+                            .map(|track| {
+                                projection::catalog_child(&track.id, &track.track, &suffix)
+                            })
+                            .collect();
+                        return call.encode(
+                            Response::ok()
+                                .member("topSongs", Object::new().set("song", Array::new(songs))),
+                        );
+                    }
+                    Err(error) => {
+                        return call.encode(Response::failed(catalog::failure(&error)));
+                    }
+                }
+            }
+            _ => {
+                tracing::debug!("a top songs request named an id that is not an artist id");
+                return call.encode(Response::failed(SubsonicError::not_found()));
+            }
+        },
+        None => match call.get("artist").filter(|name| !name.is_empty()) {
+            Some(name) => match browse::find_artist_by_name(database, name).await {
+                Ok(Some(artist)) => {
+                    match browse::top_tracks_for_artist(database, scope, artist.id, count).await {
+                        Ok(views) => views,
+                        Err(error) => {
+                            return call
+                                .encode(Response::failed(browse::failure("getTopSongs", &error)));
+                        }
+                    }
+                }
+                Ok(None) => {
+                    return call.encode(Response::ok().member(
+                        "topSongs",
+                        Object::new().set("song", Array::new(Vec::<Object>::new())),
+                    ));
+                }
+                Err(error) => {
+                    return call.encode(Response::failed(browse::failure("getTopSongs", &error)));
+                }
+            },
+            None => {
+                return call.encode(Response::failed(SubsonicError::missing_parameter("artist")));
+            }
+        },
+    };
+
+    let songs = match songs(&call, scope, views).await {
+        Ok(songs) => songs,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    call.encode(Response::ok().member("topSongs", Object::new().set("song", Array::new(songs))))
+}
+
+/// Answers `getSimilarSongs` and `getSimilarSongs2`: nothing yet.
+///
+/// The protocol asks a server for songs similar to one track. This server has
+/// no similarity model, so it answers an empty list rather than failing: a
+/// client that fills a "similar songs" panel shows nothing, which is honest
+/// about what the server knows.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call. `id` names the track the request is about.
+///
+/// # Returns
+///
+/// A successful envelope carrying `similarSongs` or `similarSongs2`, or a
+/// failed envelope.
+///
+/// # Errors
+///
+/// Answers Subsonic error 10 when `id` is missing.
+pub async fn get_similar_songs(call: Call) -> Encoded {
+    similar_songs(&call, "similarSongs").await
+}
+
+/// Answers `getSimilarSongs2`: the ID3 shape of the same empty answer.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+///
+/// # Returns
+///
+/// A successful envelope carrying `similarSongs2`, or a failed envelope.
+///
+/// # Errors
+///
+/// Answers the errors [`get_similar_songs`] documents.
+pub async fn get_similar_songs_2(call: Call) -> Encoded {
+    similar_songs(&call, "similarSongs2").await
+}
+
+/// Answers a similar-songs request with an empty listing.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `member`: the member the empty listing is carried in.
+///
+/// # Returns
+///
+/// A successful envelope, or a failed envelope.
+///
+/// # Errors
+///
+/// Answers Subsonic error 10 when `id` is missing.
+async fn similar_songs(call: &Call, member: &'static str) -> Encoded {
+    if call.get("id").filter(|value| !value.is_empty()).is_none() {
+        return call.encode(Response::failed(SubsonicError::missing_parameter("id")));
+    }
+    call.encode(Response::ok().member(
+        member,
+        Object::new().set("song", Array::new(Vec::<Object>::new())),
+    ))
 }
 
 /// Projects a listing of songs, with the user's annotations for each.

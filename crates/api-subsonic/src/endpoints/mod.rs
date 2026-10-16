@@ -35,7 +35,10 @@ pub use browse::{
 pub use cover_art::get_cover_art;
 pub use download::download;
 pub use feedback::{get_starred, get_starred2, set_rating, star, unstar};
-pub use genres::{get_genres, get_random_songs, get_songs_by_genre};
+pub use genres::{
+    get_genres, get_random_songs, get_similar_songs, get_similar_songs_2, get_songs_by_genre,
+    get_top_songs,
+};
 pub use now_playing::get_now_playing;
 pub use play_queue::{
     get_play_queue, get_play_queue_by_index, save_play_queue, save_play_queue_by_index,

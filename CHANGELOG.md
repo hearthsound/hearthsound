@@ -771,6 +771,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   another account readable only by an administrator.
 - `download` serves the stored file of one track as an attachment to an account
   that may download, with no stream session and no acquisition behind it.
+- `getTopSongs` ranks an artist's songs by how often the server recorded them
+  being played, by stored or catalog artist id or by name, and the
+  `topSongsByArtistId` extension is advertised.
+- `getSimilarSongs` and `getSimilarSongs2` answer an empty listing, because this
+  server has no similarity model to answer with.
 
 ### Security
 
