@@ -675,6 +675,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An album whose compilation flag is set, or whose album artist is named
   `Various Artists`, is stored as a compilation, credited to `Various Artists`
   when the file names no album artist, and reported with `isCompilation`.
+- A scan reads a folder's stored rows in one query and probes the changed files
+  several at a time, with the new `library.scan.concurrency` setting (8 by
+  default) bounding how many run at once.
 
 ### Security
 

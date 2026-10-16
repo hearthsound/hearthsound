@@ -414,6 +414,9 @@ pub mod keys {
     /// Separators that split a single-valued artist tag into several artists.
     pub const LIBRARY_SCAN_ARTIST_SEPARATORS: SettingKey<Vec<String>> =
         SettingKey::new("library.scan.artist_separators");
+    /// How many files a scan probes at once.
+    pub const LIBRARY_SCAN_CONCURRENCY: SettingKey<i64> =
+        SettingKey::new("library.scan.concurrency");
 
     /// Upper bound on the total size of the cache directory, in bytes.
     pub const STORAGE_CACHE_MAX_BYTES: SettingKey<i64> = SettingKey::new("storage.cache.max_bytes");
@@ -700,6 +703,12 @@ impl SettingsRegistry {
                     ),
                     "Separators that split a single-valued artist tag into several artists; \
                      applies to files indexed after the change, run a full scan to re-split",
+                ),
+                def(
+                    keys::LIBRARY_SCAN_CONCURRENCY,
+                    SettingKind::Integer { min: 1, max: 64 },
+                    SettingValue::Integer(8),
+                    "Files probed at once during a scan",
                 ),
                 def(
                     keys::STORAGE_CACHE_MAX_BYTES,

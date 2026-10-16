@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
+use futures_util::StreamExt as _;
 use hearthsound_config::keys;
 use hearthsound_config::settings::Settings;
 use hearthsound_core::events::{
@@ -264,15 +265,20 @@ impl LibraryScanner {
     /// that was indexed by an earlier scan and fails to probe now keeps its
     /// stored row.
     pub async fn scan_folder(&self, folder_id: Uuid) -> Result<ScanReport, LibraryError> {
-        let separators = self
-            .settings
-            .current()
-            .get(keys::LIBRARY_SCAN_ARTIST_SEPARATORS)?;
+        let settings = self.settings.current();
+        let separators = settings.get(keys::LIBRARY_SCAN_ARTIST_SEPARATORS)?;
         let separators = separators.as_slice();
+        let concurrency = settings.get(keys::LIBRARY_SCAN_CONCURRENCY)?;
+        // The setting is validated to 1..=64; clamping keeps a store built by
+        // hand safe as well.
+        let concurrency = concurrency.clamp(1, 64) as usize;
         let mut read = self.readers.acquire().await?;
         let folder = folders::get_library_folder(&mut read, folder_id)
             .await?
             .ok_or(LibraryError::UnknownFolder { folder_id })?;
+        // One read of the folder's rows replaces a lookup per walked file.
+        let stored = media_files::list_folder_media_files(&mut read, folder.id).await?;
+        drop(read);
 
         let walk_root = folder.path.clone();
         let found = tokio::task::spawn_blocking(move || walk(&walk_root)).await??;
@@ -284,20 +290,34 @@ impl LibraryScanner {
         };
         self.progress(&folder, "indexing", &report, None);
 
+        // The files whose size or modification time changed, with the track
+        // their stored row belongs to.
         let mut seen: HashSet<String> = HashSet::with_capacity(found.len());
-        let mut pending: Vec<PendingFile> = Vec::with_capacity(WRITE_BATCH);
+        let mut changed: Vec<(FoundFile, Option<EntityId>)> = Vec::new();
         for file in found {
             seen.insert(file.rel_path.clone());
-            let existing =
-                media_files::find_folder_media_file(&mut read, folder.id, &file.rel_path).await?;
-            if let Some(row) = &existing
-                && row.size == file.size
-                && row.mtime_ms == file.mtime_ms
+            let state = stored.get(&file.rel_path).copied();
+            if let Some(state) = state
+                && state.size == file.size
+                && state.mtime_ms == file.mtime_ms
             {
                 report.files_skipped += 1;
                 continue;
             }
-            let probe = match hearthsound_media::probe(&file.absolute).await {
+            changed.push((file, state.map(|state| state.track_id)));
+        }
+
+        // Probing a file is mostly waiting on the disk and on `lofty`, so
+        // several files are probed at once; the writes stay batched.
+        let mut pending: Vec<PendingFile> = Vec::with_capacity(WRITE_BATCH);
+        let mut probes = futures_util::stream::iter(changed)
+            .map(|(file, track_id)| async move {
+                let probe = hearthsound_media::probe(&file.absolute).await;
+                (file, track_id, probe)
+            })
+            .buffer_unordered(concurrency);
+        while let Some((file, track_id, probe)) = probes.next().await {
+            let probe = match probe {
                 Ok(probe) => probe,
                 Err(error) => {
                     tracing::warn!(
@@ -312,7 +332,7 @@ impl LibraryScanner {
             pending.push(PendingFile {
                 found: file,
                 probe,
-                track_id: existing.map(|row| row.track_id),
+                track_id,
             });
             if pending.len() >= WRITE_BATCH {
                 self.flush(&folder, separators, &mut pending, &mut report)
@@ -430,26 +450,27 @@ impl LibraryScanner {
         let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
         let existing = media_files::list_folder_media_files(&mut tx, folder.id).await?;
         let mut removed: Vec<EntityId> = Vec::new();
-        for file in existing {
-            if seen.contains(&file.rel_path) {
+        for (rel_path, state) in &existing {
+            if seen.contains(rel_path) {
                 continue;
             }
-            media_files::delete_media_file(&mut tx, file.id).await?;
+            media_files::delete_media_file(&mut tx, state.id).await?;
             report.files_removed += 1;
-            let remaining = media_files::list_media_files_for_track(&mut tx, file.track_id).await?;
+            let remaining =
+                media_files::list_media_files_for_track(&mut tx, state.track_id).await?;
             if !remaining.is_empty() {
                 continue;
             }
-            match tracks::get_track(&mut tx, file.track_id).await? {
+            match tracks::get_track(&mut tx, state.track_id).await? {
                 Some(track) if track.origin == Origin::Local => {
-                    tracks::delete_track(&mut tx, file.track_id).await?;
+                    tracks::delete_track(&mut tx, state.track_id).await?;
                     report.tracks_removed += 1;
-                    removed.push(file.track_id);
+                    removed.push(state.track_id);
                 }
                 Some(_) => {
                     tracks::set_track_availability(
                         &mut tx,
-                        file.track_id,
+                        state.track_id,
                         Availability::Remote,
                         None,
                     )

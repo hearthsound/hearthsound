@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
+futures-util.workspace = true
 hearthsound-config = { path = "../config" }
 hearthsound-core = { path = "../core" }
 hearthsound-db = { path = "../db" }

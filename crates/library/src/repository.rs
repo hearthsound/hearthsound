@@ -11,6 +11,7 @@
 //! on its own. Such a caller opens a transaction and calls the free functions
 //! with it instead.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use hearthsound_core::{Availability, EntityId, PinReason};
@@ -19,6 +20,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::error::LibraryError;
+use crate::media_files::StoredFileState;
 use crate::model::{
     Album, AlbumInput, Artist, ArtistCredit, ArtistInput, Credit, Genre, LibraryFolder,
     ManagedMediaFile, MediaFile, MediaFileInput, ScannedMediaFile, Track, TrackInput,
@@ -485,7 +487,8 @@ impl LibraryRepository {
         media_files::preferred_media_file(&mut conn, track_id).await
     }
 
-    /// Lists every media file of a folder.
+    /// Lists the stored state of every media file of a folder, keyed by its
+    /// path relative to the folder root.
     ///
     /// # Errors
     ///
@@ -493,7 +496,7 @@ impl LibraryRepository {
     pub async fn list_folder_media_files(
         &self,
         folder_id: Uuid,
-    ) -> Result<Vec<MediaFile>, LibraryError> {
+    ) -> Result<HashMap<String, StoredFileState>, LibraryError> {
         let mut conn = self.readers.acquire().await?;
         media_files::list_folder_media_files(&mut conn, folder_id).await
     }

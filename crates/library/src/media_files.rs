@@ -21,6 +21,8 @@
 //! inside its own transaction; the pool-level convenience is on
 //! [`crate::LibraryRepository`].
 
+use std::collections::HashMap;
+
 use hearthsound_core::{EntityId, IdPrefix, QualityTier, StorageClass};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
@@ -491,7 +493,24 @@ pub async fn preferred_media_file(
     row.map(MediaFileRow::into_media_file).transpose()
 }
 
-/// Lists every media file of a folder.
+/// The stored state of one media file of a folder.
+///
+/// A scan compares a walked file against this: the size and modification time
+/// decide whether the file needs probing, and the id and track let the write
+/// refresh the row and its track instead of inserting a new one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredFileState {
+    /// The media file's id.
+    pub id: Uuid,
+    /// The track the file belongs to.
+    pub track_id: EntityId,
+    /// The stored file size in bytes.
+    pub size: i64,
+    /// The stored file modification time in unix milliseconds.
+    pub mtime_ms: i64,
+}
+
+/// Lists the stored state of every media file of a folder.
 ///
 /// # Parameters
 ///
@@ -500,7 +519,7 @@ pub async fn preferred_media_file(
 ///
 /// # Returns
 ///
-/// The folder's files ordered by relative path.
+/// The folder's files, keyed by their path relative to the folder root.
 ///
 /// # Errors
 ///
@@ -508,20 +527,26 @@ pub async fn preferred_media_file(
 pub async fn list_folder_media_files(
     conn: &mut SqliteConnection,
     folder_id: Uuid,
-) -> Result<Vec<MediaFile>, LibraryError> {
-    let rows = sqlx::query_as!(
-        MediaFileRow,
-        "SELECT id, track_id, storage, folder_id, rel_path, size, mtime_ms, format, codec, \
-                bitrate_kbps, sample_rate, bit_depth, channels, duration_ms, lossless, \
-                quality_tier, replaygain, has_embedded_art, added_at, last_accessed_at, \
-                uploaded_by, acquisition_id, is_preferred FROM media_files \
-         WHERE storage = 'folder' AND folder_id = ? ORDER BY rel_path",
+) -> Result<HashMap<String, StoredFileState>, LibraryError> {
+    let rows = sqlx::query!(
+        "SELECT id, track_id, rel_path, size, mtime_ms FROM media_files \
+         WHERE storage = 'folder' AND folder_id = ?",
         folder_id.as_bytes().as_slice(),
     )
     .fetch_all(&mut *conn)
     .await?;
     rows.into_iter()
-        .map(MediaFileRow::into_media_file)
+        .map(|row| {
+            Ok((
+                row.rel_path,
+                StoredFileState {
+                    id: decode_uuid(&row.id)?,
+                    track_id: decode_entity(IdPrefix::Track, &row.track_id)?,
+                    size: row.size,
+                    mtime_ms: row.mtime_ms,
+                },
+            ))
+        })
         .collect()
 }
 
