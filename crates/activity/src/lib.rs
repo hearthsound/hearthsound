@@ -24,8 +24,10 @@
 //! [`ActivityService::set_rating`] stores a rating of 1 to 5 or clears one.
 //! [`Playlists`] creates and edits playlists, keeping the playlist pin of every
 //! track whose membership changed in step, [`PlayQueues`] stores the queue
-//! each client saved so another client can pick it up, and [`Bookmarks`] stores
-//! the position a user left a track at.
+//! each client saved so another client can pick it up, [`Bookmarks`] stores
+//! the position a user left a track at, and [`NowPlaying`] stores what each
+//! client is playing, which [`InMemoryReports`] keeps current from the playback
+//! reports that also earn plays.
 //!
 //! # Examples
 //!
@@ -62,22 +64,31 @@
 mod bookmarks;
 mod error;
 mod feedback;
+mod now_playing;
 mod play;
 mod play_queues;
 mod playlists;
 mod ratings;
+mod reports;
 mod service;
 mod session;
 
 pub use bookmarks::{Bookmark, Bookmarks};
 pub use error::ActivityError;
 pub use feedback::{like, refresh_user_library_pin, unlike};
+pub use now_playing::{
+    DEFAULT_CLIENT, NowPlaying, NowPlayingEntry, PLAYING_GRACE_MS, PLAYING_GRACE_UNKNOWN_MS,
+};
 pub use play::Plays;
 pub use play_queues::{PlayQueues, SavedQueue};
 pub use playlists::{
     MAX_PLAYLIST_NAME, Playlist, PlaylistEntry, PlaylistUpdate, Playlists, refresh_playlist_pin,
 };
 pub use ratings::{MAX_RATING, set_rating};
+pub use reports::{
+    InMemoryReports, LISTENED_HALF_MS, MIN_TRACK_MS, PlaybackOutcome, PlaybackReport,
+    PlaybackState, SCROBBLE_DEDUPE_MS,
+};
 pub use service::{ActivityService, Scrobble, ScrobbleOutcome};
 pub use session::{AudioDelivered, SessionOptions, StreamSession, StreamSessions};
 

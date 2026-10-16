@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO now_playing (user_id, client, track_id, started_at, position_ms, state) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user_id, client) DO UPDATE SET track_id = excluded.track_id, started_at = excluded.started_at, position_ms = excluded.position_ms, state = excluded.state",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "9bf9d1108597f656293b3961389c192c99efbaf9590248a5166b6d3b9edb997f"
+}

@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT started_at, listened_ms, audio_delivered, client FROM plays",
+  "describe": {
+    "columns": [
+      {
+        "name": "started_at",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "started_at"
+          }
+        }
+      },
+      {
+        "name": "listened_ms",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "listened_ms"
+          }
+        }
+      },
+      {
+        "name": "audio_delivered",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "audio_delivered"
+          }
+        }
+      },
+      {
+        "name": "client",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "client"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "ca00e5c25e877b8b3d34df65492a5b2c9ef264d01f3bffddae3261e9c97a0a4d"
+}

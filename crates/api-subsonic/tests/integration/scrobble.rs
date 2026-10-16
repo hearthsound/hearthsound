@@ -156,7 +156,7 @@ async fn scrobble_honors_the_no_song_audio_guard() {
 }
 
 #[tokio::test]
-async fn scrobble_discards_a_now_playing_report() {
+async fn scrobble_stores_a_now_playing_report() {
     let (fixture, seeded) = fixture().await;
     let app = fixture.app();
     let track = seeded.alpha_tracks[0];
@@ -171,14 +171,27 @@ async fn scrobble_discards_a_now_playing_report() {
     .await;
     assert_ok(&probe);
 
-    let plays = fixture
-        .state
-        .activity()
-        .plays()
-        .play_count(fixture.user_id.uuid(), track.uuid())
+    let activity = fixture.state.activity();
+    assert_eq!(
+        activity
+            .plays()
+            .play_count(fixture.user_id.uuid(), track.uuid())
+            .await
+            .unwrap(),
+        0,
+        "a now-playing report is not a play"
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let listed = activity
+        .now_playing()
+        .visible(&[fixture.user_id.uuid()], now)
         .await
         .unwrap();
-    assert_eq!(plays, 0);
+    assert_eq!(listed.len(), 1, "the report is stored as now playing");
+    assert_eq!(listed[0].track_id, track);
 }
 
 #[tokio::test]

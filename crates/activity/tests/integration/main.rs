@@ -11,3 +11,4 @@ mod play_queues;
 mod playlists;
 mod plays;
 mod ratings;
+mod reports;

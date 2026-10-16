@@ -221,7 +221,7 @@ async fn play_counts_lists_only_tracks_the_user_played() {
 }
 
 #[tokio::test]
-async fn a_now_playing_report_is_discarded() {
+async fn a_now_playing_report_is_stored() {
     let dir = tempfile::tempdir().unwrap();
     let database = open_database(dir.path()).await;
     let activity = ActivityService::new(&database);
@@ -233,9 +233,67 @@ async fn a_now_playing_report_is_discarded() {
     report.submission = false;
     assert_eq!(
         activity.scrobble(&report).await.unwrap(),
-        ScrobbleOutcome::Discarded
+        ScrobbleOutcome::NowPlaying
     );
     assert_eq!(activity.plays().play_count(user, track).await.unwrap(), 0);
+
+    let stored = sqlx::query!(
+        "SELECT user_id, client, track_id, started_at, position_ms, state FROM now_playing",
+    )
+    .fetch_one(database.readers())
+    .await
+    .unwrap();
+    assert_eq!(stored.user_id, user.as_bytes().to_vec());
+    assert_eq!(stored.client, "dsub");
+    assert_eq!(stored.track_id, track.as_bytes().to_vec());
+    assert_eq!(stored.started_at, 1_700_000_000_000);
+    assert_eq!(stored.position_ms, 0);
+    assert_eq!(stored.state, "playing");
+
+    // A second report from the same client replaces the row rather than adding
+    // one.
+    let other = Uuid::now_v7();
+    insert_track(&database, other).await;
+    let mut second = submission(user, other);
+    second.submission = false;
+    assert_eq!(
+        activity.scrobble(&second).await.unwrap(),
+        ScrobbleOutcome::NowPlaying
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM now_playing")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+    let stored: Vec<u8> = sqlx::query_scalar("SELECT track_id FROM now_playing")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(stored, other.as_bytes().to_vec());
+}
+
+/// A report without a client identifier lands under the placeholder name.
+#[tokio::test]
+async fn a_now_playing_report_without_a_client_is_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let activity = ActivityService::new(&database);
+    let (user, track) = (Uuid::now_v7(), Uuid::now_v7());
+    insert_user(&database, user).await;
+    insert_track(&database, track).await;
+
+    let mut report = submission(user, track);
+    report.submission = false;
+    report.client = None;
+    assert_eq!(
+        activity.scrobble(&report).await.unwrap(),
+        ScrobbleOutcome::NowPlaying
+    );
+    let client: String = sqlx::query_scalar("SELECT client FROM now_playing")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(client, hearthsound_activity::DEFAULT_CLIENT);
 }
 
 #[tokio::test]

@@ -712,6 +712,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recently saved queue is the one the queue endpoints answer.
 - A track can be bookmarked at a position with an optional note, and bookmarks
   are listed newest first.
+- A `scrobble` with `submission=false` is stored as now playing instead of being
+  discarded, with a stale row left out after the track plus a grace period.
+- The OpenSubsonic `reportPlayback` reports are applied: they keep now playing
+  current, accumulate the listening time each client reports, record the play a
+  stopped session earned, and suppress the scrobble that repeats it.
 
 ### Security
 

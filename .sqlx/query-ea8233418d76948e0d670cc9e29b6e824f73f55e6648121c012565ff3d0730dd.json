@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT user_id, client, track_id, started_at, position_ms, state FROM now_playing",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "now_playing",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "name": "client",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "now_playing",
+            "name": "client"
+          }
+        }
+      },
+      {
+        "name": "track_id",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "now_playing",
+            "name": "track_id"
+          }
+        }
+      },
+      {
+        "name": "started_at",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "now_playing",
+            "name": "started_at"
+          }
+        }
+      },
+      {
+        "name": "position_ms",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "now_playing",
+            "name": "position_ms"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "now_playing",
+            "name": "state"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "ea8233418d76948e0d670cc9e29b6e824f73f55e6648121c012565ff3d0730dd"
+}

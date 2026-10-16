@@ -8,17 +8,21 @@
 //! false play. When the call carries `submission=false` it is a now-playing
 //! report, which is accepted and discarded because now-playing is not stored.
 
-use hearthsound_core::EntityKind;
+use std::sync::Arc;
+
+use hearthsound_core::{EntityId, EntityKind, IdPrefix};
 use hearthsound_db::Database;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::bookmarks::Bookmarks;
 use crate::error::ActivityError;
+use crate::now_playing::{DEFAULT_CLIENT, NowPlaying};
 use crate::play::Plays;
 use crate::play_queues::PlayQueues;
 use crate::playlists::Playlists;
 use crate::ratings;
+use crate::reports::{InMemoryReports, PlaybackState};
 use crate::session::StreamSessions;
 use crate::{READ_THEN_WRITE, feedback, now_millis};
 
@@ -72,17 +76,24 @@ pub struct Scrobble<'a> {
 /// use hearthsound_activity::ScrobbleOutcome;
 ///
 /// let id = Uuid::now_v7();
-/// assert_ne!(ScrobbleOutcome::Recorded(id), ScrobbleOutcome::Discarded);
+/// assert_ne!(ScrobbleOutcome::Recorded(id), ScrobbleOutcome::NowPlaying);
+/// assert_ne!(
+///     ScrobbleOutcome::AlreadyRecorded,
+///     ScrobbleOutcome::NoSongAudio
+/// );
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrobbleOutcome {
     /// A play was recorded; the value is the new `plays` row id.
     Recorded(Uuid),
-    /// The call was a now-playing report: accepted and discarded.
-    Discarded,
+    /// The call was a now-playing report: what the client is playing is stored.
+    NowPlaying,
     /// The call was a submission, but the latest stream session for that user
     /// and track delivered no song audio, so no play was recorded.
     NoSongAudio,
+    /// The call was a submission, but a playback report recorded the same play
+    /// recently, so this one was not recorded again.
+    AlreadyRecorded,
 }
 
 /// Play recording and the per-stream guard that decides what counts.
@@ -117,6 +128,10 @@ pub struct ActivityService {
     queues: PlayQueues,
     /// The bookmark table.
     bookmarks: Bookmarks,
+    /// The now-playing table.
+    now_playing: NowPlaying,
+    /// The playback reports and the plays they recorded.
+    reports: Arc<InMemoryReports>,
     /// The stream sessions the guard reads.
     sessions: StreamSessions,
 }
@@ -141,6 +156,8 @@ impl ActivityService {
             playlists: Playlists::new(db),
             queues: PlayQueues::new(db),
             bookmarks: Bookmarks::new(db),
+            now_playing: NowPlaying::new(db),
+            reports: Arc::new(InMemoryReports::new(db)),
             sessions: StreamSessions::new(),
         }
     }
@@ -184,6 +201,8 @@ impl ActivityService {
             playlists: Playlists::new(db),
             queues: PlayQueues::new(db),
             bookmarks: Bookmarks::new(db),
+            now_playing: NowPlaying::new(db),
+            reports: Arc::new(InMemoryReports::new(db)),
             sessions,
         }
     }
@@ -213,14 +232,32 @@ impl ActivityService {
         &self.bookmarks
     }
 
+    /// Returns the now-playing repository.
+    pub fn now_playing(&self) -> &NowPlaying {
+        &self.now_playing
+    }
+
+    /// Returns the playback reports.
+    ///
+    /// `reportPlayback` feeds them, and `scrobble` asks them whether the play it
+    /// is submitting was already recorded from a report.
+    pub fn reports(&self) -> &Arc<InMemoryReports> {
+        &self.reports
+    }
+
     /// Handles a client's scrobble.
     ///
     /// A submission is recorded as a play unless the latest stream session for
-    /// the same user and track reported that it delivered no song audio. A
-    /// submission with no known session is recorded: the client heard the song
-    /// through a stream the server did not serve, or the session has since
-    /// expired, and neither is evidence against the play. A now-playing call
-    /// (`submission=false`) is accepted and discarded.
+    /// the same user and track reported that it delivered no song audio, or a
+    /// playback report recorded the same play recently. A submission with no
+    /// known session is recorded: the client heard the song through a stream the
+    /// server did not serve, or the session has since expired, and neither is
+    /// evidence against the play.
+    ///
+    /// A now-playing call (`submission=false`) stores what the client is playing
+    /// so `getNowPlaying` can list it; the association ends when the client
+    /// stops reporting, which is what the staleness window in
+    /// [`crate::NowPlaying`] is for.
     ///
     /// # Parameters
     ///
@@ -230,18 +267,31 @@ impl ActivityService {
     ///
     /// [`ScrobbleOutcome::Recorded`] with the new play id,
     /// [`ScrobbleOutcome::NoSongAudio`] when the guard rejected the submission,
-    /// or [`ScrobbleOutcome::Discarded`] for a now-playing report.
+    /// [`ScrobbleOutcome::AlreadyRecorded`] when a playback report recorded the
+    /// play already, or [`ScrobbleOutcome::NowPlaying`] for a now-playing
+    /// report.
     ///
     /// # Errors
     ///
-    /// Returns [`ActivityError::Database`] when the play cannot be inserted,
-    /// for example when the user or the track does not exist.
+    /// Returns [`ActivityError::Database`] when a row cannot be written, for
+    /// example when the user or the track does not exist.
     pub async fn scrobble(
         &self,
         scrobble: &Scrobble<'_>,
     ) -> Result<ScrobbleOutcome, ActivityError> {
         if !scrobble.submission {
-            return Ok(ScrobbleOutcome::Discarded);
+            let track_id = EntityId::from_uuid(IdPrefix::Track, scrobble.track_id);
+            self.now_playing
+                .upsert(
+                    scrobble.user_id,
+                    scrobble.client.unwrap_or(DEFAULT_CLIENT),
+                    track_id,
+                    scrobble.started_at,
+                    0,
+                    PlaybackState::Playing.as_str(),
+                )
+                .await?;
+            return Ok(ScrobbleOutcome::NowPlaying);
         }
         if self
             .sessions
@@ -249,6 +299,12 @@ impl ActivityService {
             == Some(false)
         {
             return Ok(ScrobbleOutcome::NoSongAudio);
+        }
+        if self
+            .reports
+            .recently_recorded(scrobble.user_id, scrobble.track_id, now_millis())
+        {
+            return Ok(ScrobbleOutcome::AlreadyRecorded);
         }
         // A play that reaches the insert either had a session that delivered
         // song audio or had no session known to the server, which the guard

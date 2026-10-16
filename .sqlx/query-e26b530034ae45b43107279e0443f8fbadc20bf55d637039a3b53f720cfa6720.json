@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM now_playing WHERE user_id = ? AND client = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "e26b530034ae45b43107279e0443f8fbadc20bf55d637039a3b53f720cfa6720"
+}

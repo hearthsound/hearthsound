@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT track_id, started_at, position_ms, state FROM now_playing",
+  "describe": {
+    "columns": [
+      {
+        "name": "track_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "now_playing",
+            "name": "track_id"
+          }
+        }
+      },
+      {
+        "name": "started_at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "now_playing",
+            "name": "started_at"
+          }
+        }
+      },
+      {
+        "name": "position_ms",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "now_playing",
+            "name": "position_ms"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "now_playing",
+            "name": "state"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4a3c51282d27861e0916fc3f2dceac80a5f4baf9821a5962bdbd5b3346c24eea"
+}

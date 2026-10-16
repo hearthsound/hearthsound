@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT np.user_id AS user_id FROM now_playing np LEFT JOIN tracks t ON t.id = np.track_id WHERE np.started_at + COALESCE(t.duration_ms, 0) + (CASE WHEN t.duration_ms IS NULL THEN 1800000 ELSE 600000 END) > ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "now_playing",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "145e866ed262ef6f683a0b257e68284a62802929b81d4467003380f893c6f076"
+}

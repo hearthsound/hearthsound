@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT np.user_id, u.username, np.client, np.track_id, np.started_at FROM now_playing np JOIN users u ON u.id = np.user_id LEFT JOIN tracks t ON t.id = np.track_id WHERE np.started_at + COALESCE(t.duration_ms, 0) + (CASE WHEN t.duration_ms IS NULL THEN 1800000 ELSE 600000 END) > ? ORDER BY np.started_at DESC, np.user_id, np.client",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "now_playing",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "name": "username",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "username"
+          }
+        }
+      },
+      {
+        "name": "client",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "now_playing",
+            "name": "client"
+          }
+        }
+      },
+      {
+        "name": "track_id",
+        "ordinal": 3,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "now_playing",
+            "name": "track_id"
+          }
+        }
+      },
+      {
+        "name": "started_at",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "now_playing",
+            "name": "started_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "67a0a86fd6effa3bddaab575bdadfd11f200a805fdcf80fa2b502a65c133db41"
+}
