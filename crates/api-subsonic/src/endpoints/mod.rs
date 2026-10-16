@@ -10,8 +10,9 @@
 //! Register a handler in [`crate::routes`], which serves it at both
 //! `/rest/<name>` and `/rest/<name>.view`.
 
-mod browse;
+pub mod browse;
 mod cover_art;
+pub mod genres;
 mod scrobble;
 mod search;
 mod stream;
@@ -22,6 +23,7 @@ pub use browse::{
     get_music_directory, get_song,
 };
 pub use cover_art::get_cover_art;
+pub use genres::{get_genres, get_random_songs, get_songs_by_genre};
 pub use scrobble::scrobble;
 pub use search::search3;
 pub use stream::stream;

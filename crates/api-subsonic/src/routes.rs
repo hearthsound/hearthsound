@@ -92,6 +92,9 @@ pub fn routes() -> Router<SubsonicState> {
     let router = register(router, "tokenInfo", endpoints::token_info);
     let router = register(router, "getMusicFolders", endpoints::get_music_folders);
     let router = register(router, "getArtists", endpoints::get_artists);
+    let router = register(router, "getGenres", endpoints::get_genres);
+    let router = register(router, "getSongsByGenre", endpoints::get_songs_by_genre);
+    let router = register(router, "getRandomSongs", endpoints::get_random_songs);
     let router = register(router, "getIndexes", endpoints::get_indexes);
     let router = register(router, "getMusicDirectory", endpoints::get_music_directory);
     let router = register(router, "getArtist", endpoints::get_artist);

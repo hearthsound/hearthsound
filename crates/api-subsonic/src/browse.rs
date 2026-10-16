@@ -16,7 +16,8 @@ use hearthsound_core::EntityId;
 use hearthsound_core::EntityKind;
 use hearthsound_db::Database;
 use hearthsound_library::query::{
-    AlbumDetail, AlbumSort, ArtistDetail, ArtistSummary, Scope, SearchResults, TrackView,
+    AlbumDetail, AlbumSort, ArtistDetail, ArtistSummary, GenreCount, Scope, SearchResults,
+    TrackView,
 };
 use hearthsound_library::{Album, Artist, LibraryError, MediaFile, artists, media_files, query};
 use uuid::Uuid;
@@ -209,6 +210,86 @@ pub(crate) async fn annotation(
 ) -> Result<Annotation, ActivityError> {
     let mut annotations = annotations(state, user_id, kind, &[id]).await?;
     Ok(annotations.remove(&id).unwrap_or_default())
+}
+
+/// Lists the genres of the tracks in scope.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `scope`: the scope to count in.
+///
+/// # Returns
+///
+/// The genres, by name.
+///
+/// # Errors
+///
+/// Returns a library failure when the read fails.
+pub(crate) async fn genres(
+    database: &Database,
+    scope: Scope,
+) -> Result<Vec<GenreCount>, LibraryError> {
+    let mut conn = database.readers().acquire().await?;
+    query::list_genres(&mut conn, scope).await
+}
+
+/// Lists the songs in scope that carry a genre.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `scope`: the scope to filter by.
+/// - `genre`: the genre to match.
+/// - `count`: the maximum number of songs.
+/// - `offset`: how many songs to skip.
+///
+/// # Returns
+///
+/// The songs, by title.
+///
+/// # Errors
+///
+/// Returns a library failure when the read fails.
+pub(crate) async fn tracks_by_genre(
+    database: &Database,
+    scope: Scope,
+    genre: &str,
+    count: i64,
+    offset: i64,
+) -> Result<Vec<TrackView>, LibraryError> {
+    let mut conn = database.readers().acquire().await?;
+    query::tracks_by_genre(&mut conn, scope, genre, count, offset).await
+}
+
+/// Lists a random sample of the songs in scope.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `scope`: the scope to sample from.
+/// - `size`: how many songs to return.
+/// - `genre`: only songs of this genre, when given.
+/// - `from_year`: the earliest release year, when given.
+/// - `to_year`: the latest release year, when given.
+///
+/// # Returns
+///
+/// The songs, in no order.
+///
+/// # Errors
+///
+/// Returns a library failure when the read fails.
+pub(crate) async fn random_tracks(
+    database: &Database,
+    scope: Scope,
+    size: i64,
+    genre: Option<&str>,
+    from_year: Option<i64>,
+    to_year: Option<i64>,
+) -> Result<Vec<TrackView>, LibraryError> {
+    let mut conn = database.readers().acquire().await?;
+    query::random_tracks(&mut conn, scope, size, genre, from_year, to_year).await
 }
 
 /// Lists the artists in scope with their album counts.

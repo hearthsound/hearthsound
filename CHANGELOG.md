@@ -740,6 +740,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `getIndexes` answers the artist index with the instant it last changed and
   skips an index a client already has, and `getMusicDirectory` browses an
   artist's albums, an album's songs, and a catalog artist or album.
+- `getGenres` counts the genres in scope, and `getSongsByGenre` and
+  `getRandomSongs` list the songs of a genre or a random sample of the scope,
+  narrowed by genre and release year.
 
 ### Security
 
