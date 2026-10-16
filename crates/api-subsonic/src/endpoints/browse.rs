@@ -6,8 +6,10 @@
 //! [`crate::projection`], so the five responses share one scope rule and one
 //! set of members.
 
+use hearthsound_activity::Annotation;
 use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, IdPrefix};
 use hearthsound_library::query::AlbumSort;
+use uuid::Uuid;
 
 use crate::auth::Call;
 use crate::catalog;
@@ -56,7 +58,24 @@ pub async fn get_artists(call: Call) -> Encoded {
             return call.encode(Response::failed(browse::failure("getArtists", &error)));
         }
     };
-    call.encode(Response::ok().member("artists", projection::artists_id3(&summaries)))
+    let ids: Vec<Uuid> = summaries
+        .iter()
+        .map(|summary| summary.artist.id.uuid())
+        .collect();
+    let annotations = match browse::annotations(
+        call.state(),
+        call.principal().user_id.uuid(),
+        EntityKind::Artist,
+        &ids,
+    )
+    .await
+    {
+        Ok(annotations) => annotations,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure("getArtists", &error)));
+        }
+    };
+    call.encode(Response::ok().member("artists", projection::artists_id3(&summaries, &annotations)))
 }
 
 /// Answers `getArtist`: one artist with its albums in scope.
@@ -95,6 +114,36 @@ pub async fn get_artist(call: Call) -> Encoded {
         }
     };
 
+    // The artist and its albums carry the user's own stars, ratings, and play
+    // counts, which one read per entity kind answers for the whole response.
+    let album_ids: Vec<Uuid> = detail.albums.iter().map(|album| album.id.uuid()).collect();
+    let annotations = match browse::annotations(
+        call.state(),
+        call.principal().user_id.uuid(),
+        EntityKind::Album,
+        &album_ids,
+    )
+    .await
+    {
+        Ok(annotations) => annotations,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure("getArtist", &error)));
+        }
+    };
+    let artist_annotation = match browse::annotation(
+        call.state(),
+        call.principal().user_id.uuid(),
+        EntityKind::Artist,
+        detail.artist.id.uuid(),
+    )
+    .await
+    {
+        Ok(annotation) => annotation,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure("getArtist", &error)));
+        }
+    };
+
     let mut albums = Vec::new();
     for album in &detail.albums {
         match browse::album(database, scope, album.id).await {
@@ -102,7 +151,9 @@ pub async fn get_artist(call: Call) -> Encoded {
                 &loaded.detail.album,
                 &loaded.detail.artists,
                 &loaded.detail.tracks,
-                loaded.has_art(),
+                annotations
+                    .get(&loaded.detail.album.id.uuid())
+                    .unwrap_or(&Annotation::default()),
             )),
             Ok(None) => {}
             Err(error) => {
@@ -111,7 +162,7 @@ pub async fn get_artist(call: Call) -> Encoded {
         }
     }
 
-    let artist = projection::artist_id3(&detail.artist, albums.len() as i64)
+    let artist = projection::artist_id3(&detail.artist, albums.len() as i64, &artist_annotation)
         .set("album", Array::new(albums));
     call.encode(Response::ok().member("artist", artist))
 }
@@ -151,18 +202,55 @@ pub async fn get_album(call: Call) -> Encoded {
         }
     };
 
+    let user_id = call.principal().user_id.uuid();
+    let album_annotation = match browse::annotation(
+        call.state(),
+        user_id,
+        EntityKind::Album,
+        loaded.detail.album.id.uuid(),
+    )
+    .await
+    {
+        Ok(annotation) => annotation,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure("getAlbum", &error)));
+        }
+    };
+    let track_ids: Vec<Uuid> = loaded
+        .detail
+        .tracks
+        .iter()
+        .map(|view| view.track.id.uuid())
+        .collect();
+    let annotations =
+        match browse::annotations(call.state(), user_id, EntityKind::Track, &track_ids).await {
+            Ok(annotations) => annotations,
+            Err(error) => {
+                return call.encode(Response::failed(browse::failure("getAlbum", &error)));
+            }
+        };
+
     let album = projection::album_id3(
         &loaded.detail.album,
         &loaded.detail.artists,
         &loaded.detail.tracks,
-        loaded.has_art(),
+        &album_annotation,
     );
     let songs = loaded
         .detail
         .tracks
         .iter()
         .zip(&loaded.files)
-        .map(|(view, file)| projection::child(view, file.as_ref(), &loaded.detail.artists));
+        .map(|(view, file)| {
+            projection::child(
+                view,
+                file.as_ref(),
+                &loaded.detail.artists,
+                annotations
+                    .get(&view.track.id.uuid())
+                    .unwrap_or(&Annotation::default()),
+            )
+        });
     record_listing(
         &call,
         loaded
@@ -209,7 +297,25 @@ pub async fn get_song(call: Call) -> Encoded {
         }
     };
 
-    let song = projection::child(&loaded.view, loaded.file.as_ref(), &loaded.album_artists);
+    let song_annotation = match browse::annotation(
+        call.state(),
+        call.principal().user_id.uuid(),
+        EntityKind::Track,
+        loaded.view.track.id.uuid(),
+    )
+    .await
+    {
+        Ok(annotation) => annotation,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure("getSong", &error)));
+        }
+    };
+    let song = projection::child(
+        &loaded.view,
+        loaded.file.as_ref(),
+        &loaded.album_artists,
+        &song_annotation,
+    );
     call.encode(Response::ok().member("song", song))
 }
 
@@ -275,6 +381,15 @@ pub async fn get_album_list_2(call: Call) -> Encoded {
         }
     };
 
+    let user_id = call.principal().user_id.uuid();
+    let ids: Vec<Uuid> = listed.iter().map(|album| album.id.uuid()).collect();
+    let annotations =
+        match browse::annotations(call.state(), user_id, EntityKind::Album, &ids).await {
+            Ok(annotations) => annotations,
+            Err(error) => {
+                return call.encode(Response::failed(browse::failure("getAlbumList2", &error)));
+            }
+        };
     let mut albums = Vec::new();
     for album in listed {
         match browse::album(database, scope, album.id).await {
@@ -282,7 +397,9 @@ pub async fn get_album_list_2(call: Call) -> Encoded {
                 &loaded.detail.album,
                 &loaded.detail.artists,
                 &loaded.detail.tracks,
-                loaded.has_art(),
+                annotations
+                    .get(&loaded.detail.album.id.uuid())
+                    .unwrap_or(&Annotation::default()),
             )),
             Ok(None) => {}
             Err(error) => {

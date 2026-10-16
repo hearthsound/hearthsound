@@ -143,54 +143,33 @@ async fn get_album_answers_the_album_with_its_songs() {
 }
 
 #[tokio::test]
-async fn cover_art_names_the_album_only_when_the_album_has_art() {
+async fn cover_art_always_names_the_album_and_its_songs_name_it() {
     let (fixture, seeded) = fixture().await;
     let app = fixture.app();
 
-    // The owned folder's files carry embedded art, so the album and its songs
-    // all name the album.
-    let with_art = get(
-        &app,
-        &format!(
-            "/rest/getAlbum?id={}&musicFolderId=1&apiKey={}&f=json",
-            seeded.alpha, fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&with_art);
-    assert_eq!(
-        with_art
-            .body
-            .matches(&format!("\"coverArt\":\"{}\"", seeded.alpha))
-            .count(),
-        3,
-        "the album and both its songs name the album: {}",
-        with_art.body
-    );
-
-    // The generic folder's file carries no art, so the album's cover art is
-    // empty and its song names itself.
-    let without_art = get(
-        &app,
-        &format!(
-            "/rest/getAlbum?id={}&musicFolderId=2&apiKey={}&f=json",
-            seeded.bright, fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&without_art);
-    assert!(
-        without_art.body.contains("\"coverArt\":\"\""),
-        "{}",
-        without_art.body
-    );
-    assert!(
-        without_art
-            .body
-            .contains(&format!("\"coverArt\":\"{}\"", seeded.bright_track)),
-        "{}",
-        without_art.body
-    );
+    // An album and each of its songs name the album, whether or not a file
+    // carries a picture: the endpoint that serves the image answers 404 when
+    // nothing resolves, and a client that never asks is never told.
+    for (album, folder, songs) in [(seeded.alpha, "1", 2), (seeded.bright, "2", 1)] {
+        let listing = get(
+            &app,
+            &format!(
+                "/rest/getAlbum?id={album}&musicFolderId={folder}&apiKey={}&f=json",
+                fixture.api_key
+            ),
+        )
+        .await;
+        assert_ok(&listing);
+        assert_eq!(
+            listing
+                .body
+                .matches(&format!("\"coverArt\":\"{album}\""))
+                .count(),
+            songs + 1,
+            "the album and each of its songs name the album: {}",
+            listing.body
+        );
+    }
 }
 
 #[tokio::test]
@@ -733,4 +712,102 @@ async fn an_entity_outside_the_scope_answers_error_70() {
     .await;
     assert_ok(&visible);
     assert!(visible.body.contains(&seeded.bright_track.to_string()));
+}
+
+/// A listed entity reports the user's own stars, rating, and play counts.
+#[tokio::test]
+async fn a_listed_entity_reports_the_users_annotation() {
+    use hearthsound_core::EntityKind;
+
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+    let user = fixture.user_id.uuid();
+    let track = seeded.alpha_tracks[0];
+    let activity = fixture.state.activity();
+
+    // The user liked and played the first song, and rated its album.
+    activity
+        .star(user, &[(EntityKind::Track, track.uuid())])
+        .await
+        .unwrap();
+    activity
+        .set_rating(user, EntityKind::Album, seeded.alpha.uuid(), 4)
+        .await
+        .unwrap();
+    activity
+        .plays()
+        .record_play(
+            user,
+            track.uuid(),
+            Some("dsub"),
+            1_700_000_000_000,
+            180_000,
+            true,
+        )
+        .await
+        .unwrap();
+
+    let song = get(
+        &app,
+        &format!(
+            "/rest/getSong?id={track}&musicFolderId=1&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&song);
+    assert!(
+        !song.body.contains("\"userRating\":4"),
+        "the song is not the rated album: {}",
+        song.body
+    );
+    assert!(
+        song.body.contains("\"playCount\":1"),
+        "the play count is the user's own: {}",
+        song.body
+    );
+    assert!(
+        song.body.contains("\"played\":\"2023-11-14T22:13:20Z\""),
+        "the last play is the user's own: {}",
+        song.body
+    );
+    assert!(
+        song.body.contains("\"starred\":\"20"),
+        "the like is reported as an instant: {}",
+        song.body
+    );
+
+    let album = get(
+        &app,
+        &format!(
+            "/rest/getAlbum?id={}&musicFolderId=1&apiKey={}&f=json",
+            seeded.alpha, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&album);
+    assert!(
+        album.body.contains("\"userRating\":4"),
+        "the album carries the rating: {}",
+        album.body
+    );
+    assert!(
+        album.body.contains("\"playCount\":1"),
+        "the album sums its tracks' plays: {}",
+        album.body
+    );
+
+    let artists = get(
+        &app,
+        &format!("/rest/getArtists?apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_ok(&artists);
+    assert!(
+        artists
+            .body
+            .contains(&format!("\"coverArt\":\"{}\"", seeded.cardinals)),
+        "an artist names itself as its cover art: {}",
+        artists.body
+    );
 }

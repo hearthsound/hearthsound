@@ -15,17 +15,23 @@
 //! to return all their data for an empty query, and it returns no catalog
 //! results at all.
 
+use std::collections::HashMap;
+
+use hearthsound_activity::Annotation;
 use hearthsound_catalog::{CatalogSearch, LocalTrackHit};
 use hearthsound_config::SettingsStore;
 use hearthsound_config::keys;
+use hearthsound_core::EntityId;
 use hearthsound_core::EntityKind;
 use hearthsound_core::providers::CatalogQuery;
 use hearthsound_db::Database;
 use hearthsound_library::query::{AlbumSort, Scope, TrackView};
+use uuid::Uuid;
 
 use crate::auth::Call;
 use crate::catalog;
 use crate::response::{Encoded, Response, SubsonicError};
+use crate::state::SubsonicState;
 use crate::value::{Array, Object};
 use crate::{browse, projection, scope};
 
@@ -98,13 +104,18 @@ pub async fn search3(call: Call) -> Encoded {
         Err(error) => return call.encode(Response::failed(error)),
     };
 
+    let query = Search {
+        text: &text,
+        artists: artist_window,
+        albums: album_window,
+        songs: song_window,
+    };
     let mut side = match local_side(
+        call.state(),
+        call.principal().user_id.uuid(),
         database,
         scope,
-        &text,
-        &artist_window,
-        &album_window,
-        &song_window,
+        &query,
     )
     .await
     {
@@ -183,14 +194,138 @@ fn catalog_enabled(snapshot: &SettingsStore) -> bool {
     }
 }
 
+/// The user's annotations for one search response.
+///
+/// One read per entity kind fills it, so a page of results costs a bounded
+/// number of statements however many entities it holds.
+#[derive(Debug, Default)]
+struct Annotations {
+    /// The artist annotations, keyed by artist id.
+    artists: HashMap<Uuid, Annotation>,
+    /// The album annotations, keyed by album id.
+    albums: HashMap<Uuid, Annotation>,
+    /// The track annotations, keyed by track id.
+    tracks: HashMap<Uuid, Annotation>,
+}
+
+impl Annotations {
+    /// Returns the annotation of an artist.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the artist's client id.
+    ///
+    /// # Returns
+    ///
+    /// The user's annotation, or the default when the user has none.
+    fn artist(&self, id: EntityId) -> Annotation {
+        self.artists.get(&id.uuid()).copied().unwrap_or_default()
+    }
+
+    /// Returns the annotation of an album.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the album's client id.
+    ///
+    /// # Returns
+    ///
+    /// The user's annotation, or the default when the user has none.
+    fn album(&self, id: EntityId) -> Annotation {
+        self.albums.get(&id.uuid()).copied().unwrap_or_default()
+    }
+
+    /// Returns the annotation of a track.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the track's client id.
+    ///
+    /// # Returns
+    ///
+    /// The user's annotation, or the default when the user has none.
+    fn track(&self, id: EntityId) -> Annotation {
+        self.tracks.get(&id.uuid()).copied().unwrap_or_default()
+    }
+}
+
+/// Why a local search side could not be built.
+#[derive(Debug, thiserror::Error)]
+enum LocalSideError {
+    /// A library read failed.
+    #[error(transparent)]
+    Library(#[from] hearthsound_library::LibraryError),
+    /// An annotation read failed.
+    #[error(transparent)]
+    Activity(#[from] hearthsound_activity::ActivityError),
+}
+
+/// Loads the user's annotations for the entities of one search response.
+///
+/// # Parameters
+///
+/// - `state`: the endpoint state, whose database the reads use.
+/// - `user_id`: the account whose activity is read.
+/// - `artist_ids`: the artists of the response.
+/// - `album_ids`: the albums of the response.
+/// - `track_ids`: the tracks of the response.
+///
+/// # Errors
+///
+/// Returns [`ActivityError`] when a read fails.
+async fn annotations_for(
+    state: &SubsonicState,
+    user_id: Uuid,
+    artist_ids: &[EntityId],
+    album_ids: &[EntityId],
+    track_ids: &[EntityId],
+) -> Result<Annotations, hearthsound_activity::ActivityError> {
+    Ok(Annotations {
+        artists: browse::annotations(state, user_id, EntityKind::Artist, &uuids(artist_ids))
+            .await?,
+        albums: browse::annotations(state, user_id, EntityKind::Album, &uuids(album_ids)).await?,
+        tracks: browse::annotations(state, user_id, EntityKind::Track, &uuids(track_ids)).await?,
+    })
+}
+
+/// Returns the plain ids of some client ids.
+///
+/// # Parameters
+///
+/// - `ids`: the client ids.
+///
+/// # Returns
+///
+/// The ids the annotation read keys on.
+fn uuids(ids: &[EntityId]) -> Vec<Uuid> {
+    ids.iter().map(EntityId::uuid).collect()
+}
+
+/// What one search request asked for.
+#[derive(Debug)]
+struct Search<'a> {
+    /// The search text, possibly empty.
+    text: &'a str,
+    /// The artist window.
+    artists: Window,
+    /// The album window.
+    albums: Window,
+    /// The song window.
+    songs: Window,
+}
+
 /// Builds the projected local side of a search.
 ///
 /// An empty query lists the scope instead of searching it, because the FTS5
 /// index has nothing to match. A non-empty query runs the full-text search per
-/// kind, so each kind can carry its own window.
+/// kind, so each kind can carry its own window. Either way the entities the
+/// response holds are known before they are projected, so the user's
+/// annotations are read once per entity kind.
 ///
 /// # Parameters
 ///
+/// - `state`: the endpoint state, whose database the reads use.
+/// - `user_id`: the account whose annotations are read.
 /// - `database`: the open database.
 /// - `scope`: the scope to search.
 /// - `text`: the search text, possibly empty.
@@ -205,23 +340,21 @@ fn catalog_enabled(snapshot: &SettingsStore) -> bool {
 ///
 /// # Errors
 ///
-/// Returns a library failure when a read fails.
+/// Returns a library or activity failure when a read fails.
 async fn local_side(
+    state: &SubsonicState,
+    user_id: Uuid,
     database: &Database,
     scope: Scope,
-    text: &str,
-    artist_window: &Window,
-    album_window: &Window,
-    song_window: &Window,
-) -> Result<LocalSide, hearthsound_library::LibraryError> {
+    query: &Search<'_>,
+) -> Result<LocalSide, LocalSideError> {
+    let text = query.text;
+    let (artist_window, album_window, song_window) = (&query.artists, &query.albums, &query.songs);
     let mut side = LocalSide::default();
     if text.is_empty() {
-        for summary in
-            browse::artists_page(database, scope, artist_window.count, artist_window.offset).await?
-        {
-            side.artists
-                .push(projection::artist_id3(&summary.artist, summary.album_count));
-        }
+        let summaries =
+            browse::artists_page(database, scope, artist_window.count, artist_window.offset)
+                .await?;
         let albums = browse::albums(
             database,
             scope,
@@ -230,13 +363,26 @@ async fn local_side(
             album_window.offset,
         )
         .await?;
-        for album in albums {
-            push_album(database, scope, album.id, &mut side).await?;
+        let views =
+            browse::list_tracks(database, scope, song_window.count, song_window.offset).await?;
+        let artist_ids: Vec<EntityId> = summaries.iter().map(|summary| summary.artist.id).collect();
+        let album_ids: Vec<EntityId> = albums.iter().map(|album| album.id).collect();
+        let track_ids: Vec<EntityId> = views.iter().map(|view| view.track.id).collect();
+        let annotations =
+            annotations_for(state, user_id, &artist_ids, &album_ids, &track_ids).await?;
+
+        for summary in &summaries {
+            side.artists.push(projection::artist_id3(
+                &summary.artist,
+                summary.album_count,
+                &annotations.artist(summary.artist.id),
+            ));
         }
-        for view in
-            browse::list_tracks(database, scope, song_window.count, song_window.offset).await?
-        {
-            push_track(database, scope, view, &mut side).await?;
+        for album in albums {
+            push_album(database, scope, album.id, &annotations, &mut side).await?;
+        }
+        for view in views {
+            push_track(database, scope, view, &annotations, &mut side).await?;
         }
         return Ok(side);
     }
@@ -250,15 +396,6 @@ async fn local_side(
         artist_window.offset,
     )
     .await?;
-    for artist in artists.artists {
-        if let Some(detail) = browse::artist(database, scope, artist.id).await? {
-            side.artists.push(projection::artist_id3(
-                &detail.artist,
-                detail.albums.len() as i64,
-            ));
-        }
-    }
-
     let albums = browse::search(
         database,
         scope,
@@ -268,10 +405,6 @@ async fn local_side(
         album_window.offset,
     )
     .await?;
-    for album in albums.albums {
-        push_album(database, scope, album.id, &mut side).await?;
-    }
-
     let tracks = browse::search(
         database,
         scope,
@@ -281,8 +414,25 @@ async fn local_side(
         song_window.offset,
     )
     .await?;
+    let artist_ids: Vec<EntityId> = artists.artists.iter().map(|artist| artist.id).collect();
+    let album_ids: Vec<EntityId> = albums.albums.iter().map(|album| album.id).collect();
+    let track_ids: Vec<EntityId> = tracks.tracks.iter().map(|view| view.track.id).collect();
+    let annotations = annotations_for(state, user_id, &artist_ids, &album_ids, &track_ids).await?;
+
+    for artist in artists.artists {
+        if let Some(detail) = browse::artist(database, scope, artist.id).await? {
+            side.artists.push(projection::artist_id3(
+                &detail.artist,
+                detail.albums.len() as i64,
+                &annotations.artist(detail.artist.id),
+            ));
+        }
+    }
+    for album in albums.albums {
+        push_album(database, scope, album.id, &annotations, &mut side).await?;
+    }
     for view in tracks.tracks {
-        push_track(database, scope, view, &mut side).await?;
+        push_track(database, scope, view, &annotations, &mut side).await?;
     }
 
     Ok(side)
@@ -295,6 +445,7 @@ async fn local_side(
 /// - `database`: the open database.
 /// - `scope`: the scope to filter by.
 /// - `album_id`: the album to load.
+/// - `annotations`: the user's annotations for the response.
 /// - `side`: the side to append to.
 ///
 /// # Errors
@@ -303,15 +454,16 @@ async fn local_side(
 async fn push_album(
     database: &Database,
     scope: Scope,
-    album_id: hearthsound_core::EntityId,
+    album_id: EntityId,
+    annotations: &Annotations,
     side: &mut LocalSide,
-) -> Result<(), hearthsound_library::LibraryError> {
+) -> Result<(), LocalSideError> {
     if let Some(loaded) = browse::album(database, scope, album_id).await? {
         side.albums.push(projection::album_id3(
             &loaded.detail.album,
             &loaded.detail.artists,
             &loaded.detail.tracks,
-            loaded.has_art(),
+            &annotations.album(loaded.detail.album.id),
         ));
     }
     Ok(())
@@ -324,6 +476,7 @@ async fn push_album(
 /// - `database`: the open database.
 /// - `scope`: the scope to filter by.
 /// - `view`: the track the local search or listing returned.
+/// - `annotations`: the user's annotations for the response.
 /// - `side`: the side to append to.
 ///
 /// # Errors
@@ -333,14 +486,16 @@ async fn push_track(
     database: &Database,
     scope: Scope,
     view: TrackView,
+    annotations: &Annotations,
     side: &mut LocalSide,
-) -> Result<(), hearthsound_library::LibraryError> {
+) -> Result<(), LocalSideError> {
     if let Some(loaded) = browse::track(database, scope, view.track.id).await? {
         side.hits.push(hit(&loaded.view));
         side.tracks.push(projection::child(
             &loaded.view,
             loaded.file.as_ref(),
             &loaded.album_artists,
+            &annotations.track(loaded.view.track.id),
         ));
     }
     Ok(())

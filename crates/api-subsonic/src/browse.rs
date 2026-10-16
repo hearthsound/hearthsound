@@ -9,6 +9,9 @@
 //! never holds more than one connection at a time and the pool cannot be
 //! exhausted by a browse request.
 
+use std::collections::HashMap;
+
+use hearthsound_activity::{ActivityError, Annotation, load_annotations};
 use hearthsound_core::EntityId;
 use hearthsound_core::EntityKind;
 use hearthsound_db::Database;
@@ -16,8 +19,10 @@ use hearthsound_library::query::{
     AlbumDetail, AlbumSort, ArtistDetail, ArtistSummary, Scope, SearchResults, TrackView,
 };
 use hearthsound_library::{Album, Artist, LibraryError, MediaFile, artists, media_files, query};
+use uuid::Uuid;
 
 use crate::response::SubsonicError;
+use crate::state::SubsonicState;
 
 /// A track with the data a `Child` projection reports.
 #[derive(Debug, Clone)]
@@ -36,25 +41,11 @@ pub(crate) struct LoadedAlbum {
     /// The album with its credited artists and its tracks.
     pub(crate) detail: AlbumDetail,
     /// The preferred media file of each track, aligned with `detail.tracks`.
+    ///
+    /// The files are not consulted for a projection: an album and its songs
+    /// always name their own cover art and the endpoint that serves the image
+    /// resolves whether there is one.
     pub(crate) files: Vec<Option<MediaFile>>,
-}
-
-impl LoadedAlbum {
-    /// Reports whether the album has cover art.
-    ///
-    /// # Returns
-    ///
-    /// `true` when any of the album's preferred files carries an embedded
-    /// picture. A sidecar image beside a file is not consulted here; the
-    /// endpoint that serves the image resolves it.
-    pub(crate) fn has_art(&self) -> bool {
-        self.files.iter().any(|file| {
-            matches!(
-                file.as_ref().and_then(|file| file.has_embedded_art),
-                Some(true)
-            )
-        })
-    }
 }
 
 /// Reads one track, if the scope contains it.
@@ -143,6 +134,63 @@ pub(crate) async fn album(
 pub(crate) fn failure(operation: &'static str, error: &dyn std::fmt::Display) -> SubsonicError {
     tracing::error!(operation, error = %error, "a browse read failed");
     SubsonicError::generic()
+}
+
+/// Loads one user's annotations for a page of entities of one kind.
+///
+/// A response that lists entities carries the user's own stars, ratings, and
+/// play counts, which is one read for the whole page rather than one per
+/// entity.
+///
+/// # Parameters
+///
+/// - `state`: the endpoint state, whose database the read uses.
+/// - `user_id`: the account whose activity is read.
+/// - `kind`: the kind of entity the page holds.
+/// - `ids`: the entities of the page.
+///
+/// # Returns
+///
+/// The annotations, keyed by entity id. An entity the user has done nothing
+/// with is absent, which a projection reads as [`Annotation::default`].
+///
+/// # Errors
+///
+/// Returns [`ActivityError`] when the read fails.
+pub(crate) async fn annotations(
+    state: &SubsonicState,
+    user_id: Uuid,
+    kind: EntityKind,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, Annotation>, ActivityError> {
+    let mut conn = state.database().readers().acquire().await?;
+    load_annotations(&mut conn, user_id, kind, ids).await
+}
+
+/// Loads one user's annotation for a single entity.
+///
+/// # Parameters
+///
+/// - `state`: the endpoint state, whose database the read uses.
+/// - `user_id`: the account whose activity is read.
+/// - `kind`: the kind of the entity.
+/// - `id`: the entity.
+///
+/// # Returns
+///
+/// The annotation, or [`Annotation::default`] when the user has none.
+///
+/// # Errors
+///
+/// Returns [`ActivityError`] when the read fails.
+pub(crate) async fn annotation(
+    state: &SubsonicState,
+    user_id: Uuid,
+    kind: EntityKind,
+    id: Uuid,
+) -> Result<Annotation, ActivityError> {
+    let mut annotations = annotations(state, user_id, kind, &[id]).await?;
+    Ok(annotations.remove(&id).unwrap_or_default())
 }
 
 /// Lists the artists in scope with their album counts.

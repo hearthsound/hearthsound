@@ -732,6 +732,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   availability, and the instant the browse index last changed is readable.
 - Responses can carry text as a child element or as the element's own content,
   which JSON writes as a string member and the `value` member.
+- Stored artists, albums, and songs report the user's own stars, rating, play
+  count, and last play, and every stored entity names itself as its cover art so
+  a client can ask for the image and be told when there is none.
 
 ### Security
 

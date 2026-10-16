@@ -25,12 +25,16 @@
 //!   the media file row rather than from the query projection, because only the
 //!   row carries the bit depth, the sample rate, and the channel count.
 
+use std::collections::HashMap;
+
+use hearthsound_activity::Annotation;
 use hearthsound_catalog::{CatalogAlbumRefResult, CatalogAlbumResult, CatalogArtistResult};
 use hearthsound_core::providers::{ArtistCredit, CatalogTrack};
 use hearthsound_core::{CatalogId, EntityKind, Slug};
 use hearthsound_library::query::ArtistSummary;
 use hearthsound_library::query::{TrackView, content_type_for};
 use hearthsound_library::{Album, Artist, MediaFile, ReplayGain};
+use uuid::Uuid;
 
 use crate::catalog::{artist_id, music_brainz_id};
 use crate::value::{Array, Object};
@@ -61,11 +65,15 @@ const ARTICLES: [&str; 7] = ["the", "el", "la", "los", "las", "le", "les"];
 /// # Parameters
 ///
 /// - `summaries`: the artists in scope, each with its album count.
+/// - `annotations`: the user's annotations for those artists, keyed by id.
 ///
 /// # Returns
 ///
 /// The `ArtistsID3` member, with `ignoredArticles` first and the index second.
-pub(crate) fn artists_id3(summaries: &[ArtistSummary]) -> Object {
+pub(crate) fn artists_id3(
+    summaries: &[ArtistSummary],
+    annotations: &HashMap<Uuid, Annotation>,
+) -> Object {
     let mut ordered: Vec<(&str, &ArtistSummary)> = summaries
         .iter()
         .map(|summary| (stripped_sort_name(&summary.artist.sort_name), summary))
@@ -83,7 +91,13 @@ pub(crate) fn artists_id3(summaries: &[ArtistSummary]) -> Object {
     let mut groups: Vec<(String, Vec<Object>)> = Vec::new();
     for (sort_name, summary) in ordered {
         let name = index_name(sort_name);
-        let artist = artist_id3(&summary.artist, summary.album_count);
+        let artist = artist_id3(
+            &summary.artist,
+            summary.album_count,
+            annotations
+                .get(&summary.artist.id.uuid())
+                .unwrap_or(&Annotation::default()),
+        );
         if let Some((group, artists)) = groups.last_mut()
             && *group == name
         {
@@ -119,16 +133,67 @@ pub(crate) fn artists_id3(summaries: &[ArtistSummary]) -> Object {
 /// The artist, with the base protocol's `id`, `name`, and `albumCount` first
 /// and the OpenSubsonic `musicBrainzId` and `sortName` after them. `coverArt`,
 /// `roles`, and `disambiguation` are not supported yet and are omitted.
-pub(crate) fn artist_id3(artist: &Artist, album_count: i64) -> Object {
-    Object::new()
+pub(crate) fn artist_id3(artist: &Artist, album_count: i64, annotation: &Annotation) -> Object {
+    let mut object = Object::new()
         .set("id", artist.id.to_string())
         .set("name", artist.name.clone())
-        .set("albumCount", album_count)
+        .set("coverArt", artist.id.to_string())
+        .set("albumCount", album_count);
+    object = set_annotation(object, annotation);
+    object
         .set(
             "musicBrainzId",
             artist.mb_artist_id.clone().unwrap_or_default(),
         )
         .set("sortName", artist.sort_name.clone())
+}
+
+/// Adds the annotation members an entity carries when the user set them.
+///
+/// `starred` is the instant of the like in ISO form and `userRating` is the
+/// rating from 1 to 5; both are left out when the user has none, which is what
+/// a client reads as "not starred" and "not rated". Play counts are not set
+/// here because the member order differs: an entity that reports them sets
+/// `playCount` and `played` first.
+///
+/// # Parameters
+///
+/// - `object`: the projection so far.
+/// - `annotation`: the user's annotation for the entity.
+///
+/// # Returns
+///
+/// The object with the members the annotation sets.
+fn set_annotation(object: Object, annotation: &Annotation) -> Object {
+    let mut object = object;
+    if let Some(at) = annotation.starred_at {
+        object = object.set("starred", timestamp(at));
+    }
+    if let Some(rating) = annotation.rating {
+        object = object.set("userRating", i64::from(rating));
+    }
+    object
+}
+
+/// Adds the play count and the last-play instant of an entity.
+///
+/// Both are always emitted, because the protocol says so and a client reads
+/// `played` as empty for a track that was never played.
+///
+/// # Parameters
+///
+/// - `object`: the projection so far.
+/// - `annotation`: the user's annotation for the entity.
+///
+/// # Returns
+///
+/// The object with `playCount`, `played`, `starred`, and `userRating` set.
+fn set_plays(object: Object, annotation: &Annotation) -> Object {
+    let object = object.set("playCount", annotation.play_count).set(
+        "played",
+        annotation.last_played.map(timestamp).unwrap_or_default(),
+    );
+    set_annotation(object, annotation)
 }
 
 /// Builds the minimal `ArtistID3` reference embedded in another member.
@@ -157,8 +222,7 @@ pub(crate) fn artist_ref(artist: &Artist) -> Object {
 /// - `artists`: the album's credited artists, in credit order.
 /// - `tracks`: the album's tracks in scope, in playing order; their genres,
 ///   durations, and explicitness are what the album reports.
-/// - `has_art`: whether any of the album's preferred files carries embedded
-///   cover art.
+/// - `annotation`: the user's stars, rating, and play counts for the album.
 ///
 /// # Returns
 ///
@@ -168,27 +232,19 @@ pub(crate) fn album_id3(
     album: &Album,
     artists: &[Artist],
     tracks: &[TrackView],
-    has_art: bool,
+    annotation: &Annotation,
 ) -> Object {
     let genres = album_genres(tracks);
     let duration_secs = tracks.iter().map(track_duration_ms).sum::<i64>() / 1000;
     let display_artist = display_name(album.display_artist.as_deref(), artists);
 
-    Object::new()
+    let object = Object::new()
         .set("id", album.id.to_string())
         .set("name", album.title.clone())
         .set("artist", display_artist.clone())
         .set("year", album.year.unwrap_or(0))
-        .set(
-            "coverArt",
-            if has_art {
-                album.id.to_string()
-            } else {
-                String::new()
-            },
-        )
+        .set("coverArt", album.id.to_string())
         .set("duration", duration_secs)
-        .set("playCount", 0)
         .set("genre", genres.first().cloned().unwrap_or_default())
         .set("created", timestamp(album.created_at))
         .set(
@@ -198,8 +254,9 @@ pub(crate) fn album_id3(
                 .map(|artist| artist.id.to_string())
                 .unwrap_or_default(),
         )
-        .set("songCount", tracks.len() as i64)
-        .set("played", "")
+        .set("songCount", tracks.len() as i64);
+    let object = set_plays(object, annotation);
+    object
         .set(
             "musicBrainzId",
             album.mb_release_id.clone().unwrap_or_default(),
@@ -237,24 +294,25 @@ pub(crate) fn album_id3(
 ///   the sample rate, the channel count, and the embedded-art flag.
 /// - `album_artists`: the credited artists of the track's album, empty when the
 ///   track has no album.
+/// - `annotation`: the user's stars, rating, and play counts for the track.
 ///
 /// # Returns
 ///
 /// The child. The base protocol's fields come first, in the order the protocol
-/// lists them, and the OpenSubsonic additions follow; see the module
-/// documentation for how `coverArt` is chosen.
+/// lists them, and the OpenSubsonic additions follow; `coverArt` always names
+/// the album the track belongs to, or the track itself when it has none, so a
+/// client asks for the image and is told when there is none.
 pub(crate) fn child(
     view: &TrackView,
     file: Option<&MediaFile>,
     album_artists: &[Artist],
+    annotation: &Annotation,
 ) -> Object {
     let track = &view.track;
     let album = view.album.as_ref();
-    let has_art = matches!(file.and_then(|file| file.has_embedded_art), Some(true));
-    let cover_art = match album {
-        Some(album) if has_art => album.id.to_string(),
-        _ => track.id.to_string(),
-    };
+    let cover_art = album
+        .map(|album| album.id.to_string())
+        .unwrap_or_else(|| track.id.to_string());
     let (suffix, content_type) = match file {
         Some(file) => {
             let suffix = file_suffix(file);
@@ -269,7 +327,7 @@ pub(crate) fn child(
         .unwrap_or(0)
         / 1000;
 
-    Object::new()
+    let object = Object::new()
         .set("id", track.id.to_string())
         .set(
             "parent",
@@ -313,8 +371,6 @@ pub(crate) fn child(
             "path",
             file.map(|file| file.rel_path.clone()).unwrap_or_default(),
         )
-        .set("playCount", 0)
-        .set("played", "")
         .set("discNumber", track.disc_number.unwrap_or(0))
         .set("created", timestamp(track.created_at))
         .set(
@@ -367,7 +423,9 @@ pub(crate) fn child(
         )
         .set("displayComposer", "")
         .set("moods", Array::named("mood", std::iter::empty::<String>()))
-        .set("explicitStatus", explicit_status(track.explicit))
+        .set("explicitStatus", explicit_status(track.explicit));
+    let object = set_plays(object, annotation);
+    object
         .set(
             "replayGain",
             replay_gain(file.and_then(MediaFile::replay_gain)),
