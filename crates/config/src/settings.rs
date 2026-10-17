@@ -257,6 +257,85 @@ impl Settings {
         self.refresh().await
     }
 
+    /// Applies a batch of changes in one transaction.
+    ///
+    /// Every change is checked first - the key is registered, neither the
+    /// config file nor the environment pins it, and a new value satisfies the
+    /// setting's kind - and nothing is written unless all of them pass. A
+    /// change of `Some(value)` stores the value; `None` removes the stored
+    /// value so the layers below apply again.
+    ///
+    /// # Parameters
+    ///
+    /// - `changes`: the keys and their new values.
+    /// - `updated_by`: the user making the change, stored for auditing.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` once every change is stored and the snapshot republished.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`SettingsError`] a check finds, with nothing written,
+    /// and [`SettingsError::Database`] when the transaction fails.
+    pub async fn apply(
+        &self,
+        changes: &[(String, Option<SettingValue>)],
+        updated_by: Option<Uuid>,
+    ) -> Result<(), SettingsError> {
+        for (key, value) in changes {
+            let def = self
+                .0
+                .registry
+                .def(key)
+                .ok_or_else(|| SettingsError::UnknownKey { key: key.clone() })?;
+            self.check_writable(key)?;
+            if let Some(value) = value {
+                validate(def, value, SettingSource::Database)?;
+            }
+        }
+        let updated_at = now_millis();
+        let updated_by = updated_by.map(|user| user.as_bytes().to_vec());
+        let mut tx = self.0.pool.begin().await?;
+        for (key, value) in changes {
+            match value {
+                Some(value) => {
+                    let json = value.to_json();
+                    sqlx::query!(
+                        "INSERT INTO settings (key, value, updated_at, updated_by)
+                         VALUES (?, ?, ?, ?)
+                         ON CONFLICT(key) DO UPDATE SET
+                           value = excluded.value,
+                           updated_at = excluded.updated_at,
+                           updated_by = excluded.updated_by",
+                        key,
+                        json,
+                        updated_at,
+                        updated_by.as_deref(),
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                None => {
+                    sqlx::query!("DELETE FROM settings WHERE key = ?", key)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+            }
+        }
+        tx.commit().await?;
+        self.refresh().await
+    }
+
+    /// Returns whether an environment variable overrides a key.
+    ///
+    /// # Parameters
+    ///
+    /// - `key`: the dotted setting key.
+    pub fn is_environment_override(&self, key: &str) -> bool {
+        self.0.env.contains_key(&env_name_for(key))
+    }
+
     /// Re-reads the stored layer and republishes the snapshot.
     ///
     /// Call this when another process may have changed the `settings` table.
@@ -912,5 +991,80 @@ mod tests {
         assert!(overridable.user_overridable);
         assert!(!overridable.pinned);
         assert_eq!(overridable.source, SettingSource::Default);
+    }
+
+    #[tokio::test]
+    async fn a_batch_is_written_whole_or_not_at_all() {
+        let (_dir, _database, pool) = database().await;
+        let settings = Settings::load(pool, SettingsRegistry::builtin(), layered_sources())
+            .await
+            .unwrap();
+
+        // One pinned key in the batch refuses the batch, and nothing changes.
+        let refused = settings
+            .apply(
+                &[
+                    (
+                        keys::PRIVACY_SERVER_BROWSE.name().to_owned(),
+                        Some(SettingValue::String("all".to_owned())),
+                    ),
+                    (
+                        keys::STREAM_PENDING_MODE.name().to_owned(),
+                        Some(SettingValue::String("hold".to_owned())),
+                    ),
+                ],
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, SettingsError::Pinned { .. }), "{refused}");
+        assert_eq!(
+            settings.current().get(keys::PRIVACY_SERVER_BROWSE).unwrap(),
+            "permanent_only"
+        );
+        let invalid = settings
+            .apply(
+                &[(
+                    keys::PRIVACY_SERVER_BROWSE.name().to_owned(),
+                    Some(SettingValue::String("everything".to_owned())),
+                )],
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(invalid, SettingsError::Invalid(_)), "{invalid}");
+
+        settings
+            .apply(
+                &[
+                    (
+                        keys::PRIVACY_SERVER_BROWSE.name().to_owned(),
+                        Some(SettingValue::String("all".to_owned())),
+                    ),
+                    (
+                        keys::UPLOADS_ENABLED.name().to_owned(),
+                        Some(SettingValue::Bool(false)),
+                    ),
+                ],
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            settings.current().get(keys::PRIVACY_SERVER_BROWSE).unwrap(),
+            "all"
+        );
+        assert!(!settings.current().get(keys::UPLOADS_ENABLED).unwrap());
+
+        settings
+            .apply(&[(keys::UPLOADS_ENABLED.name().to_owned(), None)], None)
+            .await
+            .unwrap();
+        assert_eq!(
+            settings.current().source(keys::UPLOADS_ENABLED.name()),
+            Some(SettingSource::Default)
+        );
+        assert!(settings.is_environment_override(keys::SEARCH_CATALOG_MAX_RESULTS.name()));
+        assert!(!settings.is_environment_override(keys::UPLOADS_ENABLED.name()));
     }
 }

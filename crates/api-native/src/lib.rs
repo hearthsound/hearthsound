@@ -30,6 +30,7 @@
 //! | `GET`/`PATCH /api/v1/me/settings` | any user, own overrides |
 //! | `GET`/`POST /api/v1/admin/users`, `GET`/`PATCH /api/v1/admin/users/{id}` | administrators |
 //! | `GET`/`POST /api/v1/admin/folders`, `PATCH /api/v1/admin/folders/{id}`, `POST /api/v1/admin/folders/{id}/scan` | administrators |
+//! | `GET`/`PATCH /api/v1/admin/settings` | administrators |
 
 #![forbid(unsafe_code)]
 
@@ -133,6 +134,10 @@ fn api_router() -> OpenApiRouter<NativeState> {
         ))
         .routes(routes!(routes::admin_folders::patch_folder))
         .routes(routes!(routes::admin_folders::scan_folder))
+        .routes(routes!(
+            routes::admin_settings::list_settings,
+            routes::admin_settings::patch_settings
+        ))
 }
 
 /// Returns the OpenAPI document of the native API.

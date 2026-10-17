@@ -101,6 +101,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and queues a scan of one: adding a folder requires exactly one of an
   `owner`, whose library the folder's content joins, or `generic: true`, and
   the association, the name and the watch flag can be changed later.
+- `/api/v1/admin/settings` lists every registered server setting with its value,
+  default, the layer that supplies it and whether a file or environment variable
+  pins it, and changes a batch of settings, `null` removing a stored value. A
+  batch that names a pinned key is refused with a `conflict` problem naming the
+  keys, and nothing in it is written.
 
 ### Changed
 

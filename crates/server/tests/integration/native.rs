@@ -782,3 +782,133 @@ async fn folders_are_added_with_an_owner_or_as_generic() {
     assert_problem(unknown, StatusCode::NOT_FOUND, "not-found").await;
     fixture.stop().await;
 }
+
+/// Administrators read every server setting with its source and change the
+/// ones no file or environment variable pins. A batch with a pinned key writes
+/// nothing, and other accounts may not reach the listing at all.
+#[tokio::test]
+async fn server_settings_are_listed_and_changed_unless_pinned() {
+    let fixture = Fixture::new().await;
+    let listing = json(
+        bearer(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/admin/settings",
+            None,
+        )
+        .await,
+    )
+    .await;
+    let poll = setting(&listing, "acquisition.poll_interval_ms.interactive");
+    assert_eq!(poll["source"], "file");
+    assert_eq!(poll["pinned"], true);
+    assert_eq!(poll["kind"], "integer");
+    let browse = setting(&listing, "privacy.server_browse");
+    assert_eq!(browse["source"], "default");
+    assert_eq!(browse["value"], "permanent_only");
+    assert_eq!(browse["kind"], "string");
+
+    // A pinned key refuses the whole batch and is named in the problem.
+    let refused = bearer(
+        &fixture,
+        reqwest::Method::PATCH,
+        "/api/v1/admin/settings",
+        Some(serde_json::json!({ "settings": {
+            "privacy.server_browse": "all",
+            "acquisition.poll_interval_ms.interactive": 100,
+        } })),
+    )
+    .await;
+    let problem = assert_problem(refused, StatusCode::CONFLICT, "conflict").await;
+    assert!(
+        problem["detail"]
+            .as_str()
+            .unwrap()
+            .contains("acquisition.poll_interval_ms.interactive")
+    );
+    let after = json(
+        bearer(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/admin/settings",
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        setting(&after, "privacy.server_browse")["value"],
+        "permanent_only"
+    );
+
+    // An unknown key and a value that does not fit are both invalid requests.
+    for refused in [
+        serde_json::json!({ "settings": { "no.such.key": true } }),
+        serde_json::json!({ "settings": { "privacy.server_browse": "everything" } }),
+    ] {
+        let response = bearer(
+            &fixture,
+            reqwest::Method::PATCH,
+            "/api/v1/admin/settings",
+            Some(refused),
+        )
+        .await;
+        assert_problem(response, StatusCode::BAD_REQUEST, "invalid-request").await;
+    }
+
+    // A valid batch is stored; a null removes the stored value.
+    let changed = bearer(
+        &fixture,
+        reqwest::Method::PATCH,
+        "/api/v1/admin/settings",
+        Some(serde_json::json!({ "settings": {
+            "privacy.server_browse": "all",
+            "uploads.enabled": false,
+        } })),
+    )
+    .await;
+    assert_eq!(changed.status(), StatusCode::OK);
+    let changed = json(changed).await;
+    assert_eq!(setting(&changed, "privacy.server_browse")["value"], "all");
+    assert_eq!(
+        setting(&changed, "privacy.server_browse")["source"],
+        "database"
+    );
+    assert_eq!(setting(&changed, "uploads.enabled")["value"], false);
+    let reset = bearer(
+        &fixture,
+        reqwest::Method::PATCH,
+        "/api/v1/admin/settings",
+        Some(serde_json::json!({ "settings": { "privacy.server_browse": null } })),
+    )
+    .await;
+    let reset = json(reset).await;
+    assert_eq!(
+        setting(&reset, "privacy.server_browse")["value"],
+        "permanent_only"
+    );
+    assert_eq!(
+        setting(&reset, "privacy.server_browse")["source"],
+        "default"
+    );
+
+    // Another account may not read or change the settings.
+    let created = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/users",
+        Some(serde_json::json!({ "username": "listener", "password": "correct horse" })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let (cookie, _csrf) = session_of(&fixture, "listener", "correct horse").await;
+    let denied = fixture
+        .client
+        .get(format!("{}/api/v1/admin/settings", fixture.base_url()))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_problem(denied, StatusCode::FORBIDDEN, "forbidden").await;
+    fixture.stop().await;
+}
