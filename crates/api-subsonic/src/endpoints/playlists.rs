@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use hearthsound_acquire::adopt::acquire_playlist_adds;
 use hearthsound_activity::{ActivityError, Playlist, PlaylistUpdate};
 use hearthsound_core::{ClientId, EntityId, EntityKind, IdPrefix};
 use uuid::Uuid;
@@ -167,6 +168,7 @@ pub async fn create_playlist(call: Call) -> Encoded {
             }
         }
     };
+    acquire_added(&call, &songs).await;
 
     let entries = match entries(&call, &playlist).await {
         Ok(entries) => entries,
@@ -240,6 +242,7 @@ pub async fn update_playlist(call: Call) -> Encoded {
         None => None,
     };
 
+    let added = add.clone();
     let update = PlaylistUpdate {
         name: call.get("name").map(str::to_owned),
         comment: call.get("comment").map(str::to_owned),
@@ -255,8 +258,42 @@ pub async fn update_playlist(call: Call) -> Encoded {
         .update(id, user, &update)
         .await
     {
-        Ok(_) => call.encode(Response::ok()),
+        Ok(_) => {
+            acquire_added(&call, &added).await;
+            call.encode(Response::ok())
+        }
         Err(error) => call.encode(Response::failed(failure("updatePlaylist", &error))),
+    }
+}
+
+/// Acquires the remote tracks just added to a playlist.
+///
+/// A playlist a Subsonic client creates is never temporary, so its tracks are
+/// pinned and `library.acquire_on_playlist_add` asks for every track that is
+/// not stored at priority `queue`, under the user's permission and quota. The
+/// playlist is already written; a refusal or an error here is only logged.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `songs`: the tracks the request added.
+async fn acquire_added(call: &Call, songs: &[EntityId]) {
+    if songs.is_empty() {
+        return;
+    }
+    let Some(prefetch) = call.state().prefetch() else {
+        return;
+    };
+    let user = call.principal().user_id.uuid();
+    if let Err(error) = acquire_playlist_adds(
+        prefetch.orchestrator(),
+        user,
+        call.principal().can_acquire,
+        songs,
+    )
+    .await
+    {
+        tracing::warn!(%user, %error, "could not acquire what a user added to a playlist");
     }
 }
 

@@ -996,3 +996,72 @@ async fn a_like_acquires_nothing_without_permission_or_with_the_setting_off() {
     assert!(library.track_is_pinned(first).await.unwrap());
     assert!(library.track_is_pinned(second).await.unwrap());
 }
+
+/// Adding a catalog track to a playlist acquires it into the library root, and
+/// turning acquire-on-playlist-add off leaves a later addition remote.
+#[tokio::test]
+async fn adding_a_catalog_track_to_a_playlist_acquires_it() {
+    let fixture = Fixture::new().await;
+    let services = Arc::clone(&fixture.services);
+    let downloads = downloads_dir(&fixture);
+    install_catalog(&services).await;
+    install_acquisition(&services, &downloads, "normal", 1).await;
+    services.registry().rebuild().await.unwrap();
+    place_audio(&downloads).await;
+
+    let response = fixture
+        .get(&format!(
+            "/rest/createPlaylist?name=Mix&songId={}&apiKey={}&f=json",
+            catalog_id(1),
+            fixture.api_key
+        ))
+        .await;
+    let body: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
+    let playlist = body["subsonic-response"]["playlist"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first = materialize(services.catalog(), 1).await;
+    let rows = ledger_rows(services.orchestrator(), first).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].reason, "playlist");
+    assert_eq!(rows[0].priority, hearthsound_core::Priority::Queue);
+    wait_for_state(
+        services.orchestrator(),
+        rows[0].id,
+        AcquisitionState::Completed,
+    )
+    .await;
+    assert!(
+        services
+            .config()
+            .paths
+            .library
+            .join(FIRST_REL_PATH)
+            .is_file()
+    );
+
+    services
+        .settings()
+        .set(
+            keys::LIBRARY_ACQUIRE_ON_PLAYLIST_ADD.name(),
+            SettingValue::Bool(false),
+            None,
+        )
+        .await
+        .unwrap();
+    let response = fixture
+        .get(&format!(
+            "/rest/updatePlaylist?playlistId={playlist}&songIdToAdd={}&apiKey={}&f=json",
+            catalog_id(2),
+            fixture.api_key
+        ))
+        .await;
+    assert!(response.text().await.unwrap().contains("\"status\":\"ok\""));
+    let second = materialize(services.catalog(), 2).await;
+    assert!(
+        ledger_rows(services.orchestrator(), second)
+            .await
+            .is_empty()
+    );
+}

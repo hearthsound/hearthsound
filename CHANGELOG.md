@@ -61,6 +61,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under the user's permission and quota, and because the like pins them they
   are imported into `<storage>/library`. A user who may not acquire still
   records the like.
+- Adding a track that is not stored to a playlist acquires it
+  (`library.acquire_on_playlist_add`) the same way, through `createPlaylist`
+  and `updatePlaylist`.
 
 ## [0.1.2] - 2026-10-16
 
