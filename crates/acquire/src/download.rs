@@ -40,6 +40,7 @@ use tokio::sync::{Notify, OwnedSemaphorePermit};
 use tokio::time::Instant;
 use uuid::Uuid;
 
+use crate::announce::ANNOUNCE_INTERVAL;
 use crate::error::AcquireError;
 use crate::import::HandoffOutcome;
 use crate::orchestrator::AcquisitionOrchestrator;
@@ -1013,9 +1014,17 @@ impl AcquisitionOrchestrator {
         let mut last_bytes = 0_u64;
         let mut last_progress = Instant::now();
         let mut queued_since: Option<Instant> = None;
+        let mut next_poll = Instant::now() + limits.poll_interval;
+        let mut heartbeat =
+            tokio::time::interval_at(Instant::now() + ANNOUNCE_INTERVAL, ANNOUNCE_INTERVAL);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
-                () = tokio::time::sleep(limits.poll_interval) => {}
+                () = tokio::time::sleep_until(next_poll) => {}
+                _ = heartbeat.tick() => {
+                    self.heartbeat(row.id);
+                    continue;
+                }
                 () = preempted.notified() => {
                     provider.cancel_download(&context, token).await;
                     return Ok(CandidateAttempt::Preempted);
@@ -1030,6 +1039,7 @@ impl AcquisitionOrchestrator {
                     return Ok(CandidateAttempt::Cancelled);
                 }
             }
+            next_poll = Instant::now() + limits.poll_interval;
 
             let state = match provider.poll_download(&context, token).await {
                 Ok(state) => state,

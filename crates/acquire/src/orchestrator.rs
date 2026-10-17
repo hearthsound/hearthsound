@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hearthsound_catalog::CatalogService;
 use hearthsound_config::keys;
@@ -51,6 +51,7 @@ use sqlx::SqliteConnection;
 use tokio::sync::{Notify, watch};
 use uuid::Uuid;
 
+use crate::announce::AnnounceGate;
 use crate::download::DownloadOutcome;
 use crate::error::AcquireError;
 use crate::repo::{
@@ -541,6 +542,9 @@ struct Inner {
     reserved_destinations: Mutex<HashSet<PathBuf>>,
     /// One channel per acquisition anyone is watching.
     waiters: Mutex<HashMap<Uuid, watch::Sender<AcquisitionProgress>>>,
+    /// The gate that decides which progress snapshots reach the bus, with the
+    /// latest snapshot of each live acquisition.
+    announce_gate: Mutex<AnnounceGate>,
     /// The acquisitions this process still has side effects for, and the signal
     /// that wakes a worker when another process ends one of them.
     ///
@@ -625,6 +629,7 @@ impl AcquisitionOrchestrator {
                 storage_roots: storage.roots,
                 reserved_destinations: Mutex::new(HashSet::new()),
                 waiters: Mutex::new(HashMap::new()),
+                announce_gate: Mutex::new(AnnounceGate::default()),
                 in_flight: Mutex::new(HashMap::new()),
                 running: AtomicUsize::new(0),
                 search_budgets: crate::budget::InstanceBudgets::new(),
@@ -1851,11 +1856,17 @@ impl AcquisitionOrchestrator {
         }
     }
 
-    /// Publishes a snapshot to the acquisition's waiters and to the bus.
+    /// Announces a snapshot: waiters always see it, the bus sees it when the
+    /// announce gate admits it.
+    ///
+    /// A state, priority, instance, failure or file change is published at
+    /// once. Any other change is published at most once per
+    /// `ANNOUNCE_INTERVAL_MS` per acquisition; the held snapshot is what the
+    /// next heartbeat publishes.
     ///
     /// # Parameters
     ///
-    /// - `progress`: the snapshot to publish.
+    /// - `progress`: the snapshot to announce.
     pub(crate) fn announce(&self, progress: &AcquisitionProgress) {
         {
             let waiters = lock(&self.inner.waiters);
@@ -1863,6 +1874,33 @@ impl AcquisitionOrchestrator {
                 sender.send_replace(progress.clone());
             }
         }
+        if lock(&self.inner.announce_gate).admit(progress, Instant::now()) {
+            self.publish_progress(progress);
+        }
+    }
+
+    /// Publishes the latest held snapshot of an acquisition, when it has one.
+    ///
+    /// The download loop calls this on its two-second ticker so a transfer
+    /// that makes no progress between polls still produces an event. The
+    /// waiters are not touched: they already hold the latest snapshot.
+    ///
+    /// # Parameters
+    ///
+    /// - `acquisition_id`: the acquisition whose held snapshot is published.
+    pub(crate) fn heartbeat(&self, acquisition_id: Uuid) {
+        let latest = lock(&self.inner.announce_gate).heartbeat(acquisition_id, Instant::now());
+        if let Some(progress) = latest {
+            self.publish_progress(&progress);
+        }
+    }
+
+    /// Publishes one snapshot on the bus, to the audience its requester implies.
+    ///
+    /// # Parameters
+    ///
+    /// - `progress`: the snapshot to publish.
+    fn publish_progress(&self, progress: &AcquisitionProgress) {
         let audience = match progress.requested_by {
             Some(user) => Audience::User(user),
             None => Audience::Admins,

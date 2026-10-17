@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updates reach only the user they belong to, scan and plugin status reach
   administrators, and everything else stays visible to every connection. The
   wire shape of each event is unchanged.
+- Acquisition progress is announced on a steady heartbeat: a running download
+  publishes its latest progress at least every two seconds, state, priority,
+  instance and failure changes are published at once, and percentage-only
+  changes are published at most once per two-second window.
 
 ## [0.1.3] - 2026-10-17
 

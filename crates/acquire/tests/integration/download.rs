@@ -178,7 +178,10 @@ async fn a_completed_download_is_verified_and_imported() {
     );
     assert!(logged(&env, id, "the candidate passed verification").await);
 
-    // The percentage and the ETA advance through the download.
+    // The percentage advances through the download. Percentage-only changes
+    // inside one announce window are memoized, so the 100 percent reading of
+    // the download may not reach the bus as its own frame; the terminal
+    // transition always does.
     let published = crate::common::drain(&mut events);
     let percents: Vec<u8> = published
         .iter()
@@ -191,7 +194,13 @@ async fn a_completed_download_is_verified_and_imported() {
             _ => None,
         })
         .collect();
-    assert_eq!(percents, [50, 100]);
+    assert_eq!(percents.first(), Some(&50));
+    assert!(percents.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert!(published.iter().any(|event| matches!(
+        event,
+        hearthsound_core::events::ServerEvent::AcquisitionUpdated(update)
+            if update.state == AcquisitionState::Completed
+    )));
 }
 
 #[tokio::test]

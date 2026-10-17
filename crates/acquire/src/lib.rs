@@ -41,6 +41,7 @@ mod identity;
 mod import;
 
 pub mod adopt;
+pub mod announce;
 pub mod download;
 pub mod normalize;
 pub mod orchestrator;
