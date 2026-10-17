@@ -294,3 +294,96 @@ async fn session_and_quota_rows_follow_their_account() {
 
     db.close().await;
 }
+
+/// The staged upgrade table exists, rejects unknown sources, and follows its
+/// plugin and repository.
+#[tokio::test]
+async fn plugin_upgrade_rows_follow_their_plugin_and_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let pool = db.writer();
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'plugin_upgrades'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1, "the plugin_upgrades table exists");
+
+    sqlx::query(
+        "INSERT INTO plugin_repositories (id, url, name, public_key, enabled)
+         VALUES (x'01', 'https://plugins.example/v1/index.json', 'Example', NULL, 1)",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO plugins (id, version, api, manifest, sha256, source, repository_id,
+                              approved_permissions, enabled, installed_at)
+         VALUES ('app.hearthsound.deezer', '0.1.0', 'hearthsound:plugin@0.2.0', '{}', x'00',
+                 'repository', x'01', '{}', 1, 0)",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let unknown_source = sqlx::query(
+        "INSERT INTO plugin_upgrades (plugin_id, version, api, manifest, sha256, source,
+                                      repository_id, staged_at)
+         VALUES ('app.hearthsound.deezer', '0.2.0', 'hearthsound:plugin@0.2.0', '{}', x'00',
+                 'elsewhere', x'01', 0)",
+    )
+    .execute(pool)
+    .await;
+    assert!(unknown_source.is_err(), "the source must be a known source");
+
+    sqlx::query(
+        "INSERT INTO plugin_upgrades (plugin_id, version, api, manifest, sha256, source,
+                                      repository_id, staged_at)
+         VALUES ('app.hearthsound.deezer', '0.2.0', 'hearthsound:plugin@0.2.0', '{}', x'00',
+                 'repository', x'01', 0)",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let second = sqlx::query(
+        "INSERT INTO plugin_upgrades (plugin_id, version, api, manifest, sha256, source,
+                                      repository_id, staged_at)
+         VALUES ('app.hearthsound.deezer', '0.3.0', 'hearthsound:plugin@0.2.0', '{}', x'00',
+                 'repository', x'01', 0)",
+    )
+    .execute(pool)
+    .await;
+    assert!(second.is_err(), "a plugin holds at most one staged upgrade");
+
+    sqlx::query("DELETE FROM plugin_repositories WHERE id = x'01'")
+        .execute(pool)
+        .await
+        .unwrap();
+    let repository: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT repository_id FROM plugin_upgrades")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        repository, None,
+        "deleting the repository clears the upgrade's link"
+    );
+
+    sqlx::query("DELETE FROM plugins WHERE id = 'app.hearthsound.deezer'")
+        .execute(pool)
+        .await
+        .unwrap();
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM plugin_upgrades")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "deleting the plugin removes its staged upgrade"
+    );
+
+    db.close().await;
+}

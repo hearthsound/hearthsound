@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A staged plugin upgrade table: each installed plugin can hold one upgrade
+  waiting for approval, with its version, manifest, digest, source and
+  repository, and the staged upgrade is removed with its plugin.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload
