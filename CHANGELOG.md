@@ -74,6 +74,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by everyone while only the uploader's library gains it. Client ids gain the
   `ak`, `ap`, `lf` and `up` prefixes for API keys, app passwords, library
   folders and uploads.
+- The native JSON API under `/api/v1`, described by an OpenAPI document at
+  `/api/v1/openapi.json`: requests authenticate with an API key as
+  `Authorization: Bearer` or with a web session cookie plus the
+  `X-Hearthsound-CSRF` header on unsafe methods, every error is an RFC 9457
+  problem document with a stable `code`, lists page by cursor, and
+  `GET /api/v1/system/info` reports the version, the enabled features and the
+  instances of every layer.
 
 ### Changed
 

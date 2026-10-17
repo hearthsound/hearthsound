@@ -50,12 +50,13 @@ use std::sync::Arc;
 use hearthsound_acquire::orchestrator::{AcquisitionOrchestrator, AcquisitionStorage};
 use hearthsound_acquire::prefetch::PrefetchScheduler;
 use hearthsound_activity::ActivityService;
+use hearthsound_api_native::{NativeServices, NativeState};
 use hearthsound_api_subsonic::{PendingSource, SubsonicState};
 use hearthsound_auth::{Authenticator, TrustedProxies};
 use hearthsound_catalog::CatalogService;
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_config::keys;
-use hearthsound_config::secret::SecretKey;
+use hearthsound_config::secret::{SecretBox, SecretKey};
 use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore};
 use hearthsound_core::events::EventBus;
@@ -69,6 +70,7 @@ use hearthsound_library::maintenance::{
     StorageMaintainer,
 };
 use hearthsound_library::scan::{LibraryScanner, SCAN_JOB_KIND, ScanJobHandler};
+use hearthsound_library::upload::UploadIngest;
 use hearthsound_library::watch::LibraryWatcher;
 use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::instances::InstanceService;
@@ -126,6 +128,10 @@ pub struct Services {
     /// The signal that wakes the maintenance worker; the activity service
     /// notifies it after every pin change.
     maintenance: MaintenanceSignal,
+    /// The upload ingest the native API stores uploads through.
+    uploads: UploadIngest,
+    /// The secret box app passwords are sealed with.
+    secrets: SecretBox,
     /// The managed storage roots a stored media file resolves against.
     storage_roots: StorageRoots,
     /// The proxies whose forwarding headers are trusted.
@@ -220,7 +226,7 @@ impl Services {
         ));
         log_rebuild(&registry.rebuild().await?);
 
-        let instances = InstanceService::new(Arc::clone(&plugins), repository, secrets);
+        let instances = InstanceService::new(Arc::clone(&plugins), repository, secrets.clone());
 
         let catalog = Arc::new(CatalogService::new(
             Arc::clone(&registry),
@@ -263,6 +269,13 @@ impl Services {
             Arc::clone(&events),
         ));
         let maintenance = activity.maintenance_signal().clone();
+        let uploads = UploadIngest::new(
+            &database,
+            storage_roots.clone(),
+            settings.clone(),
+            Arc::clone(&events),
+        )
+        .with_signal(maintenance.clone());
 
         let queue = Arc::new(JobQueue::new(&database, QueueOptions::default()));
         let mut runner = JobRunner::new(Arc::clone(&queue), JobRunnerOptions::default());
@@ -335,6 +348,8 @@ impl Services {
             activity,
             maintainer,
             maintenance,
+            uploads,
+            secrets,
             storage_roots,
             trusted_proxies,
             cors,
@@ -457,6 +472,26 @@ impl Services {
     /// Returns the signal that wakes the storage maintenance worker.
     pub fn maintenance(&self) -> &MaintenanceSignal {
         &self.maintenance
+    }
+
+    /// Returns the shared state of the `/api/v1` surface.
+    pub fn native_state(&self) -> NativeState {
+        NativeState::new(NativeServices {
+            database: Arc::clone(&self.database),
+            settings: self.settings.clone(),
+            authenticator: Arc::clone(&self.authenticator),
+            secrets: self.secrets.clone(),
+            trusted_proxies: self.trusted_proxies.clone(),
+            registry: Arc::clone(&self.registry),
+            orchestrator: Arc::clone(&self.orchestrator),
+            maintainer: Arc::clone(&self.maintainer),
+            uploads: self.uploads.clone(),
+            uploads_staging: self.config.paths.uploads_staging.clone(),
+            scanner: Arc::clone(&self.scanner),
+            jobs: Arc::clone(&self.queue),
+            watcher: Arc::clone(&self.watcher),
+            events: Arc::clone(&self.events),
+        })
     }
 
     /// Returns the managed storage roots.

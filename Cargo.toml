@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/acquire",
     "crates/activity",
+    "crates/api-native",
     "crates/api-subsonic",
     "crates/auth",
     "crates/catalog",
@@ -84,6 +85,9 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 unicode-normalization = "0.1.25"
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
+# OpenAPI for the native API.
+utoipa = "6.0.0"
+utoipa-axum = "0.3.0"
 uuid = { version = "1.28.0", features = ["v7"] }
 # Only the features the plugin host uses: the defaults add a WAT parser, a
 # compile cache with zstd, GC, threads, profiling and debugging support.
