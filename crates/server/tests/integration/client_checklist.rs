@@ -732,6 +732,7 @@ async fn the_binary_and_administration_endpoints_answer() {
         [
             "apiKeyAuthentication",
             "formPost",
+            "hearthsound",
             "indexBasedQueue",
             "playbackReport",
             "topSongsByArtistId",

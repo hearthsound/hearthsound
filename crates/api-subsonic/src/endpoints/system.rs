@@ -22,11 +22,11 @@ const SERVER_BROWSE_DISABLED: &str = "disabled";
 ///
 /// An extension is listed here only once the endpoint or the fields it promises
 /// are implemented, because advertising an extension that does nothing is worse
-/// for a client than omitting it. The vendor `hearthsound` extension is added
-/// when its fields and endpoints exist.
-const EXTENSIONS: [(&str, &[i64]); 7] = [
+/// for a client than omitting it.
+const EXTENSIONS: [(&str, &[i64]); 8] = [
     ("apiKeyAuthentication", &[1]),
     ("formPost", &[1]),
+    ("hearthsound", &[1]),
     ("indexBasedQueue", &[1]),
     ("playbackReport", &[1]),
     ("topSongsByArtistId", &[1]),

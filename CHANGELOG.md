@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Last-Event-ID`. It accepts a bearer key, a session cookie, or a single-use
   ticket from `POST /api/v1/events/ticket` for clients that cannot set headers.
 
+- The Subsonic `getOpenSubsonicExtensions` response advertises the `hearthsound`
+  vendor extension at version 1.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload
