@@ -111,6 +111,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `POST .../{id}/retry` steer one: a retry starts a new attempt for the same
   track, admitted like any request and charged to the administrator who asked,
   and an attempt that already ended cannot be cancelled again.
+- `/api/v1/admin/storage` reports the files and bytes under the library, cache
+  and folder roots, the pinned tracks, the free space under the cache root and
+  the storage policy, and `POST /api/v1/admin/storage/evict` runs one
+  maintenance pass now (autopin, relocation, then eviction) and answers what
+  it changed.
 
 ### Changed
 

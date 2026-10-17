@@ -3,6 +3,7 @@
 pub mod admin_acquisitions;
 pub mod admin_folders;
 pub mod admin_settings;
+pub mod admin_storage;
 pub mod admin_users;
 pub mod me;
 pub mod session;
