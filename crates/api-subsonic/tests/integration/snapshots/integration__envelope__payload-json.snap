@@ -2,4 +2,4 @@
 source: crates/api-subsonic/tests/integration/envelope.rs
 expression: "response.render(ResponseFormat::Json)"
 ---
-{"subsonic-response":{"status":"ok","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.2","openSubsonic":true,"license":{"valid":true},"musicFolders":{"musicFolder":[{"id":1,"name":"My Library"},{"id":2,"name":"Server"}]}}}
+{"subsonic-response":{"status":"ok","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.3","openSubsonic":true,"license":{"valid":true},"musicFolders":{"musicFolder":[{"id":1,"name":"My Library"},{"id":2,"name":"Server"}]}}}

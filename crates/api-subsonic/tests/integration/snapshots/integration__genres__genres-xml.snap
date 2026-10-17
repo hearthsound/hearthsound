@@ -2,4 +2,4 @@
 source: crates/api-subsonic/tests/integration/genres.rs
 expression: seeded.stabilize(&server.body)
 ---
-<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="hearthsound" serverVersion="0.1.2" openSubsonic="true"><genres><genre songCount="1" albumCount="1">ambient</genre><genre songCount="1" albumCount="1">electronic</genre><genre songCount="1" albumCount="1">pop</genre><genre songCount="2" albumCount="1">rock</genre></genres></subsonic-response>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="hearthsound" serverVersion="0.1.3" openSubsonic="true"><genres><genre songCount="1" albumCount="1">ambient</genre><genre songCount="1" albumCount="1">electronic</genre><genre songCount="1" albumCount="1">pop</genre><genre songCount="2" albumCount="1">rock</genre></genres></subsonic-response>
