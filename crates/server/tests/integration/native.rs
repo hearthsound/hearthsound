@@ -912,3 +912,86 @@ async fn server_settings_are_listed_and_changed_unless_pinned() {
     assert_problem(denied, StatusCode::FORBIDDEN, "forbidden").await;
     fixture.stop().await;
 }
+
+/// An administrator lists the ledger across users, cancels a live acquisition,
+/// retries the cancelled one, and is refused a second cancellation or a retry
+/// of an attempt that is still live.
+#[tokio::test]
+async fn an_administrator_lists_cancels_and_retries_acquisitions() {
+    let fixture = Fixture::new().await;
+    let downloads = fixture.database_path().parent().unwrap().join("downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    common::install_acquisition(&fixture.services, &downloads).await;
+    fixture.services.registry().rebuild().await.unwrap();
+
+    let library = hearthsound_library::LibraryRepository::new(fixture.services.database());
+    let track = common::insert_remote_track(&library).await;
+    fixture
+        .services
+        .orchestrator()
+        .request(hearthsound_acquire::orchestrator::AcquireRequest::new(
+            track,
+            hearthsound_core::Priority::Play,
+            "test",
+        ))
+        .await
+        .unwrap();
+
+    let active = json(bearer_get(&fixture, "/api/v1/admin/acquisitions").await).await;
+    let live = active["acquisitions"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(active["acquisitions"].as_array().unwrap().len(), 1);
+
+    let cancelled = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        &format!("/api/v1/admin/acquisitions/{live}/cancel"),
+        None,
+    )
+    .await;
+    assert_eq!(cancelled.status(), StatusCode::NO_CONTENT);
+
+    let again = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        &format!("/api/v1/admin/acquisitions/{live}/cancel"),
+        None,
+    )
+    .await;
+    assert_problem(again, StatusCode::CONFLICT, "conflict").await;
+
+    let ended = json(bearer_get(&fixture, "/api/v1/admin/acquisitions?state=recent").await).await;
+    assert_eq!(ended["acquisitions"][0]["id"], live.as_str());
+    assert_eq!(ended["acquisitions"][0]["state"], "cancelled");
+
+    let retried = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        &format!("/api/v1/admin/acquisitions/{live}/retry"),
+        None,
+    )
+    .await;
+    assert_eq!(retried.status(), StatusCode::ACCEPTED);
+    let retried = json(retried).await;
+    assert_eq!(retried["outcome"], "started");
+    let attempt = retried["id"].as_str().unwrap().to_owned();
+    assert_ne!(attempt, live);
+
+    let refused = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        &format!("/api/v1/admin/acquisitions/{attempt}/retry"),
+        None,
+    )
+    .await;
+    assert_problem(refused, StatusCode::CONFLICT, "conflict").await;
+
+    let unknown = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/acquisitions/ac_unknown/retry",
+        None,
+    )
+    .await;
+    assert_problem(unknown, StatusCode::NOT_FOUND, "not-found").await;
+    fixture.stop().await;
+}

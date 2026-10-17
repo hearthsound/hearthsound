@@ -106,6 +106,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pins it, and changes a batch of settings, `null` removing a stored value. A
   batch that names a pinned key is refused with a `conflict` problem naming the
   keys, and nothing in it is written.
+- `/api/v1/admin/acquisitions` lists the acquisition ledger across every user,
+  with `state=active`, `recent` or `all`, and `POST .../{id}/cancel` and
+  `POST .../{id}/retry` steer one: a retry starts a new attempt for the same
+  track, admitted like any request and charged to the administrator who asked,
+  and an attempt that already ended cannot be cancelled again.
 
 ### Changed
 

@@ -16,7 +16,11 @@ use std::sync::Arc;
 use hearthsound_auth::{ApiKeys, AppPasswords, NewUser, Users};
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_config::secret::SecretKey;
+use hearthsound_core::{Availability, EntityId, Layer};
+use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, Origin, TrackInput};
+use hearthsound_plugin_host::{InstanceSpec, PluginRepository, PluginSource};
 use hearthsound_server::{Server, Services};
+use hearthsound_test_support::{ACQUISITION_FIXTURE, fixture_plugin};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -220,4 +224,109 @@ pub fn write_config(dir: &Path) -> BootstrapConfig {
     let path = dir.join("hearthsound.toml");
     std::fs::write(&path, text).unwrap();
     BootstrapConfig::load(Some(&path), &BTreeMap::new()).unwrap()
+}
+
+/// The acquisition fixture's manifest id.
+pub const ACQ_ID: &str = "com.example.acquisition-fixture";
+
+/// How long the acquisition fixture answers `running` before a search completes.
+///
+/// The acquisition has to be alive while the test cancels it, so the search is
+/// kept running far longer than the test.
+pub const SEARCH_POLLS: u32 = 60;
+
+/// Installs the acquisition fixture and assigns it to the acquisition layer.
+///
+/// The instance simulates a backend that finds one lossless candidate and keeps
+/// searching, so an acquisition stays alive for the whole test.
+///
+/// # Parameters
+///
+/// - `services`: the running server's services.
+/// - `downloads`: the directory granted as the instance's import root.
+pub async fn install_acquisition(services: &Arc<Services>, downloads: &std::path::Path) {
+    let installed = services
+        .plugins()
+        .install(&fixture_plugin(ACQUISITION_FIXTURE))
+        .await
+        .unwrap();
+    let registration = PluginRepository::new(services.database())
+        .register_installed(&installed, PluginSource::Sideload)
+        .await
+        .unwrap();
+    assert_eq!(registration.id, ACQ_ID);
+    services
+        .instances()
+        .create(&InstanceSpec {
+            slug: "acq".to_owned(),
+            plugin_id: ACQ_ID.to_owned(),
+            display_name: "Acquisition fixture".to_owned(),
+            server_config: serde_json::json!({
+                "candidates": [{
+                    "token": "cand-1",
+                    "title": "Reload Song",
+                    "path": "Reload Artist/Reload Album/01 - Reload Song.flac",
+                    "files": [{
+                        "name": "01 - Reload Song.flac",
+                        "size": 4000,
+                        "format": "flac",
+                        "bitrateKbps": 900,
+                        "sampleRate": 44100,
+                        "bitDepth": 16,
+                        "durationMs": 200,
+                        "trackIndex": 0,
+                    }],
+                    "source": { "key": "peer-1", "speedBps": 1250000, "queueLength": 0, "freeSlot": true },
+                }],
+                "scenario": "normal",
+                "searchPolls": SEARCH_POLLS,
+                "downloadQueuedPolls": 0,
+                "downloadRunningPolls": 1,
+                "downloadBytesPerPoll": 4000,
+                "outputRoot": "downloads",
+                "matchSuffix": ".flac",
+            }),
+            host_config: serde_json::json!({
+                "importRoots": [{
+                    "id": "downloads",
+                    "path": downloads.to_string_lossy(),
+                    "mode": "move",
+                    "readOnly": false,
+                }],
+                "maxConcurrent": 2,
+                "maxConcurrentSearches": 2,
+                "searchesPerHour": 120,
+            }),
+        })
+        .await
+        .unwrap();
+    services
+        .instances()
+        .set_layer(Layer::Acquisition, &["acq".to_owned()])
+        .await
+        .unwrap();
+}
+
+/// Inserts one catalog-only track and returns its id.
+///
+/// # Parameters
+///
+/// - `library`: the library tables of the running server's database.
+pub async fn insert_remote_track(library: &LibraryRepository) -> EntityId {
+    let mut album_input = AlbumInput::new("Reload Album", Origin::Catalog);
+    album_input.year = Some(1993);
+    album_input.display_artist = Some("Reload Artist".to_owned());
+    let album = library
+        .upsert_album(&album_input, &[ArtistCredit::new("Reload Artist", "main")])
+        .await
+        .unwrap();
+    let mut input = TrackInput::new("Reload Song", Origin::Catalog, Availability::Remote);
+    input.album_id = Some(album);
+    input.display_artist = Some("Reload Artist".to_owned());
+    input.track_number = Some(1);
+    input.duration_ms = Some(200);
+    library
+        .insert_track(&input, &[ArtistCredit::new("Reload Artist", "main")], &[])
+        .await
+        .unwrap()
 }

@@ -78,6 +78,15 @@ pub enum AcquireError {
     /// An acquisition id has no row.
     #[error("no acquisition with id `{0}`")]
     UnknownAcquisition(Uuid),
+    /// An acquisition cannot be retried from its current state, or it has no
+    /// track to request again.
+    #[error("acquisition `{id}` is {} and cannot be retried", .state.as_str())]
+    NotRetryable {
+        /// The acquisition that was asked to retry.
+        id: Uuid,
+        /// The state the acquisition was in.
+        state: AcquisitionState,
+    },
     /// No free destination path could be found for an imported file.
     #[error("no free import path could be found under `{path}`")]
     ImportPath {

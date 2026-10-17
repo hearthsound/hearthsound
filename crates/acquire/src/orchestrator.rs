@@ -1476,6 +1476,60 @@ impl AcquisitionOrchestrator {
         self.finish_cancelled(&row, Some("cancelled")).await
     }
 
+    /// Starts a new attempt for a failed or cancelled acquisition.
+    ///
+    /// The attempt is a forced request for the same track at the same priority
+    /// and with the original reason, so a track still cooling down after its
+    /// failure is tried again. The request then goes through every admission
+    /// check a new request does: the requester's permission, quota and the
+    /// track's availability.
+    ///
+    /// # Parameters
+    ///
+    /// - `acquisition_id`: the acquisition to retry.
+    /// - `requested_by`: the user asking for the retry, or `None` for the server.
+    /// - `can_acquire`: whether that requester may acquire.
+    ///
+    /// # Returns
+    ///
+    /// The outcome of the new request; a retry that joins an acquisition
+    /// already running for the track reports that acquisition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::UnknownAcquisition`] when no row has the id,
+    /// [`AcquireError::NotRetryable`] when the row is not failed or cancelled
+    /// or names no track, and the database error of a failed read.
+    ///
+    /// # Panics
+    ///
+    /// Never panics.
+    pub async fn retry(
+        &self,
+        acquisition_id: Uuid,
+        requested_by: Option<Uuid>,
+        can_acquire: bool,
+    ) -> Result<AcquireOutcome, AcquireError> {
+        let Some(row) = self.inner.repository.get(acquisition_id).await? else {
+            return Err(AcquireError::UnknownAcquisition(acquisition_id));
+        };
+        let retryable = matches!(
+            row.state,
+            AcquisitionState::Failed | AcquisitionState::Cancelled
+        );
+        let Some(track_id) = row.track_id.filter(|_| retryable) else {
+            return Err(AcquireError::NotRetryable {
+                id: acquisition_id,
+                state: row.state,
+            });
+        };
+        let request = AcquireRequest::new(track_id, row.priority, row.reason)
+            .with_requested_by(requested_by)
+            .with_can_acquire(can_acquire)
+            .forced();
+        self.request(request).await
+    }
+
     /// Brings this process in line with the ledger another process wrote.
     ///
     /// The CLI writes the database directly instead of talking to the server,

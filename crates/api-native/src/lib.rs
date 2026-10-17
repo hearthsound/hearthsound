@@ -31,6 +31,7 @@
 //! | `GET`/`POST /api/v1/admin/users`, `GET`/`PATCH /api/v1/admin/users/{id}` | administrators |
 //! | `GET`/`POST /api/v1/admin/folders`, `PATCH /api/v1/admin/folders/{id}`, `POST /api/v1/admin/folders/{id}/scan` | administrators |
 //! | `GET`/`PATCH /api/v1/admin/settings` | administrators |
+//! | `GET /api/v1/admin/acquisitions`, `POST /api/v1/admin/acquisitions/{id}/cancel`, `POST /api/v1/admin/acquisitions/{id}/retry` | administrators |
 
 #![forbid(unsafe_code)]
 
@@ -138,6 +139,9 @@ fn api_router() -> OpenApiRouter<NativeState> {
             routes::admin_settings::list_settings,
             routes::admin_settings::patch_settings
         ))
+        .routes(routes!(routes::admin_acquisitions::list_acquisitions))
+        .routes(routes!(routes::admin_acquisitions::cancel_acquisition))
+        .routes(routes!(routes::admin_acquisitions::retry_acquisition))
 }
 
 /// Returns the OpenAPI document of the native API.
