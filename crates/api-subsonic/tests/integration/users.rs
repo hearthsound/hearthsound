@@ -154,3 +154,103 @@ async fn another_account_is_for_administrators() {
     .await;
     assert_error(&unknown, 70);
 }
+
+/// An administrator lists every account, in both encodings.
+#[tokio::test]
+async fn an_administrator_lists_the_accounts() {
+    let fixture = fixture().await;
+    let admin = account(&fixture, "root", true).await;
+    let app = fixture.app();
+
+    let listed = get(&app, &format!("/rest/getUsers?apiKey={admin}&f=json")).await;
+    assert_ok(&listed);
+    assert!(
+        listed.body.contains("\"users\":{\"user\":["),
+        "{}",
+        listed.body
+    );
+    assert!(
+        listed.body.contains("\"username\":\"echo\""),
+        "{}",
+        listed.body
+    );
+    assert!(
+        listed.body.contains("\"username\":\"root\""),
+        "{}",
+        listed.body
+    );
+    assert!(
+        listed.body.contains("\"adminRole\":true"),
+        "the administrator is reported as one: {}",
+        listed.body
+    );
+    assert!(
+        listed.body.contains("\"folder\":[1,2]"),
+        "the folders the account may browse are reported: {}",
+        listed.body
+    );
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("users-json", listed.body.clone());
+    });
+
+    let xml = get(&app, &format!("/rest/getUsers?apiKey={admin}")).await;
+    assert_ok(&xml);
+    assert!(xml.body.contains("<users>"), "{}", xml.body);
+    assert!(xml.body.contains("<user username=\"echo\""), "{}", xml.body);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("users-xml", xml.body.clone());
+    });
+}
+
+/// The account listing is for administrators, and an invalid key is refused
+/// before it is read.
+#[tokio::test]
+async fn listing_the_accounts_is_for_administrators() {
+    let fixture = fixture().await;
+    let limited = account(&fixture, "limited", false).await;
+    let app = fixture.app();
+
+    let refused = get(&app, &format!("/rest/getUsers?apiKey={limited}&f=json")).await;
+    assert_error(&refused, 50);
+
+    let anonymous = get(&app, "/rest/getUsers?apiKey=hs_bogus&f=json").await;
+    assert_error(&anonymous, 44);
+    assert!(
+        !anonymous.body.contains("\"users\""),
+        "a refused call carries no accounts: {}",
+        anonymous.body
+    );
+}
+
+/// The four account writes point a client at how accounts are managed.
+#[tokio::test]
+async fn account_writes_point_at_the_documentation() {
+    let fixture = fixture().await;
+    let admin = account(&fixture, "root", true).await;
+    let app = fixture.app();
+
+    for endpoint in ["createUser", "updateUser", "deleteUser", "changePassword"] {
+        let refused = get(
+            &app,
+            &format!("/rest/{endpoint}?username=echo&apiKey={admin}&f=json"),
+        )
+        .await;
+        assert_error(&refused, 50);
+        assert!(
+            refused
+                .body
+                .contains("\"helpUrl\":\"https://hearthsound.app/docs/admin/users\""),
+            "{endpoint} points at the documentation: {}",
+            refused.body
+        );
+
+        let xml = get(&app, &format!("/rest/{endpoint}.view?apiKey={admin}")).await;
+        assert_error(&xml, 50);
+        assert!(
+            xml.body
+                .contains("helpUrl=\"https://hearthsound.app/docs/admin/users\""),
+            "{endpoint} points at the documentation: {}",
+            xml.body
+        );
+    }
+}

@@ -1,14 +1,24 @@
-//! The `getUser` endpoint: one account's identity and roles.
+//! The account endpoints: one account's identity, the account listing, and the
+//! account-management calls this server answers by pointing elsewhere.
 //!
-//! A client reads this to learn what the account it signed in as may do, so the
-//! roles are the permissions the server actually enforces: downloading and
-//! uploading are the account's own flags, and the roles this server has no
-//! notion of are reported as off.
+//! A client reads [`get_user`] to learn what the account it signed in as may do,
+//! and an administrator reads [`get_users`] to list every account. The roles are
+//! the permissions the server actually enforces: downloading and uploading are
+//! the account's own flags, and the roles this server has no notion of are
+//! reported as off.
+//!
+//! The four Subsonic calls that create, change, or delete an account are not
+//! answered here. Accounts are managed over the native API or from the command
+//! line, which can express permissions and quotas that the base protocol has no
+//! fields for, so every one of those calls answers error 50 with
+//! [`USERS_HELP_URL`] rather than half-implementing a second way to write an
+//! account.
 
 use hearthsound_auth::User;
 use hearthsound_config::keys;
 
 use crate::auth::Call;
+use crate::params::Params;
 use crate::response::{Encoded, Response, SubsonicError};
 use crate::value::{Array, Object};
 
@@ -16,6 +26,15 @@ use crate::value::{Array, Object};
 const LIBRARY_FOLDER_ID: i64 = 1;
 /// The music folder id that selects the server-wide view.
 const SERVER_FOLDER_ID: i64 = 2;
+
+/// The value of `privacy.server_browse` that hides the server-wide view.
+const SERVER_BROWSE_DISABLED: &str = "disabled";
+
+/// Where a client that asked to manage accounts is sent.
+///
+/// The documentation describes the native API and the command line, because
+/// neither `createUser` nor its three siblings is answered here.
+pub const USERS_HELP_URL: &str = "https://hearthsound.app/docs/admin/users";
 
 /// Answers `getUser`: one account's name, roles, and music folders.
 ///
@@ -54,24 +73,105 @@ pub async fn get_user(call: Call) -> Encoded {
         }
     };
 
-    // The server-wide view is a music folder only while it is offered.
-    let server_browse = match call
+    let folders = match browse_folders(&call) {
+        Ok(folders) => folders,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    call.encode(Response::ok().member("user", user_object(&user, folders)))
+}
+
+/// Answers `getUsers`: every account, for an administrator.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+///
+/// # Returns
+///
+/// A successful envelope carrying `users`, one entry per account, ordered
+/// case-insensitively by username. Every entry carries the folders the account
+/// may browse, exactly as [`get_user`] reports them.
+///
+/// # Errors
+///
+/// Answers Subsonic error 50 for a non-administrator and a generic error when
+/// the accounts or a setting cannot be read.
+pub async fn get_users(call: Call) -> Encoded {
+    let principal = call.principal();
+    if !principal.is_admin {
+        tracing::debug!(
+            username = principal.username.as_str(),
+            "a non-administrator asked for the account list"
+        );
+        return call.encode(Response::failed(SubsonicError::not_authorized()));
+    }
+
+    let users = match call.state().users().list().await {
+        Ok(users) => users,
+        Err(error) => {
+            return call.encode(Response::failed(crate::browse::failure("getUsers", &error)));
+        }
+    };
+    let folders = match browse_folders(&call) {
+        Ok(folders) => folders,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+
+    let entries = users
+        .iter()
+        .map(|user| user_object(user, folders.clone()))
+        .collect::<Vec<Object>>();
+    call.encode(Response::ok().member("users", Object::new().set("user", Array::new(entries))))
+}
+
+/// Answers `createUser`, `updateUser`, `deleteUser`, and `changePassword`.
+///
+/// Accounts are managed over the native API and from the command line, so the
+/// base protocol's account writes are not answered here. The answer is the
+/// same whatever the caller may do, and it names where the client can read how
+/// to manage accounts instead.
+///
+/// # Parameters
+///
+/// - `params`: the request's parameters, which are not read.
+///
+/// # Returns
+///
+/// A failed envelope carrying Subsonic error 50 and [`USERS_HELP_URL`].
+pub async fn unsupported_management(params: Params) -> Encoded {
+    params.encode(Response::failed(
+        SubsonicError::not_authorized().with_help_url(USERS_HELP_URL),
+    ))
+}
+
+/// Returns the music folder ids an account may browse.
+///
+/// The server-wide view is a music folder only while it is offered, and the
+/// personal library always is.
+///
+/// # Parameters
+///
+/// - `call`: the call whose settings snapshot is read.
+///
+/// # Returns
+///
+/// The folder ids, the personal library first.
+///
+/// # Errors
+///
+/// Returns the generic Subsonic error to answer with when the setting cannot be
+/// read.
+fn browse_folders(call: &Call) -> Result<Vec<i64>, SubsonicError> {
+    let server_browse = call
         .state()
         .settings_snapshot()
         .get(keys::PRIVACY_SERVER_BROWSE)
-    {
-        Ok(value) => value,
-        Err(error) => {
-            return call.encode(Response::failed(crate::browse::failure("getUser", &error)));
-        }
-    };
-    let folders: Vec<i64> = if server_browse == "disabled" {
+        .map_err(|error| crate::browse::failure("getUsers", &error))?;
+    Ok(if server_browse == SERVER_BROWSE_DISABLED {
         vec![LIBRARY_FOLDER_ID]
     } else {
         vec![LIBRARY_FOLDER_ID, SERVER_FOLDER_ID]
-    };
-
-    call.encode(Response::ok().member("user", user_object(&user, folders)))
+    })
 }
 
 /// Projects one account.

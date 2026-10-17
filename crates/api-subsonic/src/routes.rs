@@ -111,6 +111,13 @@ pub fn routes() -> Router<SubsonicState> {
     let router = register(router, "getSimilarSongs", endpoints::get_similar_songs);
     let router = register(router, "getSimilarSongs2", endpoints::get_similar_songs_2);
     let router = register(router, "getUser", endpoints::get_user);
+    let router = register(router, "getUsers", endpoints::get_users);
+    // Account writes belong to the native API and the command line, so the
+    // Subsonic calls answer with the documentation link instead.
+    let router = register(router, "createUser", endpoints::unsupported_management);
+    let router = register(router, "updateUser", endpoints::unsupported_management);
+    let router = register(router, "deleteUser", endpoints::unsupported_management);
+    let router = register(router, "changePassword", endpoints::unsupported_management);
     let router = register(router, "download", endpoints::download);
     let router = register(router, "getScanStatus", endpoints::get_scan_status);
     let router = register(router, "startScan", endpoints::start_scan);

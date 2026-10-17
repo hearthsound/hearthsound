@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   acquisition that is already running stays free. A denied request says whether
   the permission or the quota was the reason, and a stream answers 403 for
   either.
+- `getUsers` lists every account for an administrator, and the four Subsonic
+  calls that write an account answer error 50 with a link to how accounts are
+  managed here.
 
 ## [0.1.2] - 2026-10-16
 

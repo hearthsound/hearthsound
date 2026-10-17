@@ -90,6 +90,8 @@
 //! | `getSimilarSongs2` | the same empty listing in the ID3 shape |
 //! | `download` | the stored file of one track, as an attachment |
 //! | `getUser` | one account's name, roles, and music folders |
+//! | `getUsers` | every account, for an administrator |
+//! | `createUser`, `updateUser`, `deleteUser`, `changePassword` | error 50: accounts are managed over the native API or the command line |
 //! | `getScanStatus` | what the library scanner is doing |
 //! | `startScan` | enqueues a scan of every library folder |
 //! | `reportPlayback` | applies one OpenSubsonic playback report |
