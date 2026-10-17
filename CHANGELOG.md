@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Subsonic `getOpenSubsonicExtensions` response advertises the `hearthsound`
   vendor extension at version 1.
 
+- Subsonic responses carry a `hearthsound` member on tracks, albums and artists
+  when `hearthsound=1` is sent, reporting availability, library membership,
+  dislike state, origin and, for tracks, the active acquisition and file quality.
+
 - Freshly installed plugins wait for approval before they can be enabled:
   approving records the requested permissions and enables the plugin, and
   enabling a pending plugin is refused. Approval, enabling, disabling and

@@ -31,3 +31,4 @@ mod stream;
 mod stream_pending;
 mod transcode;
 mod users;
+mod vendor;

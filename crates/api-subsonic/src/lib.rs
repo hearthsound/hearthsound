@@ -190,6 +190,7 @@ mod state;
 mod stream;
 mod transcode_decision;
 mod value;
+mod vendor;
 
 pub use auth::{BinaryCall, Call, JsonCall, forbidden};
 pub use endpoints::{

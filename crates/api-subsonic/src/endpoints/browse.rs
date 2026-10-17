@@ -76,7 +76,10 @@ pub async fn get_artists(call: Call) -> Encoded {
             return call.encode(Response::failed(browse::failure("getArtists", &error)));
         }
     };
-    call.encode(Response::ok().member("artists", projection::artists_id3(&summaries, &annotations)))
+    call.respond(
+        Response::ok().member("artists", projection::artists_id3(&summaries, &annotations)),
+    )
+    .await
 }
 
 /// Answers `getArtist`: one artist with its albums in scope.
@@ -165,7 +168,7 @@ pub async fn get_artist(call: Call) -> Encoded {
 
     let artist = projection::artist_id3(&detail.artist, albums.len() as i64, &artist_annotation)
         .set("album", Array::new(albums));
-    call.encode(Response::ok().member("artist", artist))
+    call.respond(Response::ok().member("artist", artist)).await
 }
 
 /// Answers `getAlbum`: one album with its songs.
@@ -261,7 +264,7 @@ pub async fn get_album(call: Call) -> Encoded {
             .map(|view| ClientId::Entity(view.track.id)),
     );
     let album = album.set("song", Array::new(songs));
-    call.encode(Response::ok().member("album", album))
+    call.respond(Response::ok().member("album", album)).await
 }
 
 /// Answers `getSong`: one song.
@@ -317,7 +320,7 @@ pub async fn get_song(call: Call) -> Encoded {
         &loaded.album_artists,
         &song_annotation,
     );
-    call.encode(Response::ok().member("song", song))
+    call.respond(Response::ok().member("song", song)).await
 }
 
 /// Answers `getAlbumList2`: the albums in scope in a fixed order.
@@ -363,7 +366,10 @@ pub async fn get_album_list_2(call: Call) -> Encoded {
             )
         })
         .collect();
-    call.encode(Response::ok().member("albumList2", Object::new().set("album", Array::new(albums))))
+    call.respond(
+        Response::ok().member("albumList2", Object::new().set("album", Array::new(albums))),
+    )
+    .await
 }
 
 /// Answers `getAlbumList`: the albums in scope as folders.
@@ -406,7 +412,8 @@ pub async fn get_album_list(call: Call) -> Encoded {
             )
         })
         .collect();
-    call.encode(Response::ok().member("albumList", Object::new().set("album", Array::new(albums))))
+    call.respond(Response::ok().member("albumList", Object::new().set("album", Array::new(albums))))
+        .await
 }
 
 /// Answers `getIndexes`: the artist index with the instant it last changed.
@@ -599,7 +606,8 @@ async fn artist_directory(call: &Call, scope: Scope, id: ClientId) -> Encoded {
         Some(&artist_annotation),
         children,
     );
-    call.encode(Response::ok().member("directory", directory))
+    call.respond(Response::ok().member("directory", directory))
+        .await
 }
 
 /// Answers `getMusicDirectory` for a stored album.
@@ -696,7 +704,8 @@ async fn album_directory(call: &Call, scope: Scope, id: ClientId) -> Encoded {
         Some(&annotation),
         songs,
     );
-    call.encode(Response::ok().member("directory", directory))
+    call.respond(Response::ok().member("directory", directory))
+        .await
 }
 
 /// Answers `getMusicDirectory` for an unmaterialized catalog entity.
@@ -739,7 +748,8 @@ async fn catalog_directory(call: &Call, id: CatalogId) -> Encoded {
                 .collect();
             let directory =
                 projection::directory(&id.to_string(), "", &artist.artist.name, None, children);
-            call.encode(Response::ok().member("directory", directory))
+            call.respond(Response::ok().member("directory", directory))
+                .await
         }
         EntityKind::Album => {
             let album = match call.state().catalog().album(&id).await {
@@ -759,7 +769,8 @@ async fn catalog_directory(call: &Call, id: CatalogId) -> Encoded {
                 .collect();
             let name = projection::catalog_album_name(&album, &suffix);
             let directory = projection::directory(&id.to_string(), "", &name, None, songs);
-            call.encode(Response::ok().member("directory", directory))
+            call.respond(Response::ok().member("directory", directory))
+                .await
         }
         _ => call.encode(Response::failed(SubsonicError::not_found())),
     }
@@ -1040,7 +1051,7 @@ async fn catalog_song(call: &Call, id: CatalogId) -> Encoded {
         Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
     };
     let song = projection::catalog_child(&track.id, &track.track, &suffix);
-    call.encode(Response::ok().member("song", song))
+    call.respond(Response::ok().member("song", song)).await
 }
 
 /// Answers `getAlbum` for an unmaterialized catalog id.
@@ -1082,7 +1093,7 @@ async fn catalog_album(call: &Call, id: CatalogId) -> Encoded {
     }
     record_listing(call, listing);
     let album = projection::catalog_album(&album, &suffix).set("song", Array::new(songs));
-    call.encode(Response::ok().member("album", album))
+    call.respond(Response::ok().member("album", album)).await
 }
 
 /// Answers `getArtist` for an unmaterialized catalog id.
@@ -1127,7 +1138,7 @@ async fn catalog_artist(call: &Call, id: CatalogId) -> Encoded {
         .collect();
     let artist = projection::catalog_artist(&artist, albums.len() as i64, &suffix)
         .set("album", Array::new(albums));
-    call.encode(Response::ok().member("artist", artist))
+    call.respond(Response::ok().member("artist", artist)).await
 }
 
 /// Reads a numeric parameter, defaulting when it is absent or empty.

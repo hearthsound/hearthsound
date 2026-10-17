@@ -138,7 +138,8 @@ pub async fn get_play_queue(call: Call) -> Encoded {
         .set("changed", projection::timestamp(saved.updated_at))
         .set("changedBy", saved.client.clone())
         .set("entry", Array::new(entries));
-    call.encode(Response::ok().member("playQueue", queue))
+    call.respond(Response::ok().member("playQueue", queue))
+        .await
 }
 
 /// Answers `getPlayQueueByIndex`: the saved queue with its position in it.
@@ -182,7 +183,8 @@ pub async fn get_play_queue_by_index(call: Call) -> Encoded {
         .set("changed", projection::timestamp(saved.updated_at))
         .set("changedBy", saved.client.clone())
         .set("entry", Array::new(entries));
-    call.encode(Response::ok().member("playQueueByIndex", queue))
+    call.respond(Response::ok().member("playQueueByIndex", queue))
+        .await
 }
 
 /// Writes one saved queue and tells the prefetch scheduler about it.

@@ -1,0 +1,5 @@
+---
+source: crates/api-subsonic/tests/integration/vendor.rs
+expression: seeded.stabilize(&json.body)
+---
+{"subsonic-response":{"status":"ok","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.3","openSubsonic":true,"artist":{"id":"ar_cardinals","name":"The Cardinals","coverArt":"ar_cardinals","albumCount":1,"musicBrainzId":"","sortName":"the cardinals","album":[{"id":"al_alpha","name":"Alpha","artist":"The Cardinals","year":1999,"coverArt":"al_alpha","duration":380,"genre":"rock","created":"TIMESTAMP","artistId":"ar_cardinals","songCount":2,"playCount":0,"played":"","musicBrainzId":"","genres":[{"name":"rock"},{"name":"pop"}],"artists":[{"id":"ar_cardinals","name":"The Cardinals","hearthsound":{"availability":"local","inLibrary":true,"disliked":false,"origin":"library"}}],"displayArtist":"The Cardinals","releaseTypes":["album"],"isCompilation":false,"moods":[],"sortName":"alpha","explicitStatus":"explicit","hearthsound":{"availability":"local","inLibrary":true,"disliked":false,"origin":"library"}}],"hearthsound":{"availability":"local","inLibrary":true,"disliked":false,"origin":"library"}}}}

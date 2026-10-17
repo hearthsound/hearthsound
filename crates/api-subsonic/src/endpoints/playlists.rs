@@ -112,7 +112,8 @@ pub async fn get_playlist(call: Call) -> Encoded {
         Err(error) => return call.encode(Response::failed(error)),
     };
     let playlist = playlist_object(&playlist, &names, duration, entries);
-    call.encode(Response::ok().member("playlist", playlist))
+    call.respond(Response::ok().member("playlist", playlist))
+        .await
 }
 
 /// Answers `createPlaylist`: creates a playlist, or replaces an owned one's

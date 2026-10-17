@@ -1,0 +1,455 @@
+//! The `hearthsound` member on track, album and artist objects.
+//!
+//! A request that carries `hearthsound=1` receives, on every track, album and
+//! artist object of its payload, a `hearthsound` object describing the
+//! availability and personal state of that item. The decoration is one
+//! post-pass over the payload tree, so the endpoints that build those objects
+//! stay unaware of it. Without the flag nothing here runs.
+
+use std::collections::{HashMap, HashSet};
+
+use hearthsound_acquire::repo::{AcquisitionRow, active_for_tracks};
+use hearthsound_activity::disliked_ids;
+use hearthsound_catalog::aliases::provider_namespace;
+use hearthsound_core::{Availability, ClientId, EntityId, EntityKind, IdPrefix};
+use hearthsound_library::query::{
+    album_member_tracks, artist_member_tracks, personal_album_ids, personal_artist_ids,
+    personal_track_ids, track_availabilities,
+};
+use hearthsound_library::{MediaFile, media_files::preferred_media_files};
+use uuid::Uuid;
+
+use crate::browse::failure;
+use crate::response::SubsonicError;
+use crate::state::SubsonicState;
+use crate::value::{Object, Value};
+
+/// The operation name reported when a decoration read fails.
+const OPERATION: &str = "hearthsound member";
+
+/// Appends the `hearthsound` member to every decorable object of `payload`.
+///
+/// An object is decorable when its `id` member parses as a client id of kind
+/// track, album or artist. Objects with any other id, or without one, are left
+/// untouched.
+///
+/// # Parameters
+///
+/// - `state`: the endpoint state, whose database and catalog the reads use.
+/// - `user`: the account the personal state is read for.
+/// - `payload`: the payload to decorate in place.
+///
+/// # Returns
+///
+/// `Ok(())` once the payload is decorated, or when it holds nothing to decorate.
+///
+/// # Errors
+///
+/// Returns a generic [`SubsonicError`] when a read fails.
+pub(crate) async fn decorate(
+    state: &SubsonicState,
+    user: Uuid,
+    payload: &mut Object,
+) -> Result<(), SubsonicError> {
+    let mut raw = HashSet::new();
+    collect_ids(payload, &mut raw);
+    let mut subjects = HashMap::new();
+    for id in raw {
+        if let Some(subject) = resolve(state, &id).await? {
+            subjects.insert(id, subject);
+        }
+    }
+    if subjects.is_empty() {
+        return Ok(());
+    }
+    let members = members_for(state, user, &subjects).await?;
+    apply_object(payload, &members);
+    Ok(())
+}
+
+/// The entity one client id names, once resolved.
+struct Subject {
+    /// The kind of the entity, always track, album or artist.
+    kind: EntityKind,
+    /// The stored record, when the id names one or a catalog id resolves to one.
+    entity: Option<EntityId>,
+    /// Whether the id is a catalog id.
+    catalog: bool,
+}
+
+/// Maps a client id to its subject, or `None` for ids the decorator skips.
+async fn resolve(state: &SubsonicState, raw: &str) -> Result<Option<Subject>, SubsonicError> {
+    match ClientId::parse(raw) {
+        Ok(ClientId::Entity(id)) => Ok(id
+            .kind()
+            .entity_kind()
+            .filter(|kind| decorable(*kind))
+            .map(|kind| Subject {
+                kind,
+                entity: Some(id),
+                catalog: false,
+            })),
+        Ok(ClientId::Catalog(id)) => {
+            let kind = id.kind();
+            if !decorable(kind) {
+                return Ok(None);
+            }
+            let namespace = provider_namespace(id.slug());
+            let entity = state
+                .catalog()
+                .entity_by_alias(&namespace, kind, id.provider_id())
+                .await
+                .map_err(|error| fail(&error))?;
+            Ok(Some(Subject {
+                kind,
+                entity,
+                catalog: true,
+            }))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+/// Reports whether objects of `kind` carry the vendor member.
+fn decorable(kind: EntityKind) -> bool {
+    matches!(
+        kind,
+        EntityKind::Track | EntityKind::Album | EntityKind::Artist
+    )
+}
+
+/// The batch reads behind every decorated member.
+struct Facts {
+    /// The stored availability of every track in scope.
+    availability: HashMap<EntityId, Availability>,
+    /// The preferred media file of every track in scope that has one.
+    files: HashMap<EntityId, MediaFile>,
+    /// The tracks in the personal scope.
+    personal_tracks: HashSet<EntityId>,
+    /// The albums in the personal scope.
+    personal_albums: HashSet<EntityId>,
+    /// The artists in the personal scope.
+    personal_artists: HashSet<EntityId>,
+    /// The tracks the user disliked.
+    disliked_tracks: HashSet<Uuid>,
+    /// The albums the user disliked.
+    disliked_albums: HashSet<Uuid>,
+    /// The artists the user disliked.
+    disliked_artists: HashSet<Uuid>,
+    /// The active acquisition of every track that has one.
+    active: HashMap<EntityId, AcquisitionRow>,
+    /// The member tracks of every album in scope.
+    album_tracks: HashMap<EntityId, Vec<EntityId>>,
+    /// The credited tracks of every artist in scope.
+    artist_tracks: HashMap<EntityId, Vec<EntityId>>,
+}
+
+/// Runs the batch reads for `subjects` and builds each member object.
+async fn members_for(
+    state: &SubsonicState,
+    user: Uuid,
+    subjects: &HashMap<String, Subject>,
+) -> Result<HashMap<String, Object>, SubsonicError> {
+    let track_ids = entities(subjects, EntityKind::Track);
+    let album_ids = entities(subjects, EntityKind::Album);
+    let artist_ids = entities(subjects, EntityKind::Artist);
+    let mut conn = state
+        .database()
+        .readers()
+        .acquire()
+        .await
+        .map_err(|error| fail(&error))?;
+    let album_tracks = album_member_tracks(&mut conn, &album_ids)
+        .await
+        .map_err(|error| fail(&error))?;
+    let artist_tracks = artist_member_tracks(&mut conn, &artist_ids)
+        .await
+        .map_err(|error| fail(&error))?;
+    let scope: Vec<EntityId> = track_ids
+        .iter()
+        .copied()
+        .chain(album_tracks.values().flatten().copied())
+        .chain(artist_tracks.values().flatten().copied())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let availability = track_availabilities(&mut conn, &scope)
+        .await
+        .map_err(|error| fail(&error))?;
+    let files = preferred_media_files(&mut conn, &scope)
+        .await
+        .map_err(|error| fail(&error))?;
+    let personal_tracks = personal_track_ids(&mut conn, user, &scope)
+        .await
+        .map_err(|error| fail(&error))?;
+    let personal_albums = personal_album_ids(&mut conn, user, &album_ids)
+        .await
+        .map_err(|error| fail(&error))?;
+    let personal_artists = personal_artist_ids(&mut conn, user, &artist_ids)
+        .await
+        .map_err(|error| fail(&error))?;
+    let active = active_for_tracks(&mut conn, &track_ids)
+        .await
+        .map_err(|error| fail(&error))?;
+    let disliked_tracks = disliked_ids(&mut conn, user, EntityKind::Track, &uuids(&track_ids))
+        .await
+        .map_err(|error| fail(&error))?;
+    let disliked_albums = disliked_ids(&mut conn, user, EntityKind::Album, &uuids(&album_ids))
+        .await
+        .map_err(|error| fail(&error))?;
+    let disliked_artists = disliked_ids(&mut conn, user, EntityKind::Artist, &uuids(&artist_ids))
+        .await
+        .map_err(|error| fail(&error))?;
+    let facts = Facts {
+        availability,
+        files,
+        personal_tracks,
+        personal_albums,
+        personal_artists,
+        disliked_tracks,
+        disliked_albums,
+        disliked_artists,
+        active,
+        album_tracks,
+        artist_tracks,
+    };
+    Ok(subjects
+        .iter()
+        .filter_map(|(raw, subject)| {
+            member_for(&facts, subject).map(|member| (raw.clone(), member))
+        })
+        .collect())
+}
+
+/// Builds the `hearthsound` object of one subject, or `None` when there is none.
+fn member_for(facts: &Facts, subject: &Subject) -> Option<Object> {
+    let Some(id) = subject.entity else {
+        return Some(unresolved());
+    };
+    match subject.kind {
+        EntityKind::Track => track_member(facts, subject, id),
+        EntityKind::Album => {
+            let members = facts.album_tracks.get(&id).map_or(&[][..], Vec::as_slice);
+            let in_library = facts.personal_albums.contains(&id)
+                || members.iter().any(|t| facts.personal_tracks.contains(t));
+            let server = members.iter().any(|t| facts.files.contains_key(t));
+            Some(group_member(
+                aggregate(members, facts),
+                in_library,
+                facts.disliked_albums.contains(&id.uuid()),
+                origin(subject.catalog, in_library, server),
+            ))
+        }
+        EntityKind::Artist => {
+            let members = facts.artist_tracks.get(&id).map_or(&[][..], Vec::as_slice);
+            let in_library = facts.personal_artists.contains(&id)
+                || members.iter().any(|t| facts.personal_tracks.contains(t));
+            let server = members.iter().any(|t| facts.files.contains_key(t));
+            Some(group_member(
+                aggregate(members, facts),
+                in_library,
+                facts.disliked_artists.contains(&id.uuid()),
+                origin(subject.catalog, in_library, server),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Builds the member of a track, which carries the acquisition and quality fields.
+fn track_member(facts: &Facts, subject: &Subject, id: EntityId) -> Option<Object> {
+    let availability = match facts.availability.get(&id) {
+        Some(availability) => *availability,
+        None if subject.catalog => Availability::Remote,
+        None => return None,
+    };
+    let file = facts.files.get(&id);
+    let in_library = facts.personal_tracks.contains(&id);
+    let local =
+        file.is_some() && matches!(availability, Availability::Local | Availability::Cached);
+    let mut member = base(
+        availability,
+        in_library,
+        facts.disliked_tracks.contains(&id.uuid()),
+        origin(subject.catalog, in_library, local),
+    );
+    if let Some(row) = facts.active.get(&id) {
+        let acquisition = EntityId::from_uuid(IdPrefix::Acquisition, row.id);
+        member = member.set("acquisitionId", acquisition.to_string());
+    }
+    if let Some(file) = file {
+        member = member.set("quality", quality(file));
+    }
+    Some(member)
+}
+
+/// The member of an id that names nothing stored.
+fn unresolved() -> Object {
+    base(Availability::Remote, false, false, "catalog")
+}
+
+/// The common fields of every member.
+fn base(
+    availability: Availability,
+    in_library: bool,
+    disliked: bool,
+    origin: &'static str,
+) -> Object {
+    Object::new()
+        .set("availability", availability.as_str())
+        .set("inLibrary", in_library)
+        .set("disliked", disliked)
+        .set("origin", origin)
+}
+
+/// The member of an album or artist, which carries no acquisition or quality.
+fn group_member(
+    availability: Availability,
+    in_library: bool,
+    disliked: bool,
+    origin: &'static str,
+) -> Object {
+    base(availability, in_library, disliked, origin)
+}
+
+/// The origin of an item: catalog results always report catalog, personal items
+/// report library, and other items with a local file report server.
+fn origin(catalog: bool, in_library: bool, server: bool) -> &'static str {
+    if catalog {
+        "catalog"
+    } else if in_library {
+        "library"
+    } else if server {
+        "server"
+    } else {
+        "catalog"
+    }
+}
+
+/// Aggregates the availability of an album or artist from its member tracks.
+fn aggregate(members: &[EntityId], facts: &Facts) -> Availability {
+    let states: Vec<Availability> = members
+        .iter()
+        .filter_map(|track| facts.availability.get(track).copied())
+        .collect();
+    if states.is_empty() {
+        Availability::Remote
+    } else if states.contains(&Availability::Acquiring) {
+        Availability::Acquiring
+    } else if states.iter().all(|state| *state == Availability::Local) {
+        Availability::Local
+    } else if states
+        .iter()
+        .any(|state| matches!(state, Availability::Local | Availability::Cached))
+    {
+        Availability::Cached
+    } else if states
+        .iter()
+        .all(|state| *state == Availability::Unavailable)
+    {
+        Availability::Unavailable
+    } else {
+        Availability::Remote
+    }
+}
+
+/// The quality object of a preferred media file; absent columns are omitted.
+fn quality(file: &MediaFile) -> Object {
+    let mut quality = Object::new();
+    if let Some(format) = &file.format {
+        quality = quality.set("format", format.clone());
+    }
+    if let Some(kbps) = file.bitrate_kbps {
+        quality = quality.set("bitrateKbps", kbps);
+    }
+    if let Some(rate) = file.sample_rate {
+        quality = quality.set("sampleRate", rate);
+    }
+    if let Some(depth) = file.bit_depth {
+        quality = quality.set("bitDepth", depth);
+    }
+    if let Some(lossless) = file.lossless {
+        quality = quality.set("lossless", lossless);
+    }
+    quality
+}
+
+/// The distinct stored ids of `subjects` of one kind.
+fn entities(subjects: &HashMap<String, Subject>, kind: EntityKind) -> Vec<EntityId> {
+    subjects
+        .values()
+        .filter(|subject| subject.kind == kind)
+        .filter_map(|subject| subject.entity)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// The UUIDs behind a list of entity ids.
+fn uuids(ids: &[EntityId]) -> Vec<Uuid> {
+    ids.iter().map(|id| id.uuid()).collect()
+}
+
+/// Turns a read failure into the generic browse failure.
+fn fail(error: &dyn std::fmt::Display) -> SubsonicError {
+    failure(OPERATION, error)
+}
+
+/// Collects every `id` string of the payload tree.
+fn collect_ids(object: &Object, ids: &mut HashSet<String>) {
+    if let Some(id) = id_of(object) {
+        ids.insert(id.to_owned());
+    }
+    for (_, value) in object.members() {
+        collect_value(value, ids);
+    }
+}
+
+/// Collects the `id` strings nested in one value.
+fn collect_value(value: &Value, ids: &mut HashSet<String>) {
+    match value {
+        Value::Object(object) => collect_ids(object, ids),
+        Value::Array(array) => {
+            for value in array.values() {
+                collect_value(value, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The string `id` member of an object, when it has one.
+fn id_of(object: &Object) -> Option<&str> {
+    object
+        .members()
+        .iter()
+        .find(|(name, _)| name.as_ref() == "id")
+        .and_then(|(_, value)| match value {
+            Value::Str(id) => Some(id.as_str()),
+            _ => None,
+        })
+}
+
+/// Appends the decorated `hearthsound` member to every matching object, depth first.
+fn apply_object(object: &mut Object, members: &HashMap<String, Object>) {
+    for (_, value) in object.members_mut() {
+        apply_value(value, members);
+    }
+    let member = id_of(object).and_then(|id| members.get(id)).cloned();
+    if let Some(member) = member {
+        *object = std::mem::take(object).set("hearthsound", member);
+    }
+}
+
+/// Decorates the objects nested in one value.
+fn apply_value(value: &mut Value, members: &HashMap<String, Object>) {
+    match value {
+        Value::Object(object) => apply_object(object, members),
+        Value::Array(array) => {
+            for value in array.values_mut() {
+                apply_value(value, members);
+            }
+        }
+        _ => {}
+    }
+}

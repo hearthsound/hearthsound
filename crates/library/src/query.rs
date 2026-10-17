@@ -2236,6 +2236,159 @@ pub async fn personal_artist_ids(
     Ok(found)
 }
 
+/// Reads the stored availability of the given tracks.
+///
+/// The read is chunked in batches of [`MAX_IDS_PER_QUERY`].
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `track_ids`: the tracks to read.
+///
+/// # Returns
+///
+/// The availability of each requested track that is stored. A track that is
+/// not stored is absent from the map.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails or a stored literal is unknown.
+pub async fn track_availabilities(
+    conn: &mut SqliteConnection,
+    track_ids: &[EntityId],
+) -> Result<HashMap<EntityId, Availability>, LibraryError> {
+    let mut found = HashMap::new();
+    for chunk in track_ids.chunks(MAX_IDS_PER_QUERY) {
+        let mut builder =
+            QueryBuilder::<Sqlite>::new("SELECT id, availability FROM tracks WHERE id IN (");
+        push_key_list(&mut builder, chunk);
+        let rows: Vec<(Vec<u8>, String)> = builder.build_query_as().fetch_all(&mut *conn).await?;
+        let by_key = keyed_ids(chunk);
+        for (key, literal) in rows {
+            let Some(id) = by_key.get(&key) else {
+                continue;
+            };
+            let availability =
+                literal
+                    .parse::<Availability>()
+                    .map_err(|_| LibraryError::UnknownLiteral {
+                        kind: "availability",
+                        value: literal.clone(),
+                    })?;
+            found.insert(*id, availability);
+        }
+    }
+    Ok(found)
+}
+
+/// Reads the tracks of each album in the given list.
+///
+/// The read is chunked in batches of [`MAX_IDS_PER_QUERY`].
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `album_ids`: the albums to read.
+///
+/// # Returns
+///
+/// Each requested album that has tracks, with its distinct track ids.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn album_member_tracks(
+    conn: &mut SqliteConnection,
+    album_ids: &[EntityId],
+) -> Result<HashMap<EntityId, Vec<EntityId>>, LibraryError> {
+    member_tracks(
+        conn,
+        album_ids,
+        "SELECT DISTINCT album_id, id FROM tracks WHERE album_id IN (",
+    )
+    .await
+}
+
+/// Reads the credited tracks of each artist in the given list.
+///
+/// The read is chunked in batches of [`MAX_IDS_PER_QUERY`].
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `artist_ids`: the artists to read.
+///
+/// # Returns
+///
+/// Each requested artist that is credited on tracks, with its distinct track
+/// ids.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn artist_member_tracks(
+    conn: &mut SqliteConnection,
+    artist_ids: &[EntityId],
+) -> Result<HashMap<EntityId, Vec<EntityId>>, LibraryError> {
+    member_tracks(
+        conn,
+        artist_ids,
+        "SELECT DISTINCT artist_id, track_id FROM track_artists WHERE artist_id IN (",
+    )
+    .await
+}
+
+/// Runs a `(owner, track)` batch read and groups the tracks by owner.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `owner_ids`: the owners to read, bound to the statement's `IN` list.
+/// - `select`: the statement up to and including its opening parenthesis; it
+///   returns the owner key and the track key of each row.
+///
+/// # Returns
+///
+/// The tracks of each owner that has any.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails or a stored key is corrupt.
+async fn member_tracks(
+    conn: &mut SqliteConnection,
+    owner_ids: &[EntityId],
+    select: &'static str,
+) -> Result<HashMap<EntityId, Vec<EntityId>>, LibraryError> {
+    let mut found: HashMap<EntityId, Vec<EntityId>> = HashMap::new();
+    for chunk in owner_ids.chunks(MAX_IDS_PER_QUERY) {
+        let mut builder = QueryBuilder::<Sqlite>::new(select);
+        push_key_list(&mut builder, chunk);
+        let rows: Vec<(Vec<u8>, Vec<u8>)> = builder.build_query_as().fetch_all(&mut *conn).await?;
+        let owners = keyed_ids(chunk);
+        for (owner_key, track_key) in rows {
+            let Some(owner) = owners.get(&owner_key) else {
+                continue;
+            };
+            let track = decode_entity(IdPrefix::Track, &track_key)?;
+            found.entry(*owner).or_default().push(track);
+        }
+    }
+    Ok(found)
+}
+
+/// Indexes requested ids by their stored key.
+///
+/// # Parameters
+///
+/// - `requested`: the ids to index.
+///
+/// # Returns
+///
+/// A map from each id's stored key back to the id.
+fn keyed_ids(requested: &[EntityId]) -> HashMap<Vec<u8>, EntityId> {
+    requested.iter().map(|id| (entity_key(*id), *id)).collect()
+}
+
 /// Writes the personal-scope `scope_tracks` CTE of one user into a builder.
 ///
 /// The CTE is the union [`track_in_scope`] reads, bound to `user`; the caller

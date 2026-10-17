@@ -105,7 +105,10 @@ pub async fn get_songs_by_genre(call: Call) -> Encoded {
         Ok(songs) => songs,
         Err(error) => return call.encode(Response::failed(error)),
     };
-    call.encode(Response::ok().member("songsByGenre", Object::new().set("song", Array::new(songs))))
+    call.respond(
+        Response::ok().member("songsByGenre", Object::new().set("song", Array::new(songs))),
+    )
+    .await
 }
 
 /// Answers `getRandomSongs`: a random sample of the songs in scope.
@@ -164,7 +167,8 @@ pub async fn get_random_songs(call: Call) -> Encoded {
         Ok(songs) => songs,
         Err(error) => return call.encode(Response::failed(error)),
     };
-    call.encode(Response::ok().member("randomSongs", Object::new().set("song", Array::new(songs))))
+    call.respond(Response::ok().member("randomSongs", Object::new().set("song", Array::new(songs))))
+        .await
 }
 
 /// Answers `getTopSongs`: the most played songs of one artist.
@@ -197,47 +201,51 @@ pub async fn get_top_songs(call: Call) -> Encoded {
     let database = call.state().database();
 
     let views = match call.get("id").filter(|value| !value.is_empty()) {
-        Some(value) => match ClientId::parse(value) {
-            Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::Artist => {
-                match browse::top_tracks_for_artist(database, scope, id, count).await {
-                    Ok(views) => views,
-                    Err(error) => {
-                        return call
-                            .encode(Response::failed(browse::failure("getTopSongs", &error)));
+        Some(value) => {
+            match ClientId::parse(value) {
+                Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::Artist => {
+                    match browse::top_tracks_for_artist(database, scope, id, count).await {
+                        Ok(views) => views,
+                        Err(error) => {
+                            return call
+                                .encode(Response::failed(browse::failure("getTopSongs", &error)));
+                        }
                     }
                 }
-            }
-            Ok(ClientId::Catalog(id)) if id.kind() == EntityKind::Artist => {
-                let catalog = call.state().catalog();
-                let limit = u32::try_from(count.max(0)).unwrap_or(u32::MAX);
-                match catalog.artist_top_tracks(&id, limit).await {
-                    Ok(tracks) => {
-                        let suffix = match catalog::title_suffix(&call.state().settings_snapshot())
-                        {
-                            Ok(suffix) => suffix,
-                            Err(error) => return call.encode(Response::failed(error)),
-                        };
-                        let songs: Vec<Object> = tracks
-                            .iter()
-                            .map(|track| {
-                                projection::catalog_child(&track.id, &track.track, &suffix)
-                            })
-                            .collect();
-                        return call.encode(
-                            Response::ok()
-                                .member("topSongs", Object::new().set("song", Array::new(songs))),
-                        );
-                    }
-                    Err(error) => {
-                        return call.encode(Response::failed(catalog::failure(&error)));
+                Ok(ClientId::Catalog(id)) if id.kind() == EntityKind::Artist => {
+                    let catalog = call.state().catalog();
+                    let limit = u32::try_from(count.max(0)).unwrap_or(u32::MAX);
+                    match catalog.artist_top_tracks(&id, limit).await {
+                        Ok(tracks) => {
+                            let suffix =
+                                match catalog::title_suffix(&call.state().settings_snapshot()) {
+                                    Ok(suffix) => suffix,
+                                    Err(error) => return call.encode(Response::failed(error)),
+                                };
+                            let songs: Vec<Object> = tracks
+                                .iter()
+                                .map(|track| {
+                                    projection::catalog_child(&track.id, &track.track, &suffix)
+                                })
+                                .collect();
+                            return call
+                                .respond(Response::ok().member(
+                                    "topSongs",
+                                    Object::new().set("song", Array::new(songs)),
+                                ))
+                                .await;
+                        }
+                        Err(error) => {
+                            return call.encode(Response::failed(catalog::failure(&error)));
+                        }
                     }
                 }
+                _ => {
+                    tracing::debug!("a top songs request named an id that is not an artist id");
+                    return call.encode(Response::failed(SubsonicError::not_found()));
+                }
             }
-            _ => {
-                tracing::debug!("a top songs request named an id that is not an artist id");
-                return call.encode(Response::failed(SubsonicError::not_found()));
-            }
-        },
+        }
         None => match call.get("artist").filter(|name| !name.is_empty()) {
             Some(name) => match browse::find_artist_by_name(database, name).await {
                 Ok(Some(artist)) => {
@@ -269,7 +277,8 @@ pub async fn get_top_songs(call: Call) -> Encoded {
         Ok(songs) => songs,
         Err(error) => return call.encode(Response::failed(error)),
     };
-    call.encode(Response::ok().member("topSongs", Object::new().set("song", Array::new(songs))))
+    call.respond(Response::ok().member("topSongs", Object::new().set("song", Array::new(songs))))
+        .await
 }
 
 /// Answers `getSimilarSongs` and `getSimilarSongs2`: nothing yet.

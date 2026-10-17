@@ -177,10 +177,11 @@ pub async fn get_bookmarks(call: Call) -> Encoded {
                 .set("entry", entry),
         );
     }
-    call.encode(Response::ok().member(
+    call.respond(Response::ok().member(
         "bookmarks",
         Object::new().set("bookmark", Array::new(bookmarks)),
     ))
+    .await
 }
 
 /// Loads the track a bookmark names.

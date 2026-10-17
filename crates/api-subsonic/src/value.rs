@@ -205,6 +205,12 @@ impl Object {
         &self.members
     }
 
+    /// Returns the members mutably, in order, without changing their names or
+    /// count.
+    pub(crate) fn members_mut(&mut self) -> &mut [(Cow<'static, str>, Value)] {
+        &mut self.members
+    }
+
     /// Adds a member the XML encoding writes as a child element.
     ///
     /// The JSON encoding writes it as a string member, exactly like
@@ -378,6 +384,11 @@ impl Array {
     /// Returns the items, in order.
     pub fn values(&self) -> &[Value] {
         &self.values
+    }
+
+    /// Returns the items mutably, in order, without changing their count.
+    pub(crate) fn values_mut(&mut self) -> &mut [Value] {
+        &mut self.values
     }
 
     /// Returns the number of items.

@@ -473,7 +473,8 @@ pub async fn get_starred(call: Call) -> Encoded {
         .set("artist", Array::new(artists))
         .set("album", Array::new(albums))
         .set("song", Array::new(songs));
-    call.encode(Response::ok().member("starred", starred))
+    call.respond(Response::ok().member("starred", starred))
+        .await
 }
 
 /// Answers `getStarred2`: the entities the user liked, as ID3 entities.
@@ -531,7 +532,8 @@ pub async fn get_starred2(call: Call) -> Encoded {
         .set("artist", Array::new(artists))
         .set("album", Array::new(albums))
         .set("song", Array::new(songs));
-    call.encode(Response::ok().member("starred2", starred))
+    call.respond(Response::ok().member("starred2", starred))
+        .await
 }
 
 /// The entities a user liked, with everything the listings project.

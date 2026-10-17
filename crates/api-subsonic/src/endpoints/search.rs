@@ -228,7 +228,8 @@ pub async fn search3(call: Call) -> Encoded {
         .set("artist", Array::new(artists))
         .set("album", Array::new(albums))
         .set("song", Array::new(songs));
-    call.encode(Response::ok().member("searchResult3", search_result))
+    call.respond(Response::ok().member("searchResult3", search_result))
+        .await
 }
 
 /// Answers `search2`: the same matches as `search3`, in the older shape.
@@ -320,7 +321,8 @@ pub async fn search2(call: Call) -> Encoded {
         .set("artist", Array::new(artists))
         .set("album", Array::new(albums))
         .set("song", Array::new(songs));
-    call.encode(Response::ok().member("searchResult2", search_result))
+    call.respond(Response::ok().member("searchResult2", search_result))
+        .await
 }
 
 /// Collects the matches of one search request, local first and then catalog.

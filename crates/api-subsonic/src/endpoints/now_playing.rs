@@ -94,10 +94,11 @@ pub async fn get_now_playing(call: Call) -> Encoded {
                 .set("playerName", entry.client.clone()),
         );
     }
-    call.encode(Response::ok().member(
+    call.respond(Response::ok().member(
         "nowPlaying",
         Object::new().set("entry", Array::new(playing)),
     ))
+    .await
 }
 
 /// Reports whether one account's now playing may be shown.

@@ -74,6 +74,32 @@ impl Call {
     pub fn encode(&self, response: Response) -> Encoded {
         self.params.encode(response)
     }
+
+    /// Renders a response, decorating it with the `hearthsound` member when the
+    /// request asked for the vendor extension.
+    ///
+    /// Without `hearthsound=1` this is exactly [`Call::encode`], so a standard
+    /// response is byte-identical whether or not the decorator exists.
+    ///
+    /// # Parameters
+    ///
+    /// - `response`: the response to render.
+    ///
+    /// # Returns
+    ///
+    /// The encoded response, ready to be returned from the handler.
+    pub(crate) async fn respond(&self, response: Response) -> Encoded {
+        match response {
+            Response::Payload(mut payload) if self.params.vendor_enabled() => {
+                let user = self.principal.user_id.uuid();
+                match crate::vendor::decorate(&self.state, user, &mut payload).await {
+                    Ok(()) => self.params.encode(Response::Payload(payload)),
+                    Err(error) => self.params.encode(Response::failed(error)),
+                }
+            }
+            response => self.params.encode(response),
+        }
+    }
 }
 
 impl Deref for Call {
