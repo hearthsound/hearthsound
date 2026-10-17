@@ -223,3 +223,74 @@ async fn activity_tables_exist_and_reject_invalid_rows() {
 
     db.close().await;
 }
+
+/// The session and quota tables exist, and both follow their account.
+#[tokio::test]
+async fn session_and_quota_rows_follow_their_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let pool = db.writer();
+
+    for table in ["sessions", "user_quotas"] {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+        )
+        .bind(table)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "the {table} table exists");
+    }
+
+    sqlx::query(
+        "INSERT INTO users (id, username, display_name, password_hash, created_at, updated_at)
+         VALUES (x'01', 'echo', 'Echo', 'x', 0, 0)",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO sessions (id, user_id, token_hash, csrf_token, created_at, expires_at,
+                               last_seen_at, user_agent)
+         VALUES (x'11', x'01', x'aa', 'csrf-one', 10, 99, 10, 'a client')",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    let duplicate = sqlx::query(
+        "INSERT INTO sessions (id, user_id, token_hash, csrf_token, created_at, expires_at,
+                               last_seen_at, user_agent)
+         VALUES (x'12', x'01', x'aa', 'csrf-two', 10, 99, 10, NULL)",
+    )
+    .execute(pool)
+    .await;
+    assert!(duplicate.is_err(), "a token hash is unique");
+
+    sqlx::query(
+        "INSERT INTO user_quotas (user_id, acquisitions_per_day, acquisition_bytes_per_day)
+         VALUES (x'01', 5, NULL)",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    sqlx::query("DELETE FROM users WHERE id = x'01'")
+        .execute(pool)
+        .await
+        .unwrap();
+
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0, "deleting the account removes its sessions");
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM user_quotas")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0, "deleting the account removes its quota row");
+
+    db.close().await;
+}

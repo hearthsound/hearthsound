@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The schema gains the `sessions` and `user_quotas` tables: opaque web session
+  tokens stored as their hash, and the per-user daily acquisition quotas.
+
 ## [0.1.2] - 2026-10-16
 
 ### Changed
