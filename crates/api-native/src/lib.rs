@@ -25,6 +25,8 @@
 //! |---|---|
 //! | `GET /api/v1/system/info` | any user |
 //! | `POST /api/v1/auth/login`, `POST /api/v1/auth/logout`, `GET /api/v1/auth/session` | anyone / any user |
+//! | `GET`/`POST /api/v1/me/api-keys`, `DELETE /api/v1/me/api-keys/{id}` | any user, own keys |
+//! | `GET`/`POST /api/v1/me/app-passwords`, `DELETE /api/v1/me/app-passwords/{id}` | any user, own app passwords |
 
 #![forbid(unsafe_code)]
 
@@ -63,6 +65,7 @@ pub const OPENAPI_PATH: &str = "/api/v1/openapi.json";
     tags(
         (name = "system", description = "What the server is and offers"),
         (name = "auth", description = "Web sessions"),
+        (name = "me", description = "The caller's own credentials and settings"),
     )
 )]
 struct ApiDoc;
@@ -98,6 +101,16 @@ fn api_router() -> OpenApiRouter<NativeState> {
         .routes(routes!(routes::session::login))
         .routes(routes!(routes::session::logout))
         .routes(routes!(routes::session::session))
+        .routes(routes!(
+            routes::me::list_api_keys,
+            routes::me::create_api_key
+        ))
+        .routes(routes!(routes::me::revoke_api_key))
+        .routes(routes!(
+            routes::me::list_app_passwords,
+            routes::me::create_app_password
+        ))
+        .routes(routes!(routes::me::revoke_app_password))
 }
 
 /// Returns the OpenAPI document of the native API.

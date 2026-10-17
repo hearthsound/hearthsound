@@ -45,6 +45,8 @@ const PAYLOAD_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz234567";
 /// later listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedApiKey {
+    /// The key's row id, which a listing and a revocation name it by.
+    pub id: Uuid,
     /// The full key to hand to the client, `hs_<52 base32 characters>`.
     pub plaintext: String,
     /// The key's leading characters, as stored in `key_prefix`.
@@ -244,6 +246,7 @@ impl ApiKeys {
         .await?;
 
         Ok(GeneratedApiKey {
+            id,
             plaintext,
             key_prefix,
         })

@@ -1,9 +1,12 @@
 //! Response shapes several resources share.
 
 use hearthsound_auth::{User, UserPermissions};
-use hearthsound_core::{EntityId, IdPrefix};
+use hearthsound_core::{ClientId, EntityId, IdPrefix};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use uuid::Uuid;
+
+use crate::problem::Problem;
 
 /// What an account may do besides streaming.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -82,4 +85,33 @@ pub fn now_millis() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+/// Reads a client id from a path and checks its kind.
+///
+/// # Parameters
+///
+/// - `value`: the path segment.
+/// - `prefix`: the kind the resource names, for example [`IdPrefix::User`].
+///
+/// # Returns
+///
+/// The row id.
+///
+/// # Errors
+///
+/// Answers `not-found` when the segment is not a client id of that kind:
+/// nothing can live at such a path.
+pub fn parse_id(value: &str, prefix: IdPrefix) -> Result<Uuid, Problem> {
+    match ClientId::parse(value) {
+        Ok(ClientId::Entity(id)) if id.kind() == prefix => Ok(id.uuid()),
+        _ => Err(Problem::not_found(format!(
+            "`{value}` is not a `{prefix}_` id."
+        ))),
+    }
+}
+
+/// Formats a row id as the client id of its kind.
+pub fn client_id(prefix: IdPrefix, id: Uuid) -> String {
+    EntityId::from_uuid(prefix, id).to_string()
 }

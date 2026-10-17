@@ -86,6 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cookie that lives `auth.session_ttl_days`, `GET /api/v1/auth/session` answers
   who a request is with its CSRF token, and `POST /api/v1/auth/logout` ends the
   session.
+- `/api/v1/me/api-keys` and `/api/v1/me/app-passwords` list, create and revoke
+  the caller's API keys and app passwords; a secret is answered once, at
+  creation, and a key created here works as `apiKey=` on `/rest` too.
 
 ### Changed
 

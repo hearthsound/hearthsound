@@ -255,3 +255,114 @@ async fn sign_ins_are_refused_when_they_should_be() {
     assert_problem(limited, StatusCode::TOO_MANY_REQUESTS, "rate-limited").await;
     fixture.stop().await;
 }
+
+/// Sends a request with the fixture's API key as a bearer credential.
+async fn bearer(
+    fixture: &Fixture,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+) -> reqwest::Response {
+    let mut request = fixture
+        .client
+        .request(method, format!("{}{path}", fixture.base_url()))
+        .header(AUTHORIZATION, format!("Bearer {}", fixture.api_key));
+    if let Some(body) = body {
+        request = request
+            .header(CONTENT_TYPE, "application/json")
+            .body(body.to_string());
+    }
+    request.send().await.unwrap()
+}
+
+/// `true` when a `/rest/ping` with the query's credentials answers `ok`.
+async fn rest_ping_ok(fixture: &Fixture, credentials: &str) -> bool {
+    let response = fixture
+        .get(&format!("/rest/ping?{credentials}&v=1.16.1&c=test&f=json"))
+        .await;
+    response.text().await.unwrap().contains("\"status\":\"ok\"")
+}
+
+/// An API key created here authenticates `/rest` until it is revoked, and an
+/// app password created here serves the legacy Subsonic sign-in.
+#[tokio::test]
+async fn api_keys_and_app_passwords_are_created_listed_and_revoked() {
+    let fixture = Fixture::new().await;
+    let created = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/me/api-keys",
+        Some(serde_json::json!({ "name": "phone" })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created = json(created).await;
+    let key = created["secret"].as_str().unwrap().to_owned();
+    let id = created["id"].as_str().unwrap().to_owned();
+    assert!(id.starts_with("ak_") && key.starts_with("hs_"));
+    assert!(rest_ping_ok(&fixture, &format!("apiKey={key}")).await);
+
+    let listed =
+        json(bearer(&fixture, reqwest::Method::GET, "/api/v1/me/api-keys", None).await).await;
+    let listed = listed.as_array().unwrap();
+    let entry = listed
+        .iter()
+        .find(|entry| entry["id"] == id.as_str())
+        .unwrap();
+    assert_eq!(entry["name"], "phone");
+    assert!(
+        entry.get("secret").is_none(),
+        "a listing never shows a secret"
+    );
+
+    let revoked = bearer(
+        &fixture,
+        reqwest::Method::DELETE,
+        &format!("/api/v1/me/api-keys/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+    assert!(!rest_ping_ok(&fixture, &format!("apiKey={key}")).await);
+    let again = bearer(
+        &fixture,
+        reqwest::Method::DELETE,
+        &format!("/api/v1/me/api-keys/{id}"),
+        None,
+    )
+    .await;
+    assert_problem(again, StatusCode::NOT_FOUND, "not-found").await;
+
+    let password = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/me/app-passwords",
+        Some(serde_json::json!({ "name": "old client" })),
+    )
+    .await;
+    assert_eq!(password.status(), StatusCode::CREATED);
+    let password = json(password).await;
+    let secret = password["secret"].as_str().unwrap().to_owned();
+    let credentials = format!("u={}&p={secret}", common::USERNAME);
+    assert!(rest_ping_ok(&fixture, &credentials).await);
+    let id = password["id"].as_str().unwrap();
+    let revoked = bearer(
+        &fixture,
+        reqwest::Method::DELETE,
+        &format!("/api/v1/me/app-passwords/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+    assert!(!rest_ping_ok(&fixture, &credentials).await);
+
+    let nameless = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/me/api-keys",
+        Some(serde_json::json!({ "name": "  " })),
+    )
+    .await;
+    assert_problem(nameless, StatusCode::BAD_REQUEST, "invalid-request").await;
+    fixture.stop().await;
+}
