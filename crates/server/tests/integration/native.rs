@@ -616,3 +616,169 @@ async fn administrators_manage_accounts_permissions_and_quotas() {
     assert_problem(missing, StatusCode::NOT_FOUND, "not-found").await;
     fixture.stop().await;
 }
+
+/// Writes a small tagged album into a directory.
+async fn write_album(dir: &std::path::Path, artist: &str, album: &str) {
+    use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
+    std::fs::create_dir_all(dir).unwrap();
+    for number in 1..=2u32 {
+        AudioFixture::new(AudioFormat::Mp3Cbr)
+            .seconds(1.0)
+            .file_name(format!("{number:02} - Song {number}.mp3"))
+            .tags(
+                TrackTags::new(format!("{album} Song {number}"), artist)
+                    .album(album)
+                    .album_artist(artist)
+                    .track(number, 2),
+            )
+            .write_into(dir)
+            .await
+            .unwrap();
+    }
+}
+
+/// Reads the album names `getAlbumList2` answers for a music folder.
+async fn albums_in(fixture: &Fixture, api_key: &str, folder: u8) -> Vec<String> {
+    let response = fixture
+        .get(&format!(
+            "/rest/getAlbumList2?type=alphabeticalByName&musicFolderId={folder}&apiKey={api_key}&f=json"
+        ))
+        .await;
+    let body = json(response).await;
+    body["subsonic-response"]["albumList2"]["album"]
+        .as_array()
+        .map(|albums| {
+            albums
+                .iter()
+                .map(|album| album["name"].as_str().unwrap().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A folder needs an owner or `generic`; an owned folder is in its owner's
+/// library only, and changing the association moves it.
+#[tokio::test]
+async fn folders_are_added_with_an_owner_or_as_generic() {
+    let fixture = Fixture::new().await;
+    let root = fixture
+        .database_path()
+        .parent()
+        .unwrap()
+        .join("music-owned");
+    write_album(&root, "Folder Artist", "Owned Album").await;
+    let me =
+        hearthsound_core::EntityId::from_uuid(hearthsound_core::IdPrefix::User, fixture.user_id);
+
+    for (body, status) in [
+        (serde_json::json!({ "path": root }), StatusCode::BAD_REQUEST),
+        (
+            serde_json::json!({ "path": root, "owner": me.to_string(), "generic": true }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({ "path": root, "owner": "us_00000000000000000000000000" }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({ "path": "relative/music", "generic": true }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({ "path": "/no/such/folder", "generic": true }),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let refused = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/folders",
+            Some(body),
+        )
+        .await;
+        assert_problem(refused, status, "invalid-request").await;
+    }
+
+    let created = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/folders",
+        Some(serde_json::json!({ "path": root, "owner": me.to_string(), "watch": false })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created = json(created).await;
+    let folder = created["id"].as_str().unwrap().to_owned();
+    assert!(folder.starts_with("lf_"));
+    assert_eq!(created["owner"], me.to_string());
+    assert_eq!(created["generic"], false);
+    assert_eq!(created["watch"], false);
+
+    let duplicate = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/folders",
+        Some(serde_json::json!({ "path": root, "generic": true })),
+    )
+    .await;
+    assert_problem(duplicate, StatusCode::CONFLICT, "conflict").await;
+
+    // The first scan was queued with the folder; its album is in the owner's
+    // library.
+    let mut owned = Vec::new();
+    for _ in 0..250 {
+        owned = albums_in(&fixture, &fixture.api_key, 1).await;
+        if !owned.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    }
+    assert_eq!(owned, ["Owned Album"]);
+
+    // Made generic, the album leaves the library and stays on the server.
+    let patched = json(
+        bearer(
+            &fixture,
+            reqwest::Method::PATCH,
+            &format!("/api/v1/admin/folders/{folder}"),
+            Some(serde_json::json!({ "generic": true, "name": "Shared" })),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(patched["generic"], true);
+    assert_eq!(patched["name"], "Shared");
+    assert!(patched.get("owner").is_none());
+    assert!(albums_in(&fixture, &fixture.api_key, 1).await.is_empty());
+
+    let listed = json(
+        bearer(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/admin/folders",
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(listed["folders"].as_array().unwrap().len(), 1);
+
+    let scan = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        &format!("/api/v1/admin/folders/{folder}/scan"),
+        Some(serde_json::json!({ "full": true })),
+    )
+    .await;
+    assert_eq!(scan.status(), StatusCode::ACCEPTED);
+    assert!(json(scan).await["jobId"].is_string());
+    let unknown = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/folders/lf_00000000000000000000000000/scan",
+        None,
+    )
+    .await;
+    assert_problem(unknown, StatusCode::NOT_FOUND, "not-found").await;
+    fixture.stop().await;
+}

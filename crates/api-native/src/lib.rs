@@ -29,6 +29,7 @@
 //! | `GET`/`POST /api/v1/me/app-passwords`, `DELETE /api/v1/me/app-passwords/{id}` | any user, own app passwords |
 //! | `GET`/`PATCH /api/v1/me/settings` | any user, own overrides |
 //! | `GET`/`POST /api/v1/admin/users`, `GET`/`PATCH /api/v1/admin/users/{id}` | administrators |
+//! | `GET`/`POST /api/v1/admin/folders`, `PATCH /api/v1/admin/folders/{id}`, `POST /api/v1/admin/folders/{id}/scan` | administrators |
 
 #![forbid(unsafe_code)]
 
@@ -126,6 +127,12 @@ fn api_router() -> OpenApiRouter<NativeState> {
             routes::admin_users::get_user,
             routes::admin_users::patch_user
         ))
+        .routes(routes!(
+            routes::admin_folders::list_folders,
+            routes::admin_folders::create_folder
+        ))
+        .routes(routes!(routes::admin_folders::patch_folder))
+        .routes(routes!(routes::admin_folders::scan_folder))
 }
 
 /// Returns the OpenAPI document of the native API.
