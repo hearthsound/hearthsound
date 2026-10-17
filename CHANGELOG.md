@@ -67,6 +67,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `subsonic.rating_one_is_dislike` makes `setRating` with a rating of 1 record
   a dislike as well, unless the user likes the entity, and any other rating
   clears that dislike again.
+- Uploaded files are ingested into the uploader's library: each audio file is
+  indexed from its own tags like a scanned file, stored under
+  `<storage>/library` by `library.naming_template`, recorded with the uploader
+  and pinned through their personal library, so it is permanent and streamable
+  by everyone while only the uploader's library gains it. Client ids gain the
+  `ak`, `ap`, `lf` and `up` prefixes for API keys, app passwords, library
+  folders and uploads.
 
 ### Changed
 

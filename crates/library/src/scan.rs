@@ -238,17 +238,17 @@ struct PendingFile {
 
 /// The track, album, credits, and genres a probe implies.
 #[derive(Debug)]
-struct IndexedTags {
+pub(crate) struct IndexedTags {
     /// The album to upsert, when the tags name one.
-    album: Option<AlbumInput>,
+    pub(crate) album: Option<AlbumInput>,
     /// The album's credits.
-    album_credits: Vec<ArtistCredit>,
+    pub(crate) album_credits: Vec<ArtistCredit>,
     /// The track to insert or update.
-    track: TrackInput,
+    pub(crate) track: TrackInput,
     /// The track's credits.
-    credits: Vec<ArtistCredit>,
+    pub(crate) credits: Vec<ArtistCredit>,
     /// The track's genres.
-    genres: Vec<String>,
+    pub(crate) genres: Vec<String>,
 }
 
 /// Scans library folders into the database.
@@ -840,7 +840,11 @@ impl IndexedTags {
     /// # Returns
     ///
     /// The inputs to write.
-    fn from_probe(probe: &ProbeResult, rel_path: &str, separators: &[String]) -> IndexedTags {
+    pub(crate) fn from_probe(
+        probe: &ProbeResult,
+        rel_path: &str,
+        separators: &[String],
+    ) -> IndexedTags {
         let tags = &probe.tags;
         let stem = Path::new(rel_path)
             .file_stem()
@@ -1262,7 +1266,7 @@ fn in_subtrees(rel_path: &str, subtrees: &[String]) -> bool {
 ///
 /// `true` when the extension is one of [`AUDIO_EXTENSIONS`], compared
 /// case-insensitively.
-fn is_audio_extension(extension: &str) -> bool {
+pub(crate) fn is_audio_extension(extension: &str) -> bool {
     AUDIO_EXTENSIONS
         .iter()
         .any(|known| known.eq_ignore_ascii_case(extension))

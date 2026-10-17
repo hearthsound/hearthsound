@@ -85,6 +85,14 @@ pub enum LibraryError {
         /// The rendered path whose names are all taken.
         path: PathBuf,
     },
+    /// An uploaded file is not audio the library can index.
+    #[error("`{name}` is not a supported audio file: {reason}")]
+    UnsupportedUpload {
+        /// The file name the uploader gave.
+        name: String,
+        /// Why the file was refused.
+        reason: String,
+    },
     /// A media probe or picture extraction failed.
     #[error(transparent)]
     Media(#[from] hearthsound_media::MediaError),

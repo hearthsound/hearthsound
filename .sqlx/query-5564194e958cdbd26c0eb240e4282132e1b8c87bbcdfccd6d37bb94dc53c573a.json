@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_library (user_id, entity_kind, entity_id, origin, added_at) VALUES (?, 'track', ?, 'upload', ?) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "5564194e958cdbd26c0eb240e4282132e1b8c87bbcdfccd6d37bb94dc53c573a"
+}

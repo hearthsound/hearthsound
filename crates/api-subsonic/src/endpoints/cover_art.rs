@@ -285,7 +285,13 @@ async fn local(
             }
             Ok(None)
         }
-        IdPrefix::Playlist | IdPrefix::User | IdPrefix::Acquisition => Ok(None),
+        IdPrefix::Playlist
+        | IdPrefix::User
+        | IdPrefix::Acquisition
+        | IdPrefix::ApiKey
+        | IdPrefix::AppPassword
+        | IdPrefix::LibraryFolder
+        | IdPrefix::Upload => Ok(None),
     }
 }
 

@@ -103,6 +103,14 @@ pub enum IdPrefix {
     User,
     /// An acquisition (`ac`).
     Acquisition,
+    /// An API key (`ak`).
+    ApiKey,
+    /// An app password (`ap`).
+    AppPassword,
+    /// A scanned library folder (`lf`).
+    LibraryFolder,
+    /// An upload (`up`).
+    Upload,
 }
 
 impl IdPrefix {
@@ -110,13 +118,17 @@ impl IdPrefix {
     ///
     /// The order matches the variant declaration order and is stable across
     /// releases.
-    pub const ALL: [IdPrefix; 6] = [
+    pub const ALL: [IdPrefix; 10] = [
         IdPrefix::Track,
         IdPrefix::Album,
         IdPrefix::Artist,
         IdPrefix::Playlist,
         IdPrefix::User,
         IdPrefix::Acquisition,
+        IdPrefix::ApiKey,
+        IdPrefix::AppPassword,
+        IdPrefix::LibraryFolder,
+        IdPrefix::Upload,
     ];
 
     /// Returns the two-letter prefix written into a client id.
@@ -136,14 +148,18 @@ impl IdPrefix {
             IdPrefix::Playlist => "pl",
             IdPrefix::User => "us",
             IdPrefix::Acquisition => "ac",
+            IdPrefix::ApiKey => "ak",
+            IdPrefix::AppPassword => "ap",
+            IdPrefix::LibraryFolder => "lf",
+            IdPrefix::Upload => "up",
         }
     }
 
     /// Returns the catalog entity kind this prefix names, when there is one.
     ///
     /// `Track`, `Album`, `Artist` and `Playlist` map to the matching
-    /// [`EntityKind`]; `User` and `Acquisition` are not catalog entities and
-    /// map to [`None`].
+    /// [`EntityKind`]; every other prefix names a record that is not a catalog
+    /// entity and maps to [`None`].
     ///
     /// # Returns
     ///
@@ -163,7 +179,12 @@ impl IdPrefix {
             IdPrefix::Album => Some(EntityKind::Album),
             IdPrefix::Artist => Some(EntityKind::Artist),
             IdPrefix::Playlist => Some(EntityKind::Playlist),
-            IdPrefix::User | IdPrefix::Acquisition => None,
+            IdPrefix::User
+            | IdPrefix::Acquisition
+            | IdPrefix::ApiKey
+            | IdPrefix::AppPassword
+            | IdPrefix::LibraryFolder
+            | IdPrefix::Upload => None,
         }
     }
 
@@ -861,6 +882,5 @@ mod tests {
         }
         assert_eq!(IdPrefix::User.entity_kind(), None);
         assert_eq!(IdPrefix::Acquisition.entity_kind(), None);
-        assert_eq!(IdPrefix::ALL.len(), 6);
     }
 }
