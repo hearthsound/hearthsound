@@ -20,7 +20,10 @@
 //!
 //! [`Authenticator`] ties them together: it turns the `u`, `p`, `t`, `s` and
 //! `apiKey` parameters of a `/rest` request into a [`Principal`] or a typed
-//! [`AuthenticationError`] carrying the Subsonic error code.
+//! [`AuthenticationError`] carrying the Subsonic error code. It also signs a web
+//! client in with its account password and resolves the `Authorization: Bearer`
+//! key of the native API, and [`Sessions`] issues and resolves the cookie
+//! sessions that client keeps.
 //!
 //! Library code takes plain values and reads [`hearthsound_config::SettingsStore`]
 //! snapshots handed to it by the composition root; it never reads the process
@@ -33,6 +36,7 @@ mod error;
 mod password;
 mod quotas;
 mod rate_limit;
+mod session;
 mod subsonic;
 mod user;
 mod user_settings;
@@ -46,6 +50,7 @@ pub use error::AuthError;
 pub use password::{hash_password, verify_password};
 pub use quotas::{Quotas, UserQuota};
 pub use rate_limit::{LoginKey, LoginRateLimiter, RateLimited};
+pub use session::{LoginError, NewSession, SessionRecord, Sessions};
 pub use subsonic::{
     APP_PASSWORDS_HELP_URL, AuthenticationError, Authenticator, Credential, MIN_SALT_LEN,
     Principal, ResolveError, SubsonicCredentials,

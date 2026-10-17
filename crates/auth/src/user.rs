@@ -13,7 +13,7 @@ use std::str::FromStr;
 use hearthsound_config::{SettingsStore, keys};
 use hearthsound_core::new_uuid_v7;
 use hearthsound_db::Database;
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use crate::error::AuthError;
@@ -567,13 +567,38 @@ impl Users {
     ///
     /// Returns [`AuthError::Database`] when the query fails.
     pub async fn find_by_id(&self, id: Uuid) -> Result<Option<User>, AuthError> {
+        let mut conn = self.readers.acquire().await?;
+        Users::find_by_id_on(&mut conn, id).await
+    }
+
+    /// Reads an account by its id on a connection the caller owns.
+    ///
+    /// The session store resolves a session and its account on one reader
+    /// connection, so this is the shared half of both lookups.
+    ///
+    /// # Parameters
+    ///
+    /// - `conn`: the connection or transaction to read on.
+    /// - `id`: the account's UUIDv7 primary key.
+    ///
+    /// # Returns
+    ///
+    /// The account, or `None` when no row has that id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::Database`] when the query fails.
+    pub(crate) async fn find_by_id_on(
+        conn: &mut SqliteConnection,
+        id: Uuid,
+    ) -> Result<Option<User>, AuthError> {
         let row = sqlx::query_as!(
             UserRow,
             "SELECT id, username, display_name, password_hash, is_admin, can_acquire, can_upload, \
              can_download, created_at, updated_at, disabled_at FROM users WHERE id = ?",
             id.as_bytes().as_slice()
         )
-        .fetch_optional(&self.readers)
+        .fetch_optional(&mut *conn)
         .await?;
         row.map(UserRow::into_user).transpose()
     }

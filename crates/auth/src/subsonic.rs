@@ -86,6 +86,15 @@ pub enum Credential {
         /// The id of the app password that matched.
         id: Uuid,
     },
+    /// A web session, named by the `sessions` row it matched.
+    ///
+    /// A session authenticates a request through its cookie rather than through
+    /// a credential parameter, and the CSRF token of the same row is what the
+    /// client echoes on an unsafe request.
+    Session {
+        /// The id of the session that matched.
+        id: Uuid,
+    },
     /// The account password, stored as an Argon2id hash.
     AccountPassword,
 }
@@ -113,6 +122,42 @@ pub struct Principal {
 }
 
 impl Principal {
+    /// Builds a principal from a stored account.
+    ///
+    /// The account's permission flags are copied as they are read, so a caller
+    /// that has already loaded the account - a session resolution, for example -
+    /// does not read it twice.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the account that authenticated.
+    /// - `credential`: the credential that proved it.
+    ///
+    /// # Returns
+    ///
+    /// The principal.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_auth::{Credential, Principal, UserPermissions};
+    /// # fn example(user: &hearthsound_auth::User) {
+    /// let principal = Principal::from_user(user, Credential::AccountPassword);
+    /// assert_eq!(principal.username, user.username);
+    /// # }
+    /// ```
+    pub fn from_user(user: &User, credential: Credential) -> Principal {
+        Principal {
+            user_id: EntityId::from_uuid(IdPrefix::User, user.id),
+            username: user.username.clone(),
+            is_admin: user.is_admin,
+            can_acquire: user.can_acquire,
+            can_upload: user.can_upload,
+            can_download: user.can_download,
+            credential,
+        }
+    }
+
     /// Reports whether the principal may exercise a permission.
     ///
     /// # Parameters
@@ -459,6 +504,89 @@ impl<C: Clock + Clone> Authenticator<C> {
         ))
     }
 
+    /// Signs a client in with an account password.
+    ///
+    /// This is the login path of the web client, and it differs from the `/rest`
+    /// path on purpose: only the account password is accepted, because an app
+    /// password and an API key are credentials a client is given afterwards.
+    /// An unknown username, a disabled account and a wrong password all answer
+    /// [`LoginError::WrongCredentials`], and every one of them is charged to the
+    /// login rate limiter against both the address and the submitted username.
+    /// A login that succeeds is not charged.
+    ///
+    /// # Parameters
+    ///
+    /// - `client_ip`: the address the request came from, used to key the rate
+    ///   limit.
+    /// - `username`: the submitted login name, compared case-insensitively.
+    /// - `password`: the submitted plaintext account password.
+    ///
+    /// # Returns
+    ///
+    /// The account that signed in.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LoginError::RateLimited`] when the address or the username has
+    /// spent its failure budget, [`LoginError::WrongCredentials`] when the
+    /// credentials are wrong, and [`LoginError::Internal`] when the account
+    /// cannot be read or the password cannot be verified.
+    pub async fn login(
+        &self,
+        client_ip: IpAddr,
+        username: &str,
+        password: &str,
+    ) -> Result<User, crate::session::LoginError> {
+        self.limiter
+            .check(client_ip, username)
+            .map_err(|_| crate::session::LoginError::RateLimited)?;
+        let outcome = crate::session::verify_login(&self.users, username, password).await;
+        if matches!(outcome, Err(crate::session::LoginError::WrongCredentials)) {
+            self.limiter.record_failure(client_ip, username);
+        }
+        outcome
+    }
+
+    /// Resolves an `Authorization: Bearer` API key.
+    ///
+    /// The bearer path of the native API: the key is checked exactly like the
+    /// `apiKey` parameter of `/rest`, including the `last_used_at`
+    /// bookkeeping, and a failure is charged to the login rate limiter against
+    /// the address. There is no username to key the limit on until the key has
+    /// matched, so only the address is charged.
+    ///
+    /// # Parameters
+    ///
+    /// - `client_ip`: the address the request came from.
+    /// - `key`: the presented key, exactly as the client sent it.
+    ///
+    /// # Returns
+    ///
+    /// The authenticated principal, whose credential is
+    /// [`Credential::ApiKey`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResolveError::Rejected`] with
+    /// [`AuthenticationError::TooManyAttempts`] when the address has spent its
+    /// failure budget, with [`AuthenticationError::InvalidApiKey`] for a
+    /// malformed, unknown, revoked, or disabled-account key, and
+    /// [`ResolveError::Internal`] when the lookup fails.
+    pub async fn resolve_bearer(
+        &self,
+        client_ip: IpAddr,
+        key: &str,
+    ) -> Result<Principal, ResolveError> {
+        self.limiter
+            .check_address(client_ip)
+            .map_err(|_| AuthenticationError::TooManyAttempts)?;
+        let outcome = self.resolve_api_key(key).await;
+        if matches!(outcome, Err(ResolveError::Rejected(_))) {
+            self.limiter.record_address_failure(client_ip);
+        }
+        outcome
+    }
+
     /// Resolves `u` + `p`.
     ///
     /// Only a rejected attempt is charged to the login rate limit; a correct
@@ -700,15 +828,7 @@ fn secrets_match(expected: &[u8], presented: &[u8]) -> bool {
 ///
 /// The principal.
 fn principal_from_user(user: &User, credential: Credential) -> Principal {
-    Principal {
-        user_id: EntityId::from_uuid(IdPrefix::User, user.id),
-        username: user.username.clone(),
-        is_admin: user.is_admin,
-        can_acquire: user.can_acquire,
-        can_upload: user.can_upload,
-        can_download: user.can_download,
-        credential,
-    }
+    Principal::from_user(user, credential)
 }
 
 /// Builds a principal from the owner of an API key.

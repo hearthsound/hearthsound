@@ -182,6 +182,46 @@ impl<C: Clock + Clone> LoginRateLimiter<C> {
         state.charge(LoginKey::Username(username.to_ascii_lowercase()));
     }
 
+    /// Reports whether an attempt from an address may be checked, without
+    /// charging it.
+    ///
+    /// This is the address half of [`LoginRateLimiter::check`], for a request
+    /// that carries no username: a bearer credential is only known to be one
+    /// once it has been checked, so there is no username to key the limit on.
+    ///
+    /// # Parameters
+    ///
+    /// - `ip`: the address the request came from.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the address may proceed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RateLimited`] when the address has spent its failure budget
+    /// and it has not refilled yet.
+    pub fn check_address(&self, ip: IpAddr) -> Result<(), RateLimited> {
+        let state = self.lock();
+        if state.is_blocked(&LoginKey::Ip(ip), self.clock.now()) {
+            Err(RateLimited)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Charges one failed attempt against an address only.
+    ///
+    /// # Parameters
+    ///
+    /// - `ip`: the address the request came from.
+    pub fn record_address_failure(&self, ip: IpAddr) {
+        let mut state = self.lock();
+        let now = self.clock.now();
+        state.blocked.retain(|_, until| *until > now);
+        state.charge(LoginKey::Ip(ip));
+    }
+
     /// Changes the rate, resetting the counters when it actually changes.
     ///
     /// # Parameters

@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Each account can carry a daily acquisition quota, a number of acquisitions
   and a number of bytes, stored as one `user_quotas` row and unlimited when the
   row or a column is absent.
+- Web sessions are issued and resolved: a client is handed an opaque token
+  stored only as its hash plus a CSRF token, and the session carries a fixed
+  lifetime, survives nothing after its account is disabled, and is revoked one
+  at a time or all at once. Signing in with an account password is rate limited
+  per address and username, and an API key is accepted as a bearer credential.
 
 ## [0.1.2] - 2026-10-16
 
