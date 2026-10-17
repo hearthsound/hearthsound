@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT storage, rel_path FROM media_files WHERE storage IN ('library', 'cache')",
+  "describe": {
+    "columns": [
+      {
+        "name": "storage",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "storage"
+          }
+        }
+      },
+      {
+        "name": "rel_path",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "rel_path"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "9f09cc303588d70a76ba6a1a819e0f2101d95392d455757e9272d58c3bdb2cba"
+}

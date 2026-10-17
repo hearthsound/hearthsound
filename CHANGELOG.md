@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Managed files follow their pins: a file of a pinned track is moved into
+  `<storage>/library` and a file of an unpinned track into `<storage>/cache`, or
+  removed with its row when `storage.unpin_action` is `delete`. The path inside
+  the root is kept and a name something else holds moves to the next collision
+  suffix, the directories a move emptied are removed, and the `track.availability`
+  change the move implies is published.
 - The schema gains the `sessions` and `user_quotas` tables: opaque web session
   tokens stored as their hash, and the per-user daily acquisition quotas.
 - Accounts can be created with an explicit permission set instead of the

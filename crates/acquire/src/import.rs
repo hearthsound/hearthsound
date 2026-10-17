@@ -45,7 +45,7 @@ use hearthsound_core::{
 };
 use hearthsound_library::naming::{NamingContext, NamingTemplate};
 use hearthsound_library::{
-    LibraryError, ManagedMediaFile, StorageRoots, Track, media_files, retention, tracks,
+    LibraryError, ManagedMediaFile, Track, media_files, placement, retention, tracks,
 };
 use hearthsound_media::{
     Artwork, Codec, ProbeResult, probe, verify_decodes, write_sidecar_cover, write_tags,
@@ -66,13 +66,6 @@ const DURATION_TOLERANCE_MS: i64 = 5_000;
 
 /// The acquisition's staging subdirectory the tagged copy is written in.
 const IMPORT_STAGING: &str = "import";
-
-/// How many names one import tries before it gives up.
-///
-/// The rendered name is the first, then the ` (N)` collision suffixes up to this
-/// many, and the same budget bounds how often an import retries after a name
-/// turns out to be stored already.
-const MAX_COLLISIONS: u32 = 10_000;
 
 /// What handing a completed candidate to this stage produced.
 pub(crate) enum HandoffOutcome {
@@ -800,9 +793,9 @@ impl AcquisitionOrchestrator {
         // next collision suffix, which is what keeps the retry from picking the
         // same name again.
         let mut taken: HashSet<PathBuf> = HashSet::new();
-        for _ in 0..MAX_COLLISIONS {
+        for _ in 0..placement::MAX_COLLISIONS {
             let (destination, reservation) = self.reserve_destination(&base, &mut taken).await?;
-            let rel_path = relative_path(self.storage_roots(), storage, &destination);
+            let rel_path = placement::relative_path(self.storage_roots(), storage, &destination);
             let staged = staged_dir.join(
                 destination
                     .file_name()
@@ -963,7 +956,13 @@ impl AcquisitionOrchestrator {
         taken: &mut HashSet<PathBuf>,
     ) -> Result<(PathBuf, DestinationReservation<'_>), AcquireError> {
         loop {
-            let candidate = free_destination(base, taken).await?;
+            let candidate = match placement::free_destination(base, taken).await {
+                Ok(candidate) => candidate,
+                Err(LibraryError::NoFreeName { path }) => {
+                    return Err(AcquireError::ImportPath { path });
+                }
+                Err(error) => return Err(error.into()),
+            };
             match self.try_reserve_destination(&candidate) {
                 Some(reservation) => return Ok((candidate, reservation)),
                 None => {
@@ -1219,60 +1218,6 @@ fn quality_tier_of(destination: &Path, probe: &ProbeResult) -> Option<QualityTie
     profile::quality_tier(&candidate)
 }
 
-/// Returns the first name for a rendered destination that nothing holds.
-///
-/// The rendered name comes first, then a deterministic ` (2)`, ` (3)`, ...
-/// suffix inserted before the extension, so an import never overwrites the file
-/// of another track. A name counts as held when a file already exists at it or
-/// when this import has already lost it.
-///
-/// # Parameters
-///
-/// - `destination`: the path the naming template rendered.
-/// - `taken`: the names this import has already lost; they are skipped even
-///   when no file is there, which is what keeps a retry from picking the same
-///   name again.
-///
-/// # Returns
-///
-/// The free path.
-///
-/// # Errors
-///
-/// Returns [`AcquireError::ImportPath`] when every suffix is taken, and the
-/// filesystem error when a path cannot be stat-ed.
-async fn free_destination(
-    destination: &Path,
-    taken: &HashSet<PathBuf>,
-) -> Result<PathBuf, AcquireError> {
-    if !taken.contains(destination) && !path_exists(destination).await? {
-        return Ok(destination.to_path_buf());
-    }
-    let parent = destination
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
-    let stem = destination
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("file")
-        .to_owned();
-    let extension = destination
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| format!(".{extension}"))
-        .unwrap_or_default();
-    for suffix in 2..=MAX_COLLISIONS {
-        let candidate = parent.join(format!("{stem} ({suffix}){extension}"));
-        if !taken.contains(&candidate) && !path_exists(&candidate).await? {
-            return Ok(candidate);
-        }
-    }
-    Err(AcquireError::ImportPath {
-        path: destination.to_path_buf(),
-    })
-}
-
 /// Returns whether a media file insert lost its path to a stored row.
 ///
 /// SQLite reports the violated index in the message rather than in a field, so
@@ -1292,37 +1237,6 @@ fn is_stored_path_conflict(error: &LibraryError) -> bool {
         return false;
     };
     database.is_unique_violation() && database.message().contains("media_files")
-}
-
-/// Returns whether a path exists.
-///
-/// # Errors
-///
-/// Returns [`AcquireError::Io`] for any filesystem error other than "not found".
-async fn path_exists(path: &Path) -> Result<bool, AcquireError> {
-    match tokio::fs::metadata(path).await {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(AcquireError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
-}
-
-/// Returns the part of a destination path that is relative to its storage root.
-///
-/// # Parameters
-///
-/// - `roots`: the managed storage roots.
-/// - `storage`: the root the file was written under.
-/// - `destination`: the file's absolute destination path.
-fn relative_path(roots: &StorageRoots, storage: StorageClass, destination: &Path) -> String {
-    destination
-        .strip_prefix(roots.root_for(storage))
-        .unwrap_or(destination)
-        .to_string_lossy()
-        .into_owned()
 }
 
 /// What installing a tagged staged file at its destination did.
@@ -1369,7 +1283,7 @@ async fn install(staged: &Path, destination: &Path) -> Result<Installed, Acquire
         }
         Err(_) => {}
     }
-    if path_exists(destination).await? {
+    if placement::path_exists(destination).await? {
         return Ok(Installed::Taken);
     }
     copy_durable(staged, destination).await?;

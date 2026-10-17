@@ -550,6 +550,53 @@ pub async fn list_folder_media_files(
         .collect()
 }
 
+/// Moves a managed media file to another storage class and relative path.
+///
+/// This is what records the new home of a file the storage maintainer moved
+/// between the two managed roots: the columns change, the track's preferred
+/// file is refreshed, because a `library` file outranks a `folder` file and a
+/// `cache` file does not, and the track's availability is left to the caller,
+/// which knows which pins apply.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `id`: the media file that moved.
+/// - `storage`: the root the file is in now.
+/// - `rel_path`: its path relative to that root.
+///
+/// # Returns
+///
+/// `true` when the row was updated, `false` when no row has that id.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when the update fails, including a unique
+/// index violation when a row already holds the same storage and path.
+pub async fn move_managed_file(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    storage: StorageClass,
+    rel_path: &str,
+) -> Result<bool, LibraryError> {
+    let moved: Option<Vec<u8>> = sqlx::query_scalar!(
+        "UPDATE media_files SET storage = ?, rel_path = ? WHERE id = ? RETURNING track_id",
+        storage.as_str(),
+        rel_path,
+        id.as_bytes().as_slice(),
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    match moved {
+        Some(bytes) => {
+            let track_id = decode_entity(IdPrefix::Track, &bytes)?;
+            refresh_preferred_file(conn, track_id).await?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
 /// Deletes a media file and refreshes the track's preferred file.
 ///
 /// # Parameters

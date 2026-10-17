@@ -70,6 +70,21 @@ pub enum LibraryError {
         #[source]
         source: std::io::Error,
     },
+    /// A filesystem operation on a managed path failed.
+    #[error("`{path}` failed: {source}")]
+    Io {
+        /// The path the operation failed on.
+        path: PathBuf,
+        /// The underlying filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// No free name was left for a file that has to be placed.
+    #[error("no free name is left under `{path}`")]
+    NoFreeName {
+        /// The rendered path whose names are all taken.
+        path: PathBuf,
+    },
     /// A media probe or picture extraction failed.
     #[error(transparent)]
     Media(#[from] hearthsound_media::MediaError),

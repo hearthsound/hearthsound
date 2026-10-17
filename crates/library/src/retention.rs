@@ -15,15 +15,10 @@
 //!   `local` while pinned and `cached` once the last reason is removed;
 //! - a track with no file, and a track that is `acquiring`, is left as it is.
 //!
-//! # Known limitation
-//!
-//! A pin change updates the availability but does not move the file: a managed
-//! file stays where the import put it. Unpinning a track whose file is in
-//! `<storage>/library` therefore leaves the file there and marks the track
-//! `cached`, and pinning a track whose file is in `<storage>/cache` leaves the
-//! file there and marks it `local`. Moving files between the two roots is not
-//! done yet; the two roots hold the same kind of file and the availability
-//! decides whether eviction may touch it.
+//! The availability decides whether eviction may touch a file, and the file's
+//! root follows the same pins: a managed file of a pinned track is moved into
+//! `<storage>/library` and one of an unpinned track into `<storage>/cache`, by
+//! [`crate::maintenance::StorageMaintainer`] after the pin change is committed.
 
 use std::path::{Path, PathBuf};
 
