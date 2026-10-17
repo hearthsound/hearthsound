@@ -92,6 +92,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `/api/v1/me/settings` lists the settings a user may override with the
   caller's value and where it comes from, and changes or clears overrides in a
   batch that is checked as a whole before anything is written.
+- `/api/v1/admin/users` pages through the accounts by username and creates,
+  reads and changes them: display name, password, administrator flag,
+  permissions, daily acquisition quota, and the disabled state, which also
+  ends the account's web sessions. Administrators cannot remove their own
+  administrator flag or disable themselves.
 
 ### Changed
 

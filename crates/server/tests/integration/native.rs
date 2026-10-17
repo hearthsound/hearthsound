@@ -440,3 +440,179 @@ async fn personal_settings_override_and_fall_back_to_the_server() {
     }
     fixture.stop().await;
 }
+
+/// Signs in and returns the cookie pair and CSRF token of the new session.
+async fn session_of(fixture: &Fixture, username: &str, password: &str) -> (String, String) {
+    let response = login(fixture, username, password).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = cookie_pair(&response);
+    let body = json(response).await;
+    (cookie, body["csrfToken"].as_str().unwrap().to_owned())
+}
+
+/// Administrators create, page through, change and disable accounts; other
+/// accounts may not, and nobody can lock themselves out.
+#[tokio::test]
+async fn administrators_manage_accounts_permissions_and_quotas() {
+    let fixture = Fixture::new().await;
+    let created = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/users",
+        Some(serde_json::json!({
+            "username": "listener",
+            "password": "correct horse",
+            "permissions": { "acquire": false, "upload": true, "download": true },
+            "quota": { "acquisitionsPerDay": 5 },
+        })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created = json(created).await;
+    let id = created["id"].as_str().unwrap().to_owned();
+    assert!(id.starts_with("us_"));
+    assert_eq!(created["displayName"], "listener");
+    assert_eq!(created["isAdmin"], false);
+    assert_eq!(created["permissions"]["acquire"], false);
+    assert_eq!(created["quota"]["acquisitionsPerDay"], 5);
+    assert!(created["quota"].get("acquisitionBytesPerDay").is_none());
+
+    let taken = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/users",
+        Some(serde_json::json!({ "username": "LISTENER", "password": "x" })),
+    )
+    .await;
+    assert_problem(taken, StatusCode::CONFLICT, "conflict").await;
+    let empty = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/users",
+        Some(serde_json::json!({ "username": "other", "password": "" })),
+    )
+    .await;
+    assert_problem(empty, StatusCode::BAD_REQUEST, "invalid-request").await;
+
+    // Two accounts, one per page.
+    let first = json(
+        bearer(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/admin/users?limit=1",
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(first["users"].as_array().unwrap().len(), 1);
+    assert_eq!(first["users"][0]["username"], common::USERNAME);
+    let cursor = first["nextCursor"].as_str().unwrap();
+    let second = json(
+        bearer(
+            &fixture,
+            reqwest::Method::GET,
+            &format!("/api/v1/admin/users?limit=1&cursor={cursor}"),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(second["users"][0]["username"], "listener");
+    assert!(second.get("nextCursor").is_none());
+
+    // The new account may not administer.
+    let (cookie, _) = session_of(&fixture, "listener", "correct horse").await;
+    let forbidden = fixture
+        .client
+        .get(format!("{}/api/v1/admin/users", fixture.base_url()))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_problem(forbidden, StatusCode::FORBIDDEN, "forbidden").await;
+
+    // Administrators cannot lock themselves out.
+    let me =
+        hearthsound_core::EntityId::from_uuid(hearthsound_core::IdPrefix::User, fixture.user_id);
+    for patch in [
+        serde_json::json!({ "isAdmin": false }),
+        serde_json::json!({ "disabled": true }),
+    ] {
+        let refused = bearer(
+            &fixture,
+            reqwest::Method::PATCH,
+            &format!("/api/v1/admin/users/{me}"),
+            Some(patch),
+        )
+        .await;
+        assert_problem(refused, StatusCode::CONFLICT, "conflict").await;
+    }
+
+    // Changing permissions and quota, then disabling, ends the account's
+    // sessions; enabling lets it sign in again.
+    let changed = json(
+        bearer(
+            &fixture,
+            reqwest::Method::PATCH,
+            &format!("/api/v1/admin/users/{id}"),
+            Some(serde_json::json!({
+                "displayName": "Listener",
+                "permissions": { "acquire": true, "upload": false, "download": true },
+                "quota": { "acquisitionBytesPerDay": 1000 },
+            })),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(changed["displayName"], "Listener");
+    assert_eq!(changed["permissions"]["acquire"], true);
+    assert_eq!(changed["permissions"]["upload"], false);
+    assert!(changed["quota"].get("acquisitionsPerDay").is_none());
+    assert_eq!(changed["quota"]["acquisitionBytesPerDay"], 1000);
+
+    let disabled = json(
+        bearer(
+            &fixture,
+            reqwest::Method::PATCH,
+            &format!("/api/v1/admin/users/{id}"),
+            Some(serde_json::json!({ "disabled": true })),
+        )
+        .await,
+    )
+    .await;
+    assert!(disabled["disabledAt"].is_i64());
+    let ended = fixture
+        .client
+        .get(format!("{}/api/v1/auth/session", fixture.base_url()))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_problem(ended, StatusCode::UNAUTHORIZED, "unauthenticated").await;
+    assert_eq!(
+        login(&fixture, "listener", "correct horse").await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    bearer(
+        &fixture,
+        reqwest::Method::PATCH,
+        &format!("/api/v1/admin/users/{id}"),
+        Some(serde_json::json!({ "disabled": false })),
+    )
+    .await;
+    assert_eq!(
+        login(&fixture, "listener", "correct horse").await.status(),
+        StatusCode::OK
+    );
+
+    let missing = bearer(
+        &fixture,
+        reqwest::Method::GET,
+        "/api/v1/admin/users/us_00000000000000000000000000",
+        None,
+    )
+    .await;
+    assert_problem(missing, StatusCode::NOT_FOUND, "not-found").await;
+    fixture.stop().await;
+}

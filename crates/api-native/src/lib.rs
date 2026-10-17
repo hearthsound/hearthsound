@@ -28,6 +28,7 @@
 //! | `GET`/`POST /api/v1/me/api-keys`, `DELETE /api/v1/me/api-keys/{id}` | any user, own keys |
 //! | `GET`/`POST /api/v1/me/app-passwords`, `DELETE /api/v1/me/app-passwords/{id}` | any user, own app passwords |
 //! | `GET`/`PATCH /api/v1/me/settings` | any user, own overrides |
+//! | `GET`/`POST /api/v1/admin/users`, `GET`/`PATCH /api/v1/admin/users/{id}` | administrators |
 
 #![forbid(unsafe_code)]
 
@@ -67,6 +68,7 @@ pub const OPENAPI_PATH: &str = "/api/v1/openapi.json";
         (name = "system", description = "What the server is and offers"),
         (name = "auth", description = "Web sessions"),
         (name = "me", description = "The caller's own credentials and settings"),
+        (name = "admin", description = "Server administration"),
     )
 )]
 struct ApiDoc;
@@ -115,6 +117,14 @@ fn api_router() -> OpenApiRouter<NativeState> {
         .routes(routes!(
             routes::me::get_settings,
             routes::me::patch_settings
+        ))
+        .routes(routes!(
+            routes::admin_users::list_users,
+            routes::admin_users::create_user
+        ))
+        .routes(routes!(
+            routes::admin_users::get_user,
+            routes::admin_users::patch_user
         ))
 }
 
