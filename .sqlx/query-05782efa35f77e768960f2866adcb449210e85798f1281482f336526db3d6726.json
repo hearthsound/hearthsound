@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT tr.track_id AS \"track_id!: Vec<u8>\" FROM track_retention tr, json_each(tr.pin_reasons) j WHERE j.value = 'policy' AND (SELECT COUNT(*) FROM plays p WHERE p.track_id = tr.track_id) < ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "track_id!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "track_retention",
+            "name": "track_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "05782efa35f77e768960f2866adcb449210e85798f1281482f336526db3d6726"
+}

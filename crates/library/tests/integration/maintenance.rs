@@ -710,3 +710,79 @@ async fn the_usage_report_counts_each_storage_class() {
     assert_eq!(usage.pinned_tracks, 1);
     assert_eq!(usage.filesystem.unwrap().available_bytes, 5);
 }
+
+/// Returns a track's active pin reasons.
+async fn reasons(fixture: &Fixture, track: EntityId) -> Vec<PinReason> {
+    let mut conn = fixture.db.readers().acquire().await.unwrap();
+    hearthsound_library::retention::pin_reasons(&mut conn, track)
+        .await
+        .unwrap()
+}
+
+/// A track played often enough gains the policy pin, and loses it when the
+/// threshold rises above its plays or is turned off.
+#[tokio::test]
+async fn play_counts_pin_and_release_the_policy_reason() {
+    let fixture = Fixture::new().await;
+    let often = fixture.track(Availability::Cached).await;
+    fixture
+        .file(often, StorageClass::Cache, "Often/Song.flac")
+        .await;
+    plays(&fixture, often, 3).await;
+    let rarely = fixture.track(Availability::Cached).await;
+    fixture
+        .file(rarely, StorageClass::Cache, "Rarely/Song.flac")
+        .await;
+    plays(&fixture, rarely, 1).await;
+
+    // Off by default: nothing is pinned.
+    assert_eq!(
+        fixture.maintainer().autopin().await.unwrap(),
+        Default::default()
+    );
+
+    set(
+        &fixture,
+        keys::STORAGE_AUTOPIN_PLAY_COUNT.name(),
+        SettingValue::Integer(3),
+    )
+    .await;
+    let report = fixture.maintainer().autopin().await.unwrap();
+    assert_eq!((report.pinned, report.released), (1, 0));
+    assert_eq!(reasons(&fixture, often).await, [PinReason::Policy]);
+    assert!(reasons(&fixture, rarely).await.is_empty());
+    let pinned = fixture.library.get_track(often).await.unwrap().unwrap();
+    assert_eq!(pinned.availability, Availability::Local);
+    // A second pass changes nothing.
+    assert_eq!(
+        fixture.maintainer().autopin().await.unwrap(),
+        Default::default()
+    );
+
+    set(
+        &fixture,
+        keys::STORAGE_AUTOPIN_PLAY_COUNT.name(),
+        SettingValue::Integer(5),
+    )
+    .await;
+    let report = fixture.maintainer().autopin().await.unwrap();
+    assert_eq!((report.pinned, report.released), (0, 1));
+    assert!(reasons(&fixture, often).await.is_empty());
+
+    set(
+        &fixture,
+        keys::STORAGE_AUTOPIN_PLAY_COUNT.name(),
+        SettingValue::Integer(1),
+    )
+    .await;
+    let report = fixture.maintainer().autopin().await.unwrap();
+    assert_eq!((report.pinned, report.released), (2, 0));
+    set(
+        &fixture,
+        keys::STORAGE_AUTOPIN_PLAY_COUNT.name(),
+        SettingValue::Integer(0),
+    )
+    .await;
+    let report = fixture.maintainer().autopin().await.unwrap();
+    assert_eq!((report.pinned, report.released), (0, 2));
+}

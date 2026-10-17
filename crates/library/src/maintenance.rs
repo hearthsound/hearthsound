@@ -51,7 +51,7 @@ use std::sync::Arc;
 use hearthsound_config::keys;
 use hearthsound_config::settings::Settings;
 use hearthsound_core::events::{EventBus, ServerEvent, TrackAvailability};
-use hearthsound_core::{Availability, EntityId, IdPrefix, StorageClass};
+use hearthsound_core::{Availability, EntityId, IdPrefix, PinReason, StorageClass};
 use hearthsound_db::Database;
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -75,6 +75,17 @@ pub struct RelocationReport {
     /// Files removed from the permanent root, with their rows, because their
     /// track lost its last pin and `storage.unpin_action` is `delete`.
     pub deleted: u64,
+}
+
+/// What one play-count pin pass changed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AutopinReport {
+    /// Tracks that reached `storage.autopin.play_count` and gained the
+    /// `policy` pin.
+    pub pinned: u64,
+    /// Tracks that lost the `policy` pin because they are below the threshold
+    /// or the threshold is zero.
+    pub released: u64,
 }
 
 /// What one eviction pass removed.
@@ -299,6 +310,114 @@ impl StorageMaintainer {
             );
         }
         Ok(report)
+    }
+
+    /// Brings the `policy` pins in step with `storage.autopin.play_count`.
+    ///
+    /// With a threshold N above zero, a track with at least N recorded plays,
+    /// counted over every user, carries the `policy` pin reason, and a track
+    /// below N loses it; a threshold of zero releases every `policy` pin. Each
+    /// change is its own short transaction through [`retention`], so the
+    /// track's availability follows, and a change of availability is
+    /// published. A pass after a threshold change therefore corrects the pins
+    /// in both directions.
+    ///
+    /// # Returns
+    ///
+    /// How many tracks gained and lost the pin.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when a query or a pin write fails, or the
+    /// setting cannot be read.
+    pub async fn autopin(&self) -> Result<AutopinReport, LibraryError> {
+        let threshold = self
+            .settings
+            .current()
+            .get(keys::STORAGE_AUTOPIN_PLAY_COUNT)?;
+        let mut report = AutopinReport::default();
+        let (to_pin, to_release) = {
+            let mut conn = self.readers.acquire().await?;
+            let to_pin = if threshold > 0 {
+                sqlx::query_scalar!(
+                    "SELECT p.track_id AS \"track_id!: Vec<u8>\" FROM plays p \
+                     GROUP BY p.track_id \
+                     HAVING COUNT(*) >= ? AND NOT EXISTS ( \
+                         SELECT 1 FROM track_retention tr, json_each(tr.pin_reasons) j \
+                         WHERE tr.track_id = p.track_id AND j.value = 'policy')",
+                    threshold,
+                )
+                .fetch_all(&mut *conn)
+                .await?
+            } else {
+                Vec::new()
+            };
+            // A threshold of zero releases every policy pin.
+            let release_below = if threshold > 0 { threshold } else { i64::MAX };
+            let to_release = sqlx::query_scalar!(
+                "SELECT tr.track_id AS \"track_id!: Vec<u8>\" \
+                 FROM track_retention tr, json_each(tr.pin_reasons) j \
+                 WHERE j.value = 'policy' \
+                   AND (SELECT COUNT(*) FROM plays p WHERE p.track_id = tr.track_id) < ?",
+                release_below,
+            )
+            .fetch_all(&mut *conn)
+            .await?;
+            (to_pin, to_release)
+        };
+        for stored in to_pin {
+            let track_id = decode_entity(IdPrefix::Track, &stored)?;
+            if self.change_policy_pin(track_id, true).await? {
+                report.pinned += 1;
+            }
+        }
+        for stored in to_release {
+            let track_id = decode_entity(IdPrefix::Track, &stored)?;
+            if self.change_policy_pin(track_id, false).await? {
+                report.released += 1;
+            }
+        }
+        if report != AutopinReport::default() {
+            tracing::debug!(
+                pinned = report.pinned,
+                released = report.released,
+                threshold,
+                "updated play-count pins"
+            );
+        }
+        Ok(report)
+    }
+
+    /// Adds or removes the `policy` pin of one track.
+    ///
+    /// # Parameters
+    ///
+    /// - `track_id`: the track.
+    /// - `pin`: `true` to add the reason, `false` to remove it.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the reason changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when the write fails.
+    async fn change_policy_pin(&self, track_id: EntityId, pin: bool) -> Result<bool, LibraryError> {
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+        let before = self.availability(&mut tx, track_id).await?;
+        let changed = if pin {
+            retention::add_pin_reason(&mut tx, track_id, PinReason::Policy).await?
+        } else {
+            retention::remove_pin_reason(&mut tx, track_id, PinReason::Policy).await?
+        };
+        let after = self.availability(&mut tx, track_id).await?;
+        tx.commit().await?;
+        if let (Some(before), Some(after)) = (before, after)
+            && before != after
+        {
+            self.publish_availability(track_id, after);
+        }
+        Ok(changed)
     }
 
     /// Reads `storage.unpin_action`.

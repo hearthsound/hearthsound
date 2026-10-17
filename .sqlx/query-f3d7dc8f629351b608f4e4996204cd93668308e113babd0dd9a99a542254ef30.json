@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.track_id AS \"track_id!: Vec<u8>\" FROM plays p GROUP BY p.track_id HAVING COUNT(*) >= ? AND NOT EXISTS ( SELECT 1 FROM track_retention tr, json_each(tr.pin_reasons) j WHERE tr.track_id = p.track_id AND j.value = 'policy')",
+  "describe": {
+    "columns": [
+      {
+        "name": "track_id!: Vec<u8>",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "track_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f3d7dc8f629351b608f4e4996204cd93668308e113babd0dd9a99a542254ef30"
+}

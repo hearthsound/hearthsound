@@ -48,6 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than `storage.cache.max_age_days`. Library files, folder files and pinned
   tracks are never touched, an evicted track becomes `remote`, and a usage
   report counts the files and bytes of each storage class.
+- `storage.autopin.play_count` pins a track once its recorded plays over every
+  user reach the threshold, with the `policy` pin reason, and releases that pin
+  again when the threshold rises above the plays or is set to zero.
 
 ## [0.1.2] - 2026-10-16
 
