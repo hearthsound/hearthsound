@@ -240,8 +240,8 @@ impl fmt::Debug for User {
 /// The fields of a new account.
 ///
 /// Built with [`NewUser::new`] and passed to [`Users::create`]. The permission
-/// flags are not part of it: they are copied from the
-/// `users.default_permissions` setting.
+/// flags are copied from the `users.default_permissions` setting unless
+/// [`NewUser::with_permissions`] overrides them.
 #[derive(Debug, Clone)]
 pub struct NewUser {
     /// The login name, unique case-insensitively.
@@ -252,6 +252,9 @@ pub struct NewUser {
     pub password: String,
     /// Whether the account is an administrator.
     pub is_admin: bool,
+    /// The permission flags to grant, or `None` to copy the
+    /// `users.default_permissions` setting.
+    pub permissions: Option<UserPermissions>,
 }
 
 impl NewUser {
@@ -267,7 +270,8 @@ impl NewUser {
     ///
     /// # Returns
     ///
-    /// The new account's fields.
+    /// The new account's fields, with the permissions left to the
+    /// `users.default_permissions` setting.
     ///
     /// # Examples
     ///
@@ -276,6 +280,7 @@ impl NewUser {
     ///
     /// let new = NewUser::new("echo", "Echo", "hunter2", false);
     /// assert_eq!(new.display_name, "Echo");
+    /// assert!(new.permissions.is_none());
     /// ```
     pub fn new(
         username: impl Into<String>,
@@ -288,7 +293,96 @@ impl NewUser {
             display_name: display_name.into(),
             password: password.into(),
             is_admin,
+            permissions: None,
         }
+    }
+
+    /// Grants an explicit set of permissions instead of the default.
+    ///
+    /// # Parameters
+    ///
+    /// - `permissions`: the flags the new account holds. The
+    ///   `users.default_permissions` setting is not read at all when this is
+    ///   set, so an account can be created with no permission even while the
+    ///   setting grants some.
+    ///
+    /// # Returns
+    ///
+    /// The same fields with the permissions set.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_auth::{NewUser, UserPermissions};
+    ///
+    /// let granted = UserPermissions { acquire: false, upload: false, download: true };
+    /// let new = NewUser::new("echo", "Echo", "hunter2", false).with_permissions(granted);
+    /// assert_eq!(new.permissions, Some(granted));
+    /// ```
+    pub fn with_permissions(mut self, permissions: UserPermissions) -> NewUser {
+        self.permissions = Some(permissions);
+        self
+    }
+}
+
+/// The fields of an account update.
+///
+/// Built with [`UserUpdate::default`] and the `with_` methods, or as a struct
+/// literal, and passed to [`Users::update`]. Every field is optional and an
+/// absent one leaves the stored value alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserUpdate {
+    /// The new display name, or `None` to keep the stored one.
+    pub display_name: Option<String>,
+    /// Whether the account is an administrator, or `None` to keep the stored
+    /// flag.
+    pub is_admin: Option<bool>,
+    /// The new permission flags, or `None` to keep the stored ones.
+    pub permissions: Option<UserPermissions>,
+}
+
+impl UserUpdate {
+    /// Sets the display name.
+    ///
+    /// # Parameters
+    ///
+    /// - `display_name`: the name to show people; a blank string falls back to
+    ///   the account's username.
+    ///
+    /// # Returns
+    ///
+    /// The same update with the display name set.
+    pub fn with_display_name(mut self, display_name: impl Into<String>) -> UserUpdate {
+        self.display_name = Some(display_name.into());
+        self
+    }
+
+    /// Sets whether the account is an administrator.
+    ///
+    /// # Parameters
+    ///
+    /// - `is_admin`: the new flag.
+    ///
+    /// # Returns
+    ///
+    /// The same update with the flag set.
+    pub fn with_is_admin(mut self, is_admin: bool) -> UserUpdate {
+        self.is_admin = Some(is_admin);
+        self
+    }
+
+    /// Sets the permission flags.
+    ///
+    /// # Parameters
+    ///
+    /// - `permissions`: the new flags.
+    ///
+    /// # Returns
+    ///
+    /// The same update with the permissions set.
+    pub fn with_permissions(mut self, permissions: UserPermissions) -> UserUpdate {
+        self.permissions = Some(permissions);
+        self
     }
 }
 
@@ -374,14 +468,14 @@ impl Users {
 
     /// Creates an account.
     ///
-    /// The permission flags are copied from `users.default_permissions` in
-    /// `settings`, and the password is hashed with Argon2id before it is
-    /// stored.
+    /// The permission flags come from [`NewUser::permissions`] when it is set,
+    /// and are otherwise copied from `users.default_permissions` in `settings`.
+    /// The password is hashed with Argon2id before it is stored.
     ///
     /// # Parameters
     ///
     /// - `settings`: the resolved settings snapshot the permissions default
-    ///   from.
+    ///   from; it is not read when the new account carries its own flags.
     /// - `new`: the account's fields.
     ///
     /// # Returns
@@ -415,8 +509,13 @@ impl Users {
             });
         }
 
-        let granted = settings.get(keys::USERS_DEFAULT_PERMISSIONS)?;
-        let permissions = UserPermissions::from_names(&granted);
+        let permissions = match new.permissions {
+            Some(permissions) => permissions,
+            None => {
+                let granted = settings.get(keys::USERS_DEFAULT_PERMISSIONS)?;
+                UserPermissions::from_names(&granted)
+            }
+        };
         let password_hash = password::hash_password(&new.password).await?;
 
         let id = new_uuid_v7();
@@ -559,6 +658,168 @@ impl Users {
         .await?
         .rows_affected();
         Ok(affected > 0)
+    }
+
+    /// Changes an account's display name, admin flag, and permissions.
+    ///
+    /// Every field of `update` is optional: an absent one is left as it was,
+    /// and the row is written once with the resulting values. The whole update
+    /// runs in one write transaction, so a concurrent change cannot be lost
+    /// between the read and the write.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the account to change.
+    /// - `update`: the fields to set.
+    ///
+    /// # Returns
+    ///
+    /// The account as it is stored afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::UnknownUser`] when no account has that id, and
+    /// [`AuthError::Database`] when the read or the write fails.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use hearthsound_auth::{UserUpdate, UserPermissions, Users};
+    ///
+    /// # async fn example(users: &Users, id: uuid::Uuid) -> Result<(), hearthsound_auth::AuthError> {
+    /// let update = UserUpdate::default()
+    ///     .with_display_name("Echo")
+    ///     .with_permissions(UserPermissions { acquire: false, upload: false, download: true });
+    /// let user = users.update(id, &update).await?;
+    /// assert!(!user.can_acquire);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn update(&self, id: Uuid, update: &UserUpdate) -> Result<User, AuthError> {
+        let mut tx = self.writer.begin().await?;
+        let row = sqlx::query_as!(
+            UserRow,
+            "SELECT id, username, display_name, password_hash, is_admin, can_acquire, can_upload, \
+             can_download, created_at, updated_at, disabled_at FROM users WHERE id = ?",
+            id.as_bytes().as_slice()
+        )
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(AuthError::UnknownUser { user_id: id })?;
+        let mut user = row.into_user()?;
+
+        if let Some(display_name) = &update.display_name {
+            let trimmed = display_name.trim();
+            user.display_name = if trimmed.is_empty() {
+                user.username.clone()
+            } else {
+                trimmed.to_owned()
+            };
+        }
+        if let Some(is_admin) = update.is_admin {
+            user.is_admin = is_admin;
+        }
+        if let Some(permissions) = update.permissions {
+            user.can_acquire = permissions.acquire;
+            user.can_upload = permissions.upload;
+            user.can_download = permissions.download;
+        }
+
+        let now = crate::now_millis();
+        sqlx::query!(
+            "UPDATE users SET display_name = ?, is_admin = ?, can_acquire = ?, can_upload = ?, \
+             can_download = ?, updated_at = ? WHERE id = ?",
+            &user.display_name,
+            user.is_admin,
+            user.can_acquire,
+            user.can_upload,
+            user.can_download,
+            now,
+            id.as_bytes().as_slice(),
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        user.updated_at = now;
+        Ok(user)
+    }
+
+    /// Replaces an account's password.
+    ///
+    /// The new password is hashed with Argon2id, so the previous hash is gone
+    /// and cannot be recovered. Sessions and credentials that were issued
+    /// earlier are not touched here; a caller that wants them revoked revokes
+    /// them itself.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the account whose password changes.
+    /// - `password`: the new plaintext password.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` once the hash is stored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::EmptyField`] for an empty password,
+    /// [`AuthError::UnknownUser`] when no account has that id,
+    /// [`AuthError::Password`] or [`AuthError::Join`] when hashing fails, and
+    /// [`AuthError::Database`] when the write fails.
+    pub async fn set_password(&self, id: Uuid, password: &str) -> Result<(), AuthError> {
+        if password.is_empty() {
+            return Err(AuthError::EmptyField { field: "password" });
+        }
+        let password_hash = password::hash_password(password).await?;
+        let now = crate::now_millis();
+        let affected = sqlx::query!(
+            "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
+            password_hash,
+            now,
+            id.as_bytes().as_slice(),
+        )
+        .execute(&self.writer)
+        .await?
+        .rows_affected();
+        if affected == 0 {
+            return Err(AuthError::UnknownUser { user_id: id });
+        }
+        Ok(())
+    }
+
+    /// Enables a disabled account.
+    ///
+    /// The `disabled_at` timestamp is cleared, so the account authenticates
+    /// again; an account that is already enabled is left as it is apart from
+    /// its `updated_at` timestamp.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the account to enable.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` once the account is enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::UnknownUser`] when no account has that id, and
+    /// [`AuthError::Database`] when the write fails.
+    pub async fn enable(&self, id: Uuid) -> Result<(), AuthError> {
+        let now = crate::now_millis();
+        let affected = sqlx::query!(
+            "UPDATE users SET disabled_at = NULL, updated_at = ? WHERE id = ?",
+            now,
+            id.as_bytes().as_slice(),
+        )
+        .execute(&self.writer)
+        .await?
+        .rows_affected();
+        if affected == 0 {
+            return Err(AuthError::UnknownUser { user_id: id });
+        }
+        Ok(())
     }
 }
 
@@ -719,5 +980,165 @@ mod tests {
             );
         }
         assert!("nope".parse::<Permission>().is_err());
+    }
+
+    #[tokio::test]
+    async fn create_honours_explicit_permissions() {
+        let (_dir, db) = database().await;
+        let users = Users::new(&db);
+        let settings = settings(&[]);
+
+        let granted = UserPermissions {
+            acquire: false,
+            upload: false,
+            download: true,
+        };
+        let user = users
+            .create(
+                &settings,
+                &NewUser::new("echo", "Echo", "hunter2", false).with_permissions(granted),
+            )
+            .await
+            .unwrap();
+
+        assert!(!user.can_acquire);
+        assert!(!user.can_upload);
+        assert!(user.can_download);
+        assert_eq!(user.permissions(), granted);
+    }
+
+    #[tokio::test]
+    async fn update_changes_the_named_fields_and_leaves_the_rest() {
+        let (_dir, db) = database().await;
+        let users = Users::new(&db);
+        let settings = settings(&[]);
+        let user = users
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter2", false))
+            .await
+            .unwrap();
+
+        let update = UserUpdate::default()
+            .with_is_admin(true)
+            .with_permissions(UserPermissions {
+                acquire: false,
+                upload: true,
+                download: false,
+            });
+        let updated = users.update(user.id, &update).await.unwrap();
+
+        assert!(updated.is_admin);
+        assert!(!updated.can_acquire);
+        assert!(updated.can_upload);
+        assert!(!updated.can_download);
+        assert_eq!(updated.display_name, "Echo", "the display name is kept");
+        assert_eq!(updated.created_at, user.created_at);
+        assert!(updated.updated_at >= user.updated_at);
+
+        let stored = users.find_by_id(user.id).await.unwrap().unwrap();
+        assert_eq!(stored.permissions(), updated.permissions());
+        assert!(stored.is_admin);
+        assert_eq!(stored.username, "echo");
+
+        let renamed = users
+            .update(
+                user.id,
+                &UserUpdate::default().with_display_name("  Echo  "),
+            )
+            .await
+            .unwrap();
+        assert_eq!(renamed.display_name, "Echo");
+        assert!(renamed.can_upload, "the permissions are untouched");
+
+        let blank = users
+            .update(user.id, &UserUpdate::default().with_display_name("   "))
+            .await
+            .unwrap();
+        assert_eq!(blank.display_name, "echo", "a blank name falls back");
+    }
+
+    #[tokio::test]
+    async fn update_reports_an_unknown_account() {
+        let (_dir, db) = database().await;
+        let users = Users::new(&db);
+
+        let error = users
+            .update(new_uuid_v7(), &UserUpdate::default().with_is_admin(true))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AuthError::UnknownUser { .. }));
+    }
+
+    #[tokio::test]
+    async fn set_password_replaces_the_stored_hash() {
+        let (_dir, db) = database().await;
+        let users = Users::new(&db);
+        let settings = settings(&[]);
+        let user = users
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter2", false))
+            .await
+            .unwrap();
+        let previous = user.password_hash().to_owned();
+
+        users.set_password(user.id, "correct horse").await.unwrap();
+
+        let stored = users.find_by_id(user.id).await.unwrap().unwrap();
+        assert_ne!(stored.password_hash(), previous);
+        assert!(stored.password_hash().starts_with("$argon2id$"));
+        assert!(
+            crate::verify_password("correct horse", stored.password_hash())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !crate::verify_password("hunter2", stored.password_hash())
+                .await
+                .unwrap()
+        );
+        assert!(stored.updated_at >= user.updated_at);
+
+        let error = users.set_password(user.id, "").await.unwrap_err();
+        assert!(matches!(error, AuthError::EmptyField { field: "password" }));
+
+        let error = users
+            .set_password(new_uuid_v7(), "hunter2")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AuthError::UnknownUser { .. }));
+    }
+
+    #[tokio::test]
+    async fn enable_clears_the_disabled_timestamp() {
+        let (_dir, db) = database().await;
+        let users = Users::new(&db);
+        let settings = settings(&[]);
+        let user = users
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter2", false))
+            .await
+            .unwrap();
+
+        assert!(users.disable(user.id).await.unwrap());
+        assert!(
+            users
+                .find_by_id(user.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_disabled()
+        );
+
+        users.enable(user.id).await.unwrap();
+        assert!(
+            !users
+                .find_by_id(user.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_disabled()
+        );
+
+        users.enable(user.id).await.unwrap();
+
+        let error = users.enable(new_uuid_v7()).await.unwrap_err();
+        assert!(matches!(error, AuthError::UnknownUser { .. }));
     }
 }

@@ -47,7 +47,7 @@ pub use subsonic::{
     APP_PASSWORDS_HELP_URL, AuthenticationError, Authenticator, Credential, MIN_SALT_LEN,
     Principal, ResolveError, SubsonicCredentials,
 };
-pub use user::{NewUser, Permission, UnknownPermission, User, UserPermissions, Users};
+pub use user::{NewUser, Permission, UnknownPermission, User, UserPermissions, UserUpdate, Users};
 pub use user_settings::{UserSettingEntry, UserSettings};
 
 /// Returns the current time in unix milliseconds.

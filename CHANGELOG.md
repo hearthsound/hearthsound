@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The schema gains the `sessions` and `user_quotas` tables: opaque web session
   tokens stored as their hash, and the per-user daily acquisition quotas.
+- Accounts can be created with an explicit permission set instead of the
+  `users.default_permissions` copy, and changed afterwards: display name, admin
+  flag and permissions, password, and the disabled state.
 
 ## [0.1.2] - 2026-10-16
 
