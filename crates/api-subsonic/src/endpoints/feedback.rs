@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use hearthsound_acquire::adopt::acquire_saved;
 use hearthsound_activity::Annotation;
+use hearthsound_config::keys;
 use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, IdPrefix};
 use hearthsound_library::{Artist, LibraryRepository};
 use uuid::Uuid;
@@ -396,12 +397,22 @@ pub async fn set_rating(call: Call) -> Encoded {
         Err(error) => return call.encode(Response::failed(error)),
     };
     let user = call.principal().user_id.uuid();
-    match call
+    // A failure to read the setting falls back to its default, which keeps a
+    // rating a rating.
+    let one_is_dislike = call
         .state()
-        .activity()
-        .set_rating(user, kind, id, rating)
-        .await
-    {
+        .settings_snapshot()
+        .get(keys::SUBSONIC_RATING_ONE_IS_DISLIKE)
+        .unwrap_or(false);
+    let activity = call.state().activity();
+    let result = if one_is_dislike {
+        activity
+            .set_rating_counting_dislike(user, kind, id, rating)
+            .await
+    } else {
+        activity.set_rating(user, kind, id, rating).await
+    };
+    match result {
         Ok(()) => call.encode(Response::ok()),
         Err(error) => call.encode(Response::failed(browse::failure("a rating change", &error))),
     }

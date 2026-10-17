@@ -64,6 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Adding a track that is not stored to a playlist acquires it
   (`library.acquire_on_playlist_add`) the same way, through `createPlaylist`
   and `updatePlaylist`.
+- `subsonic.rating_one_is_dislike` makes `setRating` with a rating of 1 record
+  a dislike as well, unless the user likes the entity, and any other rating
+  clears that dislike again.
 
 ## [0.1.2] - 2026-10-16
 

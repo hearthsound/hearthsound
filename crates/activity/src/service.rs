@@ -361,6 +361,50 @@ impl ActivityService {
         ratings::set_rating(&mut conn, user_id, kind, entity_id, rating, now_millis()).await
     }
 
+    /// Sets or clears a rating and lets a rating of one stand for a dislike.
+    ///
+    /// This is the rating `subsonic.rating_one_is_dislike` asks for: rating an
+    /// entity 1 also records a dislike of it, unless the user likes it, and any
+    /// other rating, or clearing the rating, removes a dislike. Artists, albums
+    /// and tracks take a dislike; for any other kind only the rating changes.
+    /// The rating and the dislike are written in one transaction.
+    ///
+    /// # Parameters
+    ///
+    /// - `user_id`: the account whose rating changes.
+    /// - `kind`: the kind of entity that is rated.
+    /// - `entity_id`: the entity's id.
+    /// - `rating`: the rating, 1 to 5, or 0 to clear it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActivityError::InvalidRating`] when `rating` is above
+    /// [`crate::MAX_RATING`], and [`ActivityError::Database`] when a row
+    /// cannot be written.
+    pub async fn set_rating_counting_dislike(
+        &self,
+        user_id: Uuid,
+        kind: EntityKind,
+        entity_id: Uuid,
+        rating: u8,
+    ) -> Result<(), ActivityError> {
+        let at = now_millis();
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+        ratings::set_rating(&mut tx, user_id, kind, entity_id, rating, at).await?;
+        if matches!(
+            kind,
+            EntityKind::Track | EntityKind::Album | EntityKind::Artist
+        ) {
+            if rating == 1 {
+                feedback::dislike_unless_liked(&mut tx, user_id, kind, entity_id, at).await?;
+            } else {
+                feedback::remove_dislike(&mut tx, user_id, kind, entity_id).await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Records likes for the named entities.
     ///
     /// The whole request is one transaction with the pin refresh it implies, so

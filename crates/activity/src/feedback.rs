@@ -7,8 +7,13 @@
 //! `user_library` row names it or its album. An artist like is recorded and
 //! pins nothing, because an artist has no file of its own.
 //!
-//! Nothing here acquires or moves a file. A track that is liked but not stored
-//! stays `remote`; acquisition belongs to the storage policy work.
+//! Nothing here acquires or moves a file: the API layer asks the acquisition
+//! layer for what a user likes, and the storage maintainer moves the files the
+//! pins imply.
+//!
+//! A dislike is the other `user_feedback` value. It pins nothing and never
+//! replaces a like here: a rating of one counts as a dislike only when the
+//! user does not like the entity (`subsonic.rating_one_is_dislike`).
 
 use hearthsound_core::{EntityId, EntityKind, IdPrefix, PinReason};
 use hearthsound_library::retention;
@@ -187,6 +192,84 @@ pub async fn refresh_user_library_pin(
         retention::remove_pin_reason(conn, track_id, PinReason::UserLibrary).await?;
     }
     Ok(wanted)
+}
+
+/// Records a dislike, unless the user likes the entity.
+///
+/// A like is the stronger, explicit signal, so it is left in place; an existing
+/// dislike has its instant refreshed. A dislike pins nothing.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `user_id`: the account that dislikes the entity.
+/// - `kind`: the kind of entity.
+/// - `entity_id`: the entity's id.
+/// - `at`: when the dislike happened, in unix milliseconds.
+///
+/// # Returns
+///
+/// `true` when a dislike is now recorded, `false` when a like kept it out.
+///
+/// # Errors
+///
+/// Returns [`ActivityError::Database`] when the row cannot be written.
+pub async fn dislike_unless_liked(
+    conn: &mut SqliteConnection,
+    user_id: Uuid,
+    kind: EntityKind,
+    entity_id: Uuid,
+    at: i64,
+) -> Result<bool, ActivityError> {
+    let written = sqlx::query!(
+        "INSERT INTO user_feedback (user_id, entity_kind, entity_id, value, at) \
+         VALUES (?, ?, ?, 'dislike', ?) \
+         ON CONFLICT (user_id, entity_kind, entity_id) \
+         DO UPDATE SET at = excluded.at WHERE user_feedback.value = 'dislike'",
+        user_id.as_bytes().as_slice(),
+        kind_literal(kind),
+        entity_id.as_bytes().as_slice(),
+        at,
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(written > 0)
+}
+
+/// Removes a user's dislike of an entity, leaving a like alone.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `user_id`: the account that no longer dislikes the entity.
+/// - `kind`: the kind of entity.
+/// - `entity_id`: the entity's id.
+///
+/// # Returns
+///
+/// `true` when a dislike was removed.
+///
+/// # Errors
+///
+/// Returns [`ActivityError::Database`] when the row cannot be removed.
+pub async fn remove_dislike(
+    conn: &mut SqliteConnection,
+    user_id: Uuid,
+    kind: EntityKind,
+    entity_id: Uuid,
+) -> Result<bool, ActivityError> {
+    let removed = sqlx::query!(
+        "DELETE FROM user_feedback \
+         WHERE user_id = ? AND entity_kind = ? AND entity_id = ? AND value = 'dislike'",
+        user_id.as_bytes().as_slice(),
+        kind_literal(kind),
+        entity_id.as_bytes().as_slice(),
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(removed > 0)
 }
 
 /// Returns the `user_feedback.entity_kind` literal of a kind.

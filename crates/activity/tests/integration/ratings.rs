@@ -145,3 +145,68 @@ async fn a_rating_and_a_like_are_separate() {
     .unwrap();
     assert_eq!(liked, 1, "clearing the rating leaves the like");
 }
+
+/// Returns one user's feedback value for a track, if any.
+async fn stored_feedback(database: &Database, user: Uuid, track: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT value FROM user_feedback WHERE user_id = ? AND entity_id = ?")
+        .bind(user.as_bytes().as_slice())
+        .bind(track.as_bytes().as_slice())
+        .fetch_optional(database.readers())
+        .await
+        .unwrap()
+}
+
+/// With a rating of one counting as a dislike, rating 1 records a dislike for
+/// that user only, a like is never replaced, and another rating clears it.
+#[tokio::test]
+async fn a_one_star_rating_counts_as_a_dislike_of_that_user_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let first = insert_user(&database).await;
+    let second = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+
+    activity
+        .set_rating_counting_dislike(first, EntityKind::Track, tracks[0], 1)
+        .await
+        .unwrap();
+    assert_eq!(stored_rating(&database, first, tracks[0]).await, vec![1]);
+    assert_eq!(
+        stored_feedback(&database, first, tracks[0])
+            .await
+            .as_deref(),
+        Some("dislike")
+    );
+    assert_eq!(stored_feedback(&database, second, tracks[0]).await, None);
+
+    // A like is the stronger signal and stays.
+    activity
+        .star(second, &[(EntityKind::Track, tracks[0])])
+        .await
+        .unwrap();
+    activity
+        .set_rating_counting_dislike(second, EntityKind::Track, tracks[0], 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored_feedback(&database, second, tracks[0])
+            .await
+            .as_deref(),
+        Some("like")
+    );
+
+    // Any other rating clears the dislike, and only the rater's.
+    activity
+        .set_rating_counting_dislike(first, EntityKind::Track, tracks[0], 3)
+        .await
+        .unwrap();
+    assert_eq!(stored_feedback(&database, first, tracks[0]).await, None);
+    assert_eq!(
+        stored_feedback(&database, second, tracks[0])
+            .await
+            .as_deref(),
+        Some("like")
+    );
+}
