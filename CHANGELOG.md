@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--acquisition-bytes-per-day`, and `admin list-users` and `admin update-user`
   list and change an account's name, permissions, quota, password and enabled
   state.
+- Acquisition admission refuses a request over the requester's daily quota: the
+  rolling 24 hours of acquisitions the user started and the bytes of the files
+  they produced are counted before anything is written, while attaching to an
+  acquisition that is already running stays free. A denied request says whether
+  the permission or the quota was the reason, and a stream answers 403 for
+  either.
 
 ## [0.1.2] - 2026-10-16
 

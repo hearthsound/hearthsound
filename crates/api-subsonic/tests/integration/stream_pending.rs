@@ -24,7 +24,7 @@ use hearthsound_acquire::orchestrator::{AcquisitionHandle, AcquisitionProgress};
 use hearthsound_api_subsonic::{PendingOutcome, PendingSource};
 use hearthsound_config::{SettingValue, keys};
 use hearthsound_core::{
-    AcquisitionState, Availability, CatalogId, EntityId, EntityKind, Priority, Slug,
+    AcquisitionState, Availability, CatalogId, EntityId, EntityKind, FailureReason, Priority, Slug,
 };
 use hearthsound_db::Database;
 use hearthsound_library::{
@@ -69,8 +69,8 @@ enum Script {
     Waiting,
     /// The track is cooling down after a failed acquisition.
     CoolingDown,
-    /// The requester may not acquire.
-    Denied,
+    /// The acquisition layer refuses the request for `reason`.
+    Denied(FailureReason),
 }
 
 /// The library write a completing acquisition performs.
@@ -190,7 +190,7 @@ impl PendingSource for FakeSource {
         Ok(match &self.script {
             Script::Available => PendingOutcome::Available,
             Script::CoolingDown => PendingOutcome::CoolingDown,
-            Script::Denied => PendingOutcome::Denied,
+            Script::Denied(reason) => PendingOutcome::Denied { reason: *reason },
             Script::Waiting => {
                 let (handle, sender) = channel(track, AcquisitionState::Downloading);
                 // A dropped sender ends the channel, which a waiter reads as a
@@ -479,7 +479,24 @@ async fn a_cooling_down_track_is_404_and_starts_nothing() {
 
 #[tokio::test]
 async fn a_denied_acquisition_is_403() {
-    let source = FakeSource::new(Script::Denied);
+    let source = FakeSource::new(Script::Denied(FailureReason::PermissionDenied));
+    let fixture = Fixture::with_pending(source).await;
+    let track = pending_track(&fixture).await;
+    let app = fixture.app();
+
+    let response = start(
+        &app,
+        &format!("/rest/stream?id={track}&apiKey={}", fixture.api_key),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(collect(response).await.is_empty());
+}
+
+/// A request over the user's daily quota is refused the same way.
+#[tokio::test]
+async fn an_over_quota_request_is_403() {
+    let source = FakeSource::new(Script::Denied(FailureReason::QuotaExceeded));
     let fixture = Fixture::with_pending(source).await;
     let track = pending_track(&fixture).await;
     let app = fixture.app();

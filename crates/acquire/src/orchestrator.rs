@@ -71,13 +71,19 @@ const SCHEDULER_TICK: Duration = Duration::from_secs(1);
 /// attempts.
 const RESUME_SLOT_WAIT: Duration = Duration::from_millis(100);
 
+/// The window a user's acquisition quota is counted over.
+///
+/// It is a rolling day: the acquisitions the user started in the 24 hours
+/// before a request are what the request is judged against.
+const QUOTA_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+
 /// A request for a track that is not on disk.
 ///
 /// The request carries everything admission decides on: what to acquire, how
-/// urgent it is, who asked, whether that caller may acquire at all, and whether
-/// a cooldown should be ignored. Quotas are not part of admission yet; when they
-/// arrive they belong here, next to `can_acquire`, because both are decided
-/// before any search starts.
+/// urgent it is, who asked, whether that caller may acquire at all, whether the
+/// caller is within its daily quota, and whether a cooldown should be ignored.
+/// The quota is read from `user_quotas` for `requested_by`, next to the
+/// permission check, because both are decided before any search starts.
 ///
 /// # Examples
 ///
@@ -240,12 +246,16 @@ pub enum AcquireOutcome {
         /// milliseconds.
         unavailable_until: i64,
     },
-    /// The requester may not acquire.
+    /// The request was refused before anything happened.
     ///
-    /// Nothing was written: a denied request leaves no trace in the ledger.
+    /// Nothing was searched, admitted or written: a denied request leaves no
+    /// trace in the ledger, which is also what the quota count relies on.
     Denied {
         /// The track the request named.
         track_id: EntityId,
+        /// Why the request was refused: the requester lacks the `can_acquire`
+        /// permission, or it has spent its daily acquisition quota.
+        reason: FailureReason,
     },
     /// A new acquisition was admitted.
     Started(AcquisitionHandle),
@@ -726,6 +736,12 @@ impl AcquisitionOrchestrator {
     /// same track that arrive together cannot both create a job: the second sees
     /// the first's row and joins it.
     ///
+    /// A request is refused before anything is written when the caller may not
+    /// acquire, or when it has spent the daily quota its `user_quotas` row sets.
+    /// Joining an acquisition that is already running is decided first and
+    /// costs nothing: a caller that is already watching a job is never turned
+    /// away by a quota it may have spent since.
+    ///
     /// # Parameters
     ///
     /// - `request`: what to acquire and on whose behalf.
@@ -733,7 +749,7 @@ impl AcquisitionOrchestrator {
     /// # Returns
     ///
     /// The outcome: the track is already available, an existing acquisition was
-    /// joined, the track is cooling down, the caller may not acquire, or a new
+    /// joined, the track is cooling down, the request was denied, or a new
     /// acquisition was admitted. The last one has created the acquisition's
     /// staging directory, marked the track `acquiring`, and published both the
     /// `acquisition.updated` and the `track.availability` event.
@@ -741,7 +757,8 @@ impl AcquisitionOrchestrator {
     /// # Errors
     ///
     /// Returns [`AcquireError::UnknownTrack`] when the id has no `tracks` row,
-    /// and the database, settings or filesystem error that stopped admission.
+    /// and the database, settings, quota or filesystem error that stopped
+    /// admission.
     pub async fn request(&self, request: AcquireRequest) -> Result<AcquireOutcome, AcquireError> {
         if !request.can_acquire {
             tracing::debug!(
@@ -751,6 +768,7 @@ impl AcquisitionOrchestrator {
             );
             return Ok(AcquireOutcome::Denied {
                 track_id: request.track_id,
+                reason: FailureReason::PermissionDenied,
             });
         }
 
@@ -768,30 +786,7 @@ impl AcquisitionOrchestrator {
             return Ok(AcquireOutcome::AlreadyAvailable { track_id: track.id });
         }
 
-        if !request.force && track.availability == Availability::Unavailable {
-            let until = track.unavailable_until.unwrap_or(0);
-            if until > crate::now_millis() {
-                tracing::debug!(
-                    track = %track.id,
-                    unavailable_until = until,
-                    "refused an acquire request while the track cools down"
-                );
-                return Ok(AcquireOutcome::CoolingDown {
-                    track_id: track.id,
-                    unavailable_until: until,
-                });
-            }
-        }
-
         let id = new_uuid_v7();
-        let staging = self.staging_dir(id);
-        tokio::fs::create_dir_all(&staging)
-            .await
-            .map_err(|source| AcquireError::Io {
-                path: staging.clone(),
-                source,
-            })?;
-
         let mut tx = self.inner.database.writer().begin().await?;
         if let Some(active) = repo::active_for_track(&mut tx, track.id).await? {
             let priority = active.priority.min(request.priority);
@@ -801,9 +796,6 @@ impl AcquisitionOrchestrator {
                 false
             };
             tx.commit().await?;
-            // The directory belongs to an acquisition that was not created, so
-            // it is removed rather than left behind empty.
-            let _ = tokio::fs::remove_dir_all(&staging).await;
             if raised {
                 tracing::debug!(
                     acquisition = %active.id,
@@ -823,6 +815,44 @@ impl AcquisitionOrchestrator {
             self.stop_signal(active.id);
             return Ok(AcquireOutcome::Joined(handle));
         }
+
+        if let Some(reason) = self.quota_denial(&mut tx, &request).await? {
+            tracing::debug!(
+                track = %track.id,
+                user = ?request.requested_by,
+                reason = reason.as_str(),
+                "refused an acquire request over the requester's quota"
+            );
+            return Ok(AcquireOutcome::Denied {
+                track_id: track.id,
+                reason,
+            });
+        }
+
+        if !request.force && track.availability == Availability::Unavailable {
+            let until = track.unavailable_until.unwrap_or(0);
+            if until > crate::now_millis() {
+                tracing::debug!(
+                    track = %track.id,
+                    unavailable_until = until,
+                    "refused an acquire request while the track cools down"
+                );
+                return Ok(AcquireOutcome::CoolingDown {
+                    track_id: track.id,
+                    unavailable_until: until,
+                });
+            }
+        }
+
+        // The directory belongs to an acquisition that is admitted here, so it
+        // is created only once every earlier refusal is behind us.
+        let staging = self.staging_dir(id);
+        tokio::fs::create_dir_all(&staging)
+            .await
+            .map_err(|source| AcquireError::Io {
+                path: staging.clone(),
+                source,
+            })?;
 
         let new = NewAcquisition {
             id,
@@ -875,6 +905,63 @@ impl AcquisitionOrchestrator {
         self.publish_availability(track.id, Availability::Acquiring, None);
         self.notify_work();
         Ok(AcquireOutcome::Started(handle))
+    }
+
+    /// Reports whether a request exceeds the requester's daily quota.
+    ///
+    /// The window is the rolling [`QUOTA_WINDOW_MS`] before now. It counts the
+    /// acquisitions the user started in that window and the bytes of the files
+    /// those acquisitions produced, because a request that attaches to an
+    /// acquisition someone else started writes no row of its own and so costs
+    /// the caller nothing.
+    ///
+    /// A request with no user behind it - the server's own work - a user with no
+    /// `user_quotas` row, and a user whose quotas are unlimited are never
+    /// refused. Administrators are not exempt; they simply have no row unless
+    /// one is written for them.
+    ///
+    /// # Parameters
+    ///
+    /// - `conn`: the write transaction admission holds, so the count and the
+    ///   admission that follows it cannot race another request from the same
+    ///   user.
+    /// - `request`: the request to judge.
+    ///
+    /// # Returns
+    ///
+    /// [`FailureReason::QuotaExceeded`] when the request is over quota, and
+    /// `None` when it may proceed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::Quota`] when the stored quota cannot be read and
+    /// [`AcquireError::Database`] when the count fails.
+    async fn quota_denial(
+        &self,
+        conn: &mut SqliteConnection,
+        request: &AcquireRequest,
+    ) -> Result<Option<FailureReason>, AcquireError> {
+        let Some(user) = request.requested_by else {
+            return Ok(None);
+        };
+        let quota = hearthsound_auth::quotas::read(conn, user).await?;
+        if quota.is_unlimited() {
+            return Ok(None);
+        }
+
+        let since = crate::now_millis() - QUOTA_WINDOW_MS;
+        let (count, bytes) = repo::admitted_since(conn, user, since).await?;
+        let bytes = u64::try_from(bytes).unwrap_or(0);
+        let over_count = quota
+            .acquisitions_per_day
+            .is_some_and(|limit| count >= i64::from(limit));
+        let over_bytes = quota
+            .acquisition_bytes_per_day
+            .is_some_and(|limit| bytes >= limit);
+        if over_count || over_bytes {
+            return Ok(Some(FailureReason::QuotaExceeded));
+        }
+        Ok(None)
     }
 
     /// Admits or joins one acquisition per track of an album.

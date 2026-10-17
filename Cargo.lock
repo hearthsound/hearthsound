@@ -1537,6 +1537,7 @@ name = "hearthsound-acquire"
 version = "0.1.2"
 dependencies = [
  "governor",
+ "hearthsound-auth",
  "hearthsound-catalog",
  "hearthsound-config",
  "hearthsound-core",

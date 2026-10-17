@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 governor.workspace = true
+hearthsound-auth = { path = "../auth" }
 hearthsound-catalog = { path = "../catalog" }
 hearthsound-config = { path = "../config" }
 hearthsound-core = { path = "../core" }

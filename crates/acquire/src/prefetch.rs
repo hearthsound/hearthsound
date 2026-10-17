@@ -825,10 +825,11 @@ impl PrefetchScheduler {
             Ok(AcquireOutcome::CoolingDown { .. }) => {
                 tracing::debug!(track = %track, "an upcoming track is cooling down");
             }
-            Ok(AcquireOutcome::Denied { .. }) => {
+            Ok(AcquireOutcome::Denied { reason, .. }) => {
                 tracing::debug!(
                     track = %track,
                     user = %user,
+                    reason = reason.as_str(),
                     "a prefetch request was denied"
                 );
             }

@@ -84,7 +84,7 @@ use hearthsound_activity::{AudioDelivered, StreamSessions};
 use hearthsound_catalog::{CatalogError, CatalogService};
 use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingKey, SettingType, SettingsStore, keys};
-use hearthsound_core::{ClientId, EntityId, IdPrefix, Priority};
+use hearthsound_core::{ClientId, EntityId, FailureReason, IdPrefix, Priority};
 use hearthsound_db::Database;
 use hearthsound_library::query::{self, PreferredFile};
 use hearthsound_library::{LibraryError, MediaFile, StorageRoots, tracks};
@@ -586,8 +586,12 @@ impl StreamService {
                 );
                 Err(StreamError::NotFound)
             }
-            PendingOutcome::Denied => {
-                tracing::debug!(track = %track, "the acquisition layer denied a pending stream");
+            PendingOutcome::Denied { reason } => {
+                tracing::debug!(
+                    track = %track,
+                    reason = reason.as_str(),
+                    "the acquisition layer denied a pending stream"
+                );
                 Err(StreamError::Forbidden)
             }
             PendingOutcome::Pending(handle) => self.serve_pending(request, track, handle).await,
@@ -1021,8 +1025,15 @@ pub enum PendingOutcome {
     Pending(AcquisitionHandle),
     /// The track failed recently and cannot be retried until its cooldown ends.
     CoolingDown,
-    /// The requester may not acquire.
-    Denied,
+    /// The acquisition layer refused the request.
+    ///
+    /// The reason says whether the requester lacks the `can_acquire` permission
+    /// or has spent its daily acquisition quota; a stream answers `403` for
+    /// both, because either way it cannot hand the client a file.
+    Denied {
+        /// Why the request was refused.
+        reason: FailureReason,
+    },
 }
 
 #[async_trait]
@@ -1048,7 +1059,7 @@ impl PendingSource for AcquisitionOrchestrator {
                 PendingOutcome::Pending(handle)
             }
             AcquireOutcome::CoolingDown { .. } => PendingOutcome::CoolingDown,
-            AcquireOutcome::Denied { .. } => PendingOutcome::Denied,
+            AcquireOutcome::Denied { reason, .. } => PendingOutcome::Denied { reason },
         })
     }
 }

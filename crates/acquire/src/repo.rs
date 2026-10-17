@@ -333,6 +333,54 @@ pub async fn active_for_track(
     row.map(AcquisitionDbRow::decode).transpose()
 }
 
+/// Counts the acquisitions a user started in a window and the bytes they hold.
+///
+/// This is what a quota is judged against: [`admitted_since`] counts the rows
+/// the user's own requests created, so joining someone else's acquisition - which
+/// writes no row - costs the caller nothing, and a refused request - which
+/// writes nothing at all - is not counted either.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `user`: the account whose acquisitions to count.
+/// - `since`: the start of the window, in unix milliseconds; a row created
+///   exactly then is counted.
+///
+/// # Returns
+///
+/// The number of acquisitions and the total size in bytes of the media files
+/// they produced, which is zero for an acquisition that has not imported yet.
+///
+/// # Errors
+///
+/// Returns [`AcquireError::Database`] when the read fails.
+pub async fn admitted_since(
+    conn: &mut SqliteConnection,
+    user: Uuid,
+    since: i64,
+) -> Result<(i64, i64), AcquireError> {
+    let count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM acquisitions WHERE requested_by = ? AND created_at >= ?",
+        uuid_key(user),
+        since,
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+
+    let bytes: i64 = sqlx::query_scalar!(
+        "SELECT COALESCE(SUM(m.size), 0) FROM media_files m \
+         WHERE m.acquisition_id IN (SELECT id FROM acquisitions \
+                                    WHERE requested_by = ? AND created_at >= ?)",
+        uuid_key(user),
+        since,
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+
+    Ok((count, bytes))
+}
+
 /// Reads the acquisition that runs next.
 ///
 /// The queue is ordered by priority, most urgent first, and then by age, so a

@@ -159,7 +159,10 @@ async fn records_nothing_when_the_requester_may_not_acquire() {
         .await
         .unwrap();
     match denied {
-        AcquireOutcome::Denied { track_id } => assert_eq!(track_id, track),
+        AcquireOutcome::Denied { track_id, reason } => {
+            assert_eq!(track_id, track);
+            assert_eq!(reason, FailureReason::PermissionDenied);
+        }
         other => panic!("the request must be denied, got {other:?}"),
     }
     assert_eq!(env.acquisitions_for(track).await, 0);
@@ -468,4 +471,214 @@ async fn allows_a_new_search_after_the_cooldown_elapsed() {
 fn now_millis() -> i64 {
     let nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
     (nanos / 1_000_000) as i64
+}
+
+/// Sets one user's acquisition quota.
+///
+/// # Parameters
+///
+/// - `env`: the environment whose database the row is written to.
+/// - `user`: the account the quota belongs to.
+/// - `quota`: the limits to store.
+async fn set_quota(env: &Env, user: uuid::Uuid, quota: hearthsound_auth::UserQuota) {
+    hearthsound_auth::Quotas::new(&env.database)
+        .set(user, &quota)
+        .await
+        .unwrap();
+}
+
+/// Requests a track on a user's behalf.
+///
+/// # Parameters
+///
+/// - `env`: the environment to request in.
+/// - `track`: the track to acquire.
+/// - `user`: the account the request is made for.
+async fn request_for(
+    env: &Env,
+    track: hearthsound_core::EntityId,
+    user: uuid::Uuid,
+) -> AcquireOutcome {
+    env.orchestrator
+        .request(
+            AcquireRequest::new(track, Priority::Play, "user request")
+                .with_requested_by(Some(user)),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn refuses_a_request_over_the_daily_count_quota() {
+    let env = Env::normal(&[]).await;
+    let user = env.add_user().await;
+    set_quota(
+        &env,
+        user,
+        hearthsound_auth::UserQuota {
+            acquisitions_per_day: Some(1),
+            acquisition_bytes_per_day: None,
+        },
+    )
+    .await;
+    let first = env.remote_track("Hello Song", "Hello Artist").await;
+    let second = env.remote_track("Other Song", "Hello Artist").await;
+
+    let outcome = request_for(&env, first, user).await;
+    assert!(
+        matches!(outcome, AcquireOutcome::Started(_)),
+        "the first request is within the quota, got {outcome:?}"
+    );
+
+    let staging_before = env.staging.read_dir().unwrap().count();
+    let denied = request_for(&env, second, user).await;
+    match denied {
+        AcquireOutcome::Denied { track_id, reason } => {
+            assert_eq!(track_id, second);
+            assert_eq!(reason, FailureReason::QuotaExceeded);
+        }
+        other => panic!("the second request is over the quota, got {other:?}"),
+    }
+
+    assert_eq!(env.acquisitions_for(second).await, 0, "nothing was written");
+    assert_eq!(env.track(second).await.availability, Availability::Remote);
+    assert_eq!(
+        env.staging.read_dir().unwrap().count(),
+        staging_before,
+        "a denied request leaves no staging directory"
+    );
+    assert_eq!(
+        env.searches_started(crate::common::INSTANCE).await,
+        0,
+        "no search was started for the denied track"
+    );
+}
+
+#[tokio::test]
+async fn joining_an_active_acquisition_is_not_counted() {
+    let env = Env::normal(&[]).await;
+    let user = env.add_user().await;
+    set_quota(
+        &env,
+        user,
+        hearthsound_auth::UserQuota {
+            acquisitions_per_day: Some(1),
+            acquisition_bytes_per_day: None,
+        },
+    )
+    .await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    let other = env.remote_track("Other Song", "Hello Artist").await;
+
+    let started = request_for(&env, track, user).await;
+    assert!(
+        matches!(started, AcquireOutcome::Started(_)),
+        "the first request is admitted, got {started:?}"
+    );
+
+    let joined = request_for(&env, track, user).await;
+    assert!(
+        matches!(joined, AcquireOutcome::Joined(_)),
+        "attaching to a running acquisition costs the caller nothing, got {joined:?}"
+    );
+    assert_eq!(env.acquisitions_for(track).await, 1);
+
+    let denied = request_for(&env, other, user).await;
+    assert!(
+        matches!(denied, AcquireOutcome::Denied { .. }),
+        "the joining request did not spend the quota, got {denied:?}"
+    );
+}
+
+#[tokio::test]
+async fn refuses_a_request_over_the_daily_byte_quota() {
+    let env = Env::normal(&[]).await;
+    let user = env.add_user().await;
+    set_quota(
+        &env,
+        user,
+        hearthsound_auth::UserQuota {
+            acquisitions_per_day: None,
+            acquisition_bytes_per_day: Some(1_000_000),
+        },
+    )
+    .await;
+    let first = env.remote_track("Hello Song", "Hello Artist").await;
+    let second = env.remote_track("Other Song", "Hello Artist").await;
+
+    let started = request_for(&env, first, user).await;
+    let AcquireOutcome::Started(handle) = started else {
+        panic!("an acquisition with no file yet is within the byte quota, got {started:?}");
+    };
+    assert_eq!(env.acquisitions_for(first).await, 1);
+
+    // The file an acquisition produces is what the byte quota counts, so the
+    // row is written the way an import writes it.
+    sqlx::query(
+        "INSERT INTO media_files (id, track_id, storage, rel_path, size, mtime_ms, added_at,
+                                  acquisition_id)
+         VALUES (?, ?, 'library', 'Hello Artist/Hello Song.flac', 2000000, 0, 0, ?)",
+    )
+    .bind(uuid::Uuid::now_v7().as_bytes().as_slice())
+    .bind(first.uuid().as_bytes().as_slice())
+    .bind(handle.id.as_bytes().as_slice())
+    .execute(env.database.writer())
+    .await
+    .unwrap();
+
+    let denied = request_for(&env, second, user).await;
+    match denied {
+        AcquireOutcome::Denied { track_id, reason } => {
+            assert_eq!(track_id, second);
+            assert_eq!(reason, FailureReason::QuotaExceeded);
+        }
+        other => panic!("the produced file puts the user over the byte quota, got {other:?}"),
+    }
+    assert_eq!(env.acquisitions_for(second).await, 0);
+}
+
+#[tokio::test]
+async fn a_user_without_a_quota_is_unlimited_and_the_window_moves() {
+    let env = Env::normal(&[]).await;
+    let user = env.add_user().await;
+    let first = env.remote_track("Hello Song", "Hello Artist").await;
+    let second = env.remote_track("Other Song", "Hello Artist").await;
+    let third = env.remote_track("Third Song", "Hello Artist").await;
+
+    for track in [first, second] {
+        let outcome = request_for(&env, track, user).await;
+        assert!(
+            matches!(outcome, AcquireOutcome::Started(_)),
+            "a user with no quota row is unlimited, got {outcome:?}"
+        );
+    }
+
+    // One acquisition inside the window uses the single admitted request up,
+    // and one started more than a day ago does not count any more.
+    set_quota(
+        &env,
+        user,
+        hearthsound_auth::UserQuota {
+            acquisitions_per_day: Some(1),
+            acquisition_bytes_per_day: None,
+        },
+    )
+    .await;
+    let denied = request_for(&env, third, user).await;
+    assert!(
+        matches!(denied, AcquireOutcome::Denied { .. }),
+        "two acquisitions in the window are over a limit of one, got {denied:?}"
+    );
+
+    sqlx::query("UPDATE acquisitions SET created_at = ? WHERE requested_by = ?")
+        .bind(now_millis() - 25 * 60 * 60 * 1000)
+        .bind(user.as_bytes().as_slice())
+        .execute(env.database.writer())
+        .await
+        .unwrap();
+    let outcome = request_for(&env, third, user).await;
+    assert!(
+        matches!(outcome, AcquireOutcome::Started(_)),
+        "an acquisition that aged out of the window is not counted, got {outcome:?}"
+    );
 }

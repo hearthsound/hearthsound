@@ -34,7 +34,7 @@ mod api_key;
 mod app_password;
 mod error;
 mod password;
-mod quotas;
+pub mod quotas;
 mod rate_limit;
 mod session;
 mod subsonic;

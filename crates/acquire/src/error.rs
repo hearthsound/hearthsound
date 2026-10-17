@@ -14,6 +14,9 @@ pub enum AcquireError {
     /// A library read or write failed.
     #[error(transparent)]
     Library(#[from] hearthsound_library::LibraryError),
+    /// The requester's acquisition quota could not be read.
+    #[error(transparent)]
+    Quota(#[from] hearthsound_auth::AuthError),
     /// A media task failed.
     #[error(transparent)]
     Media(#[from] hearthsound_media::MediaError),

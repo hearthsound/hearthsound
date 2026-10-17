@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COALESCE(SUM(m.size), 0) FROM media_files m WHERE m.acquisition_id IN (SELECT id FROM acquisitions WHERE requested_by = ? AND created_at >= ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "COALESCE(SUM(m.size), 0)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1b1029ae27bf6275984e8f02d848b17d5d515c8cb2b5b83d3eac7eb1c95e8098"
+}
