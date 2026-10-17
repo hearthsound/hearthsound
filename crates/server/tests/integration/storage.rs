@@ -78,20 +78,24 @@ async fn unstarring_a_liked_track_demotes_its_file_into_the_cache() {
     assert_eq!(response.status(), StatusCode::OK);
     assert!(response.text().await.unwrap().contains("\"status\":\"ok\""));
 
+    // The file moves first and its row follows, so the demotion is complete
+    // once the row says the file is in the cache.
+    let library = LibraryRepository::new(fixture.services.database());
     let deadline = tokio::time::Instant::now() + PATIENCE;
-    while !roots.cache.join(rel_path).is_file() {
+    loop {
+        let files = library.list_media_files_for_track(track).await.unwrap();
+        if files.iter().any(|file| file.storage == StorageClass::Cache) {
+            break;
+        }
         assert!(
             tokio::time::Instant::now() < deadline,
             "the file was not demoted within {PATIENCE:?}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    assert!(roots.cache.join(rel_path).is_file());
     assert!(!roots.library.join(rel_path).exists());
-    let stored = LibraryRepository::new(fixture.services.database())
-        .get_track(track)
-        .await
-        .unwrap()
-        .unwrap();
+    let stored = library.get_track(track).await.unwrap().unwrap();
     assert_eq!(stored.availability, Availability::Cached);
     fixture.stop().await;
 }
