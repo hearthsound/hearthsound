@@ -86,6 +86,10 @@ pub struct AdminArgs {
 pub enum AdminCommand {
     /// Create an account.
     CreateUser(CreateUserArgs),
+    /// List the accounts.
+    ListUsers,
+    /// Change an account.
+    UpdateUser(UpdateUserArgs),
     /// Create an API key for an account.
     CreateApiKey(CreateCredentialArgs),
     /// Create an app password for an account.
@@ -108,7 +112,64 @@ pub struct CreateUserArgs {
     /// The name shown to people. Defaults to the login name.
     #[arg(long, value_name = "NAME")]
     pub display_name: Option<String>,
+    /// The permissions to grant, as a comma-separated list of `acquire`,
+    /// `upload` and `download`.
+    ///
+    /// An empty list grants none. Without the flag the account gets the
+    /// `users.default_permissions` setting.
+    #[arg(long, value_name = "LIST")]
+    pub permissions: Option<String>,
+    /// How many acquisitions the account may start per day.
+    ///
+    /// Without it the account has no acquisition limit.
+    #[arg(long, value_name = "N")]
+    pub acquisitions_per_day: Option<u32>,
+    /// How many bytes the account's acquisitions may account for per day.
+    ///
+    /// Without it the account has no byte limit.
+    #[arg(long, value_name = "N")]
+    pub acquisition_bytes_per_day: Option<u64>,
     /// Read the password from standard input instead of prompting twice.
+    ///
+    /// One line is read, without its trailing newline, so a password may contain
+    /// spaces.
+    #[arg(long)]
+    pub password_stdin: bool,
+}
+
+/// The arguments of `admin update-user`.
+#[derive(Debug, Args)]
+pub struct UpdateUserArgs {
+    /// The login name of the account to change.
+    #[arg(long, value_name = "USERNAME")]
+    pub user: String,
+    /// The new name shown to people.
+    #[arg(long, value_name = "NAME")]
+    pub display_name: Option<String>,
+    /// Whether the account administers the server.
+    #[arg(long, value_name = "true|false", action = ArgAction::Set)]
+    pub admin: Option<bool>,
+    /// The permissions to grant, as a comma-separated list of `acquire`,
+    /// `upload` and `download`. An empty list grants none.
+    #[arg(long, value_name = "LIST")]
+    pub permissions: Option<String>,
+    /// The new daily acquisition limit, or `none` for no limit.
+    ///
+    /// Without the flag the stored limit is kept.
+    #[arg(long, value_name = "N|none")]
+    pub acquisitions_per_day: Option<String>,
+    /// The new daily byte limit, or `none` for no limit.
+    ///
+    /// Without the flag the stored limit is kept.
+    #[arg(long, value_name = "N|none")]
+    pub acquisition_bytes_per_day: Option<String>,
+    /// Disable the account, which keeps its data but refuses its logins.
+    #[arg(long, conflicts_with = "enable")]
+    pub disable: bool,
+    /// Enable an account that was disabled.
+    #[arg(long)]
+    pub enable: bool,
+    /// Read a new password from standard input instead of prompting twice.
     ///
     /// One line is read, without its trailing newline, so a password may contain
     /// spaces.

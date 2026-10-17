@@ -959,3 +959,278 @@ async fn acquisitions_lists_and_cancels_an_acquisition() {
         stderr(&wrong_kind)
     );
 }
+
+/// `admin create-user` stores an explicit permission set and a quota, and
+/// `admin list-users` reports both.
+///
+/// The account is created without `acquire`, which is the permission a stream
+/// checks before it asks the acquisition layer for a track.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_user_stores_permissions_and_a_quota() {
+    let sandbox = Sandbox::new("");
+
+    let created = succeeded(&sandbox.run_with_stdin(
+        &[
+            "admin",
+            "create-user",
+            "--username",
+            "listener",
+            "--display-name",
+            "Listener",
+            "--permissions",
+            "download",
+            "--acquisitions-per-day",
+            "5",
+            "--acquisition-bytes-per-day",
+            "1073741824",
+            "--password-stdin",
+        ],
+        "hunter2\n",
+    ));
+    assert!(
+        created.contains("created standard account `listener`"),
+        "{created}"
+    );
+    assert!(created.contains("permissions=download"), "{created}");
+
+    let config = bootstrap_config(&sandbox);
+    let database = hearthsound_db::Database::open(&config.database.path)
+        .await
+        .unwrap();
+    let user = hearthsound_auth::Users::new(&database)
+        .find_by_username("listener")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(user.display_name, "Listener");
+    assert!(!user.is_admin);
+    assert!(
+        !user.can_acquire,
+        "the account was created without the acquire permission"
+    );
+    assert!(!user.can_upload);
+    assert!(user.can_download);
+
+    let quota = hearthsound_auth::Quotas::new(&database)
+        .get(user.id)
+        .await
+        .unwrap();
+    assert_eq!(quota.acquisitions_per_day, Some(5));
+    assert_eq!(quota.acquisition_bytes_per_day, Some(1_073_741_824));
+
+    let listed = succeeded(&sandbox.run(&["admin", "list-users"]));
+    assert!(
+        listed.contains(
+            "username=listener admin=no permissions=download acquisitions-per-day=5 \
+             acquisition-bytes-per-day=1073741824 state=enabled"
+        ),
+        "{listed}"
+    );
+    assert!(listed.contains("1 account(s)"), "{listed}");
+
+    // An empty list grants nothing, and no quota flag leaves the account
+    // unlimited.
+    succeeded(&sandbox.run_with_stdin(
+        &[
+            "admin",
+            "create-user",
+            "--username",
+            "guest",
+            "--permissions",
+            "",
+            "--password-stdin",
+        ],
+        "hunter2\n",
+    ));
+    let listed = succeeded(&sandbox.run(&["admin", "list-users"]));
+    assert!(
+        listed.contains(
+            "username=guest admin=no permissions=none acquisitions-per-day=unlimited \
+             acquisition-bytes-per-day=unlimited state=enabled"
+        ),
+        "{listed}"
+    );
+
+    // A permission this server has no notion of is refused, and nothing is
+    // created.
+    let refused = sandbox.run_with_stdin(
+        &[
+            "admin",
+            "create-user",
+            "--username",
+            "typo",
+            "--permissions",
+            "acquire,fly",
+            "--password-stdin",
+        ],
+        "hunter2\n",
+    );
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        stderr(&refused).contains("`fly` is not one of acquire, upload, download"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(
+        hearthsound_auth::Users::new(&database)
+            .find_by_username("typo")
+            .await
+            .unwrap()
+            .is_none(),
+        "the refused account was not created"
+    );
+}
+
+/// `admin update-user` changes permissions, the admin flag, the password, the
+/// quota, and the enabled state, and `--acquisitions-per-day none` clears one
+/// dimension of the quota.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_user_changes_an_account() {
+    let sandbox = Sandbox::new("");
+    succeeded(&sandbox.run_with_stdin(
+        &[
+            "admin",
+            "create-user",
+            "--username",
+            "listener",
+            "--password-stdin",
+            "--acquisitions-per-day",
+            "2",
+        ],
+        "hunter2\n",
+    ));
+
+    let updated = succeeded(&sandbox.run_with_stdin(
+        &[
+            "admin",
+            "update-user",
+            "--user",
+            "listener",
+            "--display-name",
+            "Listener",
+            "--admin",
+            "true",
+            "--permissions",
+            "acquire,upload",
+            "--acquisitions-per-day",
+            "none",
+            "--password-stdin",
+        ],
+        "correct horse\n",
+    ));
+    assert!(updated.contains("updated account `listener`"), "{updated}");
+    assert!(updated.contains("admin=yes"), "{updated}");
+    assert!(updated.contains("permissions=acquire,upload"), "{updated}");
+    assert!(
+        updated.contains("acquisitions-per-day=unlimited"),
+        "{updated}"
+    );
+
+    let config = bootstrap_config(&sandbox);
+    let database = hearthsound_db::Database::open(&config.database.path)
+        .await
+        .unwrap();
+    let user = hearthsound_auth::Users::new(&database)
+        .find_by_username("listener")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(user.display_name, "Listener");
+    assert!(user.is_admin);
+    assert!(user.can_acquire && user.can_upload);
+    assert!(!user.can_download);
+    assert!(
+        hearthsound_auth::verify_password("correct horse", user.password_hash())
+            .await
+            .unwrap(),
+        "the new password is stored"
+    );
+    assert!(
+        !hearthsound_auth::verify_password("hunter2", user.password_hash())
+            .await
+            .unwrap(),
+        "the old password is gone"
+    );
+    let quota = hearthsound_auth::Quotas::new(&database)
+        .get(user.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        quota.acquisitions_per_day, None,
+        "the count limit is cleared"
+    );
+    assert_eq!(quota.acquisition_bytes_per_day, None);
+
+    // Setting one dimension leaves the other alone.
+    let limited = succeeded(&sandbox.run(&[
+        "admin",
+        "update-user",
+        "--user",
+        "listener",
+        "--acquisition-bytes-per-day",
+        "1024",
+    ]));
+    assert!(
+        limited.contains("acquisition-bytes-per-day=1024"),
+        "{limited}"
+    );
+    assert!(
+        limited.contains("acquisitions-per-day=unlimited"),
+        "{limited}"
+    );
+
+    // Disabling keeps the account and its data and is reported by the listing.
+    let disabled =
+        succeeded(&sandbox.run(&["admin", "update-user", "--user", "listener", "--disable"]));
+    assert!(disabled.contains("state=disabled"), "{disabled}");
+    let listed = succeeded(&sandbox.run(&["admin", "list-users"]));
+    assert!(listed.contains("username=listener"), "{listed}");
+    assert!(listed.contains("state=disabled"), "{listed}");
+
+    let enabled =
+        succeeded(&sandbox.run(&["admin", "update-user", "--user", "listener", "--enable"]));
+    assert!(enabled.contains("state=enabled"), "{enabled}");
+
+    let missing = sandbox.run(&["admin", "update-user", "--user", "nobody", "--enable"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(stderr(&missing).contains("nobody"), "{}", stderr(&missing));
+
+    let refused = sandbox.run(&[
+        "admin",
+        "update-user",
+        "--user",
+        "listener",
+        "--acquisitions-per-day",
+        "3,5",
+    ]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        stderr(&refused).contains("is not a number or `none`"),
+        "{}",
+        stderr(&refused)
+    );
+
+    let conflicting = sandbox.run(&[
+        "admin",
+        "update-user",
+        "--user",
+        "listener",
+        "--disable",
+        "--enable",
+    ]);
+    assert_eq!(conflicting.status.code(), Some(2));
+}
+
+/// `admin list-users` answers an empty list on a fresh installation.
+#[test]
+fn list_users_is_empty_on_a_fresh_installation() {
+    let sandbox = Sandbox::new("");
+
+    let listed = succeeded(&sandbox.run(&["admin", "list-users"]));
+
+    assert_eq!(
+        listed.lines().last().unwrap_or_default(),
+        "0 account(s)",
+        "{listed}"
+    );
+}

@@ -9,13 +9,16 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context as _, bail};
-use hearthsound_auth::{ApiKeys, AppPasswords, NewUser, Users};
+use hearthsound_auth::{
+    ApiKeys, AppPasswords, NewUser, Permission, Quotas, UserPermissions, UserQuota, UserUpdate,
+    Users,
+};
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_library::LibraryRepository;
 
 use crate::cli::{
     AddFolderArgs, AdminArgs, AdminCommand, CreateCredentialArgs, CreateUserArgs,
-    SetFolderWatchArgs,
+    SetFolderWatchArgs, UpdateUserArgs,
 };
 use crate::commands::scan::resolve_folder;
 use crate::context::Context;
@@ -40,6 +43,8 @@ pub async fn run(
     let context = Context::open(config, env).await?;
     match args.command {
         AdminCommand::CreateUser(args) => create_user(&context, args).await,
+        AdminCommand::ListUsers => list_users(&context).await,
+        AdminCommand::UpdateUser(args) => update_user(&context, args).await,
         AdminCommand::CreateApiKey(args) => create_api_key(&context, args).await,
         AdminCommand::CreateAppPassword(args) => create_app_password(&context, args).await,
         AdminCommand::AddFolder(args) => add_folder(&context, args).await,
@@ -56,10 +61,10 @@ pub async fn run(
 ///
 /// # Errors
 ///
-/// Returns an error when no username was given and `--admin` was not, when the
-/// password cannot be read or does not match its confirmation, or when the
-/// account cannot be stored (an empty field, a taken username, a database
-/// failure).
+/// Returns an error when no username was given and `--admin` was not, when a
+/// permission name is unknown, when the password cannot be read or does not
+/// match its confirmation, or when the account or its quota cannot be stored
+/// (an empty field, a taken username, a database failure).
 async fn create_user(context: &Context, args: CreateUserArgs) -> anyhow::Result<()> {
     let username = match (args.username, args.admin) {
         (Some(username), _) => username,
@@ -67,16 +72,30 @@ async fn create_user(context: &Context, args: CreateUserArgs) -> anyhow::Result<
         (None, false) => bail!("a username is required unless --admin is given"),
     };
     let password = read_password(args.password_stdin)?;
-    let new = NewUser::new(
+    let mut new = NewUser::new(
         &username,
         args.display_name.unwrap_or_default(),
         password,
         args.admin,
     );
+    if let Some(list) = &args.permissions {
+        new = new.with_permissions(parse_permissions(list)?);
+    }
     let user = Users::new(context.database())
         .create(&context.settings().current(), &new)
         .await
         .with_context(|| format!("could not create the account `{username}`"))?;
+
+    let quota = UserQuota {
+        acquisitions_per_day: args.acquisitions_per_day,
+        acquisition_bytes_per_day: args.acquisition_bytes_per_day,
+    };
+    if !quota.is_unlimited() {
+        Quotas::new(context.database())
+            .set(user.id, &quota)
+            .await
+            .with_context(|| format!("could not store the quota of `{username}`"))?;
+    }
 
     println!(
         "created {} account `{}` ({})",
@@ -88,7 +107,215 @@ async fn create_user(context: &Context, args: CreateUserArgs) -> anyhow::Result<
         user.username,
         user.id,
     );
+    println!("{}", describe_account(&user, &quota));
     Ok(())
+}
+
+/// Lists every account with its permissions, quota, and state.
+///
+/// # Parameters
+///
+/// - `context`: the open database.
+///
+/// # Errors
+///
+/// Returns an error when the accounts or a quota cannot be read.
+async fn list_users(context: &Context) -> anyhow::Result<()> {
+    let users = Users::new(context.database());
+    let quotas = Quotas::new(context.database());
+    let accounts = users.list().await.context("could not list the accounts")?;
+
+    for user in &accounts {
+        let quota = quotas
+            .get(user.id)
+            .await
+            .with_context(|| format!("could not read the quota of `{}`", user.username))?;
+        println!("{}", describe_account(user, &quota));
+    }
+    println!("{} account(s)", accounts.len());
+    Ok(())
+}
+
+/// Changes an account: its name, admin flag, permissions, quota, password, and
+/// enabled state.
+///
+/// The changes that are asked for are applied and the rest of the account is
+/// left as it is. Quotas are read, changed, and written back as a whole, so
+/// clearing one dimension leaves the other alone.
+///
+/// # Parameters
+///
+/// - `context`: the open database.
+/// - `args`: the account and the changes.
+///
+/// # Errors
+///
+/// Returns an error when the account does not exist, when a permission name or
+/// a quota is not one the flags accept, when the password cannot be read, or
+/// when a write fails.
+async fn update_user(context: &Context, args: UpdateUserArgs) -> anyhow::Result<()> {
+    let users = Users::new(context.database());
+    let quotas = Quotas::new(context.database());
+    let user = find_user(context, &args.user).await?;
+
+    let mut update = UserUpdate::default();
+    if let Some(display_name) = args.display_name {
+        update = update.with_display_name(display_name);
+    }
+    if let Some(is_admin) = args.admin {
+        update = update.with_is_admin(is_admin);
+    }
+    if let Some(list) = &args.permissions {
+        update = update.with_permissions(parse_permissions(list)?);
+    }
+    let user = users
+        .update(user.id, &update)
+        .await
+        .with_context(|| format!("could not update the account `{}`", args.user))?;
+
+    if args.disable {
+        users
+            .disable(user.id)
+            .await
+            .context("could not disable the account")?;
+    }
+    if args.enable {
+        users
+            .enable(user.id)
+            .await
+            .context("could not enable the account")?;
+    }
+    if args.password_stdin {
+        let password = read_password(true)?;
+        users
+            .set_password(user.id, &password)
+            .await
+            .context("could not store the new password")?;
+    }
+
+    let mut quota = quotas
+        .get(user.id)
+        .await
+        .context("could not read the stored quota")?;
+    if let Some(limit) = &args.acquisitions_per_day {
+        quota.acquisitions_per_day = parse_limit(limit)?;
+    }
+    if let Some(limit) = &args.acquisition_bytes_per_day {
+        quota.acquisition_bytes_per_day = parse_limit(limit)?;
+    }
+    quotas
+        .set(user.id, &quota)
+        .await
+        .context("could not store the quota")?;
+
+    let stored = users
+        .find_by_id(user.id)
+        .await
+        .context("could not read the account back")?
+        .with_context(|| format!("no account is named `{}`", args.user))?;
+    println!("updated account `{}`", stored.username);
+    println!("{}", describe_account(&stored, &quota));
+    Ok(())
+}
+
+/// Parses a comma-separated permission list.
+///
+/// # Parameters
+///
+/// - `list`: the names to grant, in any order. An empty string grants none.
+///
+/// # Returns
+///
+/// The flags the names ask for.
+///
+/// # Errors
+///
+/// Returns an error naming the first name that is not `acquire`, `upload` or
+/// `download`.
+fn parse_permissions(list: &str) -> anyhow::Result<UserPermissions> {
+    let mut names = Vec::new();
+    for name in list
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let permission = name
+            .parse::<Permission>()
+            .map_err(|_| anyhow::anyhow!("`{name}` is not one of acquire, upload, download"))?;
+        names.push(permission.as_str().to_owned());
+    }
+    Ok(UserPermissions::from_names(&names))
+}
+
+/// Parses one quota flag: a number, or `none` for no limit.
+///
+/// # Parameters
+///
+/// - `value`: the flag's value.
+///
+/// # Returns
+///
+/// The limit, or `None` when the value asks for no limit.
+///
+/// # Errors
+///
+/// Returns an error when the value is neither `none` nor a number the type
+/// holds.
+fn parse_limit<T>(value: &str) -> anyhow::Result<Option<T>>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    if value.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    value
+        .parse::<T>()
+        .map(Some)
+        .map_err(|error| anyhow::anyhow!("`{value}` is not a number or `none`: {error}"))
+}
+
+/// Describes an account as one line of `key=value` fields.
+///
+/// # Parameters
+///
+/// - `user`: the account.
+/// - `quota`: the account's acquisition quota.
+///
+/// # Returns
+///
+/// The line `admin list-users` prints and the commands that change an account
+/// report, with the username, the admin flag, the permissions, both quota
+/// dimensions, and the enabled state.
+fn describe_account(user: &hearthsound_auth::User, quota: &UserQuota) -> String {
+    let granted: Vec<&str> = Permission::ALL
+        .into_iter()
+        .filter(|permission| user.permissions().allows(*permission))
+        .map(Permission::as_str)
+        .collect();
+    let permissions = if granted.is_empty() {
+        "none".to_owned()
+    } else {
+        granted.join(",")
+    };
+    let limit = |value: Option<u64>| match value {
+        Some(value) => value.to_string(),
+        None => "unlimited".to_owned(),
+    };
+    format!(
+        "username={} admin={} permissions={} acquisitions-per-day={} \
+         acquisition-bytes-per-day={} state={}",
+        user.username,
+        if user.is_admin { "yes" } else { "no" },
+        permissions,
+        limit(quota.acquisitions_per_day.map(u64::from)),
+        limit(quota.acquisition_bytes_per_day),
+        if user.is_disabled() {
+            "disabled"
+        } else {
+            "enabled"
+        },
+    )
 }
 
 /// Creates an API key for an account.

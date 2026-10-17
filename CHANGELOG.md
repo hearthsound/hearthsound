@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lifetime, survives nothing after its account is disabled, and is revoked one
   at a time or all at once. Signing in with an account password is rate limited
   per address and username, and an API key is accepted as a bearer credential.
+- `admin create-user` takes `--permissions`, `--acquisitions-per-day` and
+  `--acquisition-bytes-per-day`, and `admin list-users` and `admin update-user`
+  list and change an account's name, permissions, quota, password and enabled
+  state.
 
 ## [0.1.2] - 2026-10-16
 
