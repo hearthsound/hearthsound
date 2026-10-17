@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 
 use hearthsound_core::{EntityId, IdPrefix, QualityTier, StorageClass};
-use sqlx::SqliteConnection;
+use sqlx::{QueryBuilder, Sqlite, SqliteConnection};
 use uuid::Uuid;
 
 use crate::error::LibraryError;
@@ -33,6 +33,7 @@ use crate::model::{
     decode_uuid, entity_key,
 };
 use crate::now_millis;
+use crate::query::MAX_IDS_PER_QUERY;
 
 /// One row of the `media_files` table as it is stored.
 #[derive(sqlx::FromRow)]
@@ -491,6 +492,54 @@ pub async fn preferred_media_file(
     .fetch_optional(&mut *conn)
     .await?;
     row.map(MediaFileRow::into_media_file).transpose()
+}
+
+/// Reads the preferred media file of each of the given tracks.
+///
+/// This is the batch form of [`preferred_media_file`]: it selects the same row
+/// per track, with the ids read in chunks of [`MAX_IDS_PER_QUERY`].
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `track_ids`: the tracks to read, in any order.
+///
+/// # Returns
+///
+/// The preferred file of each track that has one, keyed by track; a track with
+/// no files is absent.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails or a stored row does not decode.
+pub async fn preferred_media_files(
+    conn: &mut SqliteConnection,
+    track_ids: &[EntityId],
+) -> Result<HashMap<EntityId, MediaFile>, LibraryError> {
+    let mut files: HashMap<EntityId, MediaFile> = HashMap::new();
+    for chunk in track_ids.chunks(MAX_IDS_PER_QUERY) {
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT id, track_id, storage, folder_id, rel_path, size, mtime_ms, format, codec, \
+                    bitrate_kbps, sample_rate, bit_depth, channels, duration_ms, lossless, \
+                    quality_tier, replaygain, has_embedded_art, added_at, last_accessed_at, \
+                    uploaded_by, acquisition_id, is_preferred FROM media_files \
+             WHERE is_preferred = 1 AND track_id IN (",
+        );
+        let mut separated = builder.separated(", ");
+        for id in chunk {
+            separated.push_bind(entity_key(*id));
+        }
+        separated.push_unseparated(")");
+        let rows = builder
+            .build_query_as::<MediaFileRow>()
+            .fetch_all(&mut *conn)
+            .await?;
+        for row in rows {
+            let file = row.into_media_file()?;
+            files.entry(file.track_id).or_insert(file);
+        }
+    }
+    Ok(files)
 }
 
 /// The stored state of one media file of a folder.

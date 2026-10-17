@@ -4,6 +4,7 @@
 //! of their own. One binary per crate means the crate is compiled and linked
 //! once per test run, which is what keeps the test build and CI short.
 
+mod batch;
 mod large_library;
 mod maintenance;
 mod naming;

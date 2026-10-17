@@ -17,11 +17,13 @@
 //! written when [`AcquisitionState::can_transition_to`] allows it, so an
 //! acquisition can never reach a state its diagram does not contain.
 
+use std::collections::HashMap;
+
 use hearthsound_core::{
     AcquisitionState, EntityId, FailureReason, Granularity, IdPrefix, Priority,
 };
 use hearthsound_db::Database;
-use sqlx::{SqliteConnection, SqlitePool};
+use sqlx::{QueryBuilder, Sqlite, SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use crate::error::AcquireError;
@@ -331,6 +333,113 @@ pub async fn active_for_track(
     .fetch_optional(&mut *conn)
     .await?;
     row.map(AcquisitionDbRow::decode).transpose()
+}
+
+/// The number of track ids one batch query binds.
+///
+/// Keeps every statement well under SQLite's bind-parameter limit; longer lists
+/// are read in chunks of this size.
+const MAX_IDS_PER_QUERY: usize = 500;
+
+/// Reads the active acquisition of each of the given tracks.
+///
+/// This is the set form of [`active_for_track`]: a track has at most one row
+/// in an [`ACTIVE_STATES`] state, and that row is the one returned for it. Ids
+/// are read in chunks of 500.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `track_ids`: the tracks to look up, in any order.
+///
+/// # Returns
+///
+/// The active acquisition of each track that has one, keyed by track; a track
+/// without one is absent.
+///
+/// # Errors
+///
+/// Returns [`AcquireError::Database`] when a read fails, or a decode error when
+/// a stored row does not decode.
+pub async fn active_for_tracks(
+    conn: &mut SqliteConnection,
+    track_ids: &[EntityId],
+) -> Result<HashMap<EntityId, AcquisitionRow>, AcquireError> {
+    latest_rows_for_tracks(conn, track_ids, true).await
+}
+
+/// Reads the most recent acquisition of each of the given tracks, in any state.
+///
+/// This is the set form of "the latest row for a track": the same ordering
+/// [`active_for_track`] uses (newest `created_at` first), but without the state
+/// filter, so a completed, failed or cancelled row answers too. Ties on
+/// `created_at` resolve to the row inserted last. Ids are read in chunks of 500.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `track_ids`: the tracks to look up, in any order.
+///
+/// # Returns
+///
+/// The most recent acquisition of each track that has one, keyed by track; a
+/// track with no acquisition is absent.
+///
+/// # Errors
+///
+/// Returns [`AcquireError::Database`] when a read fails, or a decode error when
+/// a stored row does not decode.
+pub async fn latest_for_tracks(
+    conn: &mut SqliteConnection,
+    track_ids: &[EntityId],
+) -> Result<HashMap<EntityId, AcquisitionRow>, AcquireError> {
+    latest_rows_for_tracks(conn, track_ids, false).await
+}
+
+/// Reads the newest acquisition of each track, optionally restricted to the
+/// [`ACTIVE_STATES`].
+///
+/// The first row per track in newest-first order wins, so each track keeps the
+/// row [`active_for_track`] or the latest-row lookup would return.
+async fn latest_rows_for_tracks(
+    conn: &mut SqliteConnection,
+    track_ids: &[EntityId],
+    active_only: bool,
+) -> Result<HashMap<EntityId, AcquisitionRow>, AcquireError> {
+    let mut rows_by_track: HashMap<EntityId, AcquisitionRow> = HashMap::new();
+    for chunk in track_ids.chunks(MAX_IDS_PER_QUERY) {
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT id, track_id, album_id, granularity, priority, reason, state, requested_by, \
+                    instance_id, candidate, plugin_token, progress, attempts, failure_reason, \
+                    error_detail, media_file_id, created_at, updated_at \
+             FROM acquisitions WHERE track_id IN (",
+        );
+        let mut ids = builder.separated(", ");
+        for id in chunk {
+            ids.push_bind(uuid_key(id.uuid()));
+        }
+        ids.push_unseparated(")");
+        if active_only {
+            builder.push(" AND state IN (");
+            let mut states = builder.separated(", ");
+            for state in ACTIVE_STATES {
+                states.push_bind(state.as_str());
+            }
+            states.push_unseparated(")");
+        }
+        builder.push(" ORDER BY created_at DESC, rowid DESC");
+        let rows = builder
+            .build_query_as::<AcquisitionDbRow>()
+            .fetch_all(&mut *conn)
+            .await?;
+        for row in rows {
+            let row = row.decode()?;
+            if let Some(track) = row.track_id {
+                rows_by_track.entry(track).or_insert(row);
+            }
+        }
+    }
+    Ok(rows_by_track)
 }
 
 /// Counts the acquisitions a user started in a window and the bytes they hold.

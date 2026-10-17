@@ -76,7 +76,7 @@ mod reports;
 mod service;
 mod session;
 
-pub use annotations::{Annotation, MAX_IDS_PER_QUERY, load as load_annotations};
+pub use annotations::{Annotation, MAX_IDS_PER_QUERY, disliked_ids, load as load_annotations};
 pub use bookmarks::{Bookmark, Bookmarks};
 pub use error::ActivityError;
 pub use feedback::{like, refresh_user_library_pin, unlike};

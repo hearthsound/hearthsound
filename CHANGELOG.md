@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Batch lookups for personal membership, preferred media files, dislikes and
+  acquisition rows, read in chunks of 500 ids, so a listing answers a whole page
+  with a fixed number of queries.
+
 - A staged plugin upgrade table: each installed plugin can hold one upgrade
   waiting for approval, with its version, manifest, digest, source and
   repository, and the staged upgrade is removed with its plugin.

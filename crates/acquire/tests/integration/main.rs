@@ -7,6 +7,7 @@
 
 mod admission;
 mod announce;
+mod batch;
 mod common;
 mod download;
 mod identity;

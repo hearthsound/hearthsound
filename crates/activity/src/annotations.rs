@@ -11,7 +11,7 @@
 //! are chunked, because a statement that binds an unbounded list is both slow
 //! and limited by SQLite's parameter count.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use hearthsound_core::EntityKind;
 use sqlx::{QueryBuilder, Sqlite, SqliteConnection};
@@ -113,6 +113,50 @@ pub async fn load(
         }
     }
     Ok(annotations)
+}
+
+/// Reports which of the given entities the user has disliked.
+///
+/// A dislike is an active `user_feedback` row with `value = 'dislike'`. The ids
+/// are read in chunks of [`MAX_IDS_PER_QUERY`].
+///
+/// # Parameters
+///
+/// - `conn`: the connection to read on.
+/// - `user_id`: the account whose dislikes are read.
+/// - `kind`: the kind of entity the ids name.
+/// - `ids`: the entities to test, in any order.
+///
+/// # Returns
+///
+/// The ids of `ids` that the user has disliked; every other id is absent.
+///
+/// # Errors
+///
+/// Returns [`ActivityError::Database`] when a statement fails and
+/// [`ActivityError::CorruptId`] when a stored id is not 16 bytes.
+pub async fn disliked_ids(
+    conn: &mut SqliteConnection,
+    user_id: Uuid,
+    kind: EntityKind,
+    ids: &[Uuid],
+) -> Result<HashSet<Uuid>, ActivityError> {
+    let mut disliked = HashSet::new();
+    for chunk in ids.chunks(MAX_IDS_PER_QUERY) {
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT entity_id FROM user_feedback \
+             WHERE value = 'dislike' AND user_id = ",
+        );
+        builder.push_bind(user_id.as_bytes().to_vec());
+        builder.push(" AND entity_kind = ");
+        builder.push_bind(kind_literal(kind));
+        push_id_list(&mut builder, chunk);
+        let rows: Vec<Vec<u8>> = builder.build_query_scalar().fetch_all(&mut *conn).await?;
+        for bytes in rows {
+            disliked.insert(decode(&bytes)?);
+        }
+    }
+    Ok(disliked)
 }
 
 /// Loads the likes of one chunk of ids.

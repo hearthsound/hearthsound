@@ -18,6 +18,8 @@
 //! Subsonic projection: a track view carries its album, its credited artists, its
 //! genres, and the fields of its preferred file.
 
+use std::collections::{HashMap, HashSet};
+
 use hearthsound_config::SettingsStore;
 use hearthsound_config::keys;
 use hearthsound_core::{Availability, EntityId, EntityKind, IdPrefix, StorageClass};
@@ -2100,4 +2102,195 @@ async fn artist_in_scope(
         }
     };
     Ok(present != 0)
+}
+
+/// How many ids one batch statement binds.
+///
+/// Batch reads chunk their ids at this size, which keeps every statement well
+/// under SQLite's bound-parameter limit.
+pub const MAX_IDS_PER_QUERY: usize = 500;
+
+/// Reports which of the given tracks are inside a user's personal library.
+///
+/// The membership test is the one [`track_in_scope`] applies to a single track,
+/// answered for a list of tracks in chunks of [`MAX_IDS_PER_QUERY`].
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `user_id`: the account whose library is tested.
+/// - `track_ids`: the tracks to test.
+///
+/// # Returns
+///
+/// The tracks of `track_ids` that the library contains.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn personal_track_ids(
+    conn: &mut SqliteConnection,
+    user_id: Uuid,
+    track_ids: &[EntityId],
+) -> Result<HashSet<EntityId>, LibraryError> {
+    let user = user_id.as_bytes().to_vec();
+    let mut found = HashSet::new();
+    for chunk in track_ids.chunks(MAX_IDS_PER_QUERY) {
+        let mut builder = QueryBuilder::<Sqlite>::new("");
+        push_personal_scope(&mut builder, &user);
+        builder.push("SELECT track_id FROM scope_tracks WHERE track_id IN (");
+        push_key_list(&mut builder, chunk);
+        let keys: Vec<Vec<u8>> = builder.build_query_scalar().fetch_all(&mut *conn).await?;
+        found.extend(matched_ids(chunk, keys));
+    }
+    Ok(found)
+}
+
+/// Reports which of the given albums are inside a user's personal library.
+///
+/// An album is in the library when it holds a library track, is saved, or is
+/// liked, as [`album_in_scope`] decides for one album.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `user_id`: the account whose library is tested.
+/// - `album_ids`: the albums to test.
+///
+/// # Returns
+///
+/// The albums of `album_ids` that the library contains.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn personal_album_ids(
+    conn: &mut SqliteConnection,
+    user_id: Uuid,
+    album_ids: &[EntityId],
+) -> Result<HashSet<EntityId>, LibraryError> {
+    let user = user_id.as_bytes().to_vec();
+    let mut found = HashSet::new();
+    for chunk in album_ids.chunks(MAX_IDS_PER_QUERY) {
+        let mut builder = QueryBuilder::<Sqlite>::new("");
+        push_personal_scope(&mut builder, &user);
+        builder.push("SELECT al.id FROM albums al WHERE al.id IN (");
+        push_key_list(&mut builder, chunk);
+        builder
+            .push(" AND (al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id)")
+            .push(" OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ")
+            .push_bind(user.clone())
+            .push(" AND entity_kind = 'album' AND entity_id = al.id)")
+            .push(" OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ")
+            .push_bind(user.clone())
+            .push(" AND entity_kind = 'album' AND value = 'like' AND entity_id = al.id))");
+        let keys: Vec<Vec<u8>> = builder.build_query_scalar().fetch_all(&mut *conn).await?;
+        found.extend(matched_ids(chunk, keys));
+    }
+    Ok(found)
+}
+
+/// Reports which of the given artists are inside a user's personal library.
+///
+/// An artist is in the library when it is saved or liked, is credited on a
+/// library track, or is credited on an album the library contains, as
+/// [`artist_in_scope`] decides for one artist.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `user_id`: the account whose library is tested.
+/// - `artist_ids`: the artists to test.
+///
+/// # Returns
+///
+/// The artists of `artist_ids` that the library contains.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn personal_artist_ids(
+    conn: &mut SqliteConnection,
+    user_id: Uuid,
+    artist_ids: &[EntityId],
+) -> Result<HashSet<EntityId>, LibraryError> {
+    let user = user_id.as_bytes().to_vec();
+    let mut found = HashSet::new();
+    for chunk in artist_ids.chunks(MAX_IDS_PER_QUERY) {
+        let mut builder = QueryBuilder::<Sqlite>::new("");
+        push_personal_scope(&mut builder, &user);
+        builder.push("SELECT ar.id FROM artists ar WHERE ar.id IN (");
+        push_key_list(&mut builder, chunk);
+        builder
+            .push(" AND (ar.id IN (SELECT ta.artist_id FROM track_artists ta JOIN scope_tracks st ON st.track_id = ta.track_id)")
+            .push(" OR ar.id IN (SELECT aa.artist_id FROM album_artists aa WHERE aa.album_id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id))")
+            .push(" OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ")
+            .push_bind(user.clone())
+            .push(" AND entity_kind = 'artist' AND entity_id = ar.id)")
+            .push(" OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ")
+            .push_bind(user.clone())
+            .push(" AND entity_kind = 'artist' AND value = 'like' AND entity_id = ar.id))");
+        let keys: Vec<Vec<u8>> = builder.build_query_scalar().fetch_all(&mut *conn).await?;
+        found.extend(matched_ids(chunk, keys));
+    }
+    Ok(found)
+}
+
+/// Writes the personal-scope `scope_tracks` CTE of one user into a builder.
+///
+/// The CTE is the union [`track_in_scope`] reads, bound to `user`; the caller
+/// appends the statement that selects from it.
+///
+/// # Parameters
+///
+/// - `builder`: the builder to append to.
+/// - `user`: the 16 raw bytes of the user id.
+fn push_personal_scope(builder: &mut QueryBuilder<Sqlite>, user: &[u8]) {
+    builder
+        .push("WITH scope_tracks(track_id) AS (SELECT entity_id FROM user_library WHERE user_id = ")
+        .push_bind(user.to_vec())
+        .push(" AND entity_kind = 'track'")
+        .push(" UNION SELECT entity_id FROM user_feedback WHERE user_id = ")
+        .push_bind(user.to_vec())
+        .push(" AND entity_kind = 'track' AND value = 'like'")
+        .push(" UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id WHERE p.owner_user_id = ")
+        .push_bind(user.to_vec())
+        .push(" AND p.is_temporary = 0")
+        .push(" UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id WHERE mf.storage = 'folder' AND lf.owner_user_id = ")
+        .push_bind(user.to_vec())
+        .push(") ");
+}
+
+/// Appends a comma-separated bind list of entity keys and closes it.
+///
+/// The caller opens the parenthesis; this writes the ids and the closing one.
+///
+/// # Parameters
+///
+/// - `builder`: the builder to append to.
+/// - `ids`: the ids to bind.
+fn push_key_list(builder: &mut QueryBuilder<Sqlite>, ids: &[EntityId]) {
+    let mut separated = builder.separated(", ");
+    for id in ids {
+        separated.push_bind(entity_key(*id));
+    }
+    separated.push_unseparated(")");
+}
+
+/// Maps the stored keys a batch read returned back to the requested ids.
+///
+/// # Parameters
+///
+/// - `requested`: the ids the statement was bound with.
+/// - `keys`: the stored keys the statement returned.
+///
+/// # Returns
+///
+/// The requested ids whose keys were returned.
+fn matched_ids(requested: &[EntityId], keys: Vec<Vec<u8>>) -> HashSet<EntityId> {
+    let by_key: HashMap<Vec<u8>, EntityId> =
+        requested.iter().map(|id| (entity_key(*id), *id)).collect();
+    keys.iter()
+        .filter_map(|key| by_key.get(key).copied())
+        .collect()
 }
