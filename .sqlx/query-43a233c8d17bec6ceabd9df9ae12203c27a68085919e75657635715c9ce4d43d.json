@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_quotas (user_id, acquisitions_per_day, acquisition_bytes_per_day) VALUES (?, -1, NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "43a233c8d17bec6ceabd9df9ae12203c27a68085919e75657635715c9ce4d43d"
+}

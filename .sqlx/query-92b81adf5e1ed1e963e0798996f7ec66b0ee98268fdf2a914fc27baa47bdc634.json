@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM user_quotas WHERE user_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "92b81adf5e1ed1e963e0798996f7ec66b0ee98268fdf2a914fc27baa47bdc634"
+}

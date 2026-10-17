@@ -63,4 +63,11 @@ pub enum AuthError {
         /// The id that has no account.
         user_id: Uuid,
     },
+    /// A stored quota value does not fit its column, or a quota value cannot be
+    /// stored at all.
+    #[error("the `{column}` quota is out of range")]
+    QuotaOutOfRange {
+        /// The `user_quotas` column whose value is out of range.
+        column: &'static str,
+    },
 }

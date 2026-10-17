@@ -1,9 +1,10 @@
 //! Accounts and their credentials.
 //!
 //! This crate owns the tables that say who a request is: `users`,
-//! `api_keys`, `app_passwords`, and the per-user overrides in `user_settings`.
-//! It is the only crate that hashes a password, compares a secret in constant
-//! time, or decrypts an app password.
+//! `api_keys`, `app_passwords`, the per-user overrides in `user_settings`, and
+//! the per-user acquisition limits in `user_quotas`. It is the only crate that
+//! hashes a password, compares a secret in constant time, or decrypts an app
+//! password.
 //!
 //! The credentials follow the design's storage rules:
 //!
@@ -30,6 +31,7 @@ mod api_key;
 mod app_password;
 mod error;
 mod password;
+mod quotas;
 mod rate_limit;
 mod subsonic;
 mod user;
@@ -42,6 +44,7 @@ pub use app_password::{
 };
 pub use error::AuthError;
 pub use password::{hash_password, verify_password};
+pub use quotas::{Quotas, UserQuota};
 pub use rate_limit::{LoginKey, LoginRateLimiter, RateLimited};
 pub use subsonic::{
     APP_PASSWORDS_HELP_URL, AuthenticationError, Authenticator, Credential, MIN_SALT_LEN,

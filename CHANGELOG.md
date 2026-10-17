@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Accounts can be created with an explicit permission set instead of the
   `users.default_permissions` copy, and changed afterwards: display name, admin
   flag and permissions, password, and the disabled state.
+- Each account can carry a daily acquisition quota, a number of acquisitions
+  and a number of bytes, stored as one `user_quotas` row and unlimited when the
+  row or a column is absent.
 
 ## [0.1.2] - 2026-10-16
 

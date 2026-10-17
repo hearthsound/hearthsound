@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_quotas (user_id, acquisitions_per_day, acquisition_bytes_per_day) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET acquisitions_per_day = excluded.acquisitions_per_day, acquisition_bytes_per_day = excluded.acquisition_bytes_per_day",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "ce87e9561f2ae73c0dbe1b15d1d7d9d788a70f13b590d42ef10b6ed120a04e7e"
+}

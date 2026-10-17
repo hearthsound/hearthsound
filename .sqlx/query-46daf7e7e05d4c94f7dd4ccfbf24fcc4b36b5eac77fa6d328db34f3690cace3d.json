@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT acquisitions_per_day, acquisition_bytes_per_day FROM user_quotas WHERE user_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "acquisitions_per_day",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "user_quotas",
+            "name": "acquisitions_per_day"
+          }
+        }
+      },
+      {
+        "name": "acquisition_bytes_per_day",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "user_quotas",
+            "name": "acquisition_bytes_per_day"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "46daf7e7e05d4c94f7dd4ccfbf24fcc4b36b5eac77fa6d328db34f3690cace3d"
+}
