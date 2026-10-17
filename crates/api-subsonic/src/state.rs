@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use hearthsound_acquire::prefetch::PrefetchScheduler;
 use hearthsound_activity::ActivityService;
-use hearthsound_auth::{Authenticator, Principal, ResolveError, SubsonicCredentials, UserSettings};
+use hearthsound_auth::{
+    Authenticator, Principal, ResolveError, SubsonicCredentials, TrustedProxies, UserSettings,
+};
 use hearthsound_catalog::CatalogService;
 use hearthsound_config::SettingsStore;
 use hearthsound_config::settings::Settings;
@@ -21,7 +23,6 @@ use hearthsound_library::StorageRoots;
 use hearthsound_library::scan::LibraryScanner;
 use hearthsound_media::FfmpegRunner;
 
-use crate::auth::TrustedProxies;
 use crate::response::SubsonicError;
 use crate::stream::{PendingSource, StreamService};
 

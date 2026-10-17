@@ -43,7 +43,7 @@ pub enum ServerError {
     /// `server.trusted_proxies` holds something that is not an address or CIDR
     /// block.
     #[error("invalid trusted proxy: {0}")]
-    Proxy(#[from] hearthsound_api_subsonic::InvalidProxy),
+    Proxy(#[from] hearthsound_auth::InvalidProxy),
     /// `server.cors_origins` holds something that is not `*`, `null`, or a
     /// `scheme://host[:port]` origin.
     #[error(

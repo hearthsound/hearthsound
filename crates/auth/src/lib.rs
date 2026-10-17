@@ -34,6 +34,7 @@ mod api_key;
 mod app_password;
 mod error;
 mod password;
+mod proxy;
 pub mod quotas;
 mod rate_limit;
 mod session;
@@ -48,6 +49,7 @@ pub use app_password::{
 };
 pub use error::AuthError;
 pub use password::{hash_password, verify_password};
+pub use proxy::{InvalidProxy, TrustedProxies};
 pub use quotas::{Quotas, UserQuota};
 pub use rate_limit::{LoginKey, LoginRateLimiter, RateLimited};
 pub use session::{LoginError, NewSession, SessionRecord, Sessions};

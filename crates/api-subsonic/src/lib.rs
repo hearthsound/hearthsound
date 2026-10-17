@@ -64,8 +64,9 @@
 //! The address a request is attributed to is the peer address from the
 //! connection, unless that peer is one of `server.trusted_proxies` and sent an
 //! `X-Forwarded-For` header; the header of an untrusted peer is ignored, because
-//! any client can write it. [`TrustedProxies`] is built from the bootstrap
-//! configuration and handed to [`SubsonicState::with_trusted_proxies`].
+//! any client can write it. [`TrustedProxies`](hearthsound_auth::TrustedProxies)
+//! is built from the bootstrap configuration and handed to
+//! [`SubsonicState::with_trusted_proxies`].
 //!
 //! # Endpoints
 //!
@@ -190,7 +191,7 @@ mod stream;
 mod transcode_decision;
 mod value;
 
-pub use auth::{BinaryCall, Call, InvalidProxy, JsonCall, TrustedProxies, forbidden};
+pub use auth::{BinaryCall, Call, JsonCall, forbidden};
 pub use endpoints::{
     get_album, get_album_list, get_album_list_2, get_artist, get_artists, get_bookmarks,
     get_cover_art, get_genres, get_indexes, get_license, get_music_directory, get_music_folders,

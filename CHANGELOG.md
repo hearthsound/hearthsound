@@ -81,6 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first and then the rest of the server, as far as `privacy.server_browse`
   shows it, so stored content a user has not adopted is still found by
   searching; a `musicFolderId` keeps a search to that folder.
+- The trusted proxy list that decides a request's client address lives in
+  `hearthsound-auth`, so every HTTP surface attributes a request, and charges
+  its login rate limit, the same way.
 
 ## [0.1.2] - 2026-10-16
 
