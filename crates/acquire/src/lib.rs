@@ -40,6 +40,7 @@ mod error;
 mod identity;
 mod import;
 
+pub mod adopt;
 pub mod download;
 pub mod normalize;
 pub mod orchestrator;

@@ -56,6 +56,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the command line wakes it within a second, and a `storage.maintain` job runs
   it every 15 minutes besides, so a pin change reaches the filesystem without
   a manual step.
+- Liking a track or an album that is not stored acquires it
+  (`library.acquire_on_save`): its tracks are requested at priority `queue`
+  under the user's permission and quota, and because the like pins them they
+  are imported into `<storage>/library`. A user who may not acquire still
+  records the like.
 
 ## [0.1.2] - 2026-10-16
 

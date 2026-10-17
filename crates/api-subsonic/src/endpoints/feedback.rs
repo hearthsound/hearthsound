@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use hearthsound_acquire::adopt::acquire_saved;
 use hearthsound_activity::Annotation;
 use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, IdPrefix};
 use hearthsound_library::{Artist, LibraryRepository};
@@ -115,9 +116,54 @@ async fn toggle(call: &Call, like: bool) -> Encoded {
     } else {
         activity.unstar(user, &entities).await
     };
-    match result {
-        Ok(()) => call.encode(Response::ok()),
-        Err(error) => call.encode(Response::failed(browse::failure("a star change", &error))),
+    if let Err(error) = result {
+        return call.encode(Response::failed(browse::failure("a star change", &error)));
+    }
+    if like {
+        acquire_liked(call, user, &entities).await;
+    }
+    call.encode(Response::ok())
+}
+
+/// Acquires the remote tracks of what a user just liked.
+///
+/// A like is a save (`library.acquire_on_save`), so a liked track or album that
+/// is not stored is acquired at priority `queue` under the user's permission
+/// and quota. The like is already recorded; a refusal or an error here is only
+/// logged.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `user`: the user who liked the entities.
+/// - `entities`: the liked entities.
+async fn acquire_liked(call: &Call, user: Uuid, entities: &[(EntityKind, Uuid)]) {
+    let Some(prefetch) = call.state().prefetch() else {
+        return;
+    };
+    let named: Vec<(EntityKind, EntityId)> = entities
+        .iter()
+        .filter_map(|(kind, id)| {
+            let prefix = match kind {
+                EntityKind::Track => IdPrefix::Track,
+                EntityKind::Album => IdPrefix::Album,
+                _ => return None,
+            };
+            Some((*kind, EntityId::from_uuid(prefix, *id)))
+        })
+        .collect();
+    if named.is_empty() {
+        return;
+    }
+    if let Err(error) = acquire_saved(
+        prefetch.orchestrator(),
+        user,
+        call.principal().can_acquire,
+        &named,
+    )
+    .await
+    {
+        tracing::warn!(%user, %error, "could not acquire what a user liked");
     }
 }
 

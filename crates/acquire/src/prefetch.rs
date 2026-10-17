@@ -442,6 +442,14 @@ impl PrefetchScheduler {
         }
     }
 
+    /// Returns the orchestrator the scheduler starts its acquisitions through.
+    ///
+    /// A surface that holds the scheduler reaches the acquisition layer through
+    /// it, for example to acquire what a user saved.
+    pub fn orchestrator(&self) -> &Arc<AcquisitionOrchestrator> {
+        &self.inner.orchestrator
+    }
+
     /// Records a listing as the implied queue of one user and client.
     ///
     /// The listing replaces the one the same user and client recorded before,

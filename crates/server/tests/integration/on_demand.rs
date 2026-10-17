@@ -861,3 +861,138 @@ async fn a_restart_mid_download_finishes_the_acquisition() {
         Availability::Cached
     );
 }
+
+/// Finds the catalog id of the fixture's album through `search3`.
+async fn catalog_album_id(fixture: &Fixture) -> String {
+    let response = fixture
+        .get(&format!(
+            "/rest/search3?query=Fixture&apiKey={}&f=json",
+            fixture.api_key
+        ))
+        .await;
+    let body: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
+    body["subsonic-response"]["searchResult3"]["album"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|album| album["id"].as_str().unwrap().to_owned())
+        .find(|id| id.starts_with("x_"))
+        .expect("the catalog answers the fixture album")
+}
+
+/// Stars ids through `/rest/star` and expects an ok envelope.
+async fn star(fixture: &Fixture, parameter: &str, id: &str) {
+    let response = fixture
+        .get(&format!(
+            "/rest/star?{parameter}={id}&apiKey={}&f=json",
+            fixture.api_key
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = response.text().await.unwrap();
+    assert!(text.contains("\"status\":\"ok\""), "{text}");
+}
+
+/// Liking a catalog album acquires its tracks at priority `queue`, and the one
+/// the backend can serve lands in the permanent library root.
+#[tokio::test]
+async fn starring_a_catalog_album_acquires_it_into_the_library() {
+    let fixture = Fixture::new().await;
+    let services = Arc::clone(&fixture.services);
+    let downloads = downloads_dir(&fixture);
+    install_catalog(&services).await;
+    install_acquisition(&services, &downloads, "normal", 1).await;
+    services.registry().rebuild().await.unwrap();
+    place_audio(&downloads).await;
+
+    let album = catalog_album_id(&fixture).await;
+    star(&fixture, "albumId", &album).await;
+
+    let track = materialize(services.catalog(), 1).await;
+    let rows = ledger_rows(services.orchestrator(), track).await;
+    assert_eq!(rows.len(), 1, "one acquisition per album track");
+    assert_eq!(rows[0].priority, hearthsound_core::Priority::Queue);
+    assert_eq!(rows[0].reason, "save");
+    assert_eq!(rows[0].requested_by, Some(fixture.user_id));
+    for number in 2..=5 {
+        let other = materialize(services.catalog(), number).await;
+        assert_eq!(ledger_rows(services.orchestrator(), other).await.len(), 1);
+    }
+    wait_for_state(
+        services.orchestrator(),
+        rows[0].id,
+        AcquisitionState::Completed,
+    )
+    .await;
+
+    // The track is pinned by the like, so the import put it in the library
+    // root rather than the cache.
+    let imported = services.config().paths.library.join(FIRST_REL_PATH);
+    assert!(imported.is_file(), "{} exists", imported.display());
+    assert!(!services.config().paths.cache.join(FIRST_REL_PATH).exists());
+    assert_eq!(
+        LibraryRepository::new(services.database())
+            .get_track(track)
+            .await
+            .unwrap()
+            .unwrap()
+            .availability,
+        Availability::Local
+    );
+}
+
+/// A like without the acquire permission, or with acquire-on-save turned off,
+/// is recorded and acquires nothing.
+#[tokio::test]
+async fn a_like_acquires_nothing_without_permission_or_with_the_setting_off() {
+    let fixture = Fixture::new().await;
+    let services = Arc::clone(&fixture.services);
+    let downloads = downloads_dir(&fixture);
+    install_catalog(&services).await;
+    install_acquisition(&services, &downloads, "normal", 1).await;
+    services.registry().rebuild().await.unwrap();
+
+    services
+        .settings()
+        .set(
+            keys::LIBRARY_ACQUIRE_ON_SAVE.name(),
+            SettingValue::Bool(false),
+            None,
+        )
+        .await
+        .unwrap();
+    star(&fixture, "id", &catalog_id(1)).await;
+    let first = materialize(services.catalog(), 1).await;
+    assert!(ledger_rows(services.orchestrator(), first).await.is_empty());
+
+    services
+        .settings()
+        .unset(keys::LIBRARY_ACQUIRE_ON_SAVE.name())
+        .await
+        .unwrap();
+    hearthsound_auth::Users::new(services.database())
+        .update(
+            fixture.user_id,
+            &hearthsound_auth::UserUpdate::default().with_permissions(
+                hearthsound_auth::UserPermissions {
+                    acquire: false,
+                    upload: true,
+                    download: true,
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    star(&fixture, "id", &catalog_id(2)).await;
+    let second = materialize(services.catalog(), 2).await;
+    assert!(
+        ledger_rows(services.orchestrator(), second)
+            .await
+            .is_empty()
+    );
+
+    // Both likes are recorded and pin their tracks all the same.
+    let library = LibraryRepository::new(services.database());
+    assert!(library.track_is_pinned(first).await.unwrap());
+    assert!(library.track_is_pinned(second).await.unwrap());
+}
