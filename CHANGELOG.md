@@ -89,6 +89,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `/api/v1/me/api-keys` and `/api/v1/me/app-passwords` list, create and revoke
   the caller's API keys and app passwords; a secret is answered once, at
   creation, and a key created here works as `apiKey=` on `/rest` too.
+- `/api/v1/me/settings` lists the settings a user may override with the
+  caller's value and where it comes from, and changes or clears overrides in a
+  batch that is checked as a whole before anything is written.
 
 ### Changed
 

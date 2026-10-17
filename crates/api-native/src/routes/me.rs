@@ -340,3 +340,154 @@ pub async fn revoke_app_password(
     tracing::info!(user = %authed.user_id(), "revoked an app password");
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// One setting a user may override, with its effective value for the caller.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonalSetting {
+    /// The dotted setting key.
+    pub key: String,
+    /// The value in effect for the caller.
+    #[schema(value_type = Object)]
+    pub value: serde_json::Value,
+    /// Where the value comes from: `user` (the caller's override) or `server`.
+    pub source: String,
+    /// The server-wide value, which applies when the caller has no override.
+    #[schema(value_type = Object)]
+    pub server_value: serde_json::Value,
+    /// What the setting does.
+    pub description: String,
+}
+
+/// The settings a user may override.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct PersonalSettings {
+    /// One entry per overridable setting, by key.
+    pub settings: Vec<PersonalSetting>,
+}
+
+/// A batch of personal setting changes.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct PersonalSettingsPatch {
+    /// The new value per key; `null` removes the override.
+    #[schema(value_type = Object)]
+    pub settings: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Lists the settings the caller may override, with the caller's values.
+///
+/// # Errors
+///
+/// Answers `unauthenticated` without credentials and `internal` when a value
+/// cannot be read.
+#[utoipa::path(
+    get,
+    path = "/api/v1/me/settings",
+    tag = "me",
+    responses(
+        (status = 200, description = "The caller's overridable settings", body = PersonalSettings),
+        (status = 401, description = "No valid credential", body = Problem, content_type = "application/problem+json"),
+    ),
+    security(("bearer" = []), ("session" = []))
+)]
+pub async fn get_settings(
+    authed: Authed,
+    State(state): State<NativeState>,
+) -> Result<Json<PersonalSettings>, Problem> {
+    personal_settings(&state, authed.user_id()).await.map(Json)
+}
+
+/// Changes the caller's overrides; `null` removes one.
+///
+/// Every change is checked before any is written, so a batch with one bad
+/// entry changes nothing.
+///
+/// # Errors
+///
+/// Answers `invalid-request` for an unknown key, a key users may not
+/// override, or a value that does not fit the setting.
+#[utoipa::path(
+    patch,
+    path = "/api/v1/me/settings",
+    tag = "me",
+    request_body = PersonalSettingsPatch,
+    responses(
+        (status = 200, description = "The caller's overridable settings after the change", body = PersonalSettings),
+        (status = 400, description = "An unknown, fixed, or invalid setting", body = Problem, content_type = "application/problem+json"),
+    ),
+    security(("bearer" = []), ("session" = []))
+)]
+pub async fn patch_settings(
+    authed: Authed,
+    State(state): State<NativeState>,
+    JsonBody(patch): JsonBody<PersonalSettingsPatch>,
+) -> Result<Json<PersonalSettings>, Problem> {
+    let registry = state.settings().registry();
+    let mut changes = Vec::with_capacity(patch.settings.len());
+    for (key, value) in &patch.settings {
+        let def = registry
+            .def(key)
+            .ok_or_else(|| Problem::invalid_request(format!("`{key}` is not a setting.")))?;
+        if !def.user_overridable {
+            return Err(Problem::invalid_request(format!(
+                "`{key}` is a server setting; users cannot override it."
+            )));
+        }
+        let value = if value.is_null() {
+            None
+        } else {
+            Some(crate::views::setting_value(def, value)?)
+        };
+        changes.push((key.clone(), value));
+    }
+    let user = authed.user_id();
+    for (key, value) in changes {
+        let written = match value {
+            Some(value) => state.user_settings().set(user, &key, value).await,
+            None => state.user_settings().unset(user, &key).await,
+        };
+        written.map_err(|error| problem::internal("writing a personal setting", &error))?;
+    }
+    personal_settings(&state, user).await.map(Json)
+}
+
+/// Reads the overridable settings with one user's values.
+///
+/// # Errors
+///
+/// Answers `internal` when a value cannot be read.
+async fn personal_settings(
+    state: &NativeState,
+    user: uuid::Uuid,
+) -> Result<PersonalSettings, Problem> {
+    let snapshot = state.settings().current();
+    let overrides = state
+        .user_settings()
+        .list(user)
+        .await
+        .map_err(|error| problem::internal("reading personal settings", &error))?;
+    let mut settings: Vec<PersonalSetting> = state
+        .settings()
+        .registry()
+        .iter()
+        .filter(|def| def.user_overridable)
+        .map(|def| {
+            let server_value = snapshot
+                .value(def.key)
+                .map(crate::views::setting_json)
+                .unwrap_or_else(|| crate::views::setting_json(&def.default));
+            let own = overrides.iter().find(|entry| entry.key == def.key);
+            PersonalSetting {
+                key: def.key.to_owned(),
+                value: own
+                    .map(|entry| crate::views::setting_json(&entry.value))
+                    .unwrap_or_else(|| server_value.clone()),
+                source: if own.is_some() { "user" } else { "server" }.to_owned(),
+                server_value,
+                description: def.description.to_owned(),
+            }
+        })
+        .collect();
+    settings.sort_by(|a, b| a.key.cmp(&b.key));
+    Ok(PersonalSettings { settings })
+}

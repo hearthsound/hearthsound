@@ -366,3 +366,77 @@ async fn api_keys_and_app_passwords_are_created_listed_and_revoked() {
     assert_problem(nameless, StatusCode::BAD_REQUEST, "invalid-request").await;
     fixture.stop().await;
 }
+
+/// Finds one entry of a settings listing.
+fn setting<'a>(listing: &'a Value, key: &str) -> &'a Value {
+    listing["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["key"] == key)
+        .unwrap_or_else(|| panic!("{key} is listed: {listing}"))
+}
+
+/// A user overrides the settings users may override, and only those.
+#[tokio::test]
+async fn personal_settings_override_and_fall_back_to_the_server() {
+    let fixture = Fixture::new().await;
+    let listing =
+        json(bearer(&fixture, reqwest::Method::GET, "/api/v1/me/settings", None).await).await;
+    let scope = setting(&listing, "subsonic.default_scope");
+    assert_eq!(scope["value"], "library");
+    assert_eq!(scope["source"], "server");
+    assert!(
+        listing["settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["key"] != "storage.cache.max_bytes"),
+        "server settings are not offered"
+    );
+
+    let patched = bearer(
+        &fixture,
+        reqwest::Method::PATCH,
+        "/api/v1/me/settings",
+        Some(serde_json::json!({ "settings": { "subsonic.default_scope": "server" } })),
+    )
+    .await;
+    assert_eq!(patched.status(), StatusCode::OK);
+    let patched = json(patched).await;
+    let scope = setting(&patched, "subsonic.default_scope");
+    assert_eq!(scope["value"], "server");
+    assert_eq!(scope["source"], "user");
+    assert_eq!(scope["serverValue"], "library");
+
+    let cleared = json(
+        bearer(
+            &fixture,
+            reqwest::Method::PATCH,
+            "/api/v1/me/settings",
+            Some(serde_json::json!({ "settings": { "subsonic.default_scope": null } })),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        setting(&cleared, "subsonic.default_scope")["source"],
+        "server"
+    );
+
+    for refused in [
+        serde_json::json!({ "settings": { "storage.cache.max_bytes": 1 } }),
+        serde_json::json!({ "settings": { "subsonic.default_scope": "everywhere" } }),
+        serde_json::json!({ "settings": { "no.such.key": true } }),
+    ] {
+        let response = bearer(
+            &fixture,
+            reqwest::Method::PATCH,
+            "/api/v1/me/settings",
+            Some(refused),
+        )
+        .await;
+        assert_problem(response, StatusCode::BAD_REQUEST, "invalid-request").await;
+    }
+    fixture.stop().await;
+}

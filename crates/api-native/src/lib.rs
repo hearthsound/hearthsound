@@ -27,6 +27,7 @@
 //! | `POST /api/v1/auth/login`, `POST /api/v1/auth/logout`, `GET /api/v1/auth/session` | anyone / any user |
 //! | `GET`/`POST /api/v1/me/api-keys`, `DELETE /api/v1/me/api-keys/{id}` | any user, own keys |
 //! | `GET`/`POST /api/v1/me/app-passwords`, `DELETE /api/v1/me/app-passwords/{id}` | any user, own app passwords |
+//! | `GET`/`PATCH /api/v1/me/settings` | any user, own overrides |
 
 #![forbid(unsafe_code)]
 
@@ -111,6 +112,10 @@ fn api_router() -> OpenApiRouter<NativeState> {
             routes::me::create_app_password
         ))
         .routes(routes!(routes::me::revoke_app_password))
+        .routes(routes!(
+            routes::me::get_settings,
+            routes::me::patch_settings
+        ))
 }
 
 /// Returns the OpenAPI document of the native API.
