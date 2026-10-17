@@ -893,8 +893,8 @@ async fn star(fixture: &Fixture, parameter: &str, id: &str) {
     assert!(text.contains("\"status\":\"ok\""), "{text}");
 }
 
-/// Liking a catalog album acquires its tracks at priority `queue`, and the one
-/// the backend can serve lands in the permanent library root.
+/// Liking a catalog album acquires its tracks at priority `queue`, and what the
+/// backend serves lands in the permanent library root.
 #[tokio::test]
 async fn starring_a_catalog_album_acquires_it_into_the_library() {
     let fixture = Fixture::new().await;
@@ -908,30 +908,46 @@ async fn starring_a_catalog_album_acquires_it_into_the_library() {
     let album = catalog_album_id(&fixture).await;
     star(&fixture, "albumId", &album).await;
 
-    let track = materialize(services.catalog(), 1).await;
-    let rows = ledger_rows(services.orchestrator(), track).await;
-    assert_eq!(rows.len(), 1, "one acquisition per album track");
-    assert_eq!(rows[0].priority, hearthsound_core::Priority::Queue);
-    assert_eq!(rows[0].reason, "save");
-    assert_eq!(rows[0].requested_by, Some(fixture.user_id));
-    for number in 2..=5 {
-        let other = materialize(services.catalog(), number).await;
-        assert_eq!(ledger_rows(services.orchestrator(), other).await.len(), 1);
+    let mut tracks = Vec::new();
+    for number in 1..=5 {
+        let track = materialize(services.catalog(), number).await;
+        let rows = ledger_rows(services.orchestrator(), track).await;
+        assert_eq!(rows.len(), 1, "one acquisition per album track");
+        assert_eq!(rows[0].priority, hearthsound_core::Priority::Queue);
+        assert_eq!(rows[0].reason, "save");
+        assert_eq!(rows[0].requested_by, Some(fixture.user_id));
+        tracks.push(track);
     }
-    wait_for_state(
-        services.orchestrator(),
-        rows[0].id,
-        AcquisitionState::Completed,
-    )
-    .await;
 
-    // The track is pinned by the like, so the import put it in the library
-    // root rather than the cache.
-    let imported = services.config().paths.library.join(FIRST_REL_PATH);
-    assert!(imported.is_file(), "{} exists", imported.display());
-    assert!(!services.config().paths.cache.join(FIRST_REL_PATH).exists());
+    // The backend holds one file, which the closest-scoring track's
+    // acquisition imports; the album's tracks are pinned by the like, so the
+    // import lands in the library root rather than the cache.
+    let library = LibraryRepository::new(services.database());
+    let mut imported = None;
+    for _ in 0..1500 {
+        for track in &tracks {
+            let files = library.list_media_files_for_track(*track).await.unwrap();
+            if let Some(file) = files.into_iter().next() {
+                imported = Some((*track, file));
+            }
+        }
+        if imported.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (track, file) = imported.expect("one album track is imported");
+    assert_eq!(file.storage, hearthsound_core::StorageClass::Library);
+    assert!(
+        services
+            .config()
+            .paths
+            .library
+            .join(&file.rel_path)
+            .is_file()
+    );
     assert_eq!(
-        LibraryRepository::new(services.database())
+        library
             .get_track(track)
             .await
             .unwrap()
