@@ -193,6 +193,60 @@ impl PluginHost {
         })?
     }
 
+    /// Removes an installed plugin's directory, with every installed version.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the plugin id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InstallError::OutsidePluginsDir`] when the path resolves outside
+    /// the plugins directory and [`InstallError::Io`] when it cannot be removed.
+    /// A directory that is already absent is not an error.
+    pub async fn remove_plugin(&self, id: &str) -> Result<(), InstallError> {
+        self.remove_within(vec![id.to_owned()]).await
+    }
+
+    /// Removes one installed version of a plugin.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the plugin id.
+    /// - `version`: the version directory to remove.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InstallError::OutsidePluginsDir`] when the path resolves outside
+    /// the plugins directory and [`InstallError::Io`] when it cannot be removed.
+    /// A directory that is already absent is not an error.
+    pub async fn remove_version(&self, id: &str, version: &str) -> Result<(), InstallError> {
+        self.remove_within(vec![id.to_owned(), version.to_owned()])
+            .await
+    }
+
+    /// Removes a path inside the plugins directory on a blocking thread.
+    async fn remove_within(&self, parts: Vec<String>) -> Result<(), InstallError> {
+        let plugins_dir = self.plugins_dir.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), InstallError> {
+            let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+            match removal_target(&plugins_dir, &parts)? {
+                Some(target) => {
+                    std::fs::remove_dir_all(&target).map_err(|source| InstallError::Io {
+                        path: target,
+                        source,
+                    })
+                }
+                None => Ok(()),
+            }
+        })
+        .await
+        .map_err(|error| InstallError::Io {
+            path: self.plugins_dir.clone(),
+            source: std::io::Error::other(error),
+        })?
+    }
+
     /// Loads an already installed plugin.
     ///
     /// # Parameters
@@ -534,6 +588,48 @@ fn stage(
         write("icon.png", icon)?;
     }
     Ok(())
+}
+
+/// Resolves `plugins_dir/<parts>` for removal.
+///
+/// Returns `None` when the path does not exist. Refuses any part that is not a
+/// single normal path component, and any path whose canonical form is not
+/// strictly inside the canonical plugins directory, so a symbolic link cannot
+/// steer a removal elsewhere.
+fn removal_target(plugins_dir: &Path, parts: &[&str]) -> Result<Option<PathBuf>, InstallError> {
+    let outside = || InstallError::OutsidePluginsDir(parts.iter().collect::<PathBuf>());
+    for part in parts {
+        let components: Vec<_> = Path::new(part).components().collect();
+        if !matches!(components.as_slice(), [std::path::Component::Normal(_)]) {
+            return Err(outside());
+        }
+    }
+
+    let root = match plugins_dir.canonicalize() {
+        Ok(root) => root,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(InstallError::Io {
+                path: plugins_dir.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let joined = plugins_dir.join(parts.iter().collect::<PathBuf>());
+    let target = match joined.canonicalize() {
+        Ok(target) => target,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(InstallError::Io {
+                path: joined,
+                source,
+            });
+        }
+    };
+    if target == root || !target.starts_with(&root) {
+        return Err(outside());
+    }
+    Ok(Some(target))
 }
 
 /// Loads an installed plugin from its directory.

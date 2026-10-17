@@ -63,7 +63,7 @@ async fn install(context: &Context, args: InstallPluginArgs) -> anyhow::Result<(
         PluginSource::Sideload
     };
     let registration = PluginRepository::new(context.database())
-        .register_installed(&installed, source)
+        .register_approved(&installed, source)
         .await
         .context("could not record the installed plugin")?;
 

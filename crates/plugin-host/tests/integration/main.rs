@@ -5,6 +5,7 @@
 //! once per test run, which is what keeps the test build and CI short.
 
 mod acquisition_provider;
+mod admin;
 mod artwork;
 mod artwork_provider;
 mod catalog_provider;

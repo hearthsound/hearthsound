@@ -251,7 +251,7 @@ pub async fn install_acquisition(services: &Arc<Services>, downloads: &std::path
         .await
         .unwrap();
     let registration = PluginRepository::new(services.database())
-        .register_installed(&installed, PluginSource::Sideload)
+        .register_approved(&installed, PluginSource::Sideload)
         .await
         .unwrap();
     assert_eq!(registration.id, ACQ_ID);

@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Subsonic `getOpenSubsonicExtensions` response advertises the `hearthsound`
   vendor extension at version 1.
 
+- Freshly installed plugins wait for approval before they can be enabled:
+  approving records the requested permissions and enables the plugin, and
+  enabling a pending plugin is refused. Approval, enabling, disabling and
+  removal publish a plugin status event to administrators.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload

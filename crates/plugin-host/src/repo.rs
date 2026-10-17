@@ -11,6 +11,7 @@
 
 use std::str::FromStr;
 
+use crate::manifest::Permissions;
 use hearthsound_core::events::{Audience, EventBus, PluginStatus, ServerEvent};
 use hearthsound_core::{Layer, new_uuid_v7};
 use hearthsound_db::Database;
@@ -88,12 +89,60 @@ pub struct PluginRow {
     pub sha256: Vec<u8>,
     /// Where the plugin came from.
     pub source: String,
+    /// The repository the plugin was installed from, when it came from one.
+    pub repository_id: Option<Uuid>,
     /// The permissions the administrator approved, as JSON text.
     pub approved_permissions: Option<String>,
     /// Whether the plugin is active.
     pub enabled: bool,
     /// When the plugin was installed, in unix milliseconds.
     pub installed_at: i64,
+}
+
+/// The lifecycle state of an installed plugin, as administrators see it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginState {
+    /// Installed but not yet approved: its permissions are not granted and it
+    /// does not load.
+    PendingApproval,
+    /// Approved and switched off.
+    Disabled,
+    /// Approved and active.
+    Enabled,
+    /// Active, with a newer version staged until its new permissions are
+    /// approved.
+    UpgradePendingApproval,
+}
+
+impl PluginState {
+    /// The wire literal for this state.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PendingApproval => "pending-approval",
+            Self::Disabled => "disabled",
+            Self::Enabled => "enabled",
+            Self::UpgradePendingApproval => "upgrade-pending-approval",
+        }
+    }
+}
+
+impl PluginRow {
+    /// The lifecycle state of this row.
+    ///
+    /// `upgrade_pending` says whether an upgrade is staged for this plugin. The
+    /// caller loads it, because the plugins table does not join the upgrade
+    /// table.
+    pub fn state(&self, upgrade_pending: bool) -> PluginState {
+        if self.approved_permissions.is_none() {
+            PluginState::PendingApproval
+        } else if upgrade_pending {
+            PluginState::UpgradePendingApproval
+        } else if self.enabled {
+            PluginState::Enabled
+        } else {
+            PluginState::Disabled
+        }
+    }
 }
 
 /// One row of the `provider_instances` table.
@@ -189,13 +238,14 @@ impl PluginRepository {
             "INSERT INTO plugins
                (id, version, api, manifest, sha256, source, repository_id,
                 approved_permissions, enabled, installed_at)
-             VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET
                version = excluded.version,
                api = excluded.api,
                manifest = excluded.manifest,
                sha256 = excluded.sha256,
                source = excluded.source,
+               repository_id = excluded.repository_id,
                approved_permissions = excluded.approved_permissions,
                enabled = excluded.enabled,
                installed_at = excluded.installed_at",
@@ -205,6 +255,9 @@ impl PluginRepository {
             row.manifest,
             row.sha256,
             row.source,
+            row.repository_id
+                .as_ref()
+                .map(|id| id.as_bytes().as_slice()),
             row.approved_permissions,
             row.enabled,
             row.installed_at,
@@ -225,24 +278,28 @@ impl PluginRepository {
     /// Returns [`RepoError::Database`] when the row cannot be read.
     pub async fn plugin(&self, id: &str) -> Result<Option<PluginRow>, RepoError> {
         let row = sqlx::query!(
-            "SELECT id, version, api, manifest, sha256, source, approved_permissions, enabled, installed_at
+            "SELECT id, version, api, manifest, sha256, source, repository_id, approved_permissions, enabled, installed_at
              FROM plugins WHERE id = ?",
             id,
         )
         .fetch_optional(&self.readers)
         .await?;
 
-        Ok(row.map(|row| PluginRow {
-            id: row.id,
-            version: row.version,
-            api: row.api,
-            manifest: row.manifest,
-            sha256: row.sha256,
-            source: row.source,
-            approved_permissions: row.approved_permissions,
-            enabled: row.enabled != 0,
-            installed_at: row.installed_at,
-        }))
+        row.map(|row| -> Result<PluginRow, RepoError> {
+            Ok(PluginRow {
+                id: row.id,
+                version: row.version,
+                api: row.api,
+                manifest: row.manifest,
+                sha256: row.sha256,
+                source: row.source,
+                repository_id: optional_uuid("plugins.repository_id", row.repository_id)?,
+                approved_permissions: row.approved_permissions,
+                enabled: row.enabled != 0,
+                installed_at: row.installed_at,
+            })
+        })
+        .transpose()
     }
 
     /// Reads every plugin, ordered by id.
@@ -252,26 +309,28 @@ impl PluginRepository {
     /// Returns [`RepoError::Database`] when the rows cannot be read.
     pub async fn plugins(&self) -> Result<Vec<PluginRow>, RepoError> {
         let rows = sqlx::query!(
-            "SELECT id, version, api, manifest, sha256, source, approved_permissions, enabled, installed_at
+            "SELECT id, version, api, manifest, sha256, source, repository_id, approved_permissions, enabled, installed_at
              FROM plugins ORDER BY id",
         )
         .fetch_all(&self.readers)
         .await?;
 
-        Ok(rows
-            .into_iter()
-            .map(|row| PluginRow {
-                id: row.id,
-                version: row.version,
-                api: row.api,
-                manifest: row.manifest,
-                sha256: row.sha256,
-                source: row.source,
-                approved_permissions: row.approved_permissions,
-                enabled: row.enabled != 0,
-                installed_at: row.installed_at,
+        rows.into_iter()
+            .map(|row| -> Result<PluginRow, RepoError> {
+                Ok(PluginRow {
+                    id: row.id,
+                    version: row.version,
+                    api: row.api,
+                    manifest: row.manifest,
+                    sha256: row.sha256,
+                    source: row.source,
+                    repository_id: optional_uuid("plugins.repository_id", row.repository_id)?,
+                    approved_permissions: row.approved_permissions,
+                    enabled: row.enabled != 0,
+                    installed_at: row.installed_at,
+                })
             })
-            .collect())
+            .collect()
     }
 
     /// Enables or disables one plugin.
@@ -293,6 +352,62 @@ impl PluginRepository {
             .execute(&self.writer)
             .await?;
         Ok(())
+    }
+
+    /// Approves a pending plugin.
+    ///
+    /// The approved permissions become the ones the stored manifest requests,
+    /// and the plugin is enabled.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the plugin id.
+    ///
+    /// # Returns
+    ///
+    /// The updated row, or `None` when no such plugin is installed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError`] when the stored manifest cannot be parsed or the
+    /// write fails.
+    pub async fn approve(&self, id: &str) -> Result<Option<PluginRow>, RepoError> {
+        let Some(row) = self.plugin(id).await? else {
+            return Ok(None);
+        };
+        let stored: StoredPermissions = serde_json::from_str(&row.manifest)?;
+        let approved = serde_json::to_string(&stored.permissions)?;
+        sqlx::query!(
+            "UPDATE plugins SET approved_permissions = ?, enabled = 1 WHERE id = ?",
+            approved,
+            id,
+        )
+        .execute(&self.writer)
+        .await?;
+        self.plugin(id).await
+    }
+
+    /// Deletes one plugin row.
+    ///
+    /// The plugin's instances, layer assignments, key-value rows and staged
+    /// upgrade are removed with it by cascade.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the plugin id.
+    ///
+    /// # Returns
+    ///
+    /// Whether a row was removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::Database`] when the write fails.
+    pub async fn delete(&self, id: &str) -> Result<bool, RepoError> {
+        let result = sqlx::query!("DELETE FROM plugins WHERE id = ?", id)
+            .execute(&self.writer)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Inserts one provider instance.
@@ -594,6 +709,26 @@ fn instance_id(bytes: &[u8]) -> Result<Uuid, RepoError> {
         column: "provider_instances.id",
         reason: error.to_string(),
     })
+}
+
+/// Reads an optional repository id from its stored bytes.
+fn optional_uuid(column: &'static str, bytes: Option<Vec<u8>>) -> Result<Option<Uuid>, RepoError> {
+    bytes
+        .map(|bytes| {
+            Uuid::from_slice(&bytes).map_err(|error| RepoError::Malformed {
+                column,
+                reason: error.to_string(),
+            })
+        })
+        .transpose()
+}
+
+/// The part of a stored manifest that approval reads.
+#[derive(serde::Deserialize)]
+struct StoredPermissions {
+    /// The permissions the manifest requests.
+    #[serde(default)]
+    permissions: Permissions,
 }
 
 /// The write side of auto-disabling: what the host does when an instance traps

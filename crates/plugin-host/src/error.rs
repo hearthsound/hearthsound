@@ -74,6 +74,20 @@ pub enum InstallError {
     /// The component does not type-check against the host's world.
     #[error("the component is incompatible with this host: {0}")]
     Incompatible(String),
+    /// The archive's SHA-256 is not the digest the caller expected.
+    #[error("the archive's sha256 is {actual}, expected {expected}")]
+    IntegrityFailed {
+        /// The digest the caller expected, lowercase hex.
+        expected: String,
+        /// The digest of the archive, lowercase hex.
+        actual: String,
+    },
+    /// A path that must lie inside the plugins directory resolves elsewhere.
+    #[error("`{}` resolves outside the plugins directory", .0.display())]
+    OutsidePluginsDir(PathBuf),
+    /// The installed plugin could not be recorded in the database.
+    #[error(transparent)]
+    Record(#[from] crate::repo::RepoError),
 }
 
 /// An error from setting up or configuring the plugin host itself.

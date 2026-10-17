@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, version, api, manifest, sha256, source, approved_permissions, enabled, installed_at\n             FROM plugins WHERE id = ?",
+  "query": "SELECT id, version, api, manifest, sha256, source, repository_id, approved_permissions, enabled, installed_at\n             FROM plugins ORDER BY id",
   "describe": {
     "columns": [
       {
@@ -70,8 +70,19 @@
         }
       },
       {
-        "name": "approved_permissions",
+        "name": "repository_id",
         "ordinal": 6,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "plugins",
+            "name": "repository_id"
+          }
+        }
+      },
+      {
+        "name": "approved_permissions",
+        "ordinal": 7,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -82,7 +93,7 @@
       },
       {
         "name": "enabled",
-        "ordinal": 7,
+        "ordinal": 8,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -93,7 +104,7 @@
       },
       {
         "name": "installed_at",
-        "ordinal": 8,
+        "ordinal": 9,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -104,7 +115,7 @@
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 0
     },
     "nullable": [
       false,
@@ -114,9 +125,10 @@
       false,
       false,
       true,
+      true,
       false,
       false
     ]
   },
-  "hash": "3e4bdab1ddb5f16822a577c08dcfab3fbe66b8f757d5e1fb1dd091d9ca8e65e5"
+  "hash": "6e34182c14b8b7adb031ce254274006eb896265f2730072f886f308709873061"
 }

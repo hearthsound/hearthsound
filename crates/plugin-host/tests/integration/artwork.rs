@@ -88,7 +88,7 @@ impl Env {
     async fn install(&self, archive: &str) {
         let installed = self.host.install(&fixture_plugin(archive)).await.unwrap();
         self.repository
-            .register_installed(&installed, PluginSource::Sideload)
+            .register_approved(&installed, PluginSource::Sideload)
             .await
             .unwrap();
     }

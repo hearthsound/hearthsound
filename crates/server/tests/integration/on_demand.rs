@@ -85,7 +85,7 @@ pub(crate) async fn install_catalog(services: &Arc<Services>) {
         .await
         .unwrap();
     let registration = PluginRepository::new(services.database())
-        .register_installed(&installed, PluginSource::Sideload)
+        .register_approved(&installed, PluginSource::Sideload)
         .await
         .unwrap();
     assert_eq!(registration.id, ALBUM_PLUGIN);
@@ -129,7 +129,7 @@ pub(crate) async fn install_acquisition(
         .await
         .unwrap();
     let registration = PluginRepository::new(services.database())
-        .register_installed(&installed, PluginSource::Sideload)
+        .register_approved(&installed, PluginSource::Sideload)
         .await
         .unwrap();
     assert_eq!(registration.id, ACQ_PLUGIN);

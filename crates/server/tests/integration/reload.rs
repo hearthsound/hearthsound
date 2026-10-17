@@ -133,7 +133,7 @@ async fn a_layer_assignment_written_by_another_connection_rebuilds_the_registry(
         .await
         .unwrap();
     let registration = PluginRepository::new(fixture.services.database())
-        .register_installed(&installed, PluginSource::Sideload)
+        .register_approved(&installed, PluginSource::Sideload)
         .await
         .unwrap();
     assert_eq!(registration.id, HELLO_ID);

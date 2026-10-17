@@ -27,6 +27,7 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 mod acquisition;
+mod admin;
 pub mod archive;
 mod artwork;
 mod bindings;
@@ -49,6 +50,7 @@ mod repo;
 mod state;
 mod validate;
 
+pub use admin::{AdminError, PluginAdmin};
 pub use archive::PluginArchive;
 pub use engine::PluginEngine;
 pub use error::{HostError, InstallError};
@@ -65,5 +67,7 @@ pub use manifest::{Manifest, ManifestError};
 pub use registry::{
     FetchError, FetchedImage, ProviderRegistry, RegistryInstance, RegistryReport, SkippedInstance,
 };
-pub use repo::{Assignment, InstanceRow, PluginRepository, PluginRow, PluginSource, RepoError};
+pub use repo::{
+    Assignment, InstanceRow, PluginRepository, PluginRow, PluginSource, PluginState, RepoError,
+};
 pub use state::InstanceState;

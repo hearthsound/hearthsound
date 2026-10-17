@@ -14,6 +14,7 @@
 //! different manifest than the component beside it.
 
 use hearthsound_core::Layer;
+use uuid::Uuid;
 
 use crate::host::InstalledPlugin;
 use crate::manifest::Manifest;
@@ -202,13 +203,40 @@ fn join<'a>(values: impl IntoIterator<Item = &'a String>) -> String {
 }
 
 impl PluginRepository {
-    /// Records an installed plugin and enables it.
+    /// Records an installed plugin as pending approval.
+    ///
+    /// The row's `approved_permissions` stays unset and `enabled` is `0`, so the
+    /// plugin grants nothing and the registry skips it until an administrator
+    /// approves it. A second registration of the same plugin id replaces the
+    /// row.
+    ///
+    /// # Parameters
+    ///
+    /// - `plugin`: the plugin an install produced.
+    /// - `source`: where the archive came from.
+    ///
+    /// # Returns
+    ///
+    /// The registration, including the requested permissions with their risk
+    /// labels, for display.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::Database`] when the write fails.
+    pub async fn register_installed(
+        &self,
+        plugin: &InstalledPlugin,
+        source: PluginSource,
+    ) -> Result<PluginRegistration, RepoError> {
+        self.record_install(plugin, source, None, false).await
+    }
+
+    /// Records an installed plugin and approves it in the same write.
     ///
     /// The row's `approved_permissions` is the manifest's requested permission
-    /// set and `enabled` is `1`: the command-line administrator who ran the
-    /// install is the consenting party, and the host still checks the approved
-    /// set inside every import. A second registration of the same plugin id
-    /// replaces the row, which is how an upgrade is recorded.
+    /// set and `enabled` is `1`: the caller is the consenting party, and the host
+    /// still checks the approved set inside every import. A second registration
+    /// of the same plugin id replaces the row.
     ///
     /// # Parameters
     ///
@@ -225,13 +253,45 @@ impl PluginRepository {
     /// Returns [`RepoError::Database`] when the write fails and
     /// [`RepoError::Serialize`] when the manifest's permissions cannot be
     /// serialized.
-    pub async fn register_installed(
+    pub async fn register_approved(
         &self,
         plugin: &InstalledPlugin,
         source: PluginSource,
     ) -> Result<PluginRegistration, RepoError> {
+        self.record_install(plugin, source, None, true).await
+    }
+
+    /// Writes the row for an installed plugin.
+    ///
+    /// # Parameters
+    ///
+    /// - `plugin`: the plugin an install produced.
+    /// - `source`: where the archive came from.
+    /// - `repository_id`: the repository the archive was fetched from, if any.
+    /// - `approved`: whether the requested permissions are approved and the
+    ///   plugin enabled.
+    ///
+    /// # Returns
+    ///
+    /// The registration, for display.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::Database`] when the write fails and
+    /// [`RepoError::Serialize`] when the permissions cannot be serialized.
+    pub(crate) async fn record_install(
+        &self,
+        plugin: &InstalledPlugin,
+        source: PluginSource,
+        repository_id: Option<Uuid>,
+        approved: bool,
+    ) -> Result<PluginRegistration, RepoError> {
         let manifest = plugin.manifest();
-        let approved_permissions = serde_json::to_string(&manifest.permissions)?;
+        let approved_permissions = if approved {
+            Some(serde_json::to_string(&manifest.permissions)?)
+        } else {
+            None
+        };
 
         let row = PluginRow {
             id: manifest.id.clone(),
@@ -240,8 +300,9 @@ impl PluginRepository {
             manifest: plugin.manifest_json().to_owned(),
             sha256: plugin.sha256().to_vec(),
             source: source.as_str().to_owned(),
-            approved_permissions: Some(approved_permissions),
-            enabled: true,
+            repository_id,
+            approved_permissions,
+            enabled: approved,
             installed_at: now_millis(),
         };
         self.upsert_plugin(&row).await?;
