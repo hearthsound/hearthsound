@@ -8,3 +8,4 @@ pub mod admin_users;
 pub mod me;
 pub mod session;
 pub mod system;
+pub mod uploads;

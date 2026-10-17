@@ -995,3 +995,204 @@ async fn an_administrator_lists_cancels_and_retries_acquisitions() {
     assert_problem(unknown, StatusCode::NOT_FOUND, "not-found").await;
     fixture.stop().await;
 }
+
+/// Builds a `multipart/form-data` body with one `file` part per entry, and
+/// the `Content-Type` that names its boundary.
+fn multipart_body(files: &[(&str, Vec<u8>)]) -> (String, Vec<u8>) {
+    let boundary = "hsuploadboundary";
+    let mut body = Vec::new();
+    for (name, bytes) in files {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+/// Sends a multipart upload, authenticated by bearer key or by a session
+/// cookie with its CSRF token.
+async fn upload_files(
+    fixture: &Fixture,
+    session: Option<(&str, &str)>,
+    files: &[(&str, Vec<u8>)],
+) -> reqwest::Response {
+    let (content_type, body) = multipart_body(files);
+    let mut request = fixture
+        .client
+        .post(format!("{}/api/v1/uploads", fixture.base_url()))
+        .header(CONTENT_TYPE, content_type);
+    request = match session {
+        Some((cookie, csrf)) => request
+            .header(reqwest::header::COOKIE, cookie)
+            .header("x-hearthsound-csrf", csrf),
+        None => request.header(AUTHORIZATION, format!("Bearer {}", fixture.api_key)),
+    };
+    request.body(body).send().await.unwrap()
+}
+
+/// Generates a one-second FLAC file titled `title` and returns its bytes.
+async fn flac_bytes(dir: &std::path::Path, title: &str) -> Vec<u8> {
+    use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
+    std::fs::create_dir_all(dir).unwrap();
+    let path = AudioFixture::new(AudioFormat::Flac)
+        .seconds(1.0)
+        .file_name(format!("{title}.flac"))
+        .tags(TrackTags::new(title, "Uploader").album("Uploads"))
+        .write_into(dir)
+        .await
+        .unwrap();
+    std::fs::read(path).unwrap()
+}
+
+/// Files sent over the native API land in the sender's library: lossless
+/// audio becomes a track the Subsonic API serves, unsupported content fails
+/// its own entry, and the account and setting rules refuse what they should.
+#[tokio::test]
+async fn uploads_land_in_the_callers_library_and_are_refused_when_they_should_be() {
+    let fixture = Fixture::new().await;
+    let scratch = fixture
+        .database_path()
+        .parent()
+        .unwrap()
+        .join("upload-input");
+    let one = flac_bytes(&scratch, "One").await;
+    let two = flac_bytes(&scratch, "Two").await;
+
+    // Administrators upload directly; the bad entry does not stop the others.
+    let mut events = fixture.services.events().subscribe();
+    let mixed = upload_files(
+        &fixture,
+        None,
+        &[
+            ("one.flac", one.clone()),
+            ("notes.flac", b"this is not audio".to_vec()),
+            ("two.flac", two),
+        ],
+    )
+    .await;
+    assert_eq!(mixed.status(), StatusCode::CREATED);
+    let mixed = json(mixed).await;
+    let entries = mixed["uploads"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0]["fileName"], "one.flac");
+    assert_eq!(entries[0]["state"], "completed");
+    assert!(entries[0]["trackId"].as_str().unwrap().starts_with("tr_"));
+    assert_eq!(entries[1]["state"], "failed");
+    assert_eq!(entries[1]["error"], "unsupported-media");
+    assert!(entries[1].get("trackId").is_none());
+    assert_eq!(entries[2]["state"], "completed");
+
+    // The first file's progress is published in order, once per stage.
+    let mut stages = Vec::new();
+    while let Ok(envelope) = events.try_recv() {
+        if let hearthsound_core::events::ServerEvent::UploadUpdated(update) = envelope.event
+            && Some(update.upload_id.as_str()) == entries[0]["uploadId"].as_str()
+        {
+            stages.push(update.state);
+        }
+    }
+    assert_eq!(stages, ["receiving", "processing", "completed"]);
+
+    let track = entries[0]["trackId"].as_str().unwrap();
+    let song = json(
+        fixture
+            .get(&format!(
+                "/rest/getSong?id={track}&apiKey={}&f=json",
+                fixture.api_key
+            ))
+            .await,
+    )
+    .await;
+    assert_eq!(song["subsonic-response"]["song"]["title"], "One");
+
+    // A file over the configured limit ends the request with too-large.
+    let limited = bearer(
+        &fixture,
+        reqwest::Method::PATCH,
+        "/api/v1/admin/settings",
+        Some(serde_json::json!({ "settings": { "uploads.max_file_bytes": 1024 } })),
+    )
+    .await;
+    assert_eq!(limited.status(), StatusCode::OK);
+    let too_big = upload_files(&fixture, None, &[("big.flac", one.clone())]).await;
+    assert_problem(too_big, StatusCode::PAYLOAD_TOO_LARGE, "too-large").await;
+
+    // A body that is not multipart is an invalid request.
+    let plain = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/uploads",
+        Some(serde_json::json!({ "file": "x" })),
+    )
+    .await;
+    assert_problem(plain, StatusCode::BAD_REQUEST, "invalid-request").await;
+
+    // A listener without the upload permission is refused; an uploader with
+    // it lands the file, and cannot upload once the server turns uploads off.
+    for (name, upload) in [("listener", false), ("uploader", true)] {
+        let created = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/users",
+            Some(serde_json::json!({
+                "username": name,
+                "password": "correct horse",
+                "permissions": { "acquire": false, "upload": upload, "download": true },
+            })),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+    }
+    let (listener, listener_csrf) = session_of(&fixture, "listener", "correct horse").await;
+    let refused = upload_files(
+        &fixture,
+        Some((&listener, &listener_csrf)),
+        &[("three.flac", one.clone())],
+    )
+    .await;
+    assert_problem(refused, StatusCode::FORBIDDEN, "permission-denied").await;
+
+    // The limit is restored so the uploader's file fits.
+    let restored = bearer(
+        &fixture,
+        reqwest::Method::PATCH,
+        "/api/v1/admin/settings",
+        Some(serde_json::json!({ "settings": { "uploads.max_file_bytes": 268_435_456 } })),
+    )
+    .await;
+    assert_eq!(restored.status(), StatusCode::OK);
+
+    let (uploader, uploader_csrf) = session_of(&fixture, "uploader", "correct horse").await;
+    let landed = upload_files(
+        &fixture,
+        Some((&uploader, &uploader_csrf)),
+        &[("three.flac", flac_bytes(&scratch, "Three").await)],
+    )
+    .await;
+    assert_eq!(landed.status(), StatusCode::CREATED);
+    let landed = json(landed).await;
+    assert_eq!(landed["uploads"][0]["state"], "completed");
+
+    let off = bearer(
+        &fixture,
+        reqwest::Method::PATCH,
+        "/api/v1/admin/settings",
+        Some(serde_json::json!({ "settings": { "uploads.enabled": false } })),
+    )
+    .await;
+    assert_eq!(off.status(), StatusCode::OK);
+    let closed = upload_files(
+        &fixture,
+        Some((&uploader, &uploader_csrf)),
+        &[("four.flac", one)],
+    )
+    .await;
+    assert_problem(closed, StatusCode::FORBIDDEN, "permission-denied").await;
+    fixture.stop().await;
+}

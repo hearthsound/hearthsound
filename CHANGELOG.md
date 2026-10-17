@@ -116,6 +116,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the storage policy, and `POST /api/v1/admin/storage/evict` runs one
   maintenance pass now (autopin, relocation, then eviction) and answers what
   it changed.
+- `POST /api/v1/uploads` accepts one or more audio files as `multipart/form-data`
+  from an account with the upload permission while `uploads.enabled` is on. Each
+  file is staged, then moved into the library as a track of the uploader's
+  library; a file the library cannot index fails its own entry with
+  `unsupported-media` and the others still land. Progress is published as
+  `upload.updated` events, and a file over `uploads.max_file_bytes` ends the
+  request with `too-large`.
 
 ### Changed
 

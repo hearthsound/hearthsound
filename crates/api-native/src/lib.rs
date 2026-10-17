@@ -33,6 +33,7 @@
 //! | `GET`/`PATCH /api/v1/admin/settings` | administrators |
 //! | `GET /api/v1/admin/acquisitions`, `POST /api/v1/admin/acquisitions/{id}/cancel`, `POST /api/v1/admin/acquisitions/{id}/retry` | administrators |
 //! | `GET /api/v1/admin/storage`, `POST /api/v1/admin/storage/evict` | administrators |
+//! | `POST /api/v1/uploads` | any user with `can_upload`, when uploads are enabled |
 
 #![forbid(unsafe_code)]
 
@@ -46,6 +47,7 @@ pub mod views;
 
 use std::sync::Arc;
 
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{any, get};
 use axum::{Json, Router};
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme};
@@ -73,6 +75,7 @@ pub const OPENAPI_PATH: &str = "/api/v1/openapi.json";
         (name = "auth", description = "Web sessions"),
         (name = "me", description = "The caller's own credentials and settings"),
         (name = "admin", description = "Server administration"),
+        (name = "uploads", description = "Audio files sent into the caller's library"),
     )
 )]
 struct ApiDoc;
@@ -145,6 +148,13 @@ fn api_router() -> OpenApiRouter<NativeState> {
         .routes(routes!(routes::admin_acquisitions::retry_acquisition))
         .routes(routes!(routes::admin_storage::get_storage))
         .routes(routes!(routes::admin_storage::evict_storage))
+        .merge(
+            // The upload route alone lifts axum's 2 MB multipart body limit:
+            // the limit is per router and the JSON routes keep theirs.
+            OpenApiRouter::new()
+                .routes(routes!(routes::uploads::upload))
+                .layer(DefaultBodyLimit::disable()),
+        )
 }
 
 /// Returns the OpenAPI document of the native API.
