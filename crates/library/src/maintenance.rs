@@ -45,7 +45,7 @@
 //! ```
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hearthsound_config::keys;
@@ -75,6 +75,84 @@ pub struct RelocationReport {
     /// Files removed from the permanent root, with their rows, because their
     /// track lost its last pin and `storage.unpin_action` is `delete`.
     pub deleted: u64,
+}
+
+/// What one eviction pass removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EvictionReport {
+    /// How many cache files were removed.
+    pub files: u64,
+    /// How many bytes those files held.
+    pub bytes: i64,
+}
+
+/// The files and bytes of one storage class.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClassUsage {
+    /// How many files the class holds.
+    pub files: u64,
+    /// How many bytes those files hold.
+    pub bytes: i64,
+}
+
+/// The size and free space of a filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilesystemSpace {
+    /// The filesystem's total size in bytes.
+    pub total_bytes: i64,
+    /// The bytes an unprivileged process may still write.
+    pub available_bytes: i64,
+}
+
+/// What the managed roots and the scanned folders hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageUsage {
+    /// The managed permanent files under `<storage>/library`.
+    pub library: ClassUsage,
+    /// The managed evictable files under `<storage>/cache`.
+    pub cache: ClassUsage,
+    /// The files inside scanned folders.
+    pub folders: ClassUsage,
+    /// How many tracks carry at least one pin reason.
+    pub pinned_tracks: u64,
+    /// The filesystem under the cache root, when its space can be read.
+    pub filesystem: Option<FilesystemSpace>,
+}
+
+/// Reads how much space a filesystem has.
+///
+/// The maintainer asks it about the cache root before an eviction pass. The
+/// default, [`StatvfsProbe`], asks the operating system; tests supply their own.
+pub trait SpaceProbe: Send + Sync {
+    /// Returns the space of the filesystem a path is on.
+    ///
+    /// # Parameters
+    ///
+    /// - `path`: a path on the filesystem.
+    ///
+    /// # Returns
+    ///
+    /// The space, or `None` when it cannot be read.
+    fn space(&self, path: &Path) -> Option<FilesystemSpace>;
+}
+
+/// Reads filesystem space with `statvfs`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StatvfsProbe;
+
+impl SpaceProbe for StatvfsProbe {
+    /// Returns the space `statvfs` reports, or `None` when the call fails or a
+    /// value does not fit.
+    fn space(&self, path: &Path) -> Option<FilesystemSpace> {
+        let stat = rustix::fs::statvfs(path).ok()?;
+        let block = stat.f_frsize;
+        let total = stat.f_blocks.checked_mul(block)?;
+        let available = stat.f_bavail.checked_mul(block)?;
+        Some(FilesystemSpace {
+            total_bytes: i64::try_from(total).ok()?,
+            available_bytes: i64::try_from(available).ok()?,
+        })
+    }
 }
 
 /// Keeps the managed files of the two storage roots in step with the pins.
@@ -111,6 +189,8 @@ pub struct StorageMaintainer {
     settings: Settings,
     /// The bus every availability change is published on.
     events: Arc<EventBus>,
+    /// Reads the free space of the filesystem under the cache root.
+    space: Arc<dyn SpaceProbe>,
 }
 
 impl std::fmt::Debug for StorageMaintainer {
@@ -147,7 +227,26 @@ impl StorageMaintainer {
             roots,
             settings,
             events,
+            space: Arc::new(StatvfsProbe),
         }
+    }
+
+    /// Replaces how the free space of the cache filesystem is read.
+    ///
+    /// The default asks the operating system (`statvfs`); a test passes a probe
+    /// that reports a chosen amount so the free-space limit can be exercised
+    /// without filling a disk.
+    ///
+    /// # Parameters
+    ///
+    /// - `space`: the probe to use.
+    ///
+    /// # Returns
+    ///
+    /// The maintainer, using that probe.
+    pub fn with_space_probe(mut self, space: Arc<dyn SpaceProbe>) -> StorageMaintainer {
+        self.space = space;
+        self
     }
 
     /// Returns the managed roots the maintainer moves files between.
@@ -343,6 +442,12 @@ impl StorageMaintainer {
 
     /// Removes one managed file and its row.
     ///
+    /// The row goes first, in a transaction that confirms the file is still in
+    /// the root it was read from and its track is still unpinned: a pin that
+    /// arrived since the candidates were read wins, and the file stays. The file
+    /// itself is removed once that transaction committed, so a row never names a
+    /// file that is already gone.
+    ///
     /// # Parameters
     ///
     /// - `file`: the file to remove.
@@ -350,17 +455,25 @@ impl StorageMaintainer {
     ///
     /// # Returns
     ///
-    /// [`Relocated::Deleted`] when the file and its row are gone,
-    /// [`Relocated::Skipped`] when the file itself could not be removed.
+    /// [`Relocated::Deleted`] when the row is gone, [`Relocated::Skipped`] when
+    /// the track was pinned or the row moved in the meantime.
     ///
     /// # Errors
     ///
-    /// Returns [`LibraryError`] when the row cannot be removed.
+    /// Returns [`LibraryError`] when the row cannot be read or removed.
     async fn delete_file(
         &self,
         file: &ManagedFile,
         source: &std::path::Path,
     ) -> Result<Relocated, LibraryError> {
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+        if !still_unpinned(&mut tx, file).await? {
+            return Ok(Relocated::Skipped);
+        }
+        let before = self.availability(&mut tx, file.track_id).await?;
+        media_files::delete_media_file(&mut tx, file.id).await?;
+        let after = self.settle_availability(&mut tx, file.track_id).await?;
+        tx.commit().await?;
         match tokio::fs::remove_file(source).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -369,16 +482,10 @@ impl StorageMaintainer {
                     track = %file.track_id,
                     path = %source.display(),
                     %error,
-                    "could not remove an unpinned managed file; leaving it where it is"
+                    "removed the row of an unpinned managed file but not the file itself"
                 );
-                return Ok(Relocated::Skipped);
             }
         }
-        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
-        let before = self.availability(&mut tx, file.track_id).await?;
-        media_files::delete_media_file(&mut tx, file.id).await?;
-        let after = self.settle_availability(&mut tx, file.track_id).await?;
-        tx.commit().await?;
         self.prune(source, file.storage).await;
         if let (Some(before), Some(after)) = (before, after)
             && before != after
@@ -387,10 +494,232 @@ impl StorageMaintainer {
         }
         tracing::debug!(
             track = %file.track_id,
+            storage = file.storage.as_str(),
             rel_path = file.rel_path.as_str(),
             "deleted an unpinned managed file"
         );
         Ok(Relocated::Deleted)
+    }
+
+    /// Evicts unpinned cache files until the cache is within its limits.
+    ///
+    /// Only `cache` files of unpinned tracks are candidates; a file in a
+    /// scanned folder or in `<storage>/library`, and the file of any pinned
+    /// track, is never one. When `storage.cache.max_age_days` is above zero,
+    /// every candidate last used (or, never streamed, added) longer ago than
+    /// that goes first, whatever the pressure. The rest go in the order
+    /// `storage.cache.eviction` names - `lru` by last use, `lfu` by recorded
+    /// plays then last use, `fifo` by when the file was added - while the cache
+    /// holds more than `storage.cache.max_bytes` or the filesystem under it has
+    /// less than `storage.cache.min_free_bytes` available. A filesystem whose
+    /// free space cannot be read leaves only the size limit in force.
+    ///
+    /// An evicted track that has no other file becomes `remote` again.
+    ///
+    /// # Returns
+    ///
+    /// How many files and bytes were evicted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when a query fails, a row cannot be removed, or
+    /// a setting cannot be read.
+    pub async fn evict(&self) -> Result<EvictionReport, LibraryError> {
+        let snapshot = self.settings.current();
+        let max_bytes = snapshot.get(keys::STORAGE_CACHE_MAX_BYTES)?;
+        let min_free = snapshot.get(keys::STORAGE_CACHE_MIN_FREE_BYTES)?;
+        let max_age_days = snapshot.get(keys::STORAGE_CACHE_MAX_AGE_DAYS)?;
+        let policy = EvictionPolicy::parse(&snapshot.get(keys::STORAGE_CACHE_EVICTION)?)?;
+        drop(snapshot);
+
+        let mut candidates = self.eviction_candidates().await?;
+        policy.order(&mut candidates);
+        let mut cache_bytes = self.class_usage(StorageClass::Cache).await?.bytes;
+        let mut available = self
+            .space
+            .space(&self.roots.cache)
+            .map(|space| space.available_bytes);
+        let mut report = EvictionReport::default();
+
+        let mut remaining = Vec::with_capacity(candidates.len());
+        if max_age_days > 0 {
+            let cutoff = crate::now_millis() - max_age_days.saturating_mul(MILLIS_PER_DAY);
+            for candidate in candidates {
+                if candidate.used_at < cutoff {
+                    if self.evict_one(&candidate).await? {
+                        report.files += 1;
+                        report.bytes += candidate.size;
+                        cache_bytes -= candidate.size;
+                        available = available.map(|bytes| bytes.saturating_add(candidate.size));
+                    }
+                } else {
+                    remaining.push(candidate);
+                }
+            }
+        } else {
+            remaining = candidates;
+        }
+
+        for candidate in remaining {
+            let over_size = cache_bytes > max_bytes;
+            let under_free = available.is_some_and(|bytes| bytes < min_free);
+            if !over_size && !under_free {
+                break;
+            }
+            if self.evict_one(&candidate).await? {
+                report.files += 1;
+                report.bytes += candidate.size;
+                cache_bytes -= candidate.size;
+                available = available.map(|bytes| bytes.saturating_add(candidate.size));
+            }
+        }
+        if report.files > 0 {
+            tracing::info!(
+                files = report.files,
+                bytes = report.bytes,
+                policy = policy.as_str(),
+                "evicted cache files"
+            );
+        }
+        Ok(report)
+    }
+
+    /// Evicts one candidate.
+    ///
+    /// # Parameters
+    ///
+    /// - `candidate`: the cache file to remove.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the file was evicted, `false` when its track was pinned in
+    /// the meantime.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when the row cannot be read or removed.
+    async fn evict_one(&self, candidate: &EvictionCandidate) -> Result<bool, LibraryError> {
+        let source = self.roots.cache.join(&candidate.file.rel_path);
+        let outcome = self.delete_file(&candidate.file, &source).await?;
+        Ok(outcome == Relocated::Deleted)
+    }
+
+    /// Reports what the managed roots and the scanned folders hold.
+    ///
+    /// # Returns
+    ///
+    /// The file counts and bytes per storage class, the number of pinned
+    /// tracks, and the space of the filesystem under the cache root when it can
+    /// be read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Database`] when a query fails.
+    pub async fn usage(&self) -> Result<StorageUsage, LibraryError> {
+        let mut conn = self.readers.acquire().await?;
+        let rows = sqlx::query!(
+            "SELECT storage, COUNT(*) AS \"files!: i64\", COALESCE(SUM(size), 0) AS \"bytes!: i64\" \
+             FROM media_files GROUP BY storage",
+        )
+        .fetch_all(&mut *conn)
+        .await?;
+        let mut usage = StorageUsage {
+            library: ClassUsage::default(),
+            cache: ClassUsage::default(),
+            folders: ClassUsage::default(),
+            pinned_tracks: 0,
+            filesystem: self.space.space(&self.roots.cache),
+        };
+        for row in rows {
+            let class = ClassUsage {
+                files: u64::try_from(row.files).unwrap_or(0),
+                bytes: row.bytes,
+            };
+            match storage_class(&row.storage)? {
+                StorageClass::Library => usage.library = class,
+                StorageClass::Cache => usage.cache = class,
+                StorageClass::Folder => usage.folders = class,
+            }
+        }
+        let pinned = sqlx::query_scalar!(
+            "SELECT COUNT(*) AS \"pinned!: i64\" FROM track_retention WHERE pinned = 1"
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        usage.pinned_tracks = u64::try_from(pinned).unwrap_or(0);
+        Ok(usage)
+    }
+
+    /// Reads the file count and bytes of one storage class.
+    ///
+    /// # Parameters
+    ///
+    /// - `storage`: the class to measure.
+    ///
+    /// # Returns
+    ///
+    /// Its files and bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Database`] when the query fails.
+    async fn class_usage(&self, storage: StorageClass) -> Result<ClassUsage, LibraryError> {
+        let mut conn = self.readers.acquire().await?;
+        let literal = storage.as_str();
+        let row = sqlx::query!(
+            "SELECT COUNT(*) AS \"files!: i64\", COALESCE(SUM(size), 0) AS \"bytes!: i64\" \
+             FROM media_files WHERE storage = ?",
+            literal,
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        Ok(ClassUsage {
+            files: u64::try_from(row.files).unwrap_or(0),
+            bytes: row.bytes,
+        })
+    }
+
+    /// Reads every cache file whose track is unpinned, with what the eviction
+    /// orders sort by.
+    ///
+    /// # Returns
+    ///
+    /// The candidates, in no particular order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when the query fails or a stored id cannot be
+    /// decoded.
+    async fn eviction_candidates(&self) -> Result<Vec<EvictionCandidate>, LibraryError> {
+        let mut conn = self.readers.acquire().await?;
+        let rows = sqlx::query!(
+            "SELECT mf.id AS id, mf.track_id AS track_id, mf.rel_path AS rel_path, \
+                    mf.size AS size, mf.added_at AS added_at, \
+                    COALESCE(mf.last_accessed_at, mf.added_at) AS \"used_at!: i64\", \
+                    (SELECT COUNT(*) FROM plays p WHERE p.track_id = mf.track_id) AS \"plays!: i64\" \
+             FROM media_files mf \
+             LEFT JOIN track_retention tr ON tr.track_id = mf.track_id \
+             WHERE mf.storage = 'cache' AND COALESCE(tr.pinned, 0) = 0",
+        )
+        .fetch_all(&mut *conn)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(EvictionCandidate {
+                    file: ManagedFile {
+                        id: decode_uuid(&row.id)?,
+                        track_id: decode_entity(IdPrefix::Track, &row.track_id)?,
+                        storage: StorageClass::Cache,
+                        rel_path: row.rel_path,
+                        pinned: false,
+                    },
+                    size: row.size,
+                    added_at: row.added_at,
+                    used_at: row.used_at,
+                    plays: row.plays,
+                })
+            })
+            .collect()
     }
 
     /// Updates the row of a moved file and re-derives its track's availability.
@@ -655,4 +984,105 @@ fn storage_class(stored: &str) -> Result<StorageClass, LibraryError> {
             kind: "storage class",
             value: stored.to_owned(),
         })
+}
+
+/// Milliseconds in one day, for `storage.cache.max_age_days`.
+const MILLIS_PER_DAY: i64 = 86_400_000;
+
+/// One cache file an eviction pass may remove, with what the orders sort by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EvictionCandidate {
+    /// The file.
+    file: ManagedFile,
+    /// Its size in bytes.
+    size: i64,
+    /// When it was added, in unix milliseconds.
+    added_at: i64,
+    /// When it was last streamed, or added when it never was.
+    used_at: i64,
+    /// How many plays of its track are recorded, over every user.
+    plays: i64,
+}
+
+/// The order `storage.cache.eviction` names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvictionPolicy {
+    /// Least recently used first.
+    Lru,
+    /// Least played first, then least recently used.
+    Lfu,
+    /// Oldest addition first.
+    Fifo,
+}
+
+impl EvictionPolicy {
+    /// Parses the setting's literal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::UnknownLiteral`] for any other value.
+    fn parse(stored: &str) -> Result<EvictionPolicy, LibraryError> {
+        match stored {
+            "lru" => Ok(EvictionPolicy::Lru),
+            "lfu" => Ok(EvictionPolicy::Lfu),
+            "fifo" => Ok(EvictionPolicy::Fifo),
+            other => Err(LibraryError::UnknownLiteral {
+                kind: "eviction policy",
+                value: other.to_owned(),
+            }),
+        }
+    }
+
+    /// Returns the setting's literal.
+    fn as_str(self) -> &'static str {
+        match self {
+            EvictionPolicy::Lru => "lru",
+            EvictionPolicy::Lfu => "lfu",
+            EvictionPolicy::Fifo => "fifo",
+        }
+    }
+
+    /// Sorts candidates so the first one is evicted first.
+    ///
+    /// Ties fall back to the row id, which is a UUIDv7 and so follows insertion
+    /// order, keeping a pass deterministic.
+    fn order(self, candidates: &mut [EvictionCandidate]) {
+        match self {
+            EvictionPolicy::Lru => candidates.sort_by_key(|c| (c.used_at, c.file.id)),
+            EvictionPolicy::Lfu => candidates.sort_by_key(|c| (c.plays, c.used_at, c.file.id)),
+            EvictionPolicy::Fifo => candidates.sort_by_key(|c| (c.added_at, c.file.id)),
+        }
+    }
+}
+
+/// Confirms a file is still where it was read and its track still unpinned.
+///
+/// # Parameters
+///
+/// - `conn`: the transaction the removal runs in.
+/// - `file`: the file about to be removed.
+///
+/// # Returns
+///
+/// `true` when the row is still in the same storage class and the track has
+/// no pin.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when the query fails.
+async fn still_unpinned(
+    conn: &mut sqlx::SqliteConnection,
+    file: &ManagedFile,
+) -> Result<bool, LibraryError> {
+    let id = file.id.as_bytes().as_slice();
+    let row = sqlx::query!(
+        "SELECT mf.storage AS storage, COALESCE(tr.pinned, 0) AS \"pinned!: i64\" \
+         FROM media_files mf \
+         LEFT JOIN track_retention tr ON tr.track_id = mf.track_id \
+         WHERE mf.id = ?",
+        id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(row.is_some_and(|row| row.pinned == 0 && row.storage == file.storage.as_str()))
 }

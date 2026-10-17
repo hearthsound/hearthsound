@@ -41,6 +41,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `getUsers` lists every account for an administrator, and the four Subsonic
   calls that write an account answer error 50 with a link to how accounts are
   managed here.
+- Unpinned cache files are evicted under pressure: in `storage.cache.eviction`
+  order (`lru`, `lfu` or `fifo`) while the cache is over
+  `storage.cache.max_bytes` or its filesystem has less than
+  `storage.cache.min_free_bytes` free, and regardless of pressure once older
+  than `storage.cache.max_age_days`. Library files, folder files and pinned
+  tracks are never touched, an evicted track becomes `remote`, and a usage
+  report counts the files and bytes of each storage class.
 
 ## [0.1.2] - 2026-10-16
 

@@ -421,3 +421,292 @@ async fn a_file_that_is_not_on_disk_is_skipped() {
     let row = fixture.row(id).await.unwrap();
     assert_eq!(row.storage, StorageClass::Cache, "the row is untouched");
 }
+
+/// Sets a setting the maintainer reads.
+async fn set(fixture: &Fixture, key: &str, value: SettingValue) {
+    fixture.settings.set(key, value, None).await.unwrap();
+}
+
+/// Sets a file's size, addition time, and last stream time.
+async fn age(fixture: &Fixture, id: uuid::Uuid, size: i64, added_at: i64, accessed: Option<i64>) {
+    sqlx::query("UPDATE media_files SET size = ?, added_at = ?, last_accessed_at = ? WHERE id = ?")
+        .bind(size)
+        .bind(added_at)
+        .bind(accessed)
+        .bind(id.as_bytes().as_slice())
+        .execute(fixture.db.writer())
+        .await
+        .unwrap();
+}
+
+/// Records `count` plays of a track by one user.
+async fn plays(fixture: &Fixture, track: EntityId, count: usize) {
+    let user = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO users (id, username, display_name, password_hash, created_at, updated_at) \
+         VALUES (?, ?, 'Listener', 'x', 0, 0)",
+    )
+    .bind(user.as_bytes().as_slice())
+    .bind(format!("listener-{user}"))
+    .execute(fixture.db.writer())
+    .await
+    .unwrap();
+    for _ in 0..count {
+        sqlx::query(
+            "INSERT INTO plays (id, user_id, track_id, started_at, listened_ms, audio_delivered) \
+             VALUES (?, ?, ?, 0, 1000, 1)",
+        )
+        .bind(uuid::Uuid::now_v7().as_bytes().as_slice())
+        .bind(user.as_bytes().as_slice())
+        .bind(track.uuid().as_bytes().as_slice())
+        .execute(fixture.db.writer())
+        .await
+        .unwrap();
+    }
+}
+
+/// A probe that reports a fixed amount of free space.
+struct FixedSpace(i64);
+
+impl hearthsound_library::maintenance::SpaceProbe for FixedSpace {
+    fn space(&self, _path: &Path) -> Option<hearthsound_library::maintenance::FilesystemSpace> {
+        Some(hearthsound_library::maintenance::FilesystemSpace {
+            total_bytes: 1 << 40,
+            available_bytes: self.0,
+        })
+    }
+}
+
+/// Three cached tracks of 100 bytes each, added and streamed at the given
+/// times, in the cache root.
+async fn three_cached(
+    fixture: &Fixture,
+    times: [(i64, Option<i64>); 3],
+) -> Vec<(EntityId, uuid::Uuid)> {
+    let mut files = Vec::new();
+    for (index, (added_at, accessed)) in times.into_iter().enumerate() {
+        let track = fixture.track(Availability::Cached).await;
+        let id = fixture
+            .file(
+                track,
+                StorageClass::Cache,
+                &format!("Artist/Album/{index:02} - Song.flac"),
+            )
+            .await;
+        age(fixture, id, 100, added_at, accessed).await;
+        files.push((track, id));
+    }
+    files
+}
+
+/// LRU eviction removes the least recently streamed unpinned cache files until
+/// the cache fits, and never a pinned file or a library file.
+#[tokio::test]
+async fn lru_eviction_removes_the_least_recently_used_files_until_the_cache_fits() {
+    let fixture = Fixture::new().await;
+    let files = three_cached(&fixture, [(1, Some(300)), (2, Some(100)), (3, None)]).await;
+    // A pinned cache file and an unpinned library file are never candidates.
+    let pinned = fixture.track(Availability::Local).await;
+    let pinned_file = fixture
+        .file(pinned, StorageClass::Cache, "Pinned/Song.flac")
+        .await;
+    age(&fixture, pinned_file, 100, 0, None).await;
+    fixture
+        .library
+        .add_pin_reason(pinned, PinReason::Admin)
+        .await
+        .unwrap();
+    let permanent = fixture.track(Availability::Local).await;
+    let permanent_file = fixture
+        .file(permanent, StorageClass::Library, "Kept/Song.flac")
+        .await;
+    age(&fixture, permanent_file, 1000, 0, None).await;
+    set(
+        &fixture,
+        keys::STORAGE_CACHE_MAX_BYTES.name(),
+        SettingValue::Integer(250),
+    )
+    .await;
+
+    let report = fixture.maintainer().evict().await.unwrap();
+
+    // 400 cache bytes against a 250 byte cap: the two least recently used
+    // unpinned files go (never streamed counts from its addition at 3 ms).
+    assert_eq!(report.files, 2);
+    assert_eq!(report.bytes, 200);
+    assert!(
+        fixture.row(files[2].1).await.is_none(),
+        "added at 3, never streamed"
+    );
+    assert!(fixture.row(files[1].1).await.is_none(), "streamed at 100");
+    assert!(
+        fixture.row(files[0].1).await.is_some(),
+        "streamed most recently"
+    );
+    assert!(
+        !fixture
+            .roots
+            .cache
+            .join("Artist/Album/02 - Song.flac")
+            .exists()
+    );
+    assert!(fixture.row(pinned_file).await.is_some());
+    assert!(fixture.row(permanent_file).await.is_some());
+    let evicted = fixture
+        .library
+        .get_track(files[1].0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(evicted.availability, Availability::Remote);
+    assert!(
+        fixture
+            .availability_events()
+            .contains(&(files[1].0.to_string(), Availability::Remote))
+    );
+}
+
+/// FIFO eviction removes the oldest additions first.
+#[tokio::test]
+async fn fifo_eviction_removes_the_oldest_additions_first() {
+    let fixture = Fixture::new().await;
+    let files = three_cached(&fixture, [(30, Some(1)), (10, Some(900)), (20, Some(2))]).await;
+    set(
+        &fixture,
+        keys::STORAGE_CACHE_EVICTION.name(),
+        SettingValue::String("fifo".to_owned()),
+    )
+    .await;
+    set(
+        &fixture,
+        keys::STORAGE_CACHE_MAX_BYTES.name(),
+        SettingValue::Integer(200),
+    )
+    .await;
+
+    let report = fixture.maintainer().evict().await.unwrap();
+
+    assert_eq!(report.files, 1);
+    assert!(fixture.row(files[1].1).await.is_none(), "added first");
+    assert!(fixture.row(files[0].1).await.is_some());
+    assert!(fixture.row(files[2].1).await.is_some());
+}
+
+/// LFU eviction removes the least played track's file first.
+#[tokio::test]
+async fn lfu_eviction_removes_the_least_played_files_first() {
+    let fixture = Fixture::new().await;
+    let files = three_cached(&fixture, [(1, Some(1)), (2, Some(2)), (3, Some(3))]).await;
+    plays(&fixture, files[0].0, 3).await;
+    plays(&fixture, files[1].0, 1).await;
+    plays(&fixture, files[2].0, 2).await;
+    set(
+        &fixture,
+        keys::STORAGE_CACHE_EVICTION.name(),
+        SettingValue::String("lfu".to_owned()),
+    )
+    .await;
+    set(
+        &fixture,
+        keys::STORAGE_CACHE_MAX_BYTES.name(),
+        SettingValue::Integer(200),
+    )
+    .await;
+
+    let report = fixture.maintainer().evict().await.unwrap();
+
+    assert_eq!(report.files, 1);
+    assert!(fixture.row(files[1].1).await.is_none(), "played once");
+    assert!(fixture.row(files[0].1).await.is_some());
+    assert!(fixture.row(files[2].1).await.is_some());
+}
+
+/// A maximum age evicts stale files even when the cache is within its size.
+#[tokio::test]
+async fn files_older_than_the_maximum_age_are_evicted_without_pressure() {
+    let fixture = Fixture::new().await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let day = 86_400_000;
+    let files = three_cached(
+        &fixture,
+        [
+            (now - 10 * day, Some(now - 9 * day)),
+            (now - 10 * day, Some(now - day)),
+            (now, None),
+        ],
+    )
+    .await;
+    set(
+        &fixture,
+        keys::STORAGE_CACHE_MAX_AGE_DAYS.name(),
+        SettingValue::Integer(7),
+    )
+    .await;
+
+    let report = fixture.maintainer().evict().await.unwrap();
+
+    assert_eq!(report.files, 1);
+    assert!(
+        fixture.row(files[0].1).await.is_none(),
+        "last streamed nine days ago"
+    );
+    assert!(fixture.row(files[1].1).await.is_some());
+    assert!(fixture.row(files[2].1).await.is_some());
+}
+
+/// Too little free space evicts until the floor is met, even within the size cap.
+#[tokio::test]
+async fn too_little_free_space_evicts_until_the_floor_is_met() {
+    let fixture = Fixture::new().await;
+    let files = three_cached(&fixture, [(1, Some(1)), (2, Some(2)), (3, Some(3))]).await;
+    set(
+        &fixture,
+        keys::STORAGE_CACHE_MIN_FREE_BYTES.name(),
+        SettingValue::Integer(1150),
+    )
+    .await;
+    let maintainer = fixture
+        .maintainer()
+        .with_space_probe(Arc::new(FixedSpace(1000)));
+
+    let report = maintainer.evict().await.unwrap();
+
+    // 1000 available against a 1150 floor: two 100 byte files free enough.
+    assert_eq!(report.files, 2);
+    assert!(fixture.row(files[0].1).await.is_none());
+    assert!(fixture.row(files[1].1).await.is_none());
+    assert!(fixture.row(files[2].1).await.is_some());
+}
+
+/// The usage report counts the files and bytes per storage class.
+#[tokio::test]
+async fn the_usage_report_counts_each_storage_class() {
+    let fixture = Fixture::new().await;
+    let files = three_cached(&fixture, [(1, None), (2, None), (3, None)]).await;
+    let kept = fixture.track(Availability::Local).await;
+    let kept_file = fixture
+        .file(kept, StorageClass::Library, "Kept/Song.flac")
+        .await;
+    age(&fixture, kept_file, 1000, 0, None).await;
+    fixture
+        .library
+        .add_pin_reason(kept, PinReason::Admin)
+        .await
+        .unwrap();
+    let maintainer = fixture
+        .maintainer()
+        .with_space_probe(Arc::new(FixedSpace(5)));
+
+    let usage = maintainer.usage().await.unwrap();
+
+    assert_eq!(usage.cache.files, files.len() as u64);
+    assert_eq!(usage.cache.bytes, 300);
+    assert_eq!(usage.library.files, 1);
+    assert_eq!(usage.library.bytes, 1000);
+    assert_eq!(usage.folders.files, 0);
+    assert_eq!(usage.pinned_tracks, 1);
+    assert_eq!(usage.filesystem.unwrap().available_bytes, 5);
+}

@@ -20,6 +20,7 @@ hearthsound-jobs = { path = "../jobs" }
 hearthsound-media = { path = "../media" }
 notify.workspace = true
 notify-debouncer-full.workspace = true
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true

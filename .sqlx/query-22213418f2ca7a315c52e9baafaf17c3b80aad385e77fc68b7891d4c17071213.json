@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"pinned!: i64\" FROM track_retention WHERE pinned = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "pinned!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "22213418f2ca7a315c52e9baafaf17c3b80aad385e77fc68b7891d4c17071213"
+}

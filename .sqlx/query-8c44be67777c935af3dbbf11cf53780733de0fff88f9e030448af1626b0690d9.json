@@ -1,0 +1,88 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT mf.id AS id, mf.track_id AS track_id, mf.rel_path AS rel_path, mf.size AS size, mf.added_at AS added_at, COALESCE(mf.last_accessed_at, mf.added_at) AS \"used_at!: i64\", (SELECT COUNT(*) FROM plays p WHERE p.track_id = mf.track_id) AS \"plays!: i64\" FROM media_files mf LEFT JOIN track_retention tr ON tr.track_id = mf.track_id WHERE mf.storage = 'cache' AND COALESCE(tr.pinned, 0) = 0",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "track_id",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "track_id"
+          }
+        }
+      },
+      {
+        "name": "rel_path",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "rel_path"
+          }
+        }
+      },
+      {
+        "name": "size",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "size"
+          }
+        }
+      },
+      {
+        "name": "added_at",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "added_at"
+          }
+        }
+      },
+      {
+        "name": "used_at!: i64",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "plays!: i64",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8c44be67777c935af3dbbf11cf53780733de0fff88f9e030448af1626b0690d9"
+}

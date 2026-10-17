@@ -1,0 +1,40 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT storage, COUNT(*) AS \"files!: i64\", COALESCE(SUM(size), 0) AS \"bytes!: i64\" FROM media_files GROUP BY storage",
+  "describe": {
+    "columns": [
+      {
+        "name": "storage",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "storage"
+          }
+        }
+      },
+      {
+        "name": "files!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "bytes!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "be013f533af974093c3774b37671c28ccb5c14602ed798c32543dfa8a12ff9a2"
+}

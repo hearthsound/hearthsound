@@ -1,0 +1,33 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT mf.storage AS storage, COALESCE(tr.pinned, 0) AS \"pinned!: i64\" FROM media_files mf LEFT JOIN track_retention tr ON tr.track_id = mf.track_id WHERE mf.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "storage",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "storage"
+          }
+        }
+      },
+      {
+        "name": "pinned!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "13199f5a594b38cf34c5d8ac375eb9a68af67f2471a8040536d80849a534c0f5"
+}

@@ -1739,6 +1739,7 @@ dependencies = [
  "hearthsound-test-support",
  "notify",
  "notify-debouncer-full",
+ "rustix",
  "serde",
  "serde_json",
  "sqlx",
