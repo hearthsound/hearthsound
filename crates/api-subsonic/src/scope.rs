@@ -17,7 +17,7 @@
 
 use hearthsound_config::SettingsStore;
 use hearthsound_config::keys;
-use hearthsound_library::query::Scope;
+use hearthsound_library::query::{Scope, ServerBrowse};
 
 use crate::auth::Call;
 use crate::browse;
@@ -60,6 +60,39 @@ pub(crate) async fn resolve(call: &Call) -> Result<Scope, SubsonicError> {
             );
             Err(SubsonicError::not_found())
         }
+    }
+}
+
+/// Resolves the scopes a search reads, in the order their matches are listed.
+///
+/// A search with a `musicFolderId` reads only that folder's scope. A search
+/// without one reads the personal library first and then the server, so
+/// stored content the user has not adopted is still found; the server part is
+/// left out when `privacy.server_browse` is `disabled`.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+///
+/// # Returns
+///
+/// One or two scopes.
+///
+/// # Errors
+///
+/// Answers Subsonic error 70 for an unknown `musicFolderId` and a generic
+/// error when `privacy.server_browse` cannot be read.
+pub(crate) async fn search_scopes(call: &Call) -> Result<Vec<Scope>, SubsonicError> {
+    match call.get("musicFolderId") {
+        Some("") | None => {
+            let server = server(call)?;
+            if server == Scope::Server(ServerBrowse::Disabled) {
+                Ok(vec![personal(call)])
+            } else {
+                Ok(vec![personal(call), server])
+            }
+        }
+        Some(_) => Ok(vec![resolve(call).await?]),
     }
 }
 

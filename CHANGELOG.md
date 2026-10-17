@@ -68,6 +68,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a dislike as well, unless the user likes the entity, and any other rating
   clears that dislike again.
 
+### Changed
+
+- `search2` and `search3` without a `musicFolderId` search the personal library
+  first and then the rest of the server, as far as `privacy.server_browse`
+  shows it, so stored content a user has not adopted is still found by
+  searching; a `musicFolderId` keeps a search to that folder.
+
 ## [0.1.2] - 2026-10-16
 
 ### Changed

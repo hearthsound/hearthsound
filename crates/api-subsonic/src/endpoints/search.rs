@@ -19,7 +19,7 @@
 //! to return all their data for an empty query, and it returns no catalog
 //! results at all.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use hearthsound_activity::Annotation;
 use hearthsound_catalog::{
@@ -56,6 +56,24 @@ struct Window {
     offset: i64,
 }
 
+impl Window {
+    /// Returns the window that reaches from the first result to the end of
+    /// this one, which is what each scope of a merged search has to answer.
+    fn through_end(self) -> Window {
+        Window {
+            count: self.offset.saturating_add(self.count),
+            offset: 0,
+        }
+    }
+
+    /// Keeps the part of a list this window covers.
+    fn apply<T>(self, items: Vec<T>) -> Vec<T> {
+        let offset = usize::try_from(self.offset).unwrap_or(0);
+        let count = usize::try_from(self.count).unwrap_or(0);
+        items.into_iter().skip(offset).take(count).collect()
+    }
+}
+
 /// A stored artist a search matched, with the album count it reports.
 #[derive(Debug)]
 struct LocalArtist {
@@ -77,12 +95,14 @@ struct Matches {
     artists: Vec<LocalArtist>,
     /// The catalog artists that matched, in match order.
     catalog_artists: Vec<CatalogArtistResult>,
-    /// The stored albums that matched, in match order.
-    albums: Vec<EntityId>,
+    /// The stored albums that matched, in match order, each with the scope it
+    /// was found in.
+    albums: Vec<(EntityId, Scope)>,
     /// The catalog albums that matched, in match order.
     catalog_albums: Vec<CatalogAlbumRefResult>,
-    /// The stored songs that matched, in match order.
-    tracks: Vec<TrackView>,
+    /// The stored songs that matched, in match order, each with the scope it
+    /// was found in.
+    tracks: Vec<(TrackView, Scope)>,
     /// The catalog songs that matched, in match order.
     catalog_tracks: Vec<CatalogTrackResult>,
     /// The local track hits, reduced to the fields deduplication compares.
@@ -108,7 +128,7 @@ impl Matches {
     ///
     /// The album ids, in match order.
     fn local_album_ids(&self) -> Vec<EntityId> {
-        self.albums.clone()
+        self.albums.iter().map(|(id, _)| *id).collect()
     }
 
     /// Returns the ids of the matched stored songs.
@@ -117,7 +137,7 @@ impl Matches {
     ///
     /// The track ids, in match order.
     fn local_track_ids(&self) -> Vec<EntityId> {
-        self.tracks.iter().map(|view| view.track.id).collect()
+        self.tracks.iter().map(|(view, _)| view.track.id).collect()
     }
 }
 
@@ -155,7 +175,6 @@ pub async fn search3(call: Call) -> Encoded {
     };
     let matches = &collected.matches;
     let database = call.state().database();
-    let scope = collected.scope;
 
     let mut artists = Vec::with_capacity(matches.artists.len() + matches.catalog_artists.len());
     for matched in &matches.artists {
@@ -170,8 +189,8 @@ pub async fn search3(call: Call) -> Encoded {
     }
 
     let mut albums = Vec::with_capacity(matches.albums.len() + matches.catalog_albums.len());
-    for id in &matches.albums {
-        let object = match album_object(database, scope, *id, &annotations).await {
+    for (id, scope) in &matches.albums {
+        let object = match album_object(database, *scope, *id, &annotations).await {
             Ok(object) => object,
             Err(error) => {
                 return call.encode(Response::failed(browse::failure("search3", &error)));
@@ -186,8 +205,8 @@ pub async fn search3(call: Call) -> Encoded {
     }
 
     let mut songs = Vec::with_capacity(matches.tracks.len() + matches.catalog_tracks.len());
-    for view in &matches.tracks {
-        let object = match track_object(database, scope, view.clone(), &annotations).await {
+    for (view, scope) in &matches.tracks {
+        let object = match track_object(database, *scope, view.clone(), &annotations).await {
             Ok(object) => object,
             Err(error) => {
                 return call.encode(Response::failed(browse::failure("search3", &error)));
@@ -245,7 +264,6 @@ pub async fn search2(call: Call) -> Encoded {
     };
     let matches = &collected.matches;
     let database = call.state().database();
-    let scope = collected.scope;
 
     let mut artists = Vec::with_capacity(matches.artists.len() + matches.catalog_artists.len());
     for matched in &matches.artists {
@@ -259,8 +277,8 @@ pub async fn search2(call: Call) -> Encoded {
     }
 
     let mut albums = Vec::with_capacity(matches.albums.len() + matches.catalog_albums.len());
-    for id in &matches.albums {
-        let object = match album_dir_object(database, scope, *id, &annotations).await {
+    for (id, scope) in &matches.albums {
+        let object = match album_dir_object(database, *scope, *id, &annotations).await {
             Ok(object) => object,
             Err(error) => {
                 return call.encode(Response::failed(browse::failure("search2", &error)));
@@ -279,8 +297,8 @@ pub async fn search2(call: Call) -> Encoded {
     }
 
     let mut songs = Vec::with_capacity(matches.tracks.len() + matches.catalog_tracks.len());
-    for view in &matches.tracks {
-        let object = match track_object(database, scope, view.clone(), &annotations).await {
+    for (view, scope) in &matches.tracks {
+        let object = match track_object(database, *scope, view.clone(), &annotations).await {
             Ok(object) => object,
             Err(error) => {
                 return call.encode(Response::failed(browse::failure("search2", &error)));
@@ -307,6 +325,11 @@ pub async fn search2(call: Call) -> Encoded {
 
 /// Collects the matches of one search request, local first and then catalog.
 ///
+/// Without `musicFolderId` the local matches are the personal library's
+/// followed by the rest of the server's (as far as `privacy.server_browse`
+/// shows it), so content a user has not adopted is still found by searching;
+/// with `musicFolderId` only that folder's scope is searched.
+///
 /// # Parameters
 ///
 /// - `call`: the authenticated call, whose parameters are the ones [`search3`]
@@ -314,7 +337,7 @@ pub async fn search2(call: Call) -> Encoded {
 ///
 /// # Returns
 ///
-/// The matches and the scope they were read in.
+/// The matches.
 ///
 /// # Errors
 ///
@@ -326,7 +349,7 @@ async fn collect(call: &Call) -> Result<Collected, SubsonicError> {
     let Some(text) = call.get("query") else {
         return Err(SubsonicError::missing_parameter("query"));
     };
-    let scope = scope::resolve(call).await?;
+    let scopes = scope::search_scopes(call).await?;
     let query = Search {
         text,
         artists: window(call, "artistCount", "artistOffset")?,
@@ -334,7 +357,7 @@ async fn collect(call: &Call) -> Result<Collected, SubsonicError> {
         songs: window(call, "songCount", "songOffset")?,
     };
     let settings = call.state().settings_snapshot();
-    let mut matches = local_matches(call.state().database(), scope, &query)
+    let mut matches = scoped_matches(call.state().database(), &scopes, &query)
         .await
         .map_err(|error| browse::failure("search", &error))?;
 
@@ -350,16 +373,79 @@ async fn collect(call: &Call) -> Result<Collected, SubsonicError> {
         let hits = matches.hits.clone();
         append_catalog(call, &hits, text, &shortfalls, &mut matches).await;
     }
-    Ok(Collected { matches, scope })
+    Ok(Collected { matches })
 }
 
-/// The matches of one search request and the scope they were read in.
+/// The matches of one search request.
 #[derive(Debug)]
 struct Collected {
-    /// The matched entities.
+    /// The matched entities, each stored one with the scope it was read in.
     matches: Matches,
-    /// The scope the search read.
-    scope: Scope,
+}
+
+/// Collects the local matches of a search over one or more scopes.
+///
+/// With one scope this is [`local_matches`]. With several, each scope is
+/// searched for everything up to the end of the requested windows, the
+/// results are concatenated in scope order with an entity found earlier kept
+/// at its first place, and the windows are applied to the concatenation, so
+/// the personal library's matches come before the server's and paging stays
+/// stable.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `scopes`: the scopes to search, in the order their matches are listed.
+/// - `query`: the text and the windows the request asked for.
+///
+/// # Returns
+///
+/// The merged matches.
+///
+/// # Errors
+///
+/// Returns a library failure when a read fails.
+async fn scoped_matches(
+    database: &Database,
+    scopes: &[Scope],
+    query: &Search<'_>,
+) -> Result<Matches, LocalSideError> {
+    if let [scope] = scopes {
+        return local_matches(database, *scope, query).await;
+    }
+    let widened = Search {
+        text: query.text,
+        artists: query.artists.through_end(),
+        albums: query.albums.through_end(),
+        songs: query.songs.through_end(),
+    };
+    let mut merged = Matches::default();
+    let mut artists = HashSet::new();
+    let mut albums = HashSet::new();
+    let mut tracks = HashSet::new();
+    for scope in scopes {
+        let part = local_matches(database, *scope, &widened).await?;
+        for artist in part.artists {
+            if artists.insert(artist.artist.id) {
+                merged.artists.push(artist);
+            }
+        }
+        for album in part.albums {
+            if albums.insert(album.0) {
+                merged.albums.push(album);
+            }
+        }
+        for track in part.tracks {
+            if tracks.insert(track.0.track.id) {
+                merged.tracks.push(track);
+            }
+        }
+    }
+    merged.artists = query.artists.apply(merged.artists);
+    merged.albums = query.albums.apply(merged.albums);
+    merged.tracks = query.songs.apply(merged.tracks);
+    merged.hits = merged.tracks.iter().map(|(view, _)| hit(view)).collect();
+    Ok(merged)
 }
 
 /// Loads the user's annotations for the stored entities of a search response.
@@ -623,10 +709,10 @@ async fn local_matches(
                 album_count: summary.album_count,
             })
             .collect();
-        matches.albums = albums.into_iter().map(|album| album.id).collect();
+        matches.albums = albums.into_iter().map(|album| (album.id, scope)).collect();
         for view in views {
             matches.hits.push(hit(&view));
-            matches.tracks.push(view);
+            matches.tracks.push((view, scope));
         }
         return Ok(matches);
     }
@@ -666,10 +752,14 @@ async fn local_matches(
             });
         }
     }
-    matches.albums = albums.albums.into_iter().map(|album| album.id).collect();
+    matches.albums = albums
+        .albums
+        .into_iter()
+        .map(|album| (album.id, scope))
+        .collect();
     for view in tracks.tracks {
         matches.hits.push(hit(&view));
-        matches.tracks.push(view);
+        matches.tracks.push((view, scope));
     }
 
     Ok(matches)
