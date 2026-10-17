@@ -31,6 +31,7 @@ use std::sync::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tokio::sync::broadcast;
+use uuid::Uuid;
 
 use crate::{AcquisitionState, Availability, EntityKind, FailureReason, Priority, QualityTier};
 
@@ -302,6 +303,55 @@ pub struct SystemNotice {
     pub code: Option<String>,
 }
 
+/// Who may receive an event over the event stream.
+///
+/// The stream forwards an envelope to a connection when
+/// [`Audience::is_visible_to`] allows it for that connection's principal.
+/// Administrators receive every envelope, so the narrower audiences only limit
+/// ordinary users.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Audience {
+    /// Every authenticated connection receives the event.
+    #[default]
+    Everyone,
+    /// Only administrator connections receive the event.
+    Admins,
+    /// The user with this id receives the event, as do administrator connections.
+    User(Uuid),
+}
+
+impl Audience {
+    /// Reports whether an event addressed to this audience may reach a connection.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the id of the user the connection is authenticated as.
+    /// - `admin`: whether that user is an administrator.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the connection should receive the event.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_core::events::Audience;
+    /// use uuid::Uuid;
+    ///
+    /// let owner = Uuid::from_u128(1);
+    /// assert!(Audience::User(owner).is_visible_to(owner, false));
+    /// assert!(!Audience::User(owner).is_visible_to(Uuid::from_u128(2), false));
+    /// assert!(!Audience::Admins.is_visible_to(owner, false));
+    /// ```
+    pub fn is_visible_to(self, user: Uuid, admin: bool) -> bool {
+        match self {
+            Audience::Everyone => true,
+            Audience::Admins => admin,
+            Audience::User(owner) => admin || owner == user,
+        }
+    }
+}
+
 /// One event with the envelope the API exposes it in.
 ///
 /// The envelope carries the sequence number `id`, the `type` of the event, the
@@ -318,6 +368,12 @@ pub struct EventEnvelope {
     /// The event itself, flattened into the envelope as `type` and `data`.
     #[serde(flatten)]
     pub event: ServerEvent,
+    /// Who may receive the event over the stream.
+    ///
+    /// This is routing metadata for the server's own connections and is never
+    /// serialized.
+    #[serde(skip)]
+    pub audience: Audience,
 }
 
 /// The outcome of replaying after a sequence id.
@@ -396,7 +452,8 @@ impl EventBus {
         }
     }
 
-    /// Publishes `event` to the replay buffer and every subscriber.
+    /// Publishes `event` to the replay buffer and every subscriber, addressed to
+    /// [`Audience::Everyone`].
     ///
     /// Publishing never blocks: a subscriber that is not reading is dropped
     /// from the channel rather than waited for.
@@ -429,6 +486,48 @@ impl EventBus {
     /// assert_eq!((first, second), (1, 2));
     /// ```
     pub fn publish(&self, event: ServerEvent) -> u64 {
+        self.publish_for(Audience::Everyone, event)
+    }
+
+    /// Publishes `event` to the replay buffer and every subscriber, addressed to
+    /// `audience`.
+    ///
+    /// The bus delivers to every subscriber. The audience travels with the
+    /// envelope so the event stream can decide, per connection, whether to
+    /// forward it.
+    ///
+    /// Publishing never blocks: a subscriber that is not reading is dropped
+    /// from the channel rather than waited for.
+    ///
+    /// # Parameters
+    ///
+    /// - `audience`: who the event is addressed to.
+    /// - `event`: the event to publish.
+    ///
+    /// # Returns
+    ///
+    /// The sequence id the bus assigned to the event.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_core::events::{Audience, EventBus, ServerEvent, SystemNotice};
+    /// use uuid::Uuid;
+    ///
+    /// let bus = EventBus::new();
+    /// let mut receiver = bus.subscribe();
+    /// let owner = Uuid::from_u128(1);
+    /// bus.publish_for(
+    ///     Audience::User(owner),
+    ///     ServerEvent::SystemNotice(SystemNotice {
+    ///         level: "info".to_owned(),
+    ///         message: "for one user".to_owned(),
+    ///         code: None,
+    ///     }),
+    /// );
+    /// assert_eq!(receiver.try_recv().unwrap().audience, Audience::User(owner));
+    /// ```
+    pub fn publish_for(&self, audience: Audience, event: ServerEvent) -> u64 {
         let (id, envelope) = {
             let mut state = self.lock();
             let id = state.next_id;
@@ -436,6 +535,7 @@ impl EventBus {
             let envelope = EventEnvelope {
                 id,
                 at: now_millis(),
+                audience,
                 event,
             };
             state.events.push_back(envelope.clone());
@@ -706,6 +806,7 @@ mod tests {
         let envelope = EventEnvelope {
             id: 41_207,
             at: 1_760_000_000_000,
+            audience: Audience::Everyone,
             event: ServerEvent::TrackAvailability(TrackAvailability {
                 track_id: "tr_01jgn00000e008000000000001".to_owned(),
                 availability: Availability::Local,
@@ -847,5 +948,63 @@ mod tests {
         let default = EventBus::default();
         assert_eq!(default.latest_id(), 0);
         assert_eq!(default.replay_after(7), Replay::Events(Vec::new()));
+    }
+
+    #[test]
+    fn publish_stamps_everyone_and_publish_for_stamps_the_audience() {
+        let bus = EventBus::new();
+        let mut receiver = bus.subscribe();
+        let user = Uuid::from_u128(7);
+        bus.publish(notice("everyone"));
+        bus.publish_for(Audience::User(user), notice("private"));
+        bus.publish_for(Audience::Admins, notice("admins"));
+        let first = receiver.try_recv().unwrap();
+        let second = receiver.try_recv().unwrap();
+        let third = receiver.try_recv().unwrap();
+        assert_eq!(first.audience, Audience::Everyone);
+        assert_eq!(second.audience, Audience::User(user));
+        assert_eq!(third.audience, Audience::Admins);
+        assert_eq!(third.id, 3);
+    }
+
+    #[test]
+    fn replay_keeps_each_envelope_audience() {
+        let bus = EventBus::new();
+        bus.publish_for(Audience::Admins, notice("first"));
+        bus.publish(notice("second"));
+        match bus.replay_after(0) {
+            Replay::Events(events) => {
+                assert_eq!(events[0].audience, Audience::Admins);
+                assert_eq!(events[1].audience, Audience::Everyone);
+            }
+            Replay::Evicted => panic!("nothing was evicted"),
+        }
+    }
+
+    #[test]
+    fn the_audience_never_reaches_the_wire() {
+        let bus = EventBus::new();
+        bus.publish_for(Audience::User(Uuid::from_u128(1)), notice("private"));
+        let Replay::Events(mut events) = bus.replay_after(0) else {
+            unreachable!("nothing was evicted");
+        };
+        let envelope = events.remove(0);
+        let value = serde_json::to_value(&envelope).unwrap();
+        assert!(value.get("audience").is_none());
+        let back: EventEnvelope = serde_json::from_value(value).unwrap();
+        assert_eq!(back.event, envelope.event);
+        assert_eq!(back.audience, Audience::Everyone);
+    }
+
+    #[test]
+    fn audiences_gate_who_sees_an_event() {
+        let owner = Uuid::from_u128(1);
+        let other = Uuid::from_u128(2);
+        assert!(Audience::Everyone.is_visible_to(other, false));
+        assert!(!Audience::Admins.is_visible_to(owner, false));
+        assert!(Audience::Admins.is_visible_to(owner, true));
+        assert!(Audience::User(owner).is_visible_to(owner, false));
+        assert!(!Audience::User(owner).is_visible_to(other, false));
+        assert!(Audience::User(owner).is_visible_to(other, true));
     }
 }

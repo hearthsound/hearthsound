@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use hearthsound_config::SettingsStore;
 use hearthsound_config::keys;
-use hearthsound_core::events::{QueuePrefetch, ServerEvent};
+use hearthsound_core::events::{Audience, QueuePrefetch, ServerEvent};
 use hearthsound_core::{ClientId, EntityId, EntityKind, IdPrefix, Priority};
 use uuid::Uuid;
 
@@ -710,7 +710,7 @@ impl PrefetchScheduler {
         match self.inner.orchestrator.cancel(acquisition).await {
             Ok(()) => {
                 lock(&self.inner.listings).forget(user, client, item);
-                self.publish(client, item, row.priority, DROPPED);
+                self.publish(user, client, item, row.priority, DROPPED);
                 tracing::debug!(
                     acquisition = %acquisition,
                     track = %track,
@@ -817,7 +817,7 @@ impl PrefetchScheduler {
             Ok(AcquireOutcome::Started(handle)) | Ok(AcquireOutcome::Joined(handle)) => {
                 let started = lock(&self.inner.listings).track(user, client, item, handle.id);
                 if started {
-                    self.publish(client, item, handle.priority, STARTED);
+                    self.publish(user, client, item, handle.priority, STARTED);
                 }
                 tracing::debug!(
                     acquisition = %handle.id,
@@ -897,24 +897,25 @@ impl PrefetchScheduler {
         }
     }
 
-    /// Publishes one `queue.prefetch` event.
+    /// Publishes one `queue.prefetch` event addressed to `user`.
     ///
     /// # Parameters
     ///
+    /// - `user`: the user whose listing the prefetch belongs to.
     /// - `client`: the client instance the prefetch was inferred from.
     /// - `item`: the listing item the event is about.
     /// - `priority`: the priority the prefetch ran at.
     /// - `state`: [`STARTED`] or [`DROPPED`].
-    fn publish(&self, client: &str, item: &ClientId, priority: Priority, state: &str) {
-        self.inner
-            .orchestrator
-            .events()
-            .publish(ServerEvent::QueuePrefetch(QueuePrefetch {
+    fn publish(&self, user: Uuid, client: &str, item: &ClientId, priority: Priority, state: &str) {
+        self.inner.orchestrator.events().publish_for(
+            Audience::User(user),
+            ServerEvent::QueuePrefetch(QueuePrefetch {
                 client: client.to_owned(),
                 track_id: item.to_string(),
                 priority,
                 state: state.to_owned(),
-            }));
+            }),
+        );
     }
 }
 

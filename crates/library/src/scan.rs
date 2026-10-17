@@ -32,7 +32,7 @@ use futures_util::StreamExt as _;
 use hearthsound_config::keys;
 use hearthsound_config::settings::Settings;
 use hearthsound_core::events::{
-    EventBus, LibraryChange, LibraryChanged, ScanProgress, ServerEvent,
+    Audience, EventBus, LibraryChange, LibraryChanged, ScanProgress, ServerEvent,
 };
 use hearthsound_core::{Availability, EntityId, EntityKind, PinReason};
 use hearthsound_db::Database;
@@ -792,13 +792,16 @@ impl LibraryScanner {
         report: &ScanReport,
         error: Option<String>,
     ) {
-        self.events.publish(ServerEvent::ScanProgress(ScanProgress {
-            folder_id: folder.id.to_string(),
-            phase: phase.to_owned(),
-            files_seen: report.files_seen,
-            files_done: report.files_indexed + report.files_skipped,
-            error,
-        }));
+        self.events.publish_for(
+            Audience::Admins,
+            ServerEvent::ScanProgress(ScanProgress {
+                folder_id: folder.id.to_string(),
+                phase: phase.to_owned(),
+                files_seen: report.files_seen,
+                files_done: report.files_indexed + report.files_skipped,
+                error,
+            }),
+        );
     }
 
     /// Publishes a `library.changed` event for a track.

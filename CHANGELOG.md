@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Server events are addressed to an audience: acquisition progress and upload
+  updates reach only the user they belong to, scan and plugin status reach
+  administrators, and everything else stays visible to every connection. The
+  wire shape of each event is unchanged.
+
 ## [0.1.3] - 2026-10-17
 
 ### Added

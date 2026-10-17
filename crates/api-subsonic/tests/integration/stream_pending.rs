@@ -253,6 +253,7 @@ fn progress(
         instance: None,
         failure_reason: None,
         file,
+        requested_by: None,
     }
 }
 

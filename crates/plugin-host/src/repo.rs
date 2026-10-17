@@ -11,7 +11,7 @@
 
 use std::str::FromStr;
 
-use hearthsound_core::events::{EventBus, PluginStatus, ServerEvent};
+use hearthsound_core::events::{Audience, EventBus, PluginStatus, ServerEvent};
 use hearthsound_core::{Layer, new_uuid_v7};
 use hearthsound_db::Database;
 use sqlx::SqlitePool;
@@ -667,12 +667,15 @@ impl InstanceDisabler {
             );
         }
 
-        self.events.publish(ServerEvent::PluginStatus(PluginStatus {
-            plugin_id: self.plugin.clone(),
-            slug: Some(self.slug.clone()),
-            state: "disabled".to_owned(),
-            detail: Some(detail.to_owned()),
-        }));
+        self.events.publish_for(
+            Audience::Admins,
+            ServerEvent::PluginStatus(PluginStatus {
+                plugin_id: self.plugin.clone(),
+                slug: Some(self.slug.clone()),
+                state: "disabled".to_owned(),
+                detail: Some(detail.to_owned()),
+            }),
+        );
     }
 }
 

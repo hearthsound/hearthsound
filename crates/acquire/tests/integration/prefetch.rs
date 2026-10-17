@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::common::{Env, drain};
 use hearthsound_acquire::prefetch::PrefetchScheduler;
 use hearthsound_acquire::repo::{AcquisitionRow, ListFilter};
-use hearthsound_core::events::{QueuePrefetch, ServerEvent};
+use hearthsound_core::events::{Audience, QueuePrefetch, ServerEvent};
 use hearthsound_core::{AcquisitionState, Availability, ClientId, EntityId, PinReason, Priority};
 
 /// Inserts `count` catalog-only tracks and returns their ids.
@@ -136,6 +136,30 @@ async fn a_stream_prefetches_the_next_lookahead_items() {
     assert_eq!(published[1].track_id, tracks[2].to_string());
     assert_eq!(published[1].priority, Priority::Queue);
     assert_eq!(published[2].track_id, tracks[3].to_string());
+}
+
+/// Prefetch events are addressed to the user whose stream caused them.
+#[tokio::test]
+async fn prefetch_events_are_addressed_to_the_streaming_user() {
+    let env = Env::normal(&[]).await;
+    let mut events = env.events.subscribe();
+    let scheduler = PrefetchScheduler::new(Arc::clone(&env.orchestrator));
+    let tracks = remote_tracks(&env, 3).await;
+    let listing = listing_of(&tracks);
+    let user = env.add_user().await;
+
+    scheduler.record_listing(user, "symfonium", listing.clone());
+    scheduler
+        .note_stream(user, "symfonium", &listing[0], true)
+        .await;
+
+    let mut audiences = Vec::new();
+    while let Ok(envelope) = events.try_recv() {
+        if matches!(envelope.event, ServerEvent::QueuePrefetch(_)) {
+            audiences.push(envelope.audience);
+        }
+    }
+    assert_eq!(audiences, vec![Audience::User(user); 2]);
 }
 
 /// Noting the same stream again neither joins new work nor repeats an event.

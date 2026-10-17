@@ -16,7 +16,7 @@ use axum::extract::{FromRequest, Request, State};
 use axum::http::header::CONTENT_LENGTH;
 use axum::http::{HeaderMap, StatusCode};
 use hearthsound_config::keys;
-use hearthsound_core::events::{ServerEvent, UploadUpdated};
+use hearthsound_core::events::{Audience, ServerEvent, UploadUpdated};
 use hearthsound_core::{IdPrefix, new_uuid_v7};
 use hearthsound_library::LibraryError;
 use serde::Serialize;
@@ -72,6 +72,8 @@ pub struct UploadResult {
 struct Incoming {
     /// The upload's client id, which events carry.
     client: String,
+    /// The user who uploaded the file; upload events go to this user only.
+    user: Uuid,
     /// The file name the uploader gave, without a directory part.
     file_name: String,
     /// The directory the file is staged in.
@@ -198,6 +200,7 @@ async fn receive_file(
     let upload_id = new_uuid_v7();
     let incoming = Incoming {
         client: client_id(IdPrefix::Upload, upload_id),
+        user,
         file_name: staged_file_name(field.file_name()),
         dir: state.services().uploads_staging.join(upload_id.to_string()),
         max,
@@ -320,15 +323,15 @@ async fn stage_and_ingest(
 /// - `label`: the state the upload is in now.
 /// - `received`: the bytes received so far.
 fn publish(state: &NativeState, incoming: &Incoming, label: &str, received: u64) {
-    state
-        .services()
-        .events
-        .publish(ServerEvent::UploadUpdated(UploadUpdated {
+    state.services().events.publish_for(
+        Audience::User(incoming.user),
+        ServerEvent::UploadUpdated(UploadUpdated {
             upload_id: incoming.client.clone(),
             state: label.to_owned(),
             bytes_received: received,
             total_bytes: incoming.total,
-        }));
+        }),
+    );
 }
 
 /// Returns the last path component of the name an uploader gave.

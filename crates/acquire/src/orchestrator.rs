@@ -35,7 +35,9 @@ use std::time::Duration;
 use hearthsound_catalog::CatalogService;
 use hearthsound_config::keys;
 use hearthsound_config::settings::Settings;
-use hearthsound_core::events::{AcquisitionUpdated, EventBus, ServerEvent, TrackAvailability};
+use hearthsound_core::events::{
+    AcquisitionUpdated, Audience, EventBus, ServerEvent, TrackAvailability,
+};
 use hearthsound_core::providers::AcquisitionContext;
 use hearthsound_core::{
     AcquisitionState, Availability, EntityId, FailureReason, Granularity, IdPrefix, Priority,
@@ -365,6 +367,11 @@ pub struct AcquisitionProgress {
     /// This is the file the download wrote, not the managed file the import
     /// writes; the import stage replaces it with the library path.
     pub file: Option<PathBuf>,
+    /// The user the acquisition was requested for, or `None` when the server
+    /// requested it.
+    ///
+    /// The event stream routes the acquisition's updates by this id.
+    pub requested_by: Option<Uuid>,
 }
 
 impl AcquisitionProgress {
@@ -811,6 +818,7 @@ impl AcquisitionOrchestrator {
                 priority,
                 active.state,
                 active.failure_reason,
+                active.requested_by,
             );
             self.stop_signal(active.id);
             return Ok(AcquireOutcome::Joined(handle));
@@ -892,6 +900,7 @@ impl AcquisitionOrchestrator {
             instance: None,
             failure_reason: None,
             file: None,
+            requested_by: request.requested_by,
         };
         let handle = self.attach(
             id,
@@ -899,6 +908,7 @@ impl AcquisitionOrchestrator {
             request.priority,
             AcquisitionState::Queued,
             None,
+            request.requested_by,
         );
         self.stop_signal(id);
         self.announce(&progress);
@@ -1803,6 +1813,8 @@ impl AcquisitionOrchestrator {
     /// - `priority`: the acquisition's current priority.
     /// - `state`: the acquisition's current state.
     /// - `failure_reason`: the acquisition's failure reason, when it failed.
+    /// - `requested_by`: the user the acquisition was requested for, or `None`
+    ///   when the server requested it.
     fn attach(
         &self,
         id: Uuid,
@@ -1810,6 +1822,7 @@ impl AcquisitionOrchestrator {
         priority: Priority,
         state: AcquisitionState,
         failure_reason: Option<FailureReason>,
+        requested_by: Option<Uuid>,
     ) -> AcquisitionHandle {
         let progress = AcquisitionProgress {
             acquisition_id: id,
@@ -1821,6 +1834,7 @@ impl AcquisitionOrchestrator {
             instance: None,
             failure_reason,
             file: None,
+            requested_by,
         };
         let mut waiters = lock(&self.inner.waiters);
         waiters.retain(|_, sender| sender.receiver_count() > 0 || !sender.borrow().is_terminal());
@@ -1849,9 +1863,13 @@ impl AcquisitionOrchestrator {
                 sender.send_replace(progress.clone());
             }
         }
-        self.inner
-            .events
-            .publish(ServerEvent::AcquisitionUpdated(AcquisitionUpdated {
+        let audience = match progress.requested_by {
+            Some(user) => Audience::User(user),
+            None => Audience::Admins,
+        };
+        self.inner.events.publish_for(
+            audience,
+            ServerEvent::AcquisitionUpdated(AcquisitionUpdated {
                 acquisition_id: EntityId::from_uuid(IdPrefix::Acquisition, progress.acquisition_id)
                     .to_string(),
                 target_id: progress.target_id.clone(),
@@ -1861,7 +1879,8 @@ impl AcquisitionOrchestrator {
                 eta_secs: progress.eta_secs,
                 instance: progress.instance.clone(),
                 failure_reason: progress.failure_reason,
-            }));
+            }),
+        );
     }
 
     /// Publishes a track's availability change.
@@ -1918,6 +1937,7 @@ impl AcquisitionOrchestrator {
             instance: row.instance_id.and_then(|id| self.instance_slug(id)),
             failure_reason: row.failure_reason,
             file: None,
+            requested_by: row.requested_by,
         }
     }
 
