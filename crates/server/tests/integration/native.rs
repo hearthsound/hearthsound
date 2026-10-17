@@ -21,7 +21,7 @@ async fn bearer_get(fixture: &Fixture, path: &str) -> reqwest::Response {
 }
 
 /// Reads a response body as JSON.
-async fn json(response: reqwest::Response) -> Value {
+pub(crate) async fn json(response: reqwest::Response) -> Value {
     serde_json::from_str(&response.text().await.unwrap()).unwrap()
 }
 
@@ -257,7 +257,7 @@ async fn sign_ins_are_refused_when_they_should_be() {
 }
 
 /// Sends a request with the fixture's API key as a bearer credential.
-async fn bearer(
+pub(crate) async fn bearer(
     fixture: &Fixture,
     method: reqwest::Method,
     path: &str,
@@ -618,7 +618,7 @@ async fn administrators_manage_accounts_permissions_and_quotas() {
 }
 
 /// Writes a small tagged album into a directory.
-async fn write_album(dir: &std::path::Path, artist: &str, album: &str) {
+pub(crate) async fn write_album(dir: &std::path::Path, artist: &str, album: &str) {
     use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
     std::fs::create_dir_all(dir).unwrap();
     for number in 1..=2u32 {
@@ -638,7 +638,7 @@ async fn write_album(dir: &std::path::Path, artist: &str, album: &str) {
 }
 
 /// Reads the album names `getAlbumList2` answers for a music folder.
-async fn albums_in(fixture: &Fixture, api_key: &str, folder: u8) -> Vec<String> {
+pub(crate) async fn albums_in(fixture: &Fixture, api_key: &str, folder: u8) -> Vec<String> {
     let response = fixture
         .get(&format!(
             "/rest/getAlbumList2?type=alphabeticalByName&musicFolderId={folder}&apiKey={api_key}&f=json"
@@ -1110,6 +1110,21 @@ async fn uploads_land_in_the_callers_library_and_are_refused_when_they_should_be
     )
     .await;
     assert_eq!(song["subsonic-response"]["song"]["title"], "One");
+
+    // Another user streams the uploaded track; uploads are shared storage.
+    let (_, neighbour_key) = crate::multi_user::create_user(&fixture, "neighbour", false).await;
+    let streamed = fixture
+        .client
+        .get(format!(
+            "{}/rest/stream?id={track}&apiKey={neighbour_key}",
+            fixture.base_url()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(streamed.status(), StatusCode::OK);
+    let body = streamed.bytes().await.unwrap();
+    assert!(body.starts_with(b"fLaC"), "the stream is the uploaded FLAC");
 
     // A file over the configured limit ends the request with too-large.
     let limited = bearer(

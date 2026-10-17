@@ -9,6 +9,7 @@ mod client_checklist;
 mod common;
 mod cors;
 mod health;
+mod multi_user;
 mod native;
 mod on_demand;
 mod prefetch;

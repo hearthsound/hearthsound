@@ -55,7 +55,8 @@ const FIRST_TITLE: &str = "Fixture Song 1";
 const FIRST_FILE: &str = "01 - Fixture Song 1.flac";
 
 /// The path the first track is imported to, relative to the cache root.
-const FIRST_REL_PATH: &str = "Fixture Artist/Fixture Album (2026)/01 - Fixture Song 1.flac";
+pub(crate) const FIRST_REL_PATH: &str =
+    "Fixture Artist/Fixture Album (2026)/01 - Fixture Song 1.flac";
 
 /// How long the generated audio lasts, in seconds.
 ///
@@ -70,14 +71,14 @@ const TRACK_MS: u64 = 180_000;
 ///
 /// The catalog fixture's own tracks carry none, so the test writes the field a
 /// provider would have filled in before the import reads it.
-const FIRST_ISRC: &str = "USHW12600001";
+pub(crate) const FIRST_ISRC: &str = "USHW12600001";
 
 /// Installs the album catalog fixture and assigns it to the catalog layer.
 ///
 /// # Parameters
 ///
 /// - `services`: the running services.
-async fn install_catalog(services: &Arc<Services>) {
+pub(crate) async fn install_catalog(services: &Arc<Services>) {
     let installed = services
         .plugins()
         .install(&fixture_plugin(ALBUM_CATALOG))
@@ -116,7 +117,7 @@ async fn install_catalog(services: &Arc<Services>) {
 /// - `scenario`: what the simulated backend does, `normal` or `no-candidates`.
 /// - `running_polls`: how many polls the download reports progress before it
 ///   completes; the polls are two seconds apart.
-async fn install_acquisition(
+pub(crate) async fn install_acquisition(
     services: &Arc<Services>,
     downloads: &Path,
     scenario: &str,
@@ -211,7 +212,7 @@ fn catalog_track(number: u8) -> CatalogId {
 /// # Parameters
 ///
 /// - `number`: the track number within the album, one-based.
-fn catalog_id(number: u8) -> String {
+pub(crate) fn catalog_id(number: u8) -> String {
     catalog_track(number).to_string()
 }
 
@@ -221,7 +222,7 @@ fn catalog_id(number: u8) -> String {
 ///
 /// - `catalog`: the running catalog layer.
 /// - `number`: the track number within the album, one-based.
-async fn materialize(catalog: &CatalogService, number: u8) -> EntityId {
+pub(crate) async fn materialize(catalog: &CatalogService, number: u8) -> EntityId {
     catalog
         .materialize_track(&catalog_track(number))
         .await
@@ -232,7 +233,7 @@ async fn materialize(catalog: &CatalogService, number: u8) -> EntityId {
 ///
 /// The directory sits beside the database, so it is the same directory tree a
 /// restarted process finds again.
-fn downloads_dir(fixture: &Fixture) -> PathBuf {
+pub(crate) fn downloads_dir(fixture: &Fixture) -> PathBuf {
     let downloads = fixture.database_path().parent().unwrap().join("downloads");
     std::fs::create_dir_all(&downloads).unwrap();
     downloads
@@ -251,7 +252,7 @@ fn downloads_dir(fixture: &Fixture) -> PathBuf {
 /// # Returns
 ///
 /// The path of the written file.
-async fn place_audio(downloads: &Path) -> PathBuf {
+pub(crate) async fn place_audio(downloads: &Path) -> PathBuf {
     AudioFixture::new(AudioFormat::Flac)
         .seconds(AUDIO_SECONDS)
         .file_name(FIRST_FILE.to_owned())
@@ -276,7 +277,7 @@ async fn place_audio(downloads: &Path) -> PathBuf {
 /// - `services`: the running services.
 /// - `track`: the stored track to write.
 /// - `isrc`: the code to store.
-async fn give_track_isrc(services: &Arc<Services>, track: EntityId, isrc: &str) {
+pub(crate) async fn give_track_isrc(services: &Arc<Services>, track: EntityId, isrc: &str) {
     sqlx::query("UPDATE tracks SET isrc = ? WHERE id = ?")
         .bind(isrc)
         .bind(track.uuid().as_bytes().to_vec())
@@ -310,7 +311,7 @@ fn stream_path(fixture: &Fixture, id: &str) -> String {
 /// # Returns
 ///
 /// The whole body, which is the imported file.
-async fn play_stream(fixture: &Fixture, id: &str) -> Vec<u8> {
+pub(crate) async fn play_stream(fixture: &Fixture, id: &str) -> Vec<u8> {
     let response = fixture.get(&stream_path(fixture, id)).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
@@ -367,7 +368,7 @@ fn header(response: &reqwest::Response, name: reqwest::header::HeaderName) -> Op
 ///
 /// - `orchestrator`: the running acquisition layer.
 /// - `track`: the track to read.
-async fn ledger_rows(
+pub(crate) async fn ledger_rows(
     orchestrator: &AcquisitionOrchestrator,
     track: EntityId,
 ) -> Vec<AcquisitionRow> {
@@ -426,7 +427,7 @@ async fn wait_for_state(
 /// # Panics
 ///
 /// Panics when the condition never holds.
-async fn eventual<F, Fut>(mut condition: F)
+pub(crate) async fn eventual<F, Fut>(mut condition: F)
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = bool>,
@@ -863,7 +864,7 @@ async fn a_restart_mid_download_finishes_the_acquisition() {
 }
 
 /// Finds the catalog id of the fixture's album through `search3`.
-async fn catalog_album_id(fixture: &Fixture) -> String {
+pub(crate) async fn catalog_album_id(fixture: &Fixture) -> String {
     let response = fixture
         .get(&format!(
             "/rest/search3?query=Fixture&apiKey={}&f=json",
@@ -881,7 +882,7 @@ async fn catalog_album_id(fixture: &Fixture) -> String {
 }
 
 /// Stars ids through `/rest/star` and expects an ok envelope.
-async fn star(fixture: &Fixture, parameter: &str, id: &str) {
+pub(crate) async fn star(fixture: &Fixture, parameter: &str, id: &str) {
     let response = fixture
         .get(&format!(
             "/rest/star?{parameter}={id}&apiKey={}&f=json",
