@@ -81,6 +81,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   problem document with a stable `code`, lists page by cursor, and
   `GET /api/v1/system/info` reports the version, the enabled features and the
   instances of every layer.
+- Web sessions over the native API: `POST /api/v1/auth/login` checks the
+  account password and sets an `HttpOnly`, `Secure`, `SameSite=Lax` session
+  cookie that lives `auth.session_ttl_days`, `GET /api/v1/auth/session` answers
+  who a request is with its CSRF token, and `POST /api/v1/auth/logout` ends the
+  session.
 
 ### Changed
 

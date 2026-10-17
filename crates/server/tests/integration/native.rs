@@ -7,7 +7,7 @@ use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
 
-use crate::common::Fixture;
+use crate::common::{self, Fixture};
 
 /// Sends a GET with the fixture's API key as a bearer credential.
 async fn bearer_get(fixture: &Fixture, path: &str) -> reqwest::Response {
@@ -97,5 +97,161 @@ async fn the_openapi_document_is_served() {
     assert_eq!(schemes["bearer"]["scheme"], "bearer");
     assert_eq!(schemes["session"]["in"], "cookie");
     assert_eq!(schemes["session"]["name"], "hs_session");
+    fixture.stop().await;
+}
+
+/// Signs in and returns the session cookie pair and the CSRF token.
+async fn login(fixture: &Fixture, username: &str, password: &str) -> reqwest::Response {
+    fixture
+        .client
+        .post(format!("{}/api/v1/auth/login", fixture.base_url()))
+        .header(CONTENT_TYPE, "application/json")
+        .body(serde_json::json!({ "username": username, "password": password }).to_string())
+        .send()
+        .await
+        .unwrap()
+}
+
+/// The `name=value` part of a `Set-Cookie` header.
+fn cookie_pair(response: &reqwest::Response) -> String {
+    response.headers()[reqwest::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+/// A sign-in sets a hardened session cookie that authenticates reads, unsafe
+/// requests need the CSRF header, and signing out ends the session.
+#[tokio::test]
+async fn a_web_session_signs_in_checks_csrf_and_signs_out() {
+    let fixture = Fixture::new().await;
+    let signed_in = login(&fixture, common::USERNAME, common::ACCOUNT_PASSWORD).await;
+    assert_eq!(signed_in.status(), StatusCode::OK);
+    let set_cookie = signed_in.headers()[reqwest::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    for attribute in [
+        "HttpOnly",
+        "Secure",
+        "SameSite=Lax",
+        "Path=/",
+        "Max-Age=2592000",
+    ] {
+        assert!(
+            set_cookie.contains(attribute),
+            "{set_cookie} has {attribute}"
+        );
+    }
+    let cookie = cookie_pair(&signed_in);
+    let body = json(signed_in).await;
+    assert_eq!(body["user"]["username"], common::USERNAME);
+    let csrf = body["csrfToken"].as_str().unwrap().to_owned();
+
+    let session = fixture
+        .client
+        .get(format!("{}/api/v1/auth/session", fixture.base_url()))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(session.status(), StatusCode::OK);
+    let session = json(session).await;
+    assert_eq!(session["credential"], "session");
+    assert_eq!(session["csrfToken"], csrf.as_str());
+
+    let logout = |csrf: Option<&str>| {
+        let mut request = fixture
+            .client
+            .post(format!("{}/api/v1/auth/logout", fixture.base_url()))
+            .header(reqwest::header::COOKIE, &cookie);
+        if let Some(csrf) = csrf {
+            request = request.header("X-Hearthsound-CSRF", csrf);
+        }
+        request.send()
+    };
+    assert_problem(
+        logout(None).await.unwrap(),
+        StatusCode::FORBIDDEN,
+        "csrf-failed",
+    )
+    .await;
+    assert_problem(
+        logout(Some("wrong")).await.unwrap(),
+        StatusCode::FORBIDDEN,
+        "csrf-failed",
+    )
+    .await;
+    let out = logout(Some(&csrf)).await.unwrap();
+    assert_eq!(out.status(), StatusCode::NO_CONTENT);
+    assert!(
+        out.headers()[reqwest::header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=0")
+    );
+    let after = fixture
+        .client
+        .get(format!("{}/api/v1/auth/session", fixture.base_url()))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_problem(after, StatusCode::UNAUTHORIZED, "unauthenticated").await;
+
+    // A bearer key needs no CSRF header for an unsafe request.
+    let bearer = fixture
+        .client
+        .post(format!("{}/api/v1/auth/logout", fixture.base_url()))
+        .header(AUTHORIZATION, format!("Bearer {}", fixture.api_key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bearer.status(), StatusCode::NO_CONTENT);
+    fixture.stop().await;
+}
+
+/// Wrong passwords, a disabled account and an expired session are refused,
+/// and a spent failure budget refuses even the right password.
+#[tokio::test]
+async fn sign_ins_are_refused_when_they_should_be() {
+    let fixture = Fixture::new().await;
+    let wrong = login(&fixture, common::USERNAME, "not the password").await;
+    assert_problem(wrong, StatusCode::UNAUTHORIZED, "unauthenticated").await;
+
+    // An expired session no longer authenticates.
+    let signed_in = login(&fixture, common::USERNAME, common::ACCOUNT_PASSWORD).await;
+    let cookie = cookie_pair(&signed_in);
+    sqlx::query("UPDATE sessions SET expires_at = 0")
+        .execute(fixture.services.database().writer())
+        .await
+        .unwrap();
+    let expired = fixture
+        .client
+        .get(format!("{}/api/v1/auth/session", fixture.base_url()))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_problem(expired, StatusCode::UNAUTHORIZED, "unauthenticated").await;
+
+    // A disabled account cannot sign in.
+    let users = hearthsound_auth::Users::new(fixture.services.database());
+    users.disable(fixture.user_id).await.unwrap();
+    let disabled = login(&fixture, common::USERNAME, common::ACCOUNT_PASSWORD).await;
+    assert_problem(disabled, StatusCode::UNAUTHORIZED, "unauthenticated").await;
+    users.enable(fixture.user_id).await.unwrap();
+
+    // Ten failures a minute spend the budget; the right password is then
+    // refused too until it refills.
+    for _ in 0..10 {
+        login(&fixture, common::USERNAME, "still wrong").await;
+    }
+    let limited = login(&fixture, common::USERNAME, common::ACCOUNT_PASSWORD).await;
+    assert_eq!(limited.headers()[reqwest::header::RETRY_AFTER], "60");
+    assert_problem(limited, StatusCode::TOO_MANY_REQUESTS, "rate-limited").await;
     fixture.stop().await;
 }

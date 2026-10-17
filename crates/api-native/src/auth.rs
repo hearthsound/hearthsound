@@ -187,6 +187,25 @@ pub fn session_token(headers: &HeaderMap) -> Option<String> {
         .map(|(_, value)| value.to_owned())
 }
 
+/// The address a request came from, as the login rate limit sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientAddress(pub IpAddr);
+
+impl FromRequestParts<NativeState> for ClientAddress {
+    type Rejection = std::convert::Infallible;
+
+    /// Resolves the client address through the trusted proxies.
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &NativeState,
+    ) -> Result<ClientAddress, std::convert::Infallible> {
+        Ok(ClientAddress(client_ip(
+            parts,
+            &state.services().trusted_proxies,
+        )))
+    }
+}
+
 /// Builds the `Set-Cookie` value that stores a session token.
 ///
 /// The cookie is `HttpOnly` (scripts cannot read it), `Secure` (sent only over

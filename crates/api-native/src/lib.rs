@@ -24,14 +24,17 @@
 //! | Resource | Who |
 //! |---|---|
 //! | `GET /api/v1/system/info` | any user |
+//! | `POST /api/v1/auth/login`, `POST /api/v1/auth/logout`, `GET /api/v1/auth/session` | anyone / any user |
 
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod extract;
 pub mod pagination;
 pub mod problem;
 pub mod routes;
 mod state;
+pub mod views;
 
 use std::sync::Arc;
 
@@ -59,6 +62,7 @@ pub const OPENAPI_PATH: &str = "/api/v1/openapi.json";
     modifiers(&SecuritySchemes),
     tags(
         (name = "system", description = "What the server is and offers"),
+        (name = "auth", description = "Web sessions"),
     )
 )]
 struct ApiDoc;
@@ -89,7 +93,11 @@ impl Modify for SecuritySchemes {
 
 /// Collects every annotated route with its OpenAPI path.
 fn api_router() -> OpenApiRouter<NativeState> {
-    OpenApiRouter::with_openapi(ApiDoc::openapi()).routes(routes!(routes::system::system_info))
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .routes(routes!(routes::system::system_info))
+        .routes(routes!(routes::session::login))
+        .routes(routes!(routes::session::logout))
+        .routes(routes!(routes::session::session))
 }
 
 /// Returns the OpenAPI document of the native API.
