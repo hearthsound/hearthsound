@@ -16,9 +16,15 @@
 
 use std::sync::Arc;
 
+use hearthsound_core::Availability;
+use hearthsound_core::events::{
+    EventBus, LibraryChange, LibraryChanged, ServerEvent, TrackAvailability,
+};
 use hearthsound_jobs::Shutdown;
+use hearthsound_library::maintenance::MaintenanceSignal;
 use hearthsound_library::scan::ScanRequest;
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::error::ServerError;
@@ -197,11 +203,12 @@ impl Server {
     }
 }
 
-/// Spawns the job runner, the scheduler, and the data-version watcher.
+/// Spawns the job runner, the scheduler, the folder watchers, the storage
+/// maintenance worker, and the data-version watcher.
 ///
-/// The watcher is what makes a command-line write take effect on a running
-/// server: it polls `PRAGMA data_version` and reloads the settings and the
-/// provider registry when another connection commits (see
+/// The data-version watcher is what makes a command-line write take effect on
+/// a running server: it polls `PRAGMA data_version` and reloads the settings
+/// and the provider registry when another connection commits (see
 /// [`Services::watch_external_changes`](crate::Services::watch_external_changes)).
 ///
 /// # Parameters
@@ -226,11 +233,68 @@ fn spawn_workers(services: &Arc<Services>, shutdown: Shutdown) -> Vec<JoinHandle
     let watchers_task =
         tokio::spawn(async move { watch_folders(watchers, watchers_shutdown).await });
 
+    let maintainer = Arc::clone(services.maintainer());
+    let signal = services.maintenance().clone();
+    let maintainer_shutdown = shutdown.clone();
+    let maintainer_task =
+        tokio::spawn(async move { maintainer.run(signal, maintainer_shutdown).await });
+
+    let events = Arc::clone(services.events());
+    let signal = services.maintenance().clone();
+    let events_shutdown = shutdown.clone();
+    let events_task =
+        tokio::spawn(async move { wake_on_new_files(events, signal, events_shutdown).await });
+
     let external = Arc::clone(services);
     let external_task =
         tokio::spawn(async move { external.watch_external_changes(shutdown).await });
 
-    vec![runner_task, scheduler_task, watchers_task, external_task]
+    vec![
+        runner_task,
+        scheduler_task,
+        watchers_task,
+        maintainer_task,
+        events_task,
+        external_task,
+    ]
+}
+
+/// Wakes the storage maintenance worker whenever a file arrives.
+///
+/// An import that lands in the cache, or a track added to the library by an
+/// import or an upload, can push the cache over its limits, so each such event
+/// asks for a maintenance pass. The worker's own debounce merges a burst of
+/// imports into one pass. A subscriber that falls behind skips to the newest
+/// events and asks for one pass, which covers whatever it missed.
+///
+/// # Parameters
+///
+/// - `events`: the bus the imports publish on.
+/// - `signal`: the maintenance worker's signal.
+/// - `shutdown`: ends the loop.
+async fn wake_on_new_files(events: Arc<EventBus>, signal: MaintenanceSignal, shutdown: Shutdown) {
+    let mut receiver = events.subscribe();
+    loop {
+        let received = tokio::select! {
+            () = shutdown.wait() => return,
+            received = receiver.recv() => received,
+        };
+        match received {
+            Ok(envelope) => match envelope.event {
+                ServerEvent::TrackAvailability(TrackAvailability {
+                    availability: Availability::Cached,
+                    ..
+                })
+                | ServerEvent::LibraryChanged(LibraryChanged {
+                    change: LibraryChange::Added,
+                    ..
+                }) => signal.notify(),
+                _ => {}
+            },
+            Err(broadcast::error::RecvError::Lagged(_)) => signal.notify(),
+            Err(broadcast::error::RecvError::Closed) => return,
+        }
+    }
 }
 
 /// Watches the folders flagged for watching, scanning each once at startup.

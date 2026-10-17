@@ -15,10 +15,11 @@
 //!    that registry;
 //! 6. build the ffmpeg runner capped by `stream.max_concurrent_transcodes`, the
 //!    acquisition orchestrator over the catalog, registry and storage, and start
-//!    its scheduler, then the managed storage roots, the library scanner, the
-//!    job queue, the job runner, and the cron scheduler;
-//! 7. build the activity service, the trusted-proxy list, and the CORS policy
-//!    ([`crate::cors`]).
+//!    its scheduler, then the library scanner, the activity service, the
+//!    managed storage roots and the storage maintainer that keeps their files
+//!    in step with the pins, the job queue, the job runner, and the cron
+//!    scheduler with the system schedules;
+//! 7. build the trusted-proxy list and the CORS policy ([`crate::cors`]).
 //!
 //! Every service is shared through an `Arc`, so a handler, a job, or an
 //! endpoint clones the handle it needs and holds nothing else.
@@ -63,6 +64,10 @@ use hearthsound_jobs::{
     JobQueue, JobRunner, JobRunnerOptions, QueueOptions, ScheduleSpec, Scheduler, SchedulerOptions,
 };
 use hearthsound_library::StorageRoots;
+use hearthsound_library::maintenance::{
+    MAINTENANCE_JOB_KIND, MAINTENANCE_SCHEDULE, MaintenanceJobHandler, MaintenanceSignal,
+    StorageMaintainer,
+};
 use hearthsound_library::scan::{LibraryScanner, SCAN_JOB_KIND, ScanJobHandler};
 use hearthsound_library::watch::LibraryWatcher;
 use hearthsound_media::FfmpegRunner;
@@ -115,6 +120,12 @@ pub struct Services {
     scheduler: Arc<Scheduler>,
     /// The activity service: play recording and stream sessions.
     activity: Arc<ActivityService>,
+    /// Keeps managed files in the root their pins imply and the cache within
+    /// its limits.
+    maintainer: Arc<StorageMaintainer>,
+    /// The signal that wakes the maintenance worker; the activity service
+    /// notifies it after every pin change.
+    maintenance: MaintenanceSignal,
     /// The managed storage roots a stored media file resolves against.
     storage_roots: StorageRoots,
     /// The proxies whose forwarding headers are trusted.
@@ -242,6 +253,17 @@ impl Services {
             settings.clone(),
         ));
 
+        let activity = Arc::new(ActivityService::new(&database));
+        let storage_roots =
+            StorageRoots::new(config.paths.library.clone(), config.paths.cache.clone());
+        let maintainer = Arc::new(StorageMaintainer::new(
+            &database,
+            storage_roots.clone(),
+            settings.clone(),
+            Arc::clone(&events),
+        ));
+        let maintenance = activity.maintenance_signal().clone();
+
         let queue = Arc::new(JobQueue::new(&database, QueueOptions::default()));
         let mut runner = JobRunner::new(Arc::clone(&queue), JobRunnerOptions::default());
         runner.register(
@@ -251,6 +273,10 @@ impl Services {
         runner.register(
             PLUGIN_KV_SWEEP_JOB_KIND,
             Arc::new(KvSweepJobHandler::new(Arc::clone(&database))),
+        );
+        runner.register(
+            MAINTENANCE_JOB_KIND,
+            Arc::new(MaintenanceJobHandler::new(Arc::clone(&maintainer))),
         );
         let runner = Arc::new(runner);
 
@@ -272,10 +298,13 @@ impl Services {
                 PLUGIN_KV_SWEEP_CRON,
             ))
             .await?;
+        scheduler
+            .upsert(ScheduleSpec::system(
+                MAINTENANCE_JOB_KIND,
+                MAINTENANCE_SCHEDULE,
+            ))
+            .await?;
 
-        let activity = Arc::new(ActivityService::new(&database));
-        let storage_roots =
-            StorageRoots::new(config.paths.library.clone(), config.paths.cache.clone());
         let trusted_proxies = TrustedProxies::parse(config.server.trusted_proxies.iter().cloned())?;
         let cors = crate::cors::layer(&config.server.cors_origins)?;
 
@@ -304,6 +333,8 @@ impl Services {
             watcher,
             scheduler,
             activity,
+            maintainer,
+            maintenance,
             storage_roots,
             trusted_proxies,
             cors,
@@ -416,6 +447,16 @@ impl Services {
     /// Returns the activity service.
     pub fn activity(&self) -> &Arc<ActivityService> {
         &self.activity
+    }
+
+    /// Returns the storage maintainer.
+    pub fn maintainer(&self) -> &Arc<StorageMaintainer> {
+        &self.maintainer
+    }
+
+    /// Returns the signal that wakes the storage maintenance worker.
+    pub fn maintenance(&self) -> &MaintenanceSignal {
+        &self.maintenance
     }
 
     /// Returns the managed storage roots.

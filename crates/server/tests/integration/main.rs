@@ -12,5 +12,6 @@ mod health;
 mod on_demand;
 mod prefetch;
 mod reload;
+mod storage;
 mod stream_pending;
 mod watch;

@@ -12,6 +12,7 @@
 
 use hearthsound_core::{EntityId, IdPrefix, PinReason};
 use hearthsound_db::Database;
+use hearthsound_library::maintenance::MaintenanceSignal;
 use hearthsound_library::retention;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -143,6 +144,8 @@ pub struct Playlists {
     writer: SqlitePool,
     /// The reader pool every query goes through.
     readers: SqlitePool,
+    /// Woken after an edit, because an edit changes `playlist` pins.
+    signal: MaintenanceSignal,
 }
 
 impl Playlists {
@@ -160,7 +163,22 @@ impl Playlists {
         Playlists {
             writer: db.writer().clone(),
             readers: db.readers().clone(),
+            signal: MaintenanceSignal::new(),
         }
+    }
+
+    /// Wakes the given storage maintenance signal after every edit.
+    ///
+    /// # Parameters
+    ///
+    /// - `signal`: the signal the maintenance worker waits on.
+    ///
+    /// # Returns
+    ///
+    /// The repository, notifying that signal.
+    pub fn with_signal(mut self, signal: MaintenanceSignal) -> Playlists {
+        self.signal = signal;
+        self
     }
 
     /// Creates a playlist.
@@ -213,6 +231,7 @@ impl Playlists {
             refresh_playlist_pin(&mut tx, *track).await?;
         }
         tx.commit().await?;
+        self.signal.notify();
         Ok(Playlist {
             id,
             owner_user_id: owner,
@@ -268,6 +287,7 @@ impl Playlists {
             refresh_playlist_pin(&mut tx, track).await?;
         }
         tx.commit().await?;
+        self.signal.notify();
         let mut playlist = stored;
         playlist.updated_at = now;
         playlist.entries = entries;
@@ -350,6 +370,7 @@ impl Playlists {
             refresh_playlist_pin(&mut tx, track).await?;
         }
         tx.commit().await?;
+        self.signal.notify();
         playlist.name = name.to_owned();
         playlist.comment = comment;
         playlist.is_public = public;
@@ -388,6 +409,7 @@ impl Playlists {
             refresh_playlist_pin(&mut tx, track).await?;
         }
         tx.commit().await?;
+        self.signal.notify();
         Ok(deleted > 0)
     }
 

@@ -51,6 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `storage.autopin.play_count` pins a track once its recorded plays over every
   user reach the threshold, with the `policy` pin reason, and releases that pin
   again when the threshold rises above the plays or is set to zero.
+- Storage maintenance runs in the background: a like, an unlike, a playlist
+  edit, a recorded play, an imported file, a settings change or a write from
+  the command line wakes it within a second, and a `storage.maintain` job runs
+  it every 15 minutes besides, so a pin change reaches the filesystem without
+  a manual step.
 
 ## [0.1.2] - 2026-10-16
 

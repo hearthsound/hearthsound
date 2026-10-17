@@ -48,11 +48,13 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use hearthsound_config::keys;
 use hearthsound_config::settings::Settings;
 use hearthsound_core::events::{EventBus, ServerEvent, TrackAvailability};
 use hearthsound_core::{Availability, EntityId, IdPrefix, PinReason, StorageClass};
 use hearthsound_db::Database;
+use hearthsound_jobs::{Job, JobError, JobHandler, Shutdown};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -166,6 +168,70 @@ impl SpaceProbe for StatvfsProbe {
     }
 }
 
+/// The job kind of a scheduled maintenance pass.
+pub const MAINTENANCE_JOB_KIND: &str = "storage.maintain";
+
+/// The cron expression of the scheduled maintenance pass: every 15 minutes.
+///
+/// The pass is a safety net behind the wake-ups, which handle a pin change or
+/// an import within a second.
+pub const MAINTENANCE_SCHEDULE: &str = "*/15 * * * *";
+
+/// How long the worker waits after a wake-up before it runs, so a burst of
+/// changes (an album liked track by track) becomes one pass.
+const WAKE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A wake-up call for the maintenance worker.
+///
+/// Whatever changes a pin, records a play, or adds a cache file calls
+/// [`MaintenanceSignal::notify`]; the worker waiting in
+/// [`StorageMaintainer::run`] wakes, waits briefly so related changes arrive
+/// together, and runs one pass. A notification while nobody waits is kept, so
+/// a change made during a pass causes one more pass afterwards. Clones share
+/// one signal.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_library::maintenance::MaintenanceSignal;
+///
+/// let signal = MaintenanceSignal::new();
+/// signal.clone().notify();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct MaintenanceSignal {
+    /// The notification the worker waits on.
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl MaintenanceSignal {
+    /// Builds a signal nobody waits on yet.
+    pub fn new() -> MaintenanceSignal {
+        MaintenanceSignal::default()
+    }
+
+    /// Asks the worker for a pass.
+    pub fn notify(&self) {
+        self.notify.notify_one();
+    }
+
+    /// Waits until a pass is asked for.
+    pub async fn notified(&self) {
+        self.notify.notified().await;
+    }
+}
+
+/// What one maintenance pass changed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MaintenanceReport {
+    /// The play-count pins that changed.
+    pub autopin: AutopinReport,
+    /// The files that moved between the roots or were deleted.
+    pub relocation: RelocationReport,
+    /// The cache files that were evicted.
+    pub eviction: EvictionReport,
+}
+
 /// Keeps the managed files of the two storage roots in step with the pins.
 ///
 /// One maintainer serves one process: it owns no per-call state, so a clone
@@ -202,6 +268,9 @@ pub struct StorageMaintainer {
     events: Arc<EventBus>,
     /// Reads the free space of the filesystem under the cache root.
     space: Arc<dyn SpaceProbe>,
+    /// Serializes passes: a wake-up, the schedule and an administrator may
+    /// ask at the same time, and two passes must never move the same file.
+    running: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl std::fmt::Debug for StorageMaintainer {
@@ -239,6 +308,7 @@ impl StorageMaintainer {
             settings,
             events,
             space: Arc::new(StatvfsProbe),
+            running: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -263,6 +333,59 @@ impl StorageMaintainer {
     /// Returns the managed roots the maintainer moves files between.
     pub fn roots(&self) -> &StorageRoots {
         &self.roots
+    }
+
+    /// Runs one full pass: play-count pins, then relocation, then eviction.
+    ///
+    /// The order matters: a track that just reached the play-count threshold is
+    /// pinned before relocation decides where its file belongs, and relocation
+    /// demotes files into the cache before eviction measures it. Passes never
+    /// overlap; a call while another runs waits for it.
+    ///
+    /// # Returns
+    ///
+    /// What the pass changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first [`LibraryError`] of [`StorageMaintainer::autopin`],
+    /// [`StorageMaintainer::relocate`] or [`StorageMaintainer::evict`]; the
+    /// steps after a failing one do not run.
+    pub async fn run_once(&self) -> Result<MaintenanceReport, LibraryError> {
+        let _running = self.running.lock().await;
+        let autopin = self.autopin().await?;
+        let relocation = self.relocate().await?;
+        let eviction = self.evict().await?;
+        Ok(MaintenanceReport {
+            autopin,
+            relocation,
+            eviction,
+        })
+    }
+
+    /// Runs a pass whenever the signal asks for one, until shutdown.
+    ///
+    /// One pass runs at startup, so changes made while the server was stopped
+    /// are acted on. A failed pass is logged and the worker keeps waiting.
+    ///
+    /// # Parameters
+    ///
+    /// - `signal`: the signal the writers notify.
+    /// - `shutdown`: ends the loop between passes.
+    pub async fn run(&self, signal: MaintenanceSignal, shutdown: Shutdown) {
+        loop {
+            if let Err(error) = self.run_once().await {
+                tracing::warn!(%error, "storage maintenance failed");
+            }
+            tokio::select! {
+                () = shutdown.wait() => return,
+                () = signal.notified() => {}
+            }
+            tokio::select! {
+                () = shutdown.wait() => return,
+                () = tokio::time::sleep(WAKE_DEBOUNCE) => {}
+            }
+        }
     }
 
     /// Moves every managed file to the root its track's pins imply.
@@ -1204,4 +1327,46 @@ async fn still_unpinned(
     .fetch_optional(&mut *conn)
     .await?;
     Ok(row.is_some_and(|row| row.pinned == 0 && row.storage == file.storage.as_str()))
+}
+
+/// Runs a maintenance pass for the `storage.maintain` job.
+///
+/// The server registers it under [`MAINTENANCE_JOB_KIND`] and schedules it at
+/// [`MAINTENANCE_SCHEDULE`], so the storage limits hold even when no wake-up
+/// arrives, for example after a setting changed.
+#[derive(Debug, Clone)]
+pub struct MaintenanceJobHandler {
+    /// The maintainer the job runs.
+    maintainer: Arc<StorageMaintainer>,
+}
+
+impl MaintenanceJobHandler {
+    /// Builds the handler.
+    ///
+    /// # Parameters
+    ///
+    /// - `maintainer`: the maintainer the job runs.
+    ///
+    /// # Returns
+    ///
+    /// The handler.
+    pub fn new(maintainer: Arc<StorageMaintainer>) -> MaintenanceJobHandler {
+        MaintenanceJobHandler { maintainer }
+    }
+}
+
+#[async_trait]
+impl JobHandler for MaintenanceJobHandler {
+    /// Runs one pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JobError`] when the pass fails, so the queue retries it.
+    async fn handle(&self, _job: Job) -> Result<(), JobError> {
+        self.maintainer
+            .run_once()
+            .await
+            .map(|_| ())
+            .map_err(|error| JobError::new(error.to_string()))
+    }
 }

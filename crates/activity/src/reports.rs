@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use hearthsound_core::EntityId;
+use hearthsound_library::maintenance::MaintenanceSignal;
 use uuid::Uuid;
 
 use crate::error::ActivityError;
@@ -273,6 +274,21 @@ impl InMemoryReports {
                 recorded: HashMap::new(),
             })),
         }
+    }
+
+    /// Wakes the given storage maintenance signal after every play a report
+    /// records.
+    ///
+    /// # Parameters
+    ///
+    /// - `signal`: the signal the maintenance worker waits on.
+    ///
+    /// # Returns
+    ///
+    /// The reports, notifying that signal.
+    pub fn with_signal(mut self, signal: MaintenanceSignal) -> InMemoryReports {
+        self.plays = self.plays.with_signal(signal);
+        self
     }
 
     /// Reports whether a report recorded a play for a track recently.

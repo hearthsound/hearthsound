@@ -102,6 +102,9 @@ impl Services {
             Err(error) => tracing::error!(%error, "could not reconcile the acquisitions"),
         }
         self.reconcile_watchers().await;
+        // A folder owner, a like or a setting written elsewhere can change where
+        // a managed file belongs.
+        self.maintenance().notify();
         tracing::info!("reloaded the settings and providers after an external write");
     }
 
@@ -122,10 +125,13 @@ impl Services {
         }
     }
 
-    /// Reapplies the settings the services keep a copy of.
+    /// Reapplies the settings the services keep a copy of, and wakes the
+    /// storage maintenance worker.
     ///
     /// Only the ffmpeg concurrency cap is cached today; every other reader takes
-    /// the current snapshot when it needs it.
+    /// the current snapshot when it needs it. A storage setting such as
+    /// `storage.cache.max_bytes` takes effect at the next maintenance pass, so a
+    /// settings change asks for one.
     ///
     /// # Parameters
     ///
@@ -142,5 +148,6 @@ impl Services {
                 tracing::error!(%error, "could not read the ffmpeg concurrency cap");
             }
         }
+        self.maintenance().notify();
     }
 }

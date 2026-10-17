@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use hearthsound_core::new_uuid_v7;
 use hearthsound_db::Database;
+use hearthsound_library::maintenance::MaintenanceSignal;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnection;
 use uuid::Uuid;
@@ -35,6 +36,9 @@ pub struct Plays {
     writer: SqlitePool,
     /// The reader pool every query goes through.
     readers: SqlitePool,
+    /// Woken after a play is recorded, because a play can reach the
+    /// play-count pin threshold.
+    signal: MaintenanceSignal,
 }
 
 impl Plays {
@@ -61,7 +65,22 @@ impl Plays {
         Plays {
             writer: db.writer().clone(),
             readers: db.readers().clone(),
+            signal: MaintenanceSignal::new(),
         }
+    }
+
+    /// Wakes the given storage maintenance signal after every recorded play.
+    ///
+    /// # Parameters
+    ///
+    /// - `signal`: the signal the maintenance worker waits on.
+    ///
+    /// # Returns
+    ///
+    /// The repository, notifying that signal.
+    pub fn with_signal(mut self, signal: MaintenanceSignal) -> Plays {
+        self.signal = signal;
+        self
     }
 
     /// Records a play through the writer pool.
@@ -98,7 +117,7 @@ impl Plays {
         audio_delivered: bool,
     ) -> Result<Uuid, ActivityError> {
         let mut connection = self.writer.acquire().await?;
-        Plays::record_play_in(
+        let id = Plays::record_play_in(
             &mut connection,
             user_id,
             track_id,
@@ -107,7 +126,9 @@ impl Plays {
             listened_ms,
             audio_delivered,
         )
-        .await
+        .await?;
+        self.signal.notify();
+        Ok(id)
     }
 
     /// Records a play on a caller-supplied connection or transaction.

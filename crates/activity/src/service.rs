@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use hearthsound_core::{EntityId, EntityKind, IdPrefix};
 use hearthsound_db::Database;
+use hearthsound_library::maintenance::MaintenanceSignal;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -134,6 +135,9 @@ pub struct ActivityService {
     reports: Arc<InMemoryReports>,
     /// The stream sessions the guard reads.
     sessions: StreamSessions,
+    /// Woken after every like, unlike, playlist edit and recorded play, so the
+    /// storage maintenance worker acts on the pins they change.
+    signal: MaintenanceSignal,
 }
 
 impl ActivityService {
@@ -150,16 +154,7 @@ impl ActivityService {
     ///
     /// The service.
     pub fn new(db: &Database) -> ActivityService {
-        ActivityService {
-            writer: db.writer().clone(),
-            plays: Plays::new(db),
-            playlists: Playlists::new(db),
-            queues: PlayQueues::new(db),
-            bookmarks: Bookmarks::new(db),
-            now_playing: NowPlaying::new(db),
-            reports: Arc::new(InMemoryReports::new(db)),
-            sessions: StreamSessions::new(),
-        }
+        ActivityService::build(db, StreamSessions::new())
     }
 
     /// Builds the service with a session registry the caller already shares.
@@ -195,16 +190,33 @@ impl ActivityService {
     /// # }
     /// ```
     pub fn with_sessions(db: &Database, sessions: StreamSessions) -> ActivityService {
+        ActivityService::build(db, sessions)
+    }
+
+    /// Builds the service with one maintenance signal shared by every
+    /// repository that changes a pin or records a play.
+    fn build(db: &Database, sessions: StreamSessions) -> ActivityService {
+        let signal = MaintenanceSignal::new();
         ActivityService {
             writer: db.writer().clone(),
-            plays: Plays::new(db),
-            playlists: Playlists::new(db),
+            plays: Plays::new(db).with_signal(signal.clone()),
+            playlists: Playlists::new(db).with_signal(signal.clone()),
             queues: PlayQueues::new(db),
             bookmarks: Bookmarks::new(db),
             now_playing: NowPlaying::new(db),
-            reports: Arc::new(InMemoryReports::new(db)),
+            reports: Arc::new(InMemoryReports::new(db).with_signal(signal.clone())),
             sessions,
+            signal,
         }
+    }
+
+    /// Returns the signal this service notifies after it changed a pin or
+    /// recorded a play.
+    ///
+    /// The server hands it to the storage maintenance worker, which waits on
+    /// it.
+    pub fn maintenance_signal(&self) -> &MaintenanceSignal {
+        &self.signal
     }
 
     /// Returns the session registry the stream service registers streams in.
@@ -374,6 +386,7 @@ impl ActivityService {
             feedback::like(&mut tx, user_id, *kind, *entity_id, at).await?;
         }
         tx.commit().await?;
+        self.signal.notify();
         Ok(())
     }
 
@@ -400,6 +413,7 @@ impl ActivityService {
             feedback::unlike(&mut tx, user_id, *kind, *entity_id).await?;
         }
         tx.commit().await?;
+        self.signal.notify();
         Ok(())
     }
 }
