@@ -1582,6 +1582,7 @@ version = "0.1.3"
 dependencies = [
  "axum",
  "data-encoding",
+ "futures-util",
  "hearthsound-acquire",
  "hearthsound-auth",
  "hearthsound-config",
@@ -1590,8 +1591,10 @@ dependencies = [
  "hearthsound-jobs",
  "hearthsound-library",
  "hearthsound-plugin-host",
+ "rand 0.10.3",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "subtle",
  "thiserror",
  "tokio",

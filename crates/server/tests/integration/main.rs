@@ -8,6 +8,7 @@
 mod client_checklist;
 mod common;
 mod cors;
+mod events;
 mod health;
 mod multi_user;
 mod native;

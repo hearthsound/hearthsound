@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 axum = { workspace = true, features = ["multipart"] }
 data-encoding.workspace = true
+futures-util.workspace = true
 hearthsound-acquire = { path = "../acquire" }
 hearthsound-auth = { path = "../auth" }
 hearthsound-config = { path = "../config" }
@@ -21,11 +22,13 @@ hearthsound-db = { path = "../db" }
 hearthsound-jobs = { path = "../jobs" }
 hearthsound-library = { path = "../library" }
 hearthsound-plugin-host = { path = "../plugin-host" }
+rand.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync"] }
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync", "time"] }
 tracing.workspace = true
 utoipa.workspace = true
 utoipa-axum.workspace = true

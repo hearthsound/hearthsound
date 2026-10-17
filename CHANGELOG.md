@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waiting for approval, with its version, manifest, digest, source and
   repository, and the staged upgrade is removed with its plugin.
 
+- A server event stream at `GET /api/v1/events` that replays missed events from
+  `Last-Event-ID`. It accepts a bearer key, a session cookie, or a single-use
+  ticket from `POST /api/v1/events/ticket` for clients that cannot set headers.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload

@@ -18,6 +18,8 @@ use hearthsound_library::upload::UploadIngest;
 use hearthsound_library::watch::LibraryWatcher;
 use hearthsound_plugin_host::ProviderRegistry;
 
+use crate::tickets::Tickets;
+
 /// The long-lived services the composition root hands the native API.
 ///
 /// Every field is the same instance the rest of the process uses, so a change
@@ -77,6 +79,8 @@ struct Inner {
     api_keys: ApiKeys,
     /// The app password table.
     app_passwords: AppPasswords,
+    /// The event-stream ticket store.
+    tickets: Tickets,
 }
 
 impl std::fmt::Debug for NativeState {
@@ -105,6 +109,7 @@ impl NativeState {
                 quotas: Quotas::new(&database),
                 api_keys: ApiKeys::new(&database),
                 app_passwords: AppPasswords::new(&database, services.secrets.clone()),
+                tickets: Tickets::default(),
                 services,
             }),
         }
@@ -158,5 +163,10 @@ impl NativeState {
     /// Returns the app password table.
     pub fn app_passwords(&self) -> &AppPasswords {
         &self.inner.app_passwords
+    }
+
+    /// Returns the store of outstanding event-stream tickets.
+    pub(crate) fn tickets(&self) -> &Tickets {
+        &self.inner.tickets
     }
 }

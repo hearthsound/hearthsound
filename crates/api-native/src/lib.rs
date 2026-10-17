@@ -34,6 +34,8 @@
 //! | `GET /api/v1/admin/acquisitions`, `POST /api/v1/admin/acquisitions/{id}/cancel`, `POST /api/v1/admin/acquisitions/{id}/retry` | administrators |
 //! | `GET /api/v1/admin/storage`, `POST /api/v1/admin/storage/evict` | administrators |
 //! | `POST /api/v1/uploads` | any user with `can_upload`, when uploads are enabled |
+//! | `GET /api/v1/events` | any user; each event the caller's audience admits (administrators see all) |
+//! | `POST /api/v1/events/ticket` | any user, a single-use ticket for the stream |
 
 #![forbid(unsafe_code)]
 
@@ -43,6 +45,7 @@ pub mod pagination;
 pub mod problem;
 pub mod routes;
 mod state;
+mod tickets;
 pub mod views;
 
 use std::sync::Arc;
@@ -76,6 +79,7 @@ pub const OPENAPI_PATH: &str = "/api/v1/openapi.json";
         (name = "me", description = "The caller's own credentials and settings"),
         (name = "admin", description = "Server administration"),
         (name = "uploads", description = "Audio files sent into the caller's library"),
+        (name = "events", description = "The server event stream"),
     )
 )]
 struct ApiDoc;
@@ -148,6 +152,8 @@ fn api_router() -> OpenApiRouter<NativeState> {
         .routes(routes!(routes::admin_acquisitions::retry_acquisition))
         .routes(routes!(routes::admin_storage::get_storage))
         .routes(routes!(routes::admin_storage::evict_storage))
+        .routes(routes!(routes::events::create_ticket))
+        .routes(routes!(routes::events::stream))
         .merge(
             // The upload route alone lifts axum's 2 MB multipart body limit:
             // the limit is per router and the JSON routes keep theirs.
