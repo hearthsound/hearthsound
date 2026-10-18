@@ -2838,6 +2838,65 @@
       }
     },
     "/api/v1/uploads": {
+      "get": {
+        "tags": [
+          "uploads"
+        ],
+        "summary": "Lists the audio files the caller uploaded, newest first.",
+        "description": "Only the caller's own uploads are listed: a track that entered somebody\nelse's library by being uploaded, saved or liked is not theirs to see here.\n\n# Parameters\n\n- `authed`: the caller, whose own uploads are listed.\n- `state`: the shared services.\n- `params`: the page size and the cursor of the previous page.\n\n# Returns\n\n`200 OK` with one page of uploads.\n\n# Errors\n\nAnswers `invalid-request` for a cursor this server did not issue and\n`internal` when the library cannot be read.",
+        "operationId": "list_uploads",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many rows to answer, 1 to 200; 50 when absent.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The `nextCursor` of the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the caller's uploads, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The cursor is not one this server issued",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
       "post": {
         "tags": [
           "uploads"
@@ -4783,6 +4842,29 @@
           }
         }
       },
+      "UploadList": {
+        "type": "object",
+        "description": "One page of the caller's uploads.",
+        "required": [
+          "tracks"
+        ],
+        "properties": {
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cursor to send back for the next page; absent on the last page."
+          },
+          "tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UploadedTrackView"
+            },
+            "description": "The uploaded tracks, newest first."
+          }
+        }
+      },
       "UploadResult": {
         "type": "object",
         "description": "The answer to an upload request: one entry per `file` part, in order.",
@@ -4796,6 +4878,59 @@
               "$ref": "#/components/schemas/UploadEntry"
             },
             "description": "The uploaded files."
+          }
+        }
+      },
+      "UploadedTrackView": {
+        "type": "object",
+        "description": "One track the caller uploaded, as the uploads listing reports it.",
+        "required": [
+          "trackId",
+          "title",
+          "addedAt"
+        ],
+        "properties": {
+          "addedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the upload was added to the library, in unix milliseconds."
+          },
+          "album": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The album's title, when the track belongs to one."
+          },
+          "albumId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The album's client id (`al_...`), when the track belongs to one, which\n`/rest/getAlbum` accepts."
+          },
+          "artist": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The credited artist text, when the file carried one."
+          },
+          "durationSecs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The track's length in seconds, when it is known."
+          },
+          "title": {
+            "type": "string",
+            "description": "The track's title."
+          },
+          "trackId": {
+            "type": "string",
+            "description": "The track's client id (`tr_...`), which `/rest/getSong` and\n`/rest/stream` accept."
           }
         }
       },

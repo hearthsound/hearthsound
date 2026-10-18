@@ -198,6 +198,7 @@ fn api_router() -> OpenApiRouter<NativeState> {
             // the limit is per router and the JSON routes keep theirs.
             OpenApiRouter::new()
                 .routes(routes!(routes::uploads::upload))
+                .routes(routes!(routes::uploads::list_uploads))
                 .routes(routes!(routes::admin_plugins::upload_plugin))
                 .layer(DefaultBodyLimit::disable()),
         )

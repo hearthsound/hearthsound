@@ -1271,6 +1271,114 @@ async fn uploads_land_in_the_callers_library_and_are_refused_when_they_should_be
     fixture.stop().await;
 }
 
+/// The uploads listing reports the caller's own uploads, newest first, and
+/// pages them with a cursor.
+#[tokio::test]
+async fn the_uploads_listing_reports_the_callers_own_uploads() {
+    let fixture = Fixture::new().await;
+    let scratch = fixture
+        .database_path()
+        .parent()
+        .unwrap()
+        .join("upload-listing");
+
+    let first = upload_files(
+        &fixture,
+        None,
+        &[("first.flac", flac_bytes(&scratch, "First").await)],
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::CREATED);
+    let first = json(first).await;
+    let first_track = first["uploads"][0]["trackId"].as_str().unwrap().to_owned();
+
+    // A later upload is added later, which is what newest first means.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let second = upload_files(
+        &fixture,
+        None,
+        &[("second.flac", flac_bytes(&scratch, "Second").await)],
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::CREATED);
+    let second = json(second).await;
+    let second_track = second["uploads"][0]["trackId"].as_str().unwrap().to_owned();
+
+    let listed = json(bearer(&fixture, reqwest::Method::GET, "/api/v1/uploads", None).await).await;
+    let tracks = listed["tracks"].as_array().unwrap();
+    assert_eq!(tracks.len(), 2, "{listed}");
+    assert_eq!(tracks[0]["trackId"], second_track.as_str());
+    assert_eq!(tracks[0]["title"], "Second");
+    assert_eq!(tracks[0]["artist"], "Uploader");
+    assert_eq!(tracks[0]["album"], "Uploads");
+    assert!(
+        tracks[0]["albumId"].as_str().unwrap().starts_with("al_"),
+        "{listed}"
+    );
+    assert!(tracks[0]["durationSecs"].is_i64(), "{listed}");
+    assert!(tracks[0]["addedAt"].is_i64(), "{listed}");
+    assert_eq!(tracks[1]["trackId"], first_track.as_str());
+    assert!(
+        listed["nextCursor"].is_null(),
+        "everything fits one page: {listed}"
+    );
+
+    // A limit of one walks the same order.
+    let page_one = json(
+        bearer(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/uploads?limit=1",
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(page_one["tracks"].as_array().unwrap().len(), 1);
+    assert_eq!(page_one["tracks"][0]["trackId"], second_track.as_str());
+    let cursor = page_one["nextCursor"].as_str().unwrap();
+    let page_two = json(
+        bearer(
+            &fixture,
+            reqwest::Method::GET,
+            &format!("/api/v1/uploads?limit=1&cursor={cursor}"),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(page_two["tracks"][0]["trackId"], first_track.as_str());
+    assert!(page_two["nextCursor"].is_null(), "{page_two}");
+
+    // Another account's own listing is empty; the uploaded file is still
+    // shared storage, so its id streams for that account.
+    let (_, neighbour_key) = crate::multi_user::create_user(&fixture, "listener", false).await;
+    let theirs = json(
+        fixture
+            .client
+            .get(format!("{}/api/v1/uploads", fixture.base_url()))
+            .header(AUTHORIZATION, format!("Bearer {neighbour_key}"))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(theirs["tracks"].as_array().unwrap().is_empty(), "{theirs}");
+
+    let streamed = fixture
+        .client
+        .get(format!(
+            "{}/rest/stream?id={second_track}&apiKey={neighbour_key}",
+            fixture.base_url()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(streamed.status(), StatusCode::OK);
+    assert!(streamed.bytes().await.unwrap().starts_with(b"fLaC"));
+    fixture.stop().await;
+}
+
 /// Full-stack tests of `/api/v1/admin/plugins`: installing from a registered
 /// index and from a repository URL, uploading an archive, the sideload and
 /// repository gates, the approval lifecycle over the API, and the listing of

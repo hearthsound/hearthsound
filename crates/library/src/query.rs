@@ -2146,6 +2146,85 @@ pub async fn personal_track_ids(
     Ok(found)
 }
 
+/// One track an account uploaded into its own library.
+///
+/// This is the row the uploads listing reports: the track, the album it landed
+/// in when it has one, and when the upload was added.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadedTrack {
+    /// The track's id.
+    pub track_id: EntityId,
+    /// The track's title.
+    pub title: String,
+    /// The credited artist text, when the file carried one.
+    pub artist: Option<String>,
+    /// The album's id, when the track belongs to one.
+    pub album_id: Option<EntityId>,
+    /// The album's title, when the track belongs to one.
+    pub album: Option<String>,
+    /// The track's length in milliseconds, when it is known.
+    pub duration_ms: Option<i64>,
+    /// When the upload was added, in unix milliseconds.
+    pub added_at: i64,
+}
+
+/// Lists the tracks one account uploaded, newest first.
+///
+/// Only uploads count: a track that entered the library by being saved or liked
+/// carries another `origin` and is not listed here. The order is `added_at`
+/// descending, with the track id ascending as the tie-breaker, which is the
+/// order a cursor over that pair walks.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `user_id`: the account whose uploads are listed.
+///
+/// # Returns
+///
+/// Every uploaded track of the account, newest first.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails and [`LibraryError::CorruptId`]
+/// when a stored identifier is not a UUID.
+pub async fn uploaded_tracks(
+    conn: &mut SqliteConnection,
+    user_id: Uuid,
+) -> Result<Vec<UploadedTrack>, LibraryError> {
+    let rows = sqlx::query!(
+        "SELECT ul.entity_id AS track_id, t.title AS title, t.display_artist AS artist, \
+                t.album_id AS album_id, al.title AS album, t.duration_ms AS duration_ms, \
+                ul.added_at AS added_at \
+         FROM user_library ul \
+         JOIN tracks t ON t.id = ul.entity_id \
+         LEFT JOIN albums al ON al.id = t.album_id \
+         WHERE ul.user_id = ? AND ul.entity_kind = 'track' AND ul.origin = 'upload' \
+         ORDER BY ul.added_at DESC, ul.entity_id ASC",
+        user_id.as_bytes().as_slice(),
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(UploadedTrack {
+                track_id: decode_entity(IdPrefix::Track, &row.track_id)?,
+                title: row.title,
+                artist: row.artist,
+                album_id: row
+                    .album_id
+                    .as_deref()
+                    .map(|bytes| decode_entity(IdPrefix::Album, bytes))
+                    .transpose()?,
+                album: row.album,
+                duration_ms: row.duration_ms,
+                added_at: row.added_at,
+            })
+        })
+        .collect()
+}
+
 /// Reports which of the given albums are inside a user's personal library.
 ///
 /// An album is in the library when it holds a library track, is saved, or is

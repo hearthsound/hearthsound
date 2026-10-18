@@ -19,12 +19,15 @@ use hearthsound_config::keys;
 use hearthsound_core::events::{Audience, ServerEvent, UploadUpdated};
 use hearthsound_core::{IdPrefix, new_uuid_v7};
 use hearthsound_library::LibraryError;
+use hearthsound_library::query::{UploadedTrack, uploaded_tracks};
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::auth::Authed;
+use crate::extract::QueryParams;
+use crate::pagination::{Cursor, PageParams, page};
 use crate::problem::{self, Problem};
 use crate::state::NativeState;
 use crate::views::client_id;
@@ -65,6 +68,43 @@ pub struct UploadEntry {
 pub struct UploadResult {
     /// The uploaded files.
     pub uploads: Vec<UploadEntry>,
+}
+
+/// One track the caller uploaded, as the uploads listing reports it.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadedTrackView {
+    /// The track's client id (`tr_...`), which `/rest/getSong` and
+    /// `/rest/stream` accept.
+    pub track_id: String,
+    /// The track's title.
+    pub title: String,
+    /// The credited artist text, when the file carried one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artist: Option<String>,
+    /// The album's title, when the track belongs to one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album: Option<String>,
+    /// The album's client id (`al_...`), when the track belongs to one, which
+    /// `/rest/getAlbum` accepts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub album_id: Option<String>,
+    /// The track's length in seconds, when it is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<i64>,
+    /// When the upload was added to the library, in unix milliseconds.
+    pub added_at: i64,
+}
+
+/// One page of the caller's uploads.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadList {
+    /// The uploaded tracks, newest first.
+    pub tracks: Vec<UploadedTrackView>,
+    /// The cursor to send back for the next page; absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// What one file needs while it is received: its identity, where it is
@@ -368,4 +408,77 @@ async fn remove_staging(dir: &Path) {
     {
         tracing::warn!(path = %dir.display(), %error, "could not remove an upload's staging directory");
     }
+}
+
+/// Lists the audio files the caller uploaded, newest first.
+///
+/// Only the caller's own uploads are listed: a track that entered somebody
+/// else's library by being uploaded, saved or liked is not theirs to see here.
+///
+/// # Parameters
+///
+/// - `authed`: the caller, whose own uploads are listed.
+/// - `state`: the shared services.
+/// - `params`: the page size and the cursor of the previous page.
+///
+/// # Returns
+///
+/// `200 OK` with one page of uploads.
+///
+/// # Errors
+///
+/// Answers `invalid-request` for a cursor this server did not issue and
+/// `internal` when the library cannot be read.
+#[utoipa::path(
+    get,
+    path = "/api/v1/uploads",
+    tag = "uploads",
+    params(PageParams),
+    responses(
+        (status = 200, description = "One page of the caller's uploads, newest first", body = UploadList),
+        (status = 400, description = "The cursor is not one this server issued", body = Problem, content_type = "application/problem+json"),
+    ),
+    security(("bearer" = []), ("session" = []))
+)]
+pub async fn list_uploads(
+    authed: Authed,
+    State(state): State<NativeState>,
+    QueryParams(params): QueryParams<PageParams>,
+) -> Result<Json<UploadList>, Problem> {
+    let mut conn = state
+        .database()
+        .readers()
+        .acquire()
+        .await
+        .map_err(|error| problem::internal("reading the library", &error))?;
+    let rows = uploaded_tracks(&mut conn, authed.user_id())
+        .await
+        .map_err(|error| problem::internal("listing uploads", &error))?;
+
+    // Newest first, so the cursor key counts down from the largest instant: an
+    // ascending key order is the order the rows are in.
+    let position = |row: &UploadedTrack| {
+        Cursor::new(
+            format!("{:020}", i64::MAX - row.added_at),
+            client_id(IdPrefix::Track, row.track_id.uuid()),
+        )
+    };
+    let (rows, next_cursor) = page(rows, &params, position)?;
+
+    let tracks = rows
+        .into_iter()
+        .map(|row| UploadedTrackView {
+            track_id: client_id(IdPrefix::Track, row.track_id.uuid()),
+            title: row.title,
+            artist: row.artist,
+            album: row.album,
+            album_id: row.album_id.map(|id| client_id(IdPrefix::Album, id.uuid())),
+            duration_secs: row.duration_ms.map(|ms| ms / 1000),
+            added_at: row.added_at,
+        })
+        .collect();
+    Ok(Json(UploadList {
+        tracks,
+        next_cursor,
+    }))
 }
