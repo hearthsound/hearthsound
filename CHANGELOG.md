@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The plugin views report a plugin's own name, the configuration form its
+  manifest declares for the server scope, and whether it is one of the plugins
+  the server ships with. The available listing marks the same pinned plugins,
+  so a client can preselect them.
+
 - A server whose users table is empty logs the URL of a one-time setup link at
   startup. `GET /api/v1/setup` reports whether the setup is still open, and
   `POST /api/v1/setup` accepts the link's token once, creates the first

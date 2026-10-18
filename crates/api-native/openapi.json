@@ -3125,6 +3125,7 @@
           "name",
           "description",
           "provides",
+          "isDefault",
           "homepage",
           "license",
           "official",
@@ -3142,6 +3143,10 @@
           "id": {
             "type": "string",
             "description": "The plugin id from the manifest."
+          },
+          "isDefault": {
+            "type": "boolean",
+            "description": "Whether this is one of the plugins the server ships with, which the\nfirst-run wizard preselects."
           },
           "license": {
             "type": "string",
@@ -3235,6 +3240,24 @@
             "format": "int64",
             "description": "How many files the class holds.",
             "minimum": 0
+          }
+        }
+      },
+      "ConfigSectionView": {
+        "type": "object",
+        "description": "The configuration form a plugin's manifest declares.\n\nThe two documents are handed to the client as they are: the JSON Schema\ndescribes the values the plugin accepts, and the UI schema says how the form\nis laid out. A plugin whose manifest declares no configuration has no view.",
+        "required": [
+          "schema",
+          "uiSchema"
+        ],
+        "properties": {
+          "schema": {
+            "type": "object",
+            "description": "The draft-07 JSON Schema of the configuration object."
+          },
+          "uiSchema": {
+            "type": "object",
+            "description": "The UI schema that describes the form."
           }
         }
       },
@@ -3941,6 +3964,8 @@
         "description": "One installed plugin, as an administrator sees it.",
         "required": [
           "id",
+          "name",
+          "isDefault",
           "version",
           "api",
           "provides",
@@ -3960,6 +3985,17 @@
             "type": "boolean",
             "description": "Whether an administrator approved the plugin's permissions."
           },
+          "config": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ConfigSectionView",
+                "description": "The configuration form the manifest declares for the server scope, or\n`null` when the plugin is configured by its host instead."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "enabled": {
             "type": "boolean",
             "description": "Whether the plugin is active. A plugin pending approval is never active."
@@ -3972,6 +4008,14 @@
             "type": "integer",
             "format": "int64",
             "description": "When the plugin was installed, in unix milliseconds."
+          },
+          "isDefault": {
+            "type": "boolean",
+            "description": "Whether this is one of the plugins the server ships with, which the\nfirst-run wizard preselects."
+          },
+          "name": {
+            "type": "string",
+            "description": "The plugin's own name from its manifest."
           },
           "provides": {
             "type": "array",

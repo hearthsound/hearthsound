@@ -524,6 +524,13 @@ async fn an_index_url_installs_over_the_api_and_approval_enables_it() {
     let view = json(response).await;
     assert_eq!(status, StatusCode::CREATED, "{view}");
     assert_eq!(view["id"], PLUGIN_ID);
+    assert_eq!(view["name"], "Metadata fixture");
+    assert_eq!(view["isDefault"], false);
+    assert_eq!(
+        view["config"]["schema"]["properties"]["recordings"]["type"],
+        "array"
+    );
+    assert_eq!(view["config"]["uiSchema"]["type"], "VerticalLayout");
     assert_eq!(view["version"], VERSION);
     assert_eq!(view["source"], "repository");
     assert_eq!(view["state"], "pending-approval");

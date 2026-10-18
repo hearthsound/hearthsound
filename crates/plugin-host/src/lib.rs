@@ -32,6 +32,7 @@ pub mod archive;
 mod artwork;
 mod bindings;
 mod catalog;
+mod defaults;
 mod engine;
 mod error;
 pub mod files;
@@ -55,6 +56,7 @@ mod validate;
 
 pub use admin::{AdminError, PluginAdmin};
 pub use archive::PluginArchive;
+pub use defaults::default_plugin_ids;
 pub use engine::PluginEngine;
 pub use error::{HostError, InstallError};
 pub use files::{FileAccess, FileStat, FilesError};

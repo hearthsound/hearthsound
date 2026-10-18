@@ -1297,6 +1297,10 @@ mod plugin_admin {
     /// The id of the metadata fixture the tests install.
     const PLUGIN_ID: &str = "com.example.metadata-fixture";
 
+    /// The plugin id the repository's lock file pins, which the available listing
+    /// marks as a default.
+    const DEZER_ID: &str = "app.hearthsound.deezer";
+
     /// The API version this server hosts.
     const API: &str = "hearthsound:plugin@0.2.0";
 
@@ -2186,7 +2190,7 @@ mod plugin_admin {
             &server,
             other_path,
             &document(&[entry(
-                "com.example.other",
+                DEZER_ID,
                 false,
                 &[version("2.0.0", API, &archive, &bytes, json!({}))],
             )]),
@@ -2215,6 +2219,10 @@ mod plugin_admin {
         assert_eq!(plugins[0]["repositoryId"], signed);
         assert_eq!(plugins[0]["provides"], json!(["metadata"]));
         assert!(plugins[0]["unavailable"].is_null());
+        assert_eq!(
+            plugins[0]["isDefault"], false,
+            "the fixture is not one of the plugins the server ships with"
+        );
 
         // Each registered source lists its own plugin, and reports whether its
         // signature was verified. The compiled-in official index is left out of
@@ -2233,9 +2241,13 @@ mod plugin_admin {
         .await;
         let plugins = other_listed["plugins"].as_array().unwrap();
         assert_eq!(plugins.len(), 1);
-        assert_eq!(plugins[0]["id"], "com.example.other");
+        assert_eq!(plugins[0]["id"], DEZER_ID);
         assert_eq!(plugins[0]["verified"], false);
         assert_eq!(plugins[0]["repositoryId"], unsigned);
+        assert_eq!(
+            plugins[0]["isDefault"], true,
+            "the lock file pins this plugin"
+        );
 
         // An unknown repository id is a not-found problem.
         let unknown = bearer(

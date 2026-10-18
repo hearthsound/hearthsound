@@ -25,7 +25,7 @@ use hearthsound_core::{IdPrefix, new_uuid_v7};
 use hearthsound_plugin_host::{
     AdminError, AvailablePlugin, AvailableReport, IndexError, InstallError, Manifest,
     PluginRepository, PluginRow, PluginSource, PluginUpdate, RepositoryRef, RequestedPermission,
-    Unavailable, requested_permissions,
+    Unavailable, default_plugin_ids, requested_permissions,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -75,12 +75,36 @@ pub struct UpdateView {
     pub requires_approval: bool,
 }
 
+/// The configuration form a plugin's manifest declares.
+///
+/// The two documents are handed to the client as they are: the JSON Schema
+/// describes the values the plugin accepts, and the UI schema says how the form
+/// is laid out. A plugin whose manifest declares no configuration has no view.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigSectionView {
+    /// The draft-07 JSON Schema of the configuration object.
+    #[schema(value_type = Object)]
+    pub schema: serde_json::Value,
+    /// The UI schema that describes the form.
+    #[schema(value_type = Object)]
+    pub ui_schema: serde_json::Value,
+}
+
 /// One installed plugin, as an administrator sees it.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginView {
     /// The plugin id from the manifest.
     pub id: String,
+    /// The plugin's own name from its manifest.
+    pub name: String,
+    /// The configuration form the manifest declares for the server scope, or
+    /// `null` when the plugin is configured by its host instead.
+    pub config: Option<ConfigSectionView>,
+    /// Whether this is one of the plugins the server ships with, which the
+    /// first-run wizard preselects.
+    pub is_default: bool,
     /// The installed version.
     pub version: String,
     /// The plugin API version the component targets.
@@ -128,6 +152,9 @@ pub struct AvailablePluginView {
     pub description: String,
     /// The layers the plugin provides.
     pub provides: Vec<String>,
+    /// Whether this is one of the plugins the server ships with, which the
+    /// first-run wizard preselects.
+    pub is_default: bool,
     /// The project's home page.
     pub homepage: String,
     /// The license the plugin is distributed under.
@@ -726,6 +753,16 @@ async fn plugin_view(
     });
     Ok(PluginView {
         id: row.id.clone(),
+        name: manifest.name.clone(),
+        config: manifest
+            .config
+            .server
+            .as_ref()
+            .map(|section| ConfigSectionView {
+                schema: section.schema.clone(),
+                ui_schema: section.ui_schema.clone(),
+            }),
+        is_default: default_plugin_ids().contains(&row.id),
         version: row.version.clone(),
         api: row.api.clone(),
         provides: manifest
@@ -807,7 +844,9 @@ fn available_view(report: AvailableReport) -> AvailableView {
 ///
 /// The view.
 fn available_plugin_view(plugin: AvailablePlugin) -> AvailablePluginView {
+    let is_default = default_plugin_ids().contains(&plugin.id);
     AvailablePluginView {
+        is_default,
         id: plugin.id,
         name: plugin.name,
         description: plugin.description,
