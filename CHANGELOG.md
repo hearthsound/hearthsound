@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The native API's OpenAPI document is committed at
+  `crates/api-native/openapi.json` and regenerated with `cargo xtask openapi`.
+  A test fails when the committed document no longer matches the routes the
+  crate describes.
+
 ## [0.1.4] - 2026-10-18
 
 ### Added

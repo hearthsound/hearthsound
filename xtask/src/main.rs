@@ -45,6 +45,8 @@ enum Task {
     Fixtures,
     /// Download the bundled plugins pinned in `bundled-plugins.lock`.
     FetchPlugins(FetchPluginsArgs),
+    /// Regenerate the committed OpenAPI document of the native API.
+    Openapi,
 }
 
 /// Arguments of the `fetch-plugins` task.
@@ -76,6 +78,7 @@ fn main() -> Result<()> {
         Task::SyncWit(args) => sync_wit(args),
         Task::Fixtures => fixtures(),
         Task::FetchPlugins(args) => fetch_plugins(args),
+        Task::Openapi => openapi(),
     }
 }
 
@@ -219,6 +222,34 @@ fn check_wit(wit_dir: &Path, source: &Path, files: &[String], version: &str) -> 
     }
 
     println!("wit/ matches plugin-sdk v{version}");
+    Ok(())
+}
+
+/// Regenerates the committed OpenAPI document of the native API.
+///
+/// The integration test owns both the rendering and the comparison, so the
+/// command runs it with the variable that makes it write the file. The test
+/// itself is what CI runs without the variable.
+fn openapi() -> Result<()> {
+    let root = repo_root()?;
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let status = Command::new(cargo)
+        .args([
+            "test",
+            "-p",
+            "hearthsound-api-native",
+            "--test",
+            "integration",
+            "openapi",
+        ])
+        .env("HEARTHSOUND_UPDATE_OPENAPI", "1")
+        .current_dir(&root)
+        .status()
+        .context("running the native API document test")?;
+    if !status.success() {
+        bail!("writing crates/api-native/openapi.json failed");
+    }
+    println!("crates/api-native/openapi.json is up to date");
     Ok(())
 }
 

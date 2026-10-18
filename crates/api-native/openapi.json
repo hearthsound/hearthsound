@@ -1,0 +1,4795 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Hearthsound native API",
+    "description": "The control plane of a Hearthsound server. Audio is streamed through the Subsonic surface at /rest.",
+    "license": {
+      "name": "AGPL-3.0-or-later",
+      "identifier": "AGPL-3.0-or-later"
+    },
+    "version": "0.1.4"
+  },
+  "paths": {
+    "/api/v1/admin/acquisitions": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Lists acquisitions across every user, newest first.",
+        "description": "`state=active` (the default) lists the acquisitions that still hold work,\n`state=recent` the ones that ended, and `state=all` both. The ledger is\nfiltered and paged in memory, so a long-lived server with a large ledger\npays for the full read on every page.\n\n# Errors\n\nAnswers `forbidden` for a caller who is not an administrator,\n`invalid-request` for an unknown `state` or a malformed cursor, and\n`internal` when the ledger cannot be read.",
+        "operationId": "list_acquisitions",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "`active` (the default) for acquisitions that still hold work,\n`recent` for ones that ended, or `all` for both.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many rows to answer, 1 to 200; 50 when absent.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The `nextCursor` of the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of acquisitions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcquisitionPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown state or malformed cursor",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an administrator",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/acquisitions/{id}/cancel": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Cancels an acquisition that still holds work.",
+        "description": "The worker is stopped and any side effects are undone; the row ends\n`cancelled`.\n\n# Errors\n\nAnswers `not-found` for an unknown id and `conflict` when the acquisition\nhas already ended.",
+        "operationId": "cancel_acquisition",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The acquisition's client id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The acquisition is cancelled"
+          },
+          "403": {
+            "description": "Not an administrator",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such acquisition",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The acquisition has already ended",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/acquisitions/{id}/retry": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Starts a new attempt for a failed or cancelled acquisition.",
+        "description": "The attempt is a forced request for the same track, so a track cooling\ndown after its failure is tried again. The caller's permission and daily\nquota apply.\n\n# Errors\n\nAnswers `not-found` for an unknown id, `conflict` when the acquisition is\nnot failed or cancelled or the track is already available, and\n`permission-denied` or `quota-exceeded` when the administrator may not\nacquire or has spent the day's allowance.",
+        "operationId": "retry_acquisition",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The acquisition's client id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "A new attempt was started or joined",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetryView"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not allowed to acquire, or over quota",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such acquisition",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The acquisition cannot be retried now",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/folders": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Lists the scanned library folders.",
+        "description": "# Errors\n\nAnswers `forbidden` for a caller who is not an administrator.",
+        "operationId": "list_folders",
+        "responses": {
+          "200": {
+            "description": "The folders",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderList"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an administrator",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Adds a library folder, owned by one account or generic, and scans it.",
+        "description": "# Errors\n\nAnswers `invalid-request` when neither or both of `owner` and `generic` are\nnamed, the owner is unknown, or the path is not an absolute existing\ndirectory, and `conflict` when the folder is already added.",
+        "operationId": "create_folder",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewFolder"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new folder; its first scan is queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No association, an unknown owner, or an unusable path",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The folder is already added",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/folders/{id}": {
+      "patch": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Changes a folder's name, watch, or association.",
+        "description": "# Errors\n\nAnswers `not-found` for an unknown folder and `invalid-request` for a\ncontradictory or unknown association.",
+        "operationId": "patch_folder",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The folder's client id (`lf_...`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FolderPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The folder after the change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FolderView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A contradictory or unknown association",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such folder",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/folders/{id}/scan": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Queues a scan of one folder.",
+        "description": "# Errors\n\nAnswers `not-found` for an unknown folder.",
+        "operationId": "scan_folder",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The folder's client id (`lf_...`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Whether to re-read every file",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScanFolder"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The scan is queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanQueued"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such folder",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/layers": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Lists every layer with the instances assigned to it.",
+        "description": "A layer nothing is assigned to is reported with an empty list, so an\nadministrator sees every layer the server can drive.\n\n# Errors\n\nAnswers `internal` when the instance rows or the assignments cannot be read.",
+        "operationId": "list_layers",
+        "responses": {
+          "200": {
+            "description": "The layers and their instances",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LayerList"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/layers/{layer}": {
+      "put": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Replaces one layer's ordered instances.",
+        "description": "The body is a JSON array of instance slugs, first is primary; an empty array\nleaves the layer with nothing assigned. Every instance must exist and its\nplugin must provide the layer.\n\n# Errors\n\nAnswers `invalid-request` for a body that is not an array of strings,\n`not-found` for a slug that names no instance, `invalid-layer` for a layer\nthis server cannot drive or an instance whose plugin does not provide it,\nand `internal` when the assignment cannot be written.",
+        "operationId": "put_layer",
+        "parameters": [
+          {
+            "name": "layer",
+            "in": "path",
+            "description": "The layer, for example `catalog`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The layer's instances, in order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LayerView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request body is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "A slug names no instance",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The layer or an instance cannot serve it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/plugin-repositories": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Lists the registered plugin repositories.",
+        "description": "Each repository reports whether it is queried, whether its index is verified\nagainst a configured public key, and the time and error of its last fetch.\n\n# Errors\n\nAnswers `internal` when the repository rows cannot be read.",
+        "operationId": "list_repositories",
+        "responses": {
+          "200": {
+            "description": "The registered repositories",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryList"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Registers a plugin repository.",
+        "description": "The repository is queried for its index from then on, and its index is\nverified against `publicKey` when one is given.\n\n# Errors\n\nAnswers `invalid-request` for a malformed body, `repositories-disabled` when\n`plugins.allow_third_party_repositories` is off, `conflict` when another\nrepository is registered under the same URL, and `internal` when the row\ncannot be written.",
+        "operationId": "create_repository",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewRepository"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The repository was registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request body is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Third-party repositories are switched off",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A repository is registered under this URL already",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/plugin-repositories/{id}": {
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Removes a plugin repository.",
+        "description": "Plugins installed from the repository keep their rows; only the repository\nitself goes.\n\n# Errors\n\nAnswers `not-found` for an unknown repository and `internal` when the row\ncannot be removed.",
+        "operationId": "delete_repository",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The repository's client id (`pr_...`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The repository was removed"
+          },
+          "404": {
+            "description": "No such repository",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Changes a plugin repository.",
+        "description": "The URL is not mutable: a different URL is a different repository. An absent\nfield keeps its stored value; `null` clears the name or the public key.\n\n# Errors\n\nAnswers `not-found` for an unknown repository, `invalid-request` for a\nmalformed body, and `internal` when the row cannot be read or written.",
+        "operationId": "patch_repository",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The repository's client id (`pr_...`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RepositoryPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The repository was changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositoryView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request body is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such repository",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/plugins": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Lists the installed plugins.",
+        "description": "Each plugin reports its state, the permissions its manifest requests with\ntheir risk labels, whether an administrator approved them, and the newer\nversion the last completed update check found.\n\n# Errors\n\nAnswers `internal` when the plugin rows or a stored manifest cannot be read.",
+        "operationId": "list_plugins",
+        "responses": {
+          "200": {
+            "description": "The installed plugins",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginList"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Installs a plugin from an index or a repository URL.",
+        "description": "The plugin is recorded as pending approval, so an administrator still grants\nthe permissions it requests. An install with `source` `index` reads the\nofficial index, or the repository `repositoryId` names; an install with\n`source` `url` registers the repository at `url` when it is new, which\n`plugins.allow_third_party_repositories` gates.\n\n# Errors\n\nAnswers `invalid-request` for a malformed body, `not-found` for an unknown\nrepository or plugin id, `conflict` when the version is already installed or\nolder than the installed one, `repositories-disabled` when a new third-party\nrepository may not be added, `signature-invalid` when an index's signature\ndoes not verify, `integrity-failed` when an archive is not what the index\ndeclares, `index-unavailable` when an index or archive cannot be\ndownloaded, `invalid-plugin` when an archive is not a plugin this server can\nhost, and `internal` when the tables cannot be read or written.",
+        "operationId": "install_plugin",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The plugin was installed and waits for approval",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request body is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Third-party repositories are switched off",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such repository or plugin",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The version is already installed or older",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The archive is not a plugin this server hosts",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The index or the archive could not be used",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/plugins/available": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Lists every plugin the reachable indexes offer.",
+        "description": "A source that cannot be read is reported in `errors` and does not stop the\nlisting, so one unreachable repository cannot hide the others.\n\n# Errors\n\nAnswers `invalid-request` for a malformed repository id, `not-found` for a\nrepository id that names no row, and `internal` when the repository rows\ncannot be read.",
+        "operationId": "list_available",
+        "parameters": [
+          {
+            "name": "repositoryId",
+            "in": "query",
+            "description": "The repository to list, `pr_...`; every source when omitted.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The installable plugins and the sources that failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AvailableView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such repository",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/plugins/upload": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Installs a plugin from an uploaded `.hsplugin` file.",
+        "description": "The request is `multipart/form-data` with one `file` part. The file is staged\nin the plugins directory, installed as a sideloaded plugin and recorded as\npending approval, and the staged file is removed whichever way the install\nends. `plugins.allow_sideload` gates the whole route.\n\n# Errors\n\nAnswers `sideload-disabled` when uploading a plugin is switched off,\n`invalid-request` when the body is not multipart, has no `file` part or is\nmalformed, `conflict` when the version is already installed or older,\n`invalid-plugin` when the file is not a plugin this server can host, and\n`internal` when the file cannot be staged or the tables cannot be written.",
+        "operationId": "upload_plugin",
+        "requestBody": {
+          "description": "One `file` part holding a `.hsplugin` archive",
+          "content": {
+            "multipart/form-data": {}
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The plugin was installed and waits for approval",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is not multipart, has no `file` part, or is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Sideloading is switched off",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The version is already installed or older",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The file is not a plugin this server hosts",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/plugins/{id}": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Reports one installed plugin.",
+        "description": "# Errors\n\nAnswers `not-found` for an unknown plugin and `internal` when the row or its\nstored manifest cannot be read.",
+        "operationId": "get_plugin",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The plugin id from its manifest",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The installed plugin",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such plugin is installed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Removes a plugin with its rows, assignments and files.",
+        "description": "# Errors\n\nAnswers `not-found` for an unknown plugin and `internal` when its files\ncannot be removed.",
+        "operationId": "delete_plugin",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The plugin id from its manifest",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The plugin was removed"
+          },
+          "404": {
+            "description": "No such plugin is installed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/plugins/{id}/approve": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Approves a plugin's requested permissions, or applies its staged upgrade.",
+        "description": "A plugin waiting for its first approval is enabled once approved; a plugin\nwith a staged upgrade switches to the new version and the files of the old\none are removed.\n\n# Errors\n\nAnswers `not-found` for an unknown plugin and `conflict` when the plugin has\nneither an approval pending nor a staged upgrade.",
+        "operationId": "approve_plugin",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The plugin id from its manifest",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The plugin was approved or its upgrade applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such plugin is installed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The plugin has nothing to approve",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/plugins/{id}/decline-upgrade": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Discards a staged upgrade and keeps the installed version in service.",
+        "description": "# Errors\n\nAnswers `not-found` for an unknown plugin and `conflict` when no upgrade is\nstaged.",
+        "operationId": "decline_upgrade",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The plugin id from its manifest",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The staged upgrade was discarded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such plugin is installed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No upgrade is staged",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/plugins/{id}/disable": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Switches an approved plugin off.",
+        "description": "# Errors\n\nAnswers `not-found` for an unknown plugin and `conflict` while the plugin\nawaits approval.",
+        "operationId": "disable_plugin",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The plugin id from its manifest",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The plugin is disabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such plugin is installed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The plugin is pending approval",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/plugins/{id}/enable": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Switches an approved plugin on.",
+        "description": "# Errors\n\nAnswers `not-found` for an unknown plugin and `conflict` while the plugin\nawaits approval, which gates enabling.",
+        "operationId": "enable_plugin",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The plugin id from its manifest",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The plugin is enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PluginView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such plugin is installed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The plugin is pending approval",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/providers": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Lists the configured provider instances.",
+        "description": "Each instance reports its plugin, its configuration (with the sealed\nplaceholder in place of every secret), whether it is enabled, and the\noutcome of the last health check.\n\n# Errors\n\nAnswers `internal` when the instance rows cannot be read.",
+        "operationId": "list_providers",
+        "responses": {
+          "200": {
+            "description": "The configured provider instances",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderList"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Configures a provider instance from an installed plugin.",
+        "description": "The plugin must be installed and enabled, the slug must be free, the\nserver-scoped configuration must satisfy the plugin's schema, and the plugin\nmust accept it in `lifecycle.validate-config`. The instance is enabled, so\nit takes part in the layers it is assigned to.\n\n# Errors\n\nAnswers `invalid-request` for a malformed body or a slug that is not a\nlegal slug, `conflict` when the slug is taken, `invalid-provider` when the\nplugin is unknown or disabled, provides no layer this server drives, or\nrejects the configuration, and `internal` when the plugin cannot be loaded\nor the row cannot be written.",
+        "operationId": "create_provider",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewProvider"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The instance was configured and enabled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request body is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The slug is taken",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The plugin or the configuration cannot be used",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/providers/{slug}": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Reports one configured provider instance.",
+        "description": "# Errors\n\nAnswers `not-found` for an unknown instance and `internal` when the row or\nits configuration cannot be read.",
+        "operationId": "get_provider",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "The instance slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The configured instance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such instance",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Removes a provider instance.",
+        "description": "The instance's key-value rows and its layer assignments go with it, and the\nregistry is rebuilt so it stops serving.\n\n# Errors\n\nAnswers `not-found` for an unknown instance and `internal` when the row\ncannot be removed.",
+        "operationId": "delete_provider",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "The instance slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The instance was removed"
+          },
+          "404": {
+            "description": "No such instance",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Changes a provider instance.",
+        "description": "The configuration is validated and sealed exactly as it is on creation, and\nthe registry is rebuilt so the change is in service before the answer is\nsent. An update that echoes the sealed placeholder back keeps the stored\nsecret; a write-only field the update leaves out is gone.\n\n# Errors\n\nAnswers `invalid-request` for a malformed body, `not-found` for an unknown\ninstance, `invalid-provider` when the plugin rejects the configuration or\ncannot serve it, and `internal` when the row cannot be written.",
+        "operationId": "patch_provider",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "The instance slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProviderPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The instance was changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request body is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such instance",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The configuration cannot be used",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/providers/{slug}/health": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Runs one instance's health check.",
+        "description": "The probe is the plugin's own `lifecycle.health`, run through the first\nprovider the instance holds. Its outcome is recorded on the instance, so the\nprovider views report it until the next check.\n\n# Errors\n\nAnswers `not-found` for an unknown instance, `conflict` when the instance is\nnot in service - it is disabled, or no layer it serves has been assigned to\nit - and `internal` when the probe's outcome cannot be recorded.",
+        "operationId": "provider_health",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "The instance slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What the health check reported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such instance",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The instance is not in service",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/settings": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Lists every registered server setting.",
+        "description": "# Errors\n\nAnswers `forbidden` for a caller who is not an administrator.",
+        "operationId": "list_settings",
+        "responses": {
+          "200": {
+            "description": "Every registered server setting",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerSettings"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not an administrator",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Changes server settings; `null` removes a stored value.",
+        "description": "Every change is checked before any is written. A key the configuration\nfile or an environment variable pins is refused with a `conflict` problem\nnaming all such keys; an unknown key or a value that does not fit is an\n`invalid-request` problem. Either way nothing changes.\n\n# Errors\n\nAnswers `forbidden` for a non-administrator, `invalid-request` for an\nunknown key or invalid value, and `conflict` for pinned keys.",
+        "operationId": "patch_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServerSettingsPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Every registered server setting after the change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An unknown or invalid setting",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not an administrator",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A setting is pinned by the configuration file or the environment",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/storage": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Reports what the managed roots and the scanned folders hold.",
+        "description": "# Errors\n\nAnswers `internal` when the usage cannot be counted or a policy setting\ncannot be read.",
+        "operationId": "get_storage",
+        "responses": {
+          "200": {
+            "description": "The storage usage and policy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageReport"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/storage/evict": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Runs one maintenance pass now: autopin, relocation, then eviction.",
+        "description": "The pass is the same one the background worker runs, so it waits for a\npass already in progress and then reports what this one changed.\n\n# Errors\n\nAnswers `internal` when a step of the pass fails; the steps after the\nfailing one do not run.",
+        "operationId": "evict_storage",
+        "responses": {
+          "200": {
+            "description": "The pass ran; what it changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceView"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/users": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Lists the accounts, a page at a time, by username.",
+        "description": "# Errors\n\nAnswers `forbidden` for a caller who is not an administrator and\n`invalid-request` for a cursor this server did not issue.",
+        "operationId": "list_users",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many rows to answer, 1 to 200; 50 when absent.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The `nextCursor` of the previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of accounts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserPage"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an administrator",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Creates an account.",
+        "description": "# Errors\n\nAnswers `invalid-request` for an empty username or password, `conflict`\nfor a taken username, and `forbidden` for a caller who is not an\nadministrator.",
+        "operationId": "create_user",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewUserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminUser"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An empty username or password",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The username is taken",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/users/{id}": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Reads one account.",
+        "description": "# Errors\n\nAnswers `not-found` for an unknown account.",
+        "operationId": "get_user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The account's client id (`us_...`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminUser"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Changes an account.",
+        "description": "# Errors\n\nAnswers `not-found` for an unknown account, `invalid-request` for an empty\npassword, and `conflict` when administrators would remove their own\nadministrator flag or disable themselves.",
+        "operationId": "patch_user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The account's client id (`us_...`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The account after the change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminUser"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such account",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The change would lock the caller out",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Signs in with the account password and starts a web session.",
+        "description": "# Errors\n\nAnswers `unauthenticated` for a wrong username or password (or a disabled\naccount), `rate-limited` once the address or the username spent its\nfailure budget, and `internal` when the session cannot be stored.",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Signed in; the session cookie is set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Wrong username or password",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many failed sign-ins",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Ends the request's web session and clears the cookie.",
+        "description": "A request authenticated by an API key has no session to end and is answered\nthe same way; the key stays valid.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `csrf-failed` for a cookie\nwithout the CSRF header, and `internal` when the session cannot be removed.",
+        "operationId": "logout",
+        "responses": {
+          "204": {
+            "description": "Signed out; the session cookie is cleared"
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/session": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Answers who the request is, and the session's CSRF token.",
+        "description": "# Errors\n\nAnswers `unauthenticated` without credentials and `internal` when the\naccount cannot be read.",
+        "operationId": "session",
+        "responses": {
+          "200": {
+            "description": "The authenticated account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Streams server events to the caller as Server-Sent Events.",
+        "description": "The stream is authorized by a bearer key, a session cookie, or a `ticket`\nquery parameter. Each event is forwarded when its audience admits the\ncaller; administrators see every event. When the `Last-Event-ID` header is\npresent, events after that id are replayed before the live feed starts. The\nresponse carries a comment keep-alive every 15 seconds.\n\n# Parameters\n\n- `state`: the native state, which holds the event bus and the ticket store.\n- `query`: the optional single-use `ticket`.\n- `parts`: the request head, from which the credential and the\n  `Last-Event-ID` header are read.\n\n# Returns\n\nA `text/event-stream` response that stays open until the server stops.\n\n# Errors\n\n`400 invalid-request` when `Last-Event-ID` is not an unsigned integer\n(checked before a ticket is redeemed, so a malformed request does not spend\nthe ticket). `401 unauthenticated` when the credential or ticket is missing,\nunknown, expired, or already used.",
+        "operationId": "stream",
+        "parameters": [
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "description": "The id of the last frame the client received; missed events are replayed after it",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "ticket",
+            "in": "query",
+            "description": "A ticket from `POST /api/v1/events/ticket`, used in place of a bearer\nkey or session cookie. Redeemed once.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A text/event-stream of server events; each frame's data is an event envelope",
+            "content": {
+              "text/event-stream": {}
+            }
+          },
+          "400": {
+            "description": "Last-Event-ID is not an unsigned integer",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential or ticket",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/events/ticket": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Issues a single-use ticket for the event stream.",
+        "description": "The ticket authorizes one connection to `GET /api/v1/events` for 60 seconds\nand is consumed by that connection, so a client that needs to reconnect\nrequests a new one.\n\n# Parameters\n\n- `state`: the native state, which holds the ticket store.\n- `authed`: the authenticated caller; the ticket acts as this principal.\n\n# Returns\n\n`201 Created` with the ticket token and its expiry.\n\n# Errors\n\n`401 unauthenticated` when the request carries no valid credential.",
+        "operationId": "create_ticket",
+        "responses": {
+          "201": {
+            "description": "A single-use ticket for the event stream",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamTicket"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/api-keys": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Lists the caller's active API keys.",
+        "description": "# Errors\n\nAnswers `unauthenticated` without credentials and `internal` when the keys\ncannot be read.",
+        "operationId": "list_api_keys",
+        "responses": {
+          "200": {
+            "description": "The caller's active API keys, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ApiKeyView"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Creates an API key for the caller and answers its secret once.",
+        "description": "# Errors\n\nAnswers `invalid-request` for an empty name and `internal` when the key\ncannot be stored.",
+        "operationId": "create_api_key",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewCredential"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new key, with its secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedApiKey"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No name",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/api-keys/{id}": {
+      "delete": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Revokes one of the caller's API keys.",
+        "description": "# Errors\n\nAnswers `not-found` for a key that is not the caller's or is already\nrevoked, and `internal` when the key cannot be updated.",
+        "operationId": "revoke_api_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The key's client id (`ak_...`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked"
+          },
+          "404": {
+            "description": "No such key of the caller's",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/app-passwords": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Lists the caller's active app passwords.",
+        "description": "# Errors\n\nAnswers `unauthenticated` without credentials and `internal` when the app\npasswords cannot be read.",
+        "operationId": "list_app_passwords",
+        "responses": {
+          "200": {
+            "description": "The caller's active app passwords, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AppPasswordView"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Creates an app password for the caller and answers it once.",
+        "description": "# Errors\n\nAnswers `invalid-request` for an empty name and `internal` when the app\npassword cannot be stored.",
+        "operationId": "create_app_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewCredential"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new app password, with its secret",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedAppPassword"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No name",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/app-passwords/{id}": {
+      "delete": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Revokes one of the caller's app passwords.",
+        "description": "# Errors\n\nAnswers `not-found` for an app password that is not the caller's or is\nalready revoked, and `internal` when it cannot be updated.",
+        "operationId": "revoke_app_password",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The app password's client id (`ap_...`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked"
+          },
+          "404": {
+            "description": "No such app password of the caller's",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/settings": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Lists the settings the caller may override, with the caller's values.",
+        "description": "# Errors\n\nAnswers `unauthenticated` without credentials and `internal` when a value\ncannot be read.",
+        "operationId": "get_settings",
+        "responses": {
+          "200": {
+            "description": "The caller's overridable settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalSettings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Changes the caller's overrides; `null` removes one.",
+        "description": "Every change is checked before any is written, so a batch with one bad\nentry changes nothing.\n\n# Errors\n\nAnswers `invalid-request` for an unknown key, a key users may not\noverride, or a value that does not fit the setting.",
+        "operationId": "patch_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalSettingsPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The caller's overridable settings after the change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An unknown, fixed, or invalid setting",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/system/info": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "Answers what this server is and what it offers.",
+        "description": "# Errors\n\nAnswers `unauthenticated` without credentials and `internal` when a setting\ncannot be read.",
+        "operationId": "system_info",
+        "responses": {
+          "200": {
+            "description": "The server's version, features and layers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemInfo"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/uploads": {
+      "post": {
+        "tags": [
+          "uploads"
+        ],
+        "summary": "Accepts one or more audio files into the caller's library.",
+        "description": "The permission and the `uploads.enabled` setting are checked before any\npart is read. A file over `uploads.max_file_bytes` ends the request with\n`too-large`; files completed before it stay in the library. A file the\nlibrary does not index answers as a failed entry instead of an error, so\nthe other files of the request still land.\n\n# Parameters\n\n- `authed`: the caller, who must hold `can_upload`.\n- `state`: the shared services.\n- `headers`: the request headers; `Content-Length` sets the total.\n- `request`: the multipart body.\n\n# Returns\n\n`201 Created` with one entry per `file` part.\n\n# Errors\n\nAnswers `permission-denied` (403) when uploads are off or the account may\nnot upload, `invalid-request` (400) when the body is not multipart, has no\n`file` part or is malformed, `too-large` (413) when a file is over the\nlimit, and `internal` (500) when the library cannot take a file.",
+        "operationId": "upload",
+        "requestBody": {
+          "description": "One or more `file` parts",
+          "content": {
+            "multipart/form-data": {}
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The files were received; each entry says what became of it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is not multipart, has no `file` part, or is malformed"
+          },
+          "403": {
+            "description": "Uploads are off, or the account may not upload"
+          },
+          "413": {
+            "description": "A file is larger than uploads.max_file_bytes"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AcquisitionPage": {
+        "type": "object",
+        "description": "One page of acquisitions.",
+        "required": [
+          "acquisitions"
+        ],
+        "properties": {
+          "acquisitions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AcquisitionView"
+            },
+            "description": "The acquisitions on this page, newest first."
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cursor of the next page, absent on the last page."
+          }
+        }
+      },
+      "AcquisitionView": {
+        "type": "object",
+        "description": "One acquisition, as an administrator sees it.",
+        "required": [
+          "id",
+          "state",
+          "priority",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the acquisition was created, in unix milliseconds."
+          },
+          "failureReason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the acquisition failed, once it has."
+          },
+          "id": {
+            "type": "string",
+            "description": "The acquisition's client id (`ac_...`)."
+          },
+          "instance": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The plugin instance doing the work, when one has been assigned."
+          },
+          "percent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Progress from 0 to 100, when the backend reports it.",
+            "minimum": 0
+          },
+          "priority": {
+            "type": "string",
+            "description": "The priority the request was made at."
+          },
+          "state": {
+            "type": "string",
+            "description": "The lifecycle state, such as `queued`, `downloading`, `completed` or\n`failed`."
+          },
+          "trackArtist": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The track's artist, when known."
+          },
+          "trackId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The track's client id (`tr_...`), when the acquisition names one."
+          },
+          "trackTitle": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The track's title, when known."
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the acquisition last changed, in unix milliseconds."
+          }
+        }
+      },
+      "AdminUser": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/UserView",
+            "description": "The account."
+          },
+          {
+            "type": "object",
+            "required": [
+              "quota"
+            ],
+            "properties": {
+              "quota": {
+                "$ref": "#/components/schemas/QuotaView",
+                "description": "The account's daily acquisition quota."
+              }
+            }
+          }
+        ],
+        "description": "An account as an administrator sees it."
+      },
+      "ApiKeyView": {
+        "type": "object",
+        "description": "An API key as a listing shows it.",
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the key was created, in unix milliseconds."
+          },
+          "id": {
+            "type": "string",
+            "description": "The key's client id (`ak_...`)."
+          },
+          "lastUsedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the key last authenticated, in unix milliseconds."
+          },
+          "name": {
+            "type": "string",
+            "description": "What the key is for."
+          },
+          "prefix": {
+            "type": "string",
+            "description": "The key's leading characters, which identify it."
+          }
+        }
+      },
+      "AppPasswordView": {
+        "type": "object",
+        "description": "An app password as a listing shows it.",
+        "required": [
+          "id",
+          "name",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it was created, in unix milliseconds."
+          },
+          "id": {
+            "type": "string",
+            "description": "The app password's client id (`ap_...`)."
+          },
+          "lastUsedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When it last authenticated, in unix milliseconds."
+          },
+          "name": {
+            "type": "string",
+            "description": "What the app password is for."
+          }
+        }
+      },
+      "AutopinView": {
+        "type": "object",
+        "description": "The play-count pins one maintenance pass changed.",
+        "required": [
+          "pinned",
+          "released"
+        ],
+        "properties": {
+          "pinned": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tracks that gained the automatic pin.",
+            "minimum": 0
+          },
+          "released": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tracks that lost the automatic pin.",
+            "minimum": 0
+          }
+        }
+      },
+      "AvailableErrorView": {
+        "type": "object",
+        "description": "One index a listing could not read.",
+        "required": [
+          "source",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "Why it could not be read."
+          },
+          "source": {
+            "type": "string",
+            "description": "The URL of the index that could not be read."
+          }
+        }
+      },
+      "AvailablePluginView": {
+        "type": "object",
+        "description": "One plugin an index offers.",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "provides",
+          "homepage",
+          "license",
+          "official",
+          "verified"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "The one-line description."
+          },
+          "homepage": {
+            "type": "string",
+            "description": "The project's home page."
+          },
+          "id": {
+            "type": "string",
+            "description": "The plugin id from the manifest."
+          },
+          "license": {
+            "type": "string",
+            "description": "The license the plugin is distributed under."
+          },
+          "name": {
+            "type": "string",
+            "description": "The display name."
+          },
+          "official": {
+            "type": "boolean",
+            "description": "Whether the index says the project itself publishes the plugin."
+          },
+          "provides": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The layers the plugin provides."
+          },
+          "repositoryId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The repository the plugin comes from, `pr_...`, when it is not the\nofficial index."
+          },
+          "unavailable": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UnavailableView",
+                "description": "Why the plugin cannot be installed here, when it cannot."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "verified": {
+            "type": "boolean",
+            "description": "Whether the index's signature was verified."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The newest version this server can install, when the index offers one."
+          }
+        }
+      },
+      "AvailableView": {
+        "type": "object",
+        "description": "Everything an administrator can install right now.",
+        "required": [
+          "plugins",
+          "errors"
+        ],
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AvailableErrorView"
+            },
+            "description": "The indexes that could not be read."
+          },
+          "plugins": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AvailablePluginView"
+            },
+            "description": "The plugins the reachable indexes offer."
+          }
+        }
+      },
+      "ClassView": {
+        "type": "object",
+        "description": "The files and bytes of one storage class.",
+        "required": [
+          "files",
+          "bytes"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many bytes those files hold."
+          },
+          "files": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many files the class holds.",
+            "minimum": 0
+          }
+        }
+      },
+      "CreatedApiKey": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ApiKeyView",
+            "description": "The key as a listing shows it."
+          },
+          {
+            "type": "object",
+            "required": [
+              "secret"
+            ],
+            "properties": {
+              "secret": {
+                "type": "string",
+                "description": "The full key; it is shown this once and never again."
+              }
+            }
+          }
+        ],
+        "description": "A key that was just created, with its secret."
+      },
+      "CreatedAppPassword": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AppPasswordView",
+            "description": "The app password as a listing shows it."
+          },
+          {
+            "type": "object",
+            "required": [
+              "secret"
+            ],
+            "properties": {
+              "secret": {
+                "type": "string",
+                "description": "The password to enter in the client; it is shown this once."
+              }
+            }
+          }
+        ],
+        "description": "An app password that was just created, with its secret."
+      },
+      "EvictionView": {
+        "type": "object",
+        "description": "The cache files one maintenance pass evicted.",
+        "required": [
+          "files",
+          "bytes"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many bytes those files held."
+          },
+          "files": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many cache files were removed.",
+            "minimum": 0
+          }
+        }
+      },
+      "Features": {
+        "type": "object",
+        "description": "The features the server's settings turn on.",
+        "required": [
+          "uploads",
+          "serverBrowse",
+          "acquireOnSave",
+          "acquireOnPlaylistAdd"
+        ],
+        "properties": {
+          "acquireOnPlaylistAdd": {
+            "type": "boolean",
+            "description": "Whether adding a remote track to a playlist acquires it."
+          },
+          "acquireOnSave": {
+            "type": "boolean",
+            "description": "Whether saving or liking a remote item acquires it."
+          },
+          "serverBrowse": {
+            "type": "string",
+            "description": "What the Server view shows: `all`, `permanent_only` or `disabled`."
+          },
+          "uploads": {
+            "type": "boolean",
+            "description": "Whether users may upload files (`uploads.enabled`)."
+          }
+        }
+      },
+      "FilesystemView": {
+        "type": "object",
+        "description": "The size and free space of the filesystem under the cache root.",
+        "required": [
+          "totalBytes",
+          "availableBytes"
+        ],
+        "properties": {
+          "availableBytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The bytes an unprivileged process may still write."
+          },
+          "totalBytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The filesystem's total size in bytes."
+          }
+        }
+      },
+      "FolderList": {
+        "type": "object",
+        "description": "The scanned library folders.",
+        "required": [
+          "folders"
+        ],
+        "properties": {
+          "folders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FolderView"
+            },
+            "description": "The folders, by path."
+          }
+        }
+      },
+      "FolderPatch": {
+        "type": "object",
+        "description": "Changes to a folder; an absent field is left as it is.",
+        "properties": {
+          "generic": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true` to make the folder generic; not together with `owner`."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The new display name."
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A new owner (`us_...`); not together with `generic`."
+          },
+          "watch": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to watch the folder for changes."
+          }
+        }
+      },
+      "FolderView": {
+        "type": "object",
+        "description": "A scanned library folder.",
+        "required": [
+          "id",
+          "path",
+          "name",
+          "generic",
+          "watch",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the folder was added, in unix milliseconds."
+          },
+          "generic": {
+            "type": "boolean",
+            "description": "Whether the folder is in nobody's personal library."
+          },
+          "id": {
+            "type": "string",
+            "description": "The folder's client id (`lf_...`)."
+          },
+          "lastScanAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the folder was last scanned, in unix milliseconds."
+          },
+          "name": {
+            "type": "string",
+            "description": "The folder's display name."
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The account the folder belongs to (`us_...`); absent for a generic\nfolder."
+          },
+          "path": {
+            "type": "string",
+            "description": "The folder's absolute path on the server."
+          },
+          "watch": {
+            "type": "boolean",
+            "description": "Whether changes inside the folder are picked up as they happen."
+          }
+        }
+      },
+      "HealthView": {
+        "type": "object",
+        "description": "The outcome of one health check.\n\nThe object is what the health route answers and what the instance's row\nstores, so a later read reports the check as it was taken.",
+        "required": [
+          "slug",
+          "ok",
+          "detail",
+          "checkedAt"
+        ],
+        "properties": {
+          "checkedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the probe ran, in unix milliseconds."
+          },
+          "detail": {
+            "type": "string",
+            "description": "What the probe reported: the plugin's own status line when the instance\nis healthy, and the failure when it is not."
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "Whether the instance answered that it can serve requests."
+          },
+          "slug": {
+            "type": "string",
+            "description": "The instance the check ran against."
+          }
+        }
+      },
+      "InstallRequest": {
+        "type": "object",
+        "description": "What an install asks for.",
+        "required": [
+          "source",
+          "pluginId"
+        ],
+        "properties": {
+          "pluginId": {
+            "type": "string",
+            "description": "The plugin id from the plugin's manifest."
+          },
+          "repositoryId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The registered repository to install from, `pr_...`; the official index\nwhen omitted."
+          },
+          "source": {
+            "type": "string",
+            "description": "`index` to install from an index, `url` for a third-party index URL that\nis registered on the way in."
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The URL of a repository's index document, required when `source` is\n`url`."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The version to install; the newest compatible one when omitted."
+          }
+        },
+        "additionalProperties": false
+      },
+      "LayerList": {
+        "type": "object",
+        "description": "Every layer this server can drive.",
+        "required": [
+          "layers"
+        ],
+        "properties": {
+          "layers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LayerView"
+            },
+            "description": "The layers."
+          }
+        }
+      },
+      "LayerSummary": {
+        "type": "object",
+        "description": "The instances assigned to one layer.",
+        "required": [
+          "layer",
+          "instances"
+        ],
+        "properties": {
+          "instances": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The slugs of the enabled instances serving it, in policy order."
+          },
+          "layer": {
+            "type": "string",
+            "description": "The layer, for example `catalog` or `acquisition`."
+          }
+        }
+      },
+      "LayerView": {
+        "type": "object",
+        "description": "One layer and the instances assigned to it, in the order the layer tries\nthem.",
+        "required": [
+          "layer",
+          "instances"
+        ],
+        "properties": {
+          "instances": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The slugs of the assigned instances, first is primary."
+          },
+          "layer": {
+            "type": "string",
+            "description": "The layer, for example `catalog` or `acquisition`."
+          }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "description": "The credentials of a sign-in.",
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string",
+            "description": "The account password."
+          },
+          "username": {
+            "type": "string",
+            "description": "The account's sign-in name, compared case-insensitively."
+          }
+        }
+      },
+      "LoginResponse": {
+        "type": "object",
+        "description": "A started session.",
+        "required": [
+          "user",
+          "csrfToken",
+          "expiresAt"
+        ],
+        "properties": {
+          "csrfToken": {
+            "type": "string",
+            "description": "The token to send in `X-Hearthsound-CSRF` on unsafe requests."
+          },
+          "expiresAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the session expires, in unix milliseconds."
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserView",
+            "description": "The signed-in account."
+          }
+        }
+      },
+      "MaintenanceView": {
+        "type": "object",
+        "description": "What one forced maintenance pass changed.",
+        "required": [
+          "autopin",
+          "relocation",
+          "eviction"
+        ],
+        "properties": {
+          "autopin": {
+            "$ref": "#/components/schemas/AutopinView",
+            "description": "The play-count pins that changed."
+          },
+          "eviction": {
+            "$ref": "#/components/schemas/EvictionView",
+            "description": "The cache files that were evicted."
+          },
+          "relocation": {
+            "$ref": "#/components/schemas/RelocationView",
+            "description": "The files that moved between the roots or were deleted."
+          }
+        }
+      },
+      "NewCredential": {
+        "type": "object",
+        "description": "The name a new credential is listed under.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "What the credential is for, for example the client it is given to."
+          }
+        }
+      },
+      "NewFolder": {
+        "type": "object",
+        "description": "A folder to add.",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "generic": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true` to keep the folder in nobody's library; exactly one of `owner`\nand `generic` is required."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The display name; the directory name when absent."
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The account whose library the folder joins (`us_...`); exactly one of\n`owner` and `generic` is required."
+          },
+          "path": {
+            "type": "string",
+            "description": "The folder's absolute path on the server."
+          },
+          "watch": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether to watch the folder for changes; `true` when absent."
+          }
+        }
+      },
+      "NewProvider": {
+        "type": "object",
+        "description": "An instance to configure.",
+        "required": [
+          "slug",
+          "pluginId"
+        ],
+        "properties": {
+          "displayName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name shown in the admin UI; the slug when absent."
+          },
+          "hostConfig": {
+            "type": "object",
+            "description": "The host-level settings; the plugin host's defaults when absent."
+          },
+          "pluginId": {
+            "type": "string",
+            "description": "The installed, enabled plugin to configure the instance from."
+          },
+          "serverConfig": {
+            "type": "object",
+            "description": "The plugin's server-scoped configuration; an empty object when absent."
+          },
+          "slug": {
+            "type": "string",
+            "description": "The instance slug, `^[a-z0-9]{2,24}$`, unique among the server's\ninstances and immutable once created."
+          }
+        },
+        "additionalProperties": false
+      },
+      "NewRepository": {
+        "type": "object",
+        "description": "A repository to register.",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name to show to administrators."
+          },
+          "publicKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The minisign public key the repository signs its index with; omitted for\na repository that is read unsigned."
+          },
+          "url": {
+            "type": "string",
+            "description": "The URL of the repository's index document."
+          }
+        },
+        "additionalProperties": false
+      },
+      "NewUserRequest": {
+        "type": "object",
+        "description": "A new account.",
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "displayName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name clients show; the username when absent or empty."
+          },
+          "isAdmin": {
+            "type": "boolean",
+            "description": "Whether the account administers the server."
+          },
+          "password": {
+            "type": "string",
+            "description": "The account password."
+          },
+          "permissions": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PermissionsView",
+                "description": "The permissions; `users.default_permissions` when absent."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "quota": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/QuotaView",
+                "description": "The daily acquisition quota; unlimited when absent."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "username": {
+            "type": "string",
+            "description": "The sign-in name, unique case-insensitively."
+          }
+        }
+      },
+      "PermissionView": {
+        "type": "object",
+        "description": "One permission a plugin asks for, as shown to the approving administrator.",
+        "required": [
+          "scope",
+          "detail",
+          "risk"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "What is requested, in a form an administrator can read."
+          },
+          "risk": {
+            "type": "string",
+            "description": "How much thought the grant deserves: `low`, `medium` or `high`."
+          },
+          "scope": {
+            "type": "string",
+            "description": "The manifest field the permission comes from, such as `http.hosts`."
+          }
+        }
+      },
+      "PermissionsView": {
+        "type": "object",
+        "description": "What an account may do besides streaming.",
+        "required": [
+          "acquire",
+          "upload",
+          "download"
+        ],
+        "properties": {
+          "acquire": {
+            "type": "boolean",
+            "description": "May trigger acquisitions (`can_acquire`)."
+          },
+          "download": {
+            "type": "boolean",
+            "description": "May download files (`can_download`)."
+          },
+          "upload": {
+            "type": "boolean",
+            "description": "May upload files (`can_upload`)."
+          }
+        }
+      },
+      "PersonalSetting": {
+        "type": "object",
+        "description": "One setting a user may override, with its effective value for the caller.",
+        "required": [
+          "key",
+          "value",
+          "source",
+          "serverValue",
+          "description"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "What the setting does."
+          },
+          "key": {
+            "type": "string",
+            "description": "The dotted setting key."
+          },
+          "serverValue": {
+            "type": "object",
+            "description": "The server-wide value, which applies when the caller has no override."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the value comes from: `user` (the caller's override) or `server`."
+          },
+          "value": {
+            "type": "object",
+            "description": "The value in effect for the caller."
+          }
+        }
+      },
+      "PersonalSettings": {
+        "type": "object",
+        "description": "The settings a user may override.",
+        "required": [
+          "settings"
+        ],
+        "properties": {
+          "settings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonalSetting"
+            },
+            "description": "One entry per overridable setting, by key."
+          }
+        }
+      },
+      "PersonalSettingsPatch": {
+        "type": "object",
+        "description": "A batch of personal setting changes.",
+        "required": [
+          "settings"
+        ],
+        "properties": {
+          "settings": {
+            "type": "object",
+            "description": "The new value per key; `null` removes the override."
+          }
+        }
+      },
+      "PluginList": {
+        "type": "object",
+        "description": "Every installed plugin.",
+        "required": [
+          "plugins"
+        ],
+        "properties": {
+          "plugins": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PluginView"
+            },
+            "description": "The installed plugins, in the order they were installed."
+          }
+        }
+      },
+      "PluginView": {
+        "type": "object",
+        "description": "One installed plugin, as an administrator sees it.",
+        "required": [
+          "id",
+          "version",
+          "api",
+          "provides",
+          "source",
+          "state",
+          "enabled",
+          "requestedPermissions",
+          "approved",
+          "installedAt"
+        ],
+        "properties": {
+          "api": {
+            "type": "string",
+            "description": "The plugin API version the component targets."
+          },
+          "approved": {
+            "type": "boolean",
+            "description": "Whether an administrator approved the plugin's permissions."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the plugin is active. A plugin pending approval is never active."
+          },
+          "id": {
+            "type": "string",
+            "description": "The plugin id from the manifest."
+          },
+          "installedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the plugin was installed, in unix milliseconds."
+          },
+          "provides": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The layers the plugin provides."
+          },
+          "repositoryId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The repository the plugin came from, `pr_...`, when it came from one."
+          },
+          "requestedPermissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermissionView"
+            },
+            "description": "The permissions the plugin's manifest requests, with their risk labels."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the plugin came from: `official`, `repository`, `sideload` or\n`bundled`."
+          },
+          "state": {
+            "type": "string",
+            "description": "The lifecycle state: `pending-approval`, `disabled`, `enabled` or\n`upgrade-pending-approval`."
+          },
+          "update": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/UpdateView",
+                "description": "The newer version the last update check found, or `null`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version": {
+            "type": "string",
+            "description": "The installed version."
+          }
+        }
+      },
+      "Problem": {
+        "type": "object",
+        "description": "An RFC 9457 problem document.\n\n# Examples\n\n```\nuse hearthsound_api_native::problem::Problem;\n\nlet problem = Problem::not_found(\"No such user.\");\nassert_eq!(problem.status, 404);\nassert_eq!(problem.code, \"not-found\");\n```",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The stable machine-readable problem code clients branch on."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What happened in this occurrence."
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The HTTP status code.",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string",
+            "description": "A short human-readable summary of the problem kind."
+          },
+          "type": {
+            "type": "string",
+            "description": "`https://hearthsound.app/problems/<code>`."
+          }
+        }
+      },
+      "ProviderList": {
+        "type": "object",
+        "description": "The configured provider instances, by slug.",
+        "required": [
+          "providers"
+        ],
+        "properties": {
+          "providers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProviderView"
+            },
+            "description": "The instances."
+          }
+        }
+      },
+      "ProviderPatch": {
+        "type": "object",
+        "description": "Changes to an instance; an absent field is left as it is.\n\nThe slug and the plugin are not mutable: a different plugin is a different\ninstance. Fields this route does not change are ignored, so an instance read\nfrom [`ProviderView`] can be sent back with its changes made.",
+        "properties": {
+          "displayName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The new name shown in the admin UI."
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the instance takes part in its layers."
+          },
+          "hostConfig": {
+            "type": "object",
+            "description": "The host-level settings, which replace the stored ones."
+          },
+          "serverConfig": {
+            "type": "object",
+            "description": "The plugin's server-scoped configuration, which replaces the stored one.\nA write-only field that carries the sealed placeholder keeps the secret\nthe instance stores."
+          }
+        }
+      },
+      "ProviderView": {
+        "type": "object",
+        "description": "One configured provider instance.",
+        "required": [
+          "slug",
+          "pluginId",
+          "displayName",
+          "enabled",
+          "serverConfig",
+          "hostConfig",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the instance was created, in unix milliseconds."
+          },
+          "displayName": {
+            "type": "string",
+            "description": "The name shown in the admin UI."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the instance takes part in its layers."
+          },
+          "health": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/HealthView",
+                "description": "The last health check, when one has run."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hostConfig": {
+            "type": "object",
+            "description": "The host-level settings: the import roots and the concurrency limits."
+          },
+          "pluginId": {
+            "type": "string",
+            "description": "The plugin the instance is configured from."
+          },
+          "serverConfig": {
+            "type": "object",
+            "description": "The plugin's server-scoped configuration, carrying the sealed\nplaceholder in place of every write-only field."
+          },
+          "slug": {
+            "type": "string",
+            "description": "The instance slug."
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the instance was last changed, in unix milliseconds."
+          }
+        }
+      },
+      "QuotaView": {
+        "type": "object",
+        "description": "A daily acquisition quota; an absent field is unlimited.",
+        "properties": {
+          "acquisitionBytesPerDay": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many bytes of acquired files the account may add in 24 hours.",
+            "minimum": 0
+          },
+          "acquisitionsPerDay": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many acquisitions the account may start in 24 hours.",
+            "minimum": 0
+          }
+        }
+      },
+      "RelocationView": {
+        "type": "object",
+        "description": "The files one maintenance pass moved or removed.",
+        "required": [
+          "promoted",
+          "demoted",
+          "deleted"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Files removed from the library after their last pin, in `delete` mode.",
+            "minimum": 0
+          },
+          "demoted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Files moved from the library to the cache after their last pin.",
+            "minimum": 0
+          },
+          "promoted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Files moved from the cache to the library because their track is pinned.",
+            "minimum": 0
+          }
+        }
+      },
+      "RepositoryList": {
+        "type": "object",
+        "description": "The registered plugin repositories, by URL.",
+        "required": [
+          "repositories"
+        ],
+        "properties": {
+          "repositories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RepositoryView"
+            },
+            "description": "The repositories."
+          }
+        }
+      },
+      "RepositoryPatch": {
+        "type": "object",
+        "description": "Changes to a repository; an absent field is left as it is.",
+        "properties": {
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the repository is queried for its index."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name to show; `null` clears it."
+          },
+          "publicKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The minisign public key to verify the index with; `null` clears it and\nmakes the repository unsigned."
+          }
+        }
+      },
+      "RepositoryView": {
+        "type": "object",
+        "description": "One plugin repository, as an administrator sees it.",
+        "required": [
+          "id",
+          "url",
+          "enabled",
+          "verified"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the repository is queried for its index."
+          },
+          "id": {
+            "type": "string",
+            "description": "The repository's client id (`pr_...`)."
+          },
+          "lastError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What went wrong on the last fetch."
+          },
+          "lastFetchedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the index was last fetched, in unix milliseconds."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name shown to administrators."
+          },
+          "publicKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The minisign public key the repository signs its index with, when it is\nsigned."
+          },
+          "url": {
+            "type": "string",
+            "description": "The URL of the repository's index document."
+          },
+          "verified": {
+            "type": "boolean",
+            "description": "Whether the index is verified: a repository with a configured key\nrefuses an index whose signature does not match, and one without a key\nis read unsigned."
+          }
+        }
+      },
+      "RetryView": {
+        "type": "object",
+        "description": "The answer to a retry that started or joined an attempt.",
+        "required": [
+          "id",
+          "outcome"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The acquisition now doing the work (`ac_...`): the new attempt, or the\none already running for the track that the retry joined."
+          },
+          "outcome": {
+            "type": "string",
+            "description": "`started` when a new attempt was admitted, `joined` when an attempt\nalready running for the track was reused."
+          }
+        }
+      },
+      "ScanFolder": {
+        "type": "object",
+        "description": "A scan to start.",
+        "properties": {
+          "full": {
+            "type": "boolean",
+            "description": "Re-read every file instead of only the changed ones."
+          }
+        }
+      },
+      "ScanQueued": {
+        "type": "object",
+        "description": "A queued scan.",
+        "required": [
+          "jobId"
+        ],
+        "properties": {
+          "jobId": {
+            "type": "string",
+            "description": "The queued job's id."
+          }
+        }
+      },
+      "ServerSetting": {
+        "type": "object",
+        "description": "One registered server setting.",
+        "required": [
+          "key",
+          "value",
+          "default",
+          "source",
+          "pinned",
+          "environmentPinned",
+          "kind",
+          "userOverridable",
+          "description"
+        ],
+        "properties": {
+          "default": {
+            "type": "object",
+            "description": "The built-in default."
+          },
+          "description": {
+            "type": "string",
+            "description": "What the setting does."
+          },
+          "environmentPinned": {
+            "type": "boolean",
+            "description": "Whether an environment variable pins the key."
+          },
+          "key": {
+            "type": "string",
+            "description": "The dotted setting key."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The value's shape: `bool`, `integer`, `float`, `string`, or\n`stringList`."
+          },
+          "pinned": {
+            "type": "boolean",
+            "description": "Whether the configuration file pins the key."
+          },
+          "source": {
+            "type": "string",
+            "description": "The layer that supplied the value: `environment`, `file`, `database`,\nor `default`."
+          },
+          "userOverridable": {
+            "type": "boolean",
+            "description": "Whether users may override the setting for themselves."
+          },
+          "value": {
+            "type": "object",
+            "description": "The effective value."
+          }
+        }
+      },
+      "ServerSettings": {
+        "type": "object",
+        "description": "Every registered server setting, in registry order.",
+        "required": [
+          "settings"
+        ],
+        "properties": {
+          "settings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServerSetting"
+            },
+            "description": "One entry per registered setting."
+          }
+        }
+      },
+      "ServerSettingsPatch": {
+        "type": "object",
+        "description": "A batch of server setting changes.",
+        "required": [
+          "settings"
+        ],
+        "properties": {
+          "settings": {
+            "type": "object",
+            "description": "The new value per key; `null` removes the stored value so the layers\nbelow apply again."
+          }
+        }
+      },
+      "SessionResponse": {
+        "type": "object",
+        "description": "Who a request is.",
+        "required": [
+          "user",
+          "credential"
+        ],
+        "properties": {
+          "credential": {
+            "type": "string",
+            "description": "How the request authenticated: `session` or `apiKey`."
+          },
+          "csrfToken": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The session's CSRF token, for a session."
+          },
+          "expiresAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the session expires, in unix milliseconds, for a session."
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserView",
+            "description": "The account."
+          }
+        }
+      },
+      "StoragePolicy": {
+        "type": "object",
+        "description": "The settings that decide what storage keeps, evicts and demotes.",
+        "required": [
+          "cacheMaxBytes",
+          "cacheMinFreeBytes",
+          "eviction",
+          "maxAgeDays",
+          "unpinAction",
+          "autopinPlayCount"
+        ],
+        "properties": {
+          "autopinPlayCount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Play count that pins a track automatically; 0 disables it."
+          },
+          "cacheMaxBytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Upper bound on the cache directory, in bytes; 0 means no bound."
+          },
+          "cacheMinFreeBytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Free-space floor below which eviction runs, in bytes."
+          },
+          "eviction": {
+            "type": "string",
+            "description": "Eviction order: `lru`, `lfu` or `fifo`."
+          },
+          "maxAgeDays": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Age in days above which a cached file is evicted; 0 disables it."
+          },
+          "unpinAction": {
+            "type": "string",
+            "description": "What happens to a file when its last pin is removed: `demote` or\n`delete`."
+          }
+        }
+      },
+      "StorageReport": {
+        "type": "object",
+        "description": "What the managed roots and the scanned folders hold, with the policy.",
+        "required": [
+          "library",
+          "cache",
+          "folders",
+          "pinnedTracks",
+          "policy"
+        ],
+        "properties": {
+          "cache": {
+            "$ref": "#/components/schemas/ClassView",
+            "description": "The managed evictable files under `<storage>/cache`."
+          },
+          "filesystem": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FilesystemView",
+                "description": "The filesystem under the cache root, when its space can be read."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "folders": {
+            "$ref": "#/components/schemas/ClassView",
+            "description": "The files inside scanned folders."
+          },
+          "library": {
+            "$ref": "#/components/schemas/ClassView",
+            "description": "The managed permanent files under `<storage>/library`."
+          },
+          "pinnedTracks": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many tracks carry at least one pin reason.",
+            "minimum": 0
+          },
+          "policy": {
+            "$ref": "#/components/schemas/StoragePolicy",
+            "description": "The settings that decide what is kept and evicted."
+          }
+        }
+      },
+      "StreamTicket": {
+        "type": "object",
+        "description": "A short-lived ticket that authorizes one event-stream connection.",
+        "required": [
+          "ticket",
+          "expiresAt"
+        ],
+        "properties": {
+          "expiresAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The unix millisecond timestamp after which the ticket is refused."
+          },
+          "ticket": {
+            "type": "string",
+            "description": "The ticket token: 52 lowercase base32 characters, single-use.",
+            "example": "mfrggzdfmztwq2lknnwg23tpobyxe43uovzxs4tuf5ohtxs7x4ta"
+          }
+        }
+      },
+      "SystemInfo": {
+        "type": "object",
+        "description": "What this server is and what it offers.",
+        "required": [
+          "version",
+          "serverType",
+          "apiVersion",
+          "features",
+          "layers"
+        ],
+        "properties": {
+          "apiVersion": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The native API version.",
+            "minimum": 0
+          },
+          "features": {
+            "$ref": "#/components/schemas/Features",
+            "description": "The features the server's settings turn on."
+          },
+          "layers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LayerSummary"
+            },
+            "description": "The provider instances assigned to each layer, in layer order."
+          },
+          "serverType": {
+            "type": "string",
+            "description": "Always `hearthsound`."
+          },
+          "version": {
+            "type": "string",
+            "description": "The server version, a plain semantic version."
+          }
+        }
+      },
+      "UnavailableView": {
+        "type": "object",
+        "description": "Why a plugin an index lists cannot be installed here.",
+        "required": [
+          "code",
+          "detail"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "A stable code: `no-compatible-version` or `no-such-version`."
+          },
+          "detail": {
+            "type": "string",
+            "description": "Why the plugin is unavailable, in words."
+          }
+        }
+      },
+      "UpdateView": {
+        "type": "object",
+        "description": "The newer version a plugin has waiting, when a check found one.",
+        "required": [
+          "version",
+          "requiresApproval"
+        ],
+        "properties": {
+          "requiresApproval": {
+            "type": "boolean",
+            "description": "Whether installing it waits for an approval, which is the case when it\nrequests a permission the installed version does not hold and is already\nstaged."
+          },
+          "version": {
+            "type": "string",
+            "description": "The version the plugin's index publishes."
+          }
+        }
+      },
+      "UploadEntry": {
+        "type": "object",
+        "description": "The outcome of one uploaded file.",
+        "required": [
+          "uploadId",
+          "fileName",
+          "state"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the file failed, in words."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A stable code for a failure, such as `unsupported-media`."
+          },
+          "fileName": {
+            "type": "string",
+            "description": "The file name, without any directory part."
+          },
+          "state": {
+            "type": "string",
+            "description": "`completed` or `failed`."
+          },
+          "trackId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The track the file became, when it was completed."
+          },
+          "uploadId": {
+            "type": "string",
+            "description": "The upload's client id, `up_...`."
+          }
+        }
+      },
+      "UploadResult": {
+        "type": "object",
+        "description": "The answer to an upload request: one entry per `file` part, in order.",
+        "required": [
+          "uploads"
+        ],
+        "properties": {
+          "uploads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UploadEntry"
+            },
+            "description": "The uploaded files."
+          }
+        }
+      },
+      "UserPage": {
+        "type": "object",
+        "description": "One page of accounts.",
+        "required": [
+          "users"
+        ],
+        "properties": {
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cursor of the next page; absent on the last page."
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminUser"
+            },
+            "description": "The accounts, by username."
+          }
+        }
+      },
+      "UserPatch": {
+        "type": "object",
+        "description": "Changes to an account; an absent field is left as it is.",
+        "properties": {
+          "disabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true` disables the account, `false` enables it again."
+          },
+          "displayName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The new display name."
+          },
+          "isAdmin": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the account administers the server."
+          },
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The new password."
+          },
+          "permissions": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PermissionsView",
+                "description": "The new permissions."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "quota": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/QuotaView",
+                "description": "The new quota, which replaces the old one entirely."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "UserView": {
+        "type": "object",
+        "description": "An account, without its secrets.",
+        "required": [
+          "id",
+          "username",
+          "displayName",
+          "isAdmin",
+          "permissions",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the account was created, in unix milliseconds."
+          },
+          "disabledAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the account was disabled, in unix milliseconds; absent while it is\nactive."
+          },
+          "displayName": {
+            "type": "string",
+            "description": "The name clients show."
+          },
+          "id": {
+            "type": "string",
+            "description": "The account's client id (`us_...`)."
+          },
+          "isAdmin": {
+            "type": "boolean",
+            "description": "Whether the account administers the server."
+          },
+          "permissions": {
+            "$ref": "#/components/schemas/PermissionsView",
+            "description": "What the account may do besides streaming."
+          },
+          "updatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the account last changed, in unix milliseconds."
+          },
+          "username": {
+            "type": "string",
+            "description": "The sign-in name."
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "hs_<base32>"
+      },
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "hs_session"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "system",
+      "description": "What the server is and offers"
+    },
+    {
+      "name": "auth",
+      "description": "Web sessions"
+    },
+    {
+      "name": "me",
+      "description": "The caller's own credentials and settings"
+    },
+    {
+      "name": "admin",
+      "description": "Server administration"
+    },
+    {
+      "name": "uploads",
+      "description": "Audio files sent into the caller's library"
+    },
+    {
+      "name": "events",
+      "description": "The server event stream"
+    }
+  ]
+}
