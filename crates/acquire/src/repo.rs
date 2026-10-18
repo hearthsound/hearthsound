@@ -114,6 +114,34 @@ pub struct AcquisitionRow {
     pub updated_at: i64,
 }
 
+impl AcquisitionRow {
+    /// Returns the row's download progress as a whole percentage.
+    ///
+    /// The percentage is decoded from the last snapshot the download reported,
+    /// which is the same number the event stream and the administrative listing
+    /// carry.
+    ///
+    /// # Returns
+    ///
+    /// The percentage, or `None` when the download has reported none yet and
+    /// when it does not know the total size.
+    pub fn percent(&self) -> Option<u8> {
+        crate::download::stored_progress(self.progress.as_deref())
+            .and_then(|progress| progress.percent())
+    }
+
+    /// Returns the estimated number of seconds left in the download.
+    ///
+    /// # Returns
+    ///
+    /// The estimate, or `None` when the download has not reported both a total
+    /// size and a speed.
+    pub fn eta_secs(&self) -> Option<u32> {
+        crate::download::stored_progress(self.progress.as_deref())
+            .and_then(|progress| progress.eta_secs())
+    }
+}
+
 /// One row of the `acquisition_log` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogEntry {
@@ -1206,6 +1234,128 @@ pub async fn list(
     rows.into_iter().map(ListDbRow::decode).collect()
 }
 
+/// Which part of the acquisition ledger a listing reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerWindow {
+    /// The acquisitions that still hold work, in any of the
+    /// [`ACTIVE_STATES`].
+    Active,
+    /// The acquisitions that ended at or after a cutoff instant.
+    Recent {
+        /// The earliest `updated_at` a row may have, in unix milliseconds. A
+        /// row last written exactly then is included.
+        since: i64,
+    },
+    /// Both, newest first.
+    All,
+}
+
+/// One page of the acquisition ledger.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_acquire::repo::{LedgerQuery, LedgerWindow};
+///
+/// let query = LedgerQuery {
+///     window: LedgerWindow::Recent { since: 0 },
+///     requested_by: None,
+///     limit: 50,
+///     offset: 0,
+/// };
+/// assert_eq!(query.limit, 50);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerQuery {
+    /// Which part of the ledger to read.
+    pub window: LedgerWindow,
+    /// Only the rows this account requested, when set; every account's rows
+    /// when `None`.
+    pub requested_by: Option<Uuid>,
+    /// At most this many rows.
+    pub limit: u32,
+    /// How many matching rows to skip, for the page after this one.
+    pub offset: u32,
+}
+
+/// Lists one page of the acquisition ledger, newest first.
+///
+/// This is the listing a client-facing view reads: it selects whole rows rather
+/// than the display columns [`list`] joins in, so a caller can render the target
+/// of an album-granular row as well as a track-granular one, and it takes the
+/// window, the requester and the page in one query.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `query`: which rows to return, and how many.
+///
+/// # Returns
+///
+/// The matching rows, newest first: by creation, and by insertion order within
+/// one millisecond, so a page is stable across calls.
+///
+/// # Errors
+///
+/// Returns [`AcquireError::Database`] when the read fails, or a decode error
+/// when a stored row does not decode.
+pub async fn list_window(
+    conn: &mut SqliteConnection,
+    query: &LedgerQuery,
+) -> Result<Vec<AcquisitionRow>, AcquireError> {
+    let mut builder = QueryBuilder::<Sqlite>::new(
+        "SELECT id, track_id, album_id, granularity, priority, reason, state, requested_by, \
+                instance_id, candidate, plugin_token, progress, attempts, failure_reason, \
+                error_detail, media_file_id, created_at, updated_at FROM acquisitions \
+         WHERE 1 = 1",
+    );
+    match query.window {
+        LedgerWindow::Active => push_state_filter(&mut builder, true, None),
+        LedgerWindow::Recent { since } => push_state_filter(&mut builder, false, Some(since)),
+        LedgerWindow::All => {}
+    }
+    if let Some(user) = query.requested_by {
+        builder
+            .push(" AND requested_by = ")
+            .push_bind(uuid_key(user));
+    }
+    builder
+        .push(" ORDER BY created_at DESC, rowid DESC LIMIT ")
+        .push_bind(i64::from(query.limit))
+        .push(" OFFSET ")
+        .push_bind(i64::from(query.offset));
+    let rows = builder
+        .build_query_as::<AcquisitionDbRow>()
+        .fetch_all(&mut *conn)
+        .await?;
+    rows.into_iter().map(AcquisitionDbRow::decode).collect()
+}
+
+/// Adds a window's state predicate to a ledger listing.
+///
+/// # Parameters
+///
+/// - `builder`: the statement being built.
+/// - `active`: whether the rows that still hold work are the ones wanted; the
+///   other case selects the rows that ended.
+/// - `since`: the cutoff a terminal row is held to, when the caller has one.
+fn push_state_filter(builder: &mut QueryBuilder<Sqlite>, active: bool, since: Option<i64>) {
+    let keyword = if active {
+        " AND state IN ("
+    } else {
+        " AND state NOT IN ("
+    };
+    builder.push(keyword);
+    let mut states = builder.separated(", ");
+    for state in ACTIVE_STATES {
+        states.push_bind(state.as_str());
+    }
+    states.push_unseparated(")");
+    if let Some(since) = since {
+        builder.push(" AND updated_at >= ").push_bind(since);
+    }
+}
+
 /// The pool-level view of the acquisition ledger.
 ///
 /// Each method wraps the matching free function in its own transaction, which
@@ -1287,6 +1437,23 @@ impl AcquisitionRepository {
     pub async fn active(&self) -> Result<Vec<AcquisitionRow>, AcquireError> {
         let mut conn = self.readers.acquire().await?;
         active(&mut conn).await
+    }
+
+    /// Lists one page of the acquisition ledger, in its own read transaction.
+    ///
+    /// # Parameters
+    ///
+    /// - `query`: which rows to return, and how many.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::Database`] when the read fails.
+    pub async fn list_window(
+        &self,
+        query: &LedgerQuery,
+    ) -> Result<Vec<AcquisitionRow>, AcquireError> {
+        let mut conn = self.readers.acquire().await?;
+        list_window(&mut conn, query).await
     }
 
     /// Lists acquisitions, in its own read transaction.

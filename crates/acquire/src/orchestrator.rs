@@ -55,7 +55,8 @@ use crate::announce::AnnounceGate;
 use crate::download::DownloadOutcome;
 use crate::error::AcquireError;
 use crate::repo::{
-    self, AcquisitionRepository, AcquisitionRow, AcquisitionSummary, ListFilter, NewAcquisition,
+    self, AcquisitionRepository, AcquisitionRow, AcquisitionSummary, LedgerQuery, ListFilter,
+    NewAcquisition,
 };
 use crate::search::SearchOutcome;
 
@@ -1598,6 +1599,30 @@ impl AcquisitionOrchestrator {
     /// Returns [`AcquireError::Database`] when the read fails.
     pub async fn list(&self, filter: &ListFilter) -> Result<Vec<AcquisitionSummary>, AcquireError> {
         self.inner.repository.list(filter).await
+    }
+
+    /// Lists one page of the acquisition ledger.
+    ///
+    /// This is the listing a client-facing view reads: whole rows, taken from
+    /// one window of the ledger, optionally restricted to one requester and
+    /// paged.
+    ///
+    /// # Parameters
+    ///
+    /// - `query`: which rows to return, and how many.
+    ///
+    /// # Returns
+    ///
+    /// The matching rows, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::Database`] when the read fails.
+    pub async fn list_window(
+        &self,
+        query: &LedgerQuery,
+    ) -> Result<Vec<AcquisitionRow>, AcquireError> {
+        self.inner.repository.list_window(query).await
     }
 
     /// Ends an acquisition as cancelled and undoes what admission did for it.

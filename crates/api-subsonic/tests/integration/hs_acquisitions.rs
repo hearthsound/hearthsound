@@ -9,23 +9,63 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::HashMap;
+
 use hearthsound_acquire::orchestrator::{AcquireOutcome, AcquireRequest};
-use hearthsound_core::{CatalogId, EntityId, EntityKind, IdPrefix, Priority, Slug};
+use hearthsound_core::{
+    Availability, CatalogId, EntityId, EntityKind, FailureReason, IdPrefix, Priority, Slug,
+};
+use hearthsound_library::tracks;
 
 use crate::common::seed::{Seeded, library};
 use crate::common::{Fixture, SNAPSHOT_FILTERS, assert_error, assert_ok, get};
 
-/// The filters that make an availability snapshot stable across runs.
-///
-/// An acquisition's client id carries the UUIDv7 its admission generated, so it
-/// differs from run to run; the marker keeps the snapshot readable.
-const FILTERS: [(&str, &str); 2] = [SNAPSHOT_FILTERS[0], (r"ac_[0-9a-z]{26}", "ac_ACQUISITION")];
+/// The number of characters in a materialized client id's payload.
+const PAYLOAD: usize = 26;
 
 /// Builds the `x_` id of one hello-catalog entity.
 fn catalog_id(kind: EntityKind, provider_id: &str) -> String {
     CatalogId::new(Slug::new("hello").unwrap(), kind, provider_id)
         .unwrap()
         .to_string()
+}
+
+/// Replaces each acquisition id in `body` with a marker.
+///
+/// The markers are numbered in the order the ids first appear, and two rows that
+/// name the same acquisition carry the same marker, so an attached acquisition is
+/// visible in a snapshot. An acquisition's client id carries the UUIDv7 its
+/// admission generated, which is what makes this necessary.
+///
+/// # Parameters
+///
+/// - `body`: the rendered response.
+///
+/// # Returns
+///
+/// The body, with every `ac_...` id replaced by `ac_<number>`.
+fn number_acquisitions(body: &str) -> String {
+    let mut names: HashMap<&str, usize> = HashMap::new();
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(start) = rest.find("ac_") {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start + 3..];
+        let payload = &tail[..PAYLOAD.min(tail.len())];
+        let complete =
+            payload.len() == PAYLOAD && payload.bytes().all(|byte| byte.is_ascii_alphanumeric());
+        if !complete {
+            out.push_str("ac_");
+            rest = tail;
+            continue;
+        }
+        let next = names.len() + 1;
+        let number = *names.entry(payload).or_insert(next);
+        out.push_str(&format!("ac_{number}"));
+        rest = &tail[PAYLOAD..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Builds a fixture with the seeded library, the acquisition layer, and one
@@ -104,14 +144,14 @@ async fn availability_reports_states_and_membership_in_both_encodings() {
 
     let json = get(&app, &format!("{query}&f=json")).await;
     assert_ok(&json);
-    insta::with_settings!({filters => FILTERS.to_vec()}, {
-        insta::assert_snapshot!("hs-availability-json", stabilize(&json.body));
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("hs-availability-json", number_acquisitions(&stabilize(&json.body)));
     });
 
     let xml = get(&app, &query).await;
     assert_ok(&xml);
-    insta::with_settings!({filters => FILTERS.to_vec()}, {
-        insta::assert_snapshot!("hs-availability-xml", stabilize(&xml.body));
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("hs-availability-xml", number_acquisitions(&stabilize(&xml.body)));
     });
 }
 
@@ -223,8 +263,8 @@ async fn a_catalog_id_is_answered_from_what_the_catalog_knows() {
         probe.body
     );
     assert!(probe.body.contains("\"inLibrary\":false"), "{}", probe.body);
-    insta::with_settings!({filters => FILTERS.to_vec()}, {
-        insta::assert_snapshot!("hs-availability-catalog-json", &probe.body);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("hs-availability-catalog-json", number_acquisitions(&probe.body));
     });
 }
 
@@ -255,6 +295,224 @@ async fn availability_answers_error_10_without_an_id() {
             "/rest/hsGetAvailability?apiKey={}&hearthsound=1",
             fixture.api_key
         ),
+    )
+    .await;
+    assert_error(&probe, 10);
+}
+
+#[tokio::test]
+async fn acquire_starts_acquisitions_in_both_encodings() {
+    let (fixture, _seeded, album, tracks) = fixture().await;
+    let app = fixture.app();
+    let query = format!(
+        "/rest/hsAcquire?apiKey={}&hearthsound=1&id={}&id={album}&priority=next",
+        fixture.api_key, tracks[0]
+    );
+    let stabilize = |body: &str| {
+        body.replace(&album.to_string(), "al_faraway")
+            .replace(&tracks[0].to_string(), "tr_faraway_1")
+            .replace(&tracks[1].to_string(), "tr_faraway_2")
+    };
+
+    let json = get(&app, &format!("{query}&f=json")).await;
+    assert_ok(&json);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("hs-acquire-json", number_acquisitions(&stabilize(&json.body)));
+    });
+
+    let xml = get(&app, &query).await;
+    assert_ok(&xml);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("hs-acquire-xml", number_acquisitions(&stabilize(&xml.body)));
+    });
+}
+
+#[tokio::test]
+async fn an_acquiring_track_is_attached_instead_of_requested_again() {
+    let (fixture, _seeded, _album, tracks) = fixture().await;
+    let app = fixture.app();
+    let id = acquire(&fixture, tracks[0]).await;
+    let expected = EntityId::from_uuid(IdPrefix::Acquisition, id).to_string();
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsAcquire?apiKey={}&hearthsound=1&f=json&id={}",
+            fixture.api_key, tracks[0]
+        ),
+    )
+    .await;
+    assert_ok(&probe);
+    assert!(
+        probe.body.contains(&format!("\"id\":\"{expected}\"")),
+        "{}",
+        probe.body
+    );
+    assert_eq!(
+        probe.body.matches("\"state\":\"queued\"").count(),
+        1,
+        "{}",
+        probe.body
+    );
+}
+
+#[tokio::test]
+async fn a_track_with_a_file_answers_its_latest_acquisition() {
+    let (fixture, _seeded, _album, tracks) = fixture().await;
+    let app = fixture.app();
+    let id = acquire(&fixture, tracks[0]).await;
+    let expected = EntityId::from_uuid(IdPrefix::Acquisition, id).to_string();
+    // The import that followed the admission produced the file the track now
+    // has, which is what makes the next request answer "already available".
+    {
+        let mut tx = fixture.database.writer().begin().await.unwrap();
+        tracks::set_track_availability(&mut tx, tracks[0], Availability::Local, None)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsAcquire?apiKey={}&hearthsound=1&f=json&id={}",
+            fixture.api_key, tracks[0]
+        ),
+    )
+    .await;
+    assert_ok(&probe);
+    assert!(
+        probe.body.contains(&format!("\"id\":\"{expected}\"")),
+        "{}",
+        probe.body
+    );
+}
+
+#[tokio::test]
+async fn a_track_with_a_file_and_no_acquisition_is_left_out() {
+    let (fixture, seeded, _album, _tracks) = fixture().await;
+    let app = fixture.app();
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsAcquire?apiKey={}&hearthsound=1&f=json&id={}",
+            fixture.api_key, seeded.alpha_tracks[0]
+        ),
+    )
+    .await;
+    assert_ok(&probe);
+    assert!(probe.body.contains("\"acquisition\":[]"), "{}", probe.body);
+}
+
+#[tokio::test]
+async fn a_cooling_down_track_answers_its_latest_acquisition() {
+    let (fixture, _seeded, _album, tracks) = fixture().await;
+    let app = fixture.app();
+    let id = acquire(&fixture, tracks[0]).await;
+    fixture
+        .state
+        .acquisitions()
+        .unwrap()
+        .repository()
+        .fail(id, FailureReason::NoCandidates, None)
+        .await
+        .unwrap();
+    {
+        let mut tx = fixture.database.writer().begin().await.unwrap();
+        let until = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            + 3_600_000;
+        tracks::set_track_availability(&mut tx, tracks[0], Availability::Unavailable, Some(until))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsAcquire?apiKey={}&hearthsound=1&f=json&id={}",
+            fixture.api_key, tracks[0]
+        ),
+    )
+    .await;
+    assert_ok(&probe);
+    assert!(
+        probe.body.contains("\"state\":\"failed\""),
+        "{}",
+        probe.body
+    );
+    assert!(
+        probe.body.contains("\"failureReason\":\"no-candidates\""),
+        "{}",
+        probe.body
+    );
+}
+
+#[tokio::test]
+async fn acquire_answers_error_50_without_can_acquire() {
+    let (fixture, _seeded, _album, tracks) = fixture().await;
+    let app = fixture.app();
+    let (_, key) = fixture.account(&[]).await;
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsAcquire?apiKey={key}&hearthsound=1&f=json&id={}",
+            tracks[0]
+        ),
+    )
+    .await;
+    assert_error(&probe, 50);
+}
+
+#[tokio::test]
+async fn acquire_answers_error_70_for_an_entity_that_does_not_exist() {
+    let (fixture, _seeded, _album, _tracks) = fixture().await;
+    let app = fixture.app();
+    let unknown = EntityId::new(IdPrefix::Track);
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsAcquire?apiKey={}&hearthsound=1&f=json&id={unknown}",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&probe, 70);
+}
+
+#[tokio::test]
+async fn acquire_answers_error_70_without_the_vendor_flag() {
+    let (fixture, _seeded, _album, tracks) = fixture().await;
+    let app = fixture.app();
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsAcquire?apiKey={}&id={}",
+            fixture.api_key, tracks[0]
+        ),
+    )
+    .await;
+    assert_error(&probe, 70);
+}
+
+#[tokio::test]
+async fn acquire_answers_error_10_without_an_id() {
+    let (fixture, _seeded, _album, _tracks) = fixture().await;
+    let app = fixture.app();
+
+    let probe = get(
+        &app,
+        &format!("/rest/hsAcquire?apiKey={}&hearthsound=1", fixture.api_key),
     )
     .await;
     assert_error(&probe, 10);

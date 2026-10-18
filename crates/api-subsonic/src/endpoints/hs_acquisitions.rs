@@ -3,7 +3,11 @@
 //! `hsGetAvailability` answers what the server knows about the tracks and albums
 //! a client names, without starting anything: the availability the library
 //! stores, whether the requesting account's personal library holds the entity,
-//! and the acquisition in flight for it, if any.
+//! and the acquisition in flight for it, if any. `hsAcquire` starts what a
+//! client asks for: a track is requested on its own and an album is requested
+//! track by track, and every row of the answer is the acquisition the request
+//! produced, the acquisition it attached to, or the last acquisition the track
+//! has.
 //!
 //! Every endpoint here belongs to the `hearthsound` vendor extension, so each one
 //! is answered only when the request carries `hearthsound=1` and answers Subsonic
@@ -12,17 +16,30 @@
 
 use std::collections::HashMap;
 
-use hearthsound_acquire::repo::active_for_tracks;
-use hearthsound_core::{EntityId, EntityKind, IdPrefix};
+use hearthsound_acquire::AcquireError;
+use hearthsound_acquire::orchestrator::{
+    AcquireOutcome, AcquireRequest, AcquisitionOrchestrator, AlbumAcquireRequest,
+};
+use hearthsound_acquire::repo::{AcquisitionRow, active_for_tracks, latest_for_tracks};
+use hearthsound_core::{ClientId, EntityId, EntityKind, IdPrefix, Layer, Priority};
+use uuid::Uuid;
 
 use crate::auth::Call;
 use crate::browse::failure;
-use crate::response::{Encoded, Response, SubsonicError};
+use crate::catalog;
+use crate::response::{Encoded, Response, SubsonicError, codes};
+use crate::state::SubsonicState;
 use crate::value::{Array, Object};
 use crate::vendor;
 
 /// The operation name an availability read reports.
 const AVAILABILITY_OPERATION: &str = "hsGetAvailability";
+
+/// The operation name an acquisition request reports.
+const ACQUIRE_OPERATION: &str = "hsAcquire";
+
+/// The reason an acquisition started by the vendor extension records.
+const ACQUIRE_REASON: &str = "vendor";
 
 /// Answers `hsGetAvailability`: what the server knows about the named entities.
 ///
@@ -145,21 +162,12 @@ async fn availabilities(call: &Call, ids: &[String]) -> Result<Vec<Object>, Subs
             .set("inLibrary", standing.in_library);
         if subject.kind == EntityKind::Track {
             if let Some(row) = standing.entity.and_then(|track| active.get(&track)) {
-                let acquisition = EntityId::from_uuid(IdPrefix::Acquisition, row.id);
-                entry = entry.set("acquisitionId", acquisition.to_string());
-                if let Some(orchestrator) = state.acquisitions() {
-                    match orchestrator.progress_of(row.id).await {
-                        Ok(Some(progress)) => {
-                            if let Some(percent) = progress.percent {
-                                entry = entry.set("percent", i64::from(percent));
-                            }
-                            if let Some(eta) = progress.eta_secs {
-                                entry = entry.set("etaSecs", i64::from(eta));
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(error) => return Err(failure(AVAILABILITY_OPERATION, &error)),
-                    }
+                entry = entry.set("acquisitionId", acquisition_id(row.id));
+                if let Some(percent) = row.percent() {
+                    entry = entry.set("percent", i64::from(percent));
+                }
+                if let Some(eta) = row.eta_secs() {
+                    entry = entry.set("etaSecs", i64::from(eta));
                 }
             }
         } else if standing.members.is_empty() && standing.entity.is_some() {
@@ -172,4 +180,377 @@ async fn availabilities(call: &Call, ids: &[String]) -> Result<Vec<Object>, Subs
         entries.push(entry);
     }
     Ok(entries)
+}
+
+/// Answers `hsAcquire`: asks the acquisition layer for the named entities.
+///
+/// A track is requested on its own, an album is requested track by track, and an
+/// `x_` catalog id is materialized first, so the acquisition has a stored target
+/// to import into. Every row of the answer is the acquisition the request
+/// admitted, the acquisition it attached to, or - for a track that already has a
+/// file or is cooling down - the last acquisition the track has; an id with no
+/// such row is left out.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call. `id` may be repeated and names tracks and
+///   albums, stored or catalog ids; `priority` is `play`, `next`, `queue` or
+///   `background` and defaults to `queue`. The request must carry
+///   `hearthsound=1`, and the account must hold `can_acquire`.
+///
+/// # Returns
+///
+/// An envelope carrying `acquisitions.acquisition`, or a failed envelope.
+///
+/// # Errors
+///
+/// Answers Subsonic error 70 when the request does not carry `hearthsound=1` and
+/// when an id names nothing this endpoint can acquire, error 10 when the request
+/// names no id, error 50 when the account may not acquire and when admission
+/// denies one of the requests, and a generic error when a request cannot be read
+/// or written. A request that is denied or fails mid-list leaves the acquisitions
+/// the earlier ids produced in the ledger.
+pub async fn hs_acquire(call: Call) -> Encoded {
+    if !call.vendor_enabled() {
+        return call.encode(Response::failed(SubsonicError::not_found()));
+    }
+    let ids = requested(&call);
+    if ids.is_empty() {
+        return call.encode(Response::failed(SubsonicError::missing_parameter("id")));
+    }
+    if !call.principal().can_acquire {
+        return call.encode(Response::failed(SubsonicError::not_authorized()));
+    }
+    let priority = match priority(&call) {
+        Ok(priority) => priority,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let state = call.state();
+    let Some(orchestrator) = state.acquisitions() else {
+        tracing::error!("the /rest surface has no acquisition layer to admit an acquisition");
+        return call.encode(Response::failed(SubsonicError::generic()));
+    };
+    let instances = instance_slugs(state);
+    let user = call.principal().user_id.uuid();
+    let can_acquire = call.principal().can_acquire;
+    let mut rows = Vec::new();
+    for id in &ids {
+        let outcomes = match acquire(state, orchestrator, user, can_acquire, id, priority).await {
+            Ok(outcomes) => outcomes,
+            Err(error) => return call.encode(Response::failed(error)),
+        };
+        for outcome in outcomes {
+            if let Err(error) = record(state, orchestrator, outcome, &instances, &mut rows).await {
+                return call.encode(Response::failed(error));
+            }
+        }
+    }
+    call.encode(Response::ok().member(
+        "acquisitions",
+        Object::new().set("acquisition", Array::new(rows)),
+    ))
+}
+
+/// Reads the `priority` parameter.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+///
+/// # Returns
+///
+/// The priority, which is `queue` when the request did not carry one.
+///
+/// # Errors
+///
+/// Returns a generic error when the value is not one of `play`, `next`, `queue`
+/// or `background`.
+fn priority(call: &Call) -> Result<Priority, SubsonicError> {
+    let Some(value) = call.get("priority").map(str::trim) else {
+        return Ok(Priority::Queue);
+    };
+    if value.is_empty() {
+        return Ok(Priority::Queue);
+    }
+    value.parse::<Priority>().map_err(|_| {
+        tracing::debug!(
+            value,
+            "a vendor acquire request carried an unknown priority"
+        );
+        SubsonicError::new(
+            codes::GENERIC,
+            "The `priority` parameter must be one of play, next, queue or background.",
+        )
+    })
+}
+
+/// Requests one id and reports what admission decided.
+///
+/// # Parameters
+///
+/// - `state`: the endpoint state.
+/// - `orchestrator`: the acquisition layer.
+/// - `user`: the account the request is made on behalf of.
+/// - `can_acquire`: whether that account may acquire.
+/// - `raw`: the id the client wrote.
+/// - `priority`: the priority every track request carries.
+///
+/// # Returns
+///
+/// The outcome of a track request, or the outcomes of an album's fan-out, in
+/// playing order.
+///
+/// # Errors
+///
+/// Answers Subsonic error 70 when the id names something this endpoint does not
+/// acquire, and a generic error otherwise.
+async fn acquire(
+    state: &SubsonicState,
+    orchestrator: &AcquisitionOrchestrator,
+    user: Uuid,
+    can_acquire: bool,
+    raw: &str,
+    priority: Priority,
+) -> Result<Vec<AcquireOutcome>, SubsonicError> {
+    let Ok(client) = ClientId::parse(raw) else {
+        return Err(SubsonicError::not_found());
+    };
+    match client {
+        ClientId::Entity(id) => match id.kind().entity_kind() {
+            Some(EntityKind::Track) => request_track(orchestrator, user, can_acquire, id, priority)
+                .await
+                .map(|outcome| vec![outcome]),
+            Some(EntityKind::Album) => {
+                request_album(orchestrator, user, can_acquire, id, priority).await
+            }
+            _ => Err(SubsonicError::not_found()),
+        },
+        ClientId::Catalog(id) => match id.kind() {
+            EntityKind::Track => {
+                let track = state
+                    .catalog()
+                    .materialize_track(&id)
+                    .await
+                    .map_err(|error| catalog::failure(&error))?;
+                request_track(orchestrator, user, can_acquire, track, priority)
+                    .await
+                    .map(|outcome| vec![outcome])
+            }
+            EntityKind::Album => {
+                let album = state
+                    .catalog()
+                    .materialize_album(&id)
+                    .await
+                    .map_err(|error| catalog::failure(&error))?;
+                request_album(orchestrator, user, can_acquire, album.album, priority).await
+            }
+            _ => Err(SubsonicError::not_found()),
+        },
+    }
+}
+
+/// Requests one stored track.
+///
+/// # Errors
+///
+/// Answers Subsonic error 70 when the track has no row, and a generic error when
+/// the request cannot be read or written.
+async fn request_track(
+    orchestrator: &AcquisitionOrchestrator,
+    user: Uuid,
+    can_acquire: bool,
+    track: EntityId,
+    priority: Priority,
+) -> Result<AcquireOutcome, SubsonicError> {
+    let request = AcquireRequest::new(track, priority, ACQUIRE_REASON)
+        .with_requested_by(Some(user))
+        .with_can_acquire(can_acquire);
+    orchestrator
+        .request(request)
+        .await
+        .map_err(|error| acquire_failure(&error))
+}
+
+/// Requests every track of one stored album.
+///
+/// # Errors
+///
+/// Answers Subsonic error 70 when the album has no tracks, and a generic error
+/// when a request cannot be read or written.
+async fn request_album(
+    orchestrator: &AcquisitionOrchestrator,
+    user: Uuid,
+    can_acquire: bool,
+    album: EntityId,
+    priority: Priority,
+) -> Result<Vec<AcquireOutcome>, SubsonicError> {
+    let request = AlbumAcquireRequest {
+        album_id: album,
+        priority,
+        reason: ACQUIRE_REASON.to_owned(),
+        requested_by: Some(user),
+        can_acquire,
+        force: false,
+    };
+    orchestrator
+        .request_album(request)
+        .await
+        .map(|outcomes| {
+            outcomes
+                .into_iter()
+                .map(|outcome| outcome.outcome)
+                .collect()
+        })
+        .map_err(|error| acquire_failure(&error))
+}
+
+/// Maps an acquisition failure onto the failure envelope.
+///
+/// # Parameters
+///
+/// - `error`: the failure a request returned.
+///
+/// # Returns
+///
+/// Subsonic error 70 when the request named an entity that does not exist, and a
+/// generic error otherwise: a database that refused a write is nothing a client
+/// can act on, while an operator reading the log wants the cause.
+fn acquire_failure(error: &AcquireError) -> SubsonicError {
+    match error {
+        AcquireError::UnknownTrack(_) | AcquireError::UnknownAlbum(_) => {
+            tracing::debug!(error = %error, "a vendor acquire request named an unknown entity");
+            SubsonicError::not_found()
+        }
+        other => failure(ACQUIRE_OPERATION, other),
+    }
+}
+
+/// Records what one request produced as the rows of the answer.
+///
+/// # Parameters
+///
+/// - `state`: the endpoint state.
+/// - `orchestrator`: the acquisition layer.
+/// - `outcome`: what admission decided for one track.
+/// - `instances`: the instance slugs the registry serves, keyed by id.
+/// - `rows`: the answer's rows, which a row is appended to.
+///
+/// # Errors
+///
+/// Answers Subsonic error 50 when admission denied the request, and a generic
+/// error when the ledger cannot be read.
+async fn record(
+    state: &SubsonicState,
+    orchestrator: &AcquisitionOrchestrator,
+    outcome: AcquireOutcome,
+    instances: &HashMap<Uuid, String>,
+    rows: &mut Vec<Object>,
+) -> Result<(), SubsonicError> {
+    match outcome {
+        AcquireOutcome::Started(handle) | AcquireOutcome::Joined(handle) => {
+            let row = orchestrator
+                .repository()
+                .get(handle.id)
+                .await
+                .map_err(|error| failure(ACQUIRE_OPERATION, &error))?;
+            if let Some(row) = row {
+                rows.push(acquisition_row(&row, instances));
+            }
+            Ok(())
+        }
+        AcquireOutcome::AlreadyAvailable { track_id }
+        | AcquireOutcome::CoolingDown { track_id, .. } => {
+            let latest = {
+                let mut conn = state
+                    .database()
+                    .readers()
+                    .acquire()
+                    .await
+                    .map_err(|error| failure(ACQUIRE_OPERATION, &error))?;
+                latest_for_tracks(&mut conn, &[track_id])
+                    .await
+                    .map_err(|error| failure(ACQUIRE_OPERATION, &error))?
+            };
+            if let Some(row) = latest.get(&track_id) {
+                rows.push(acquisition_row(row, instances));
+            }
+            Ok(())
+        }
+        AcquireOutcome::Denied { reason, .. } => {
+            tracing::debug!(
+                reason = reason.as_str(),
+                "admission denied a vendor acquire request"
+            );
+            Err(SubsonicError::not_authorized())
+        }
+    }
+}
+
+/// Builds one row of an acquisition list.
+///
+/// # Parameters
+///
+/// - `row`: the ledger row.
+/// - `instances`: the instance slugs the registry serves, keyed by id.
+///
+/// # Returns
+///
+/// The row, in the order the vendor extension documents: its client id, its
+/// target, its state and priority, and the optional progress, instance and
+/// failure.
+fn acquisition_row(row: &AcquisitionRow, instances: &HashMap<Uuid, String>) -> Object {
+    let mut object = Object::new()
+        .set("id", acquisition_id(row.id))
+        .set("targetId", target_id(row))
+        .set("state", row.state.as_str())
+        .set("priority", row.priority.as_str());
+    if let Some(percent) = row.percent() {
+        object = object.set("percent", i64::from(percent));
+    }
+    if let Some(eta) = row.eta_secs() {
+        object = object.set("etaSecs", i64::from(eta));
+    }
+    if let Some(instance) = row.instance_id.and_then(|id| instances.get(&id)) {
+        object = object.set("instance", instance.clone());
+    }
+    if let Some(reason) = row.failure_reason {
+        object = object.set("failureReason", reason.as_str());
+    }
+    object
+}
+
+/// Returns the client id of an acquisition.
+fn acquisition_id(id: Uuid) -> String {
+    EntityId::from_uuid(IdPrefix::Acquisition, id).to_string()
+}
+
+/// Returns the client id of the track or album an acquisition targets.
+fn target_id(row: &AcquisitionRow) -> String {
+    row.track_id
+        .or(row.album_id)
+        .map(|id| id.to_string())
+        .unwrap_or_default()
+}
+
+/// Returns the slugs of the acquisition instances the server serves.
+///
+/// # Parameters
+///
+/// - `state`: the endpoint state.
+///
+/// # Returns
+///
+/// The slug of each instance of the acquisition layer, keyed by its id. A state
+/// built without a registry has none, so an acquisition reports no instance.
+fn instance_slugs(state: &SubsonicState) -> HashMap<Uuid, String> {
+    state
+        .registry()
+        .map(|registry| {
+            registry
+                .layers(Layer::Acquisition)
+                .into_iter()
+                .map(|instance| (instance.id(), instance.slug().as_str().to_owned()))
+                .collect()
+        })
+        .unwrap_or_default()
 }

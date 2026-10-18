@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   availability state, whether the requesting account's personal library holds it,
   and the acquisition in flight for a track.
 
+- `hsAcquire` asks the acquisition layer for the tracks and albums a client names
+  over the `hearthsound` vendor extension, at the priority the request carries,
+  and answers the acquisition each request produced or attached to.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload

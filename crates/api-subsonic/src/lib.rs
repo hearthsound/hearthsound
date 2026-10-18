@@ -129,6 +129,7 @@
 //! | `getCoverArt` | the stored entity's own image, or the issuing instance's through the catalog layer; local images are served unscaled |
 //! | `scrobble` | records a play for a stored track; now-playing is accepted and discarded |
 //! | `hsGetAvailability` | what the server knows about the named tracks and albums: their availability, the caller's library membership, and the acquisition in flight |
+//! | `hsAcquire` | asks the acquisition layer for the named tracks and albums, at the priority the request names |
 //!
 //! The browse endpoints share one scope rule: an explicit `musicFolderId` of
 //! `1` is the requesting user's personal library and of `2` the server-wide
