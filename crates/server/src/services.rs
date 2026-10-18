@@ -592,6 +592,12 @@ impl Services {
         NativeState::new(NativeServices {
             database: Arc::clone(&self.database),
             sessions: self.sessions.clone(),
+            base_url_is_https: self
+                .config
+                .server
+                .base_url
+                .to_ascii_lowercase()
+                .starts_with("https://"),
             settings: self.settings.clone(),
             authenticator: Arc::clone(&self.authenticator),
             secrets: self.secrets.clone(),

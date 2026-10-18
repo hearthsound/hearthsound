@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The session cookie carries `Secure` only when the request arrived over
+  HTTPS, which is when `server.base_url` is an `https://` URL or when a
+  trusted proxy reports `https` in `X-Forwarded-Proto`. A LAN deployment over
+  plain HTTP can sign in, and signing out clears the cookie with the same
+  attributes it was stored with.
+
 - The `/rest` surface accepts the web session cookie in place of a credential
   parameter. An envelope call must echo the session's CSRF token in
   `X-Hearthsound-CSRF`; a media endpoint is accepted without one, unless the
@@ -19,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crates/api-native/openapi.json` and regenerated with `cargo xtask openapi`.
   A test fails when the committed document no longer matches the routes the
   crate describes.
+
+### Fixed
+
+- A request carries the address of the connection it arrived on, so the login
+  rate limit is keyed on the client's address and `server.trusted_proxies`
+  decides whether an `X-Forwarded-For` header names the client. Previously
+  every request looked like it came from an unknown address.
 
 ## [0.1.4] - 2026-10-18
 

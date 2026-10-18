@@ -134,18 +134,16 @@ async fn a_web_session_signs_in_checks_csrf_and_signs_out() {
         .to_str()
         .unwrap()
         .to_owned();
-    for attribute in [
-        "HttpOnly",
-        "Secure",
-        "SameSite=Lax",
-        "Path=/",
-        "Max-Age=2592000",
-    ] {
+    for attribute in ["HttpOnly", "SameSite=Lax", "Path=/", "Max-Age=2592000"] {
         assert!(
             set_cookie.contains(attribute),
             "{set_cookie} has {attribute}"
         );
     }
+    assert!(
+        !set_cookie.contains("Secure"),
+        "a plain-HTTP sign-in must not set a Secure cookie: {set_cookie}"
+    );
     let cookie = cookie_pair(&signed_in);
     let body = json(signed_in).await;
     assert_eq!(body["user"]["username"], common::USERNAME);
@@ -211,6 +209,67 @@ async fn a_web_session_signs_in_checks_csrf_and_signs_out() {
         .await
         .unwrap();
     assert_eq!(bearer.status(), StatusCode::NO_CONTENT);
+    fixture.stop().await;
+}
+
+/// A sign-in through a trusted proxy that terminates HTTPS sets a `Secure`
+/// cookie, and signing out clears the one it stored.
+#[tokio::test]
+async fn a_sign_in_over_https_sets_a_secure_cookie() {
+    let fixture = Fixture::with_config(|config| {
+        config.server.trusted_proxies = vec!["127.0.0.1/32".to_owned()];
+    })
+    .await;
+
+    let response = fixture
+        .client
+        .post(format!("{}/api/v1/auth/login", fixture.base_url()))
+        .header(CONTENT_TYPE, "application/json")
+        .header("X-Forwarded-Proto", "https")
+        .body(
+            serde_json::json!({
+                "username": common::USERNAME,
+                "password": common::ACCOUNT_PASSWORD,
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let set_cookie = response.headers()[reqwest::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        set_cookie.contains("Secure"),
+        "{set_cookie} has the Secure attribute"
+    );
+    let cookie = cookie_pair(&response);
+    let csrf = json(response).await["csrfToken"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let out = fixture
+        .client
+        .post(format!("{}/api/v1/auth/logout", fixture.base_url()))
+        .header("X-Forwarded-Proto", "https")
+        .header(reqwest::header::COOKIE, &cookie)
+        .header("X-Hearthsound-CSRF", &csrf)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(out.status(), StatusCode::NO_CONTENT);
+    let cleared = out.headers()[reqwest::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        cleared.contains("Secure"),
+        "{cleared} clears a Secure cookie"
+    );
+    assert!(cleared.contains("Max-Age=0"), "{cleared} clears the cookie");
     fixture.stop().await;
 }
 

@@ -33,6 +33,10 @@ pub struct NativeServices {
     /// The web session table, shared with the `/rest` surface so a session a
     /// client signed in with there is the one this surface resolves.
     pub sessions: Sessions,
+    /// Whether `server.base_url` names an `https://` address, computed once at
+    /// startup. The session cookie carries `Secure` when this is set or when the
+    /// request came through a trusted proxy over HTTPS.
+    pub base_url_is_https: bool,
     /// The runtime settings service.
     pub settings: Settings,
     /// The credential resolver shared with `/rest`, so one login rate limiter

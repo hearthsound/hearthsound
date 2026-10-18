@@ -100,9 +100,16 @@ impl Server {
 
         let http_shutdown = shutdown.clone();
         let http = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async move { http_shutdown.wait().await })
-                .await
+            // The connect information is what lets a handler read the peer
+            // address: the login rate limit is keyed on the client address, and
+            // `server.trusted_proxies` decides whether a forwarding header
+            // names the client.
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move { http_shutdown.wait().await })
+            .await
         });
 
         let workers = spawn_workers(&services, shutdown.clone());

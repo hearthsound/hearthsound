@@ -33,6 +33,9 @@ use crate::state::NativeState;
 /// The header a proxy appends the address it received a request from.
 const FORWARDED_FOR: &str = "x-forwarded-for";
 
+/// The header a proxy appends the scheme it received a request over.
+const FORWARDED_PROTO: &str = "x-forwarded-proto";
+
 /// The session a request authenticated with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
@@ -191,28 +194,84 @@ impl FromRequestParts<NativeState> for ClientAddress {
 
 /// Builds the `Set-Cookie` value that stores a session token.
 ///
-/// The cookie is `HttpOnly` (scripts cannot read it), `Secure` (sent only over
-/// HTTPS, which the reverse proxy in front of the server terminates),
-/// `SameSite=Lax`, scoped to the whole site, and lives as long as the session.
+/// The cookie is `HttpOnly` (scripts cannot read it), `SameSite=Lax`, scoped to
+/// the whole site, and lives as long as the session. The `Secure` attribute is
+/// added only when the request arrived over HTTPS: a browser drops a `Secure`
+/// cookie it received over plain HTTP, so a LAN deployment without a
+/// certificate could otherwise never sign in.
 ///
 /// # Parameters
 ///
 /// - `token`: the session token.
 /// - `max_age_secs`: the cookie's lifetime in seconds.
+/// - `secure`: whether the request arrived over HTTPS
+///   ([`request_is_https`]).
 ///
 /// # Returns
 ///
 /// The header value.
-pub fn session_cookie(token: &str, max_age_secs: i64) -> Option<HeaderValue> {
+pub fn session_cookie(token: &str, max_age_secs: i64, secure: bool) -> Option<HeaderValue> {
+    let secure = if secure { "; Secure" } else { "" };
     HeaderValue::from_str(&format!(
-        "{SESSION_COOKIE}={token}; Path=/; Max-Age={max_age_secs}; HttpOnly; Secure; SameSite=Lax"
+        "{SESSION_COOKIE}={token}; Path=/; Max-Age={max_age_secs}; HttpOnly{secure}; SameSite=Lax"
     ))
     .ok()
 }
 
 /// Builds the `Set-Cookie` value that removes the session cookie.
-pub fn cleared_session_cookie() -> HeaderValue {
-    HeaderValue::from_static("hs_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax")
+///
+/// # Parameters
+///
+/// - `secure`: whether the request arrived over HTTPS; the attribute has to
+///   match what the stored cookie carried, or a browser keeps the stale one.
+///
+/// # Returns
+///
+/// The header value.
+pub fn cleared_session_cookie(secure: bool) -> HeaderValue {
+    if secure {
+        HeaderValue::from_static("hs_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax")
+    } else {
+        HeaderValue::from_static("hs_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+    }
+}
+
+/// Reports whether a request arrived over HTTPS.
+///
+/// # Parameters
+///
+/// - `parts`: the request head, which supplies the peer address and the
+///   forwarding header.
+/// - `trusted`: the proxies whose forwarding headers are believed.
+/// - `base_url_is_https`: whether `server.base_url` names an `https://` address,
+///   computed once at startup.
+///
+/// # Returns
+///
+/// `true` when `server.base_url` is an `https://` URL, or when the peer is a
+/// trusted proxy whose first `X-Forwarded-Proto` value is `https`. An untrusted
+/// peer's forwarding header is ignored, because a client can write any header
+/// it likes.
+pub fn request_is_https(parts: &Parts, trusted: &TrustedProxies, base_url_is_https: bool) -> bool {
+    if base_url_is_https {
+        return true;
+    }
+    let Some(peer) = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip())
+    else {
+        return false;
+    };
+    if !trusted.trusts(peer) {
+        return false;
+    }
+    parts
+        .headers
+        .get(FORWARDED_PROTO)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("https"))
 }
 
 /// Returns the address a request came from.
@@ -245,18 +304,80 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_session_cookie_is_http_only_secure_and_lax() {
-        let cookie = session_cookie("abc", 60).unwrap();
-        let text = cookie.to_str().unwrap();
+    fn the_session_cookie_is_http_only_and_lax_and_secure_only_over_https() {
+        let secure = session_cookie("abc", 60, true).unwrap();
+        let text = secure.to_str().unwrap();
         assert!(text.starts_with("hs_session=abc;"));
         for attribute in ["Path=/", "Max-Age=60", "HttpOnly", "Secure", "SameSite=Lax"] {
             assert!(text.contains(attribute), "{text} has {attribute}");
         }
+
+        let plain = session_cookie("abc", 60, false).unwrap();
+        let text = plain.to_str().unwrap();
+        assert!(!text.contains("Secure"), "{text} must not be Secure");
+        for attribute in ["Path=/", "Max-Age=60", "HttpOnly", "SameSite=Lax"] {
+            assert!(text.contains(attribute), "{text} has {attribute}");
+        }
+
         assert!(
-            cleared_session_cookie()
+            cleared_session_cookie(true)
                 .to_str()
                 .unwrap()
-                .contains("Max-Age=0")
+                .contains("Secure")
         );
+        let cleared = cleared_session_cookie(false);
+        let text = cleared.to_str().unwrap();
+        assert!(text.contains("Max-Age=0"), "{text} clears the cookie");
+        assert!(!text.contains("Secure"), "{text} must not be Secure");
+    }
+
+    #[test]
+    fn a_request_is_https_only_over_https_or_from_a_trusted_proxy() {
+        let trusted = TrustedProxies::parse(["127.0.0.1/32", "::1"]).unwrap();
+        let mut parts = parts_with_peer(None, &[]);
+        assert!(!request_is_https(&parts, &trusted, false));
+
+        parts = parts_with_peer(Some([127, 0, 0, 1]), &[("x-forwarded-proto", "https")]);
+        assert!(request_is_https(&parts, &trusted, false));
+
+        parts = parts_with_peer(Some([127, 0, 0, 1]), &[("x-forwarded-proto", "HTTPS")]);
+        assert!(request_is_https(&parts, &trusted, false));
+
+        parts = parts_with_peer(
+            Some([127, 0, 0, 1]),
+            &[("x-forwarded-proto", "https, http")],
+        );
+        assert!(request_is_https(&parts, &trusted, false));
+
+        parts = parts_with_peer(Some([127, 0, 0, 1]), &[("x-forwarded-proto", "http")]);
+        assert!(!request_is_https(&parts, &trusted, false));
+
+        parts = parts_with_peer(Some([203, 0, 113, 9]), &[("x-forwarded-proto", "https")]);
+        assert!(
+            !request_is_https(&parts, &trusted, false),
+            "an untrusted peer's header must not be believed"
+        );
+
+        let plain = parts_with_peer(None, &[]);
+        assert!(request_is_https(&plain, &trusted, true));
+    }
+
+    /// Builds the request head of a request from a peer with some headers.
+    fn parts_with_peer(peer: Option<[u8; 4]>, headers: &[(&str, &str)]) -> Parts {
+        let mut builder = axum::http::Request::builder().uri("/api/v1/system/info");
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let mut parts = builder
+            .body(axum::body::Body::empty())
+            .unwrap()
+            .into_parts()
+            .0;
+        if let Some(peer) = peer {
+            parts
+                .extensions
+                .insert(ConnectInfo(SocketAddr::from((peer, 5000))));
+        }
+        parts
     }
 }

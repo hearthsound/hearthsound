@@ -11,15 +11,18 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::http::header::{SET_COOKIE, USER_AGENT};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use hearthsound_auth::{Credential, LoginError};
 use hearthsound_config::keys;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::auth::{Authed, ClientAddress, cleared_session_cookie, session_cookie};
+use crate::auth::{
+    Authed, ClientAddress, cleared_session_cookie, request_is_https, session_cookie,
+};
 use crate::extract::JsonBody;
 use crate::problem::{self, Problem};
 use crate::state::NativeState;
@@ -87,7 +90,7 @@ pub struct SessionResponse {
 pub async fn login(
     State(state): State<NativeState>,
     ClientAddress(ip): ClientAddress,
-    headers: HeaderMap,
+    parts: Parts,
     JsonBody(request): JsonBody<LoginRequest>,
 ) -> Result<Response, Problem> {
     let user = match state
@@ -102,13 +105,19 @@ pub async fn login(
         Err(LoginError::RateLimited) => return Err(Problem::rate_limited()),
         Err(LoginError::Internal(error)) => return Err(problem::internal("signing in", &error)),
     };
+    let secure = request_is_https(
+        &parts,
+        &state.services().trusted_proxies,
+        state.services().base_url_is_https,
+    );
     let days = state
         .settings()
         .current()
         .get(keys::AUTH_SESSION_TTL_DAYS)
         .map_err(|error| problem::internal("reading auth.session_ttl_days", &error))?;
     let ttl_secs = u64::try_from(days).unwrap_or(1).max(1) * SECS_PER_DAY;
-    let user_agent = headers
+    let user_agent = parts
+        .headers
         .get(USER_AGENT)
         .and_then(|value| value.to_str().ok());
     let session = state
@@ -123,8 +132,12 @@ pub async fn login(
     }
     tracing::info!(user = %user.id, "signed in with a web session");
 
-    let cookie = session_cookie(&session.token, i64::try_from(ttl_secs).unwrap_or(i64::MAX))
-        .ok_or_else(Problem::internal)?;
+    let cookie = session_cookie(
+        &session.token,
+        i64::try_from(ttl_secs).unwrap_or(i64::MAX),
+        secure,
+    )
+    .ok_or_else(Problem::internal)?;
     let body = LoginResponse {
         user: UserView::from(&user),
         csrf_token: session.csrf_token,
@@ -152,7 +165,11 @@ pub async fn login(
     ),
     security(("bearer" = []), ("session" = []))
 )]
-pub async fn logout(authed: Authed, State(state): State<NativeState>) -> Result<Response, Problem> {
+pub async fn logout(
+    authed: Authed,
+    State(state): State<NativeState>,
+    parts: Parts,
+) -> Result<Response, Problem> {
     if let Some(session) = &authed.session {
         state
             .sessions()
@@ -161,9 +178,14 @@ pub async fn logout(authed: Authed, State(state): State<NativeState>) -> Result<
             .map_err(|error| problem::internal("ending a session", &error))?;
         tracing::info!(user = %authed.user_id(), "signed out of a web session");
     }
+    let secure = request_is_https(
+        &parts,
+        &state.services().trusted_proxies,
+        state.services().base_url_is_https,
+    );
     Ok((
         StatusCode::NO_CONTENT,
-        [(SET_COOKIE, cleared_session_cookie())],
+        [(SET_COOKIE, cleared_session_cookie(secure))],
     )
         .into_response())
 }
