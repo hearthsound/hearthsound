@@ -361,6 +361,16 @@ async fn an_interactive_request_preempts_a_bulk_download() {
     let play_id = request(&env, play_track, Priority::Play).await.id;
     env.wait_for_state(play_id, AcquisitionState::Completed)
         .await;
+    // The preempted run is queued again and restarted by the scheduler, which
+    // is a separate step from the interactive download finishing.
+    let deadline = Instant::now() + crate::common::WAIT_TIMEOUT;
+    while env.downloads_started(INSTANCE).await < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "the preempted download was not started again"
+        );
+        tokio::time::sleep(crate::common::WAIT_POLL_INTERVAL).await;
+    }
     assert_eq!(
         env.downloads_started(INSTANCE).await,
         3,
