@@ -54,6 +54,10 @@ httpdate = "1.0.3"
 jsonschema = { version = "0.58.6", default-features = false }
 insta = "1.49.0"
 md-5 = "0.11.0"
+# Plugin index signatures: the verifying half in the plugin host, the signing
+# half in its tests.
+minisign = "0.10.0"
+minisign-verify = "0.3.0"
 moka = { version = "0.12.16", features = ["future"] }
 notify = "8.2.0"
 notify-debouncer-full = "0.7.0"

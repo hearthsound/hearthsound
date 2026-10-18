@@ -37,6 +37,7 @@ mod error;
 pub mod files;
 mod host;
 pub mod http;
+pub mod index;
 pub mod install;
 mod instance;
 pub mod instances;
@@ -56,6 +57,7 @@ pub use engine::PluginEngine;
 pub use error::{HostError, InstallError};
 pub use files::{FileAccess, FileStat, FilesError};
 pub use host::{InstalledPlugin, PluginHost};
+pub use index::{Index, IndexClient, IndexError, IndexPlugin, IndexVersion, Unavailable};
 pub use install::{PluginRegistration, RequestedPermission, Risk, requested_permissions};
 pub use instance::{ImportRoot, InstanceConfig, InstanceHostConfig};
 pub use instances::{

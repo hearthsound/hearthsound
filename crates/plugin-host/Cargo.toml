@@ -18,6 +18,7 @@ hearthsound-config = { path = "../config" }
 hearthsound-core = { path = "../core" }
 hearthsound-db = { path = "../db" }
 jsonschema.workspace = true
+minisign-verify.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 semver = { workspace = true, features = ["serde"] }
@@ -36,6 +37,7 @@ zip.workspace = true
 
 [dev-dependencies]
 hearthsound-test-support = { path = "../test-support" }
+minisign.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber.workspace = true

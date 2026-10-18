@@ -84,6 +84,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rows and files that went with it; and `list` reports each plugin's state, its
   requested permissions, and the version waiting for approval.
 
+- The server reads plugin indexes. `IndexClient` downloads an index document
+  and its minisign signature, verifies the signature against the key the
+  repository is known by, and rejects the official index when its signature is
+  missing or does not verify; a third-party repository without a configured key
+  is accepted unsigned as unverified. The client also carries the URL and
+  public key of the official index, and picks the newest version of a plugin
+  that targets the API version this server hosts, reporting the API versions an
+  incompatible entry offers instead.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload
