@@ -539,3 +539,67 @@ async fn a_host_can_publish_on_the_servers_bus() {
     .with_event_bus(Arc::clone(&bus));
     assert!(Arc::ptr_eq(host.events(), &bus));
 }
+
+/// An update that echoes the sealed placeholder back keeps the stored secret,
+/// so the plugin is handed the secret the instance was configured with.
+#[tokio::test]
+async fn an_update_that_echoes_the_placeholder_keeps_the_secret() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .and(query_param("q", "hello"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"[{"id":"remote-1","title":"Remote Song","artists":["Remote Artist"]}]"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let endpoint = format!("{}/search", server.uri());
+
+    let env = Env::new().await;
+    env.install(HTTP_CATALOG).await;
+    let service = env.service();
+    let created = service
+        .create(&spec(
+            "httpcat",
+            HTTP_CATALOG_ID,
+            json!({ "url": endpoint }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.server_config["url"], json!(SECRET_PLACEHOLDER));
+
+    // The configuration an administrator read and sent back carries the
+    // placeholder where the secret belongs.
+    let echoed = service
+        .update(
+            "httpcat",
+            &spec(
+                "httpcat",
+                HTTP_CATALOG_ID,
+                json!({ "url": SECRET_PLACEHOLDER }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(echoed.server_config["url"], json!(SECRET_PLACEHOLDER));
+    let stored = row(&env, "httpcat").await.server_config.unwrap();
+    assert!(stored.contains("$secret"), "{stored}");
+    assert!(!stored.contains(SECRET_PLACEHOLDER), "{stored}");
+
+    // The plugin is handed the secret rather than the placeholder: the search
+    // can only reach the endpoint the configuration names, and the endpoint is
+    // the one the update echoed back.
+    service
+        .set_layer(Layer::Catalog, &["httpcat".to_owned()])
+        .await
+        .unwrap();
+    let registry = env.registry();
+    registry.rebuild().await.unwrap();
+    let instance = registry.layers(Layer::Catalog).into_iter().next().unwrap();
+    let provider = instance.catalog().unwrap().clone();
+    drop(instance);
+    let results = provider.search(&query("hello")).await.unwrap();
+    assert_eq!(results.tracks.len(), 1);
+    assert_eq!(results.tracks[0].title, "Remote Song");
+}

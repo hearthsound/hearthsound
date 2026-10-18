@@ -19,7 +19,7 @@ use hearthsound_config::secret::SecretBox;
 use hearthsound_core::providers::{
     AcquisitionProvider, ArtworkProvider, CatalogProvider, MetadataProvider,
 };
-use hearthsound_core::{Layer, Slug};
+use hearthsound_core::{Layer, ProviderError, Slug};
 
 use crate::host::{InstalledPlugin, PluginHost, instance_http_client};
 use crate::http::{HttpClient, HttpError, HttpRequest};
@@ -443,6 +443,42 @@ impl ProviderRegistry {
             .instance(slug)
             .ok_or_else(|| FetchError::UnknownInstance(slug.to_owned()))?;
         instance.fetch_image(url).await
+    }
+
+    /// Runs one instance's `lifecycle.health` probe.
+    ///
+    /// The probe runs through the first provider the instance holds, in layer
+    /// order: catalog, metadata, acquisition, artwork. Every one of them is the
+    /// plugin's own `lifecycle.health`, so one probe answers for the instance,
+    /// and an instance in service always holds at least one provider, because
+    /// the registry only serves instances an administrator assigned to a layer.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the instance slug.
+    ///
+    /// # Returns
+    ///
+    /// `None` when the registry serves no instance with the slug - an unknown
+    /// instance, or one that is disabled, unassigned or whose plugin could not
+    /// be loaded - and otherwise what the probe reported.
+    pub async fn health(&self, slug: &str) -> Option<Result<String, ProviderError>> {
+        let instance = self.instance(slug)?;
+        if let Some(provider) = instance.catalog() {
+            return Some(provider.health().await);
+        }
+        if let Some(provider) = instance.metadata() {
+            return Some(provider.health().await);
+        }
+        if let Some(provider) = instance.acquisition() {
+            return Some(provider.health().await);
+        }
+        if let Some(provider) = instance.artwork() {
+            return Some(provider.health().await);
+        }
+        // No provider is held, so nothing can serve a request for this
+        // instance; that is what `unavailable` means.
+        Some(Err(ProviderError::Unavailable))
     }
 
     /// Builds one instance's entry.

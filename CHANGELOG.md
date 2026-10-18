@@ -143,6 +143,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   repository reports whether its index is verified against a configured public
   key, and the time and error of its last fetch.
 
+- The native admin API administers the provider instances and the layers they
+  serve. `GET`/`POST /api/v1/admin/providers` list them and configure one from an
+  installed plugin; `GET`/`PATCH`/`DELETE /api/v1/admin/providers/{slug}` read,
+  change and remove one; `GET /api/v1/admin/providers/{slug}/health` runs the
+  plugin's own health probe, records its outcome on the instance and reports it.
+  `GET /api/v1/admin/layers` lists every layer this server drives with the
+  instances assigned to it, and `PUT /api/v1/admin/layers/{layer}` replaces one
+  layer's ordered instances. Every write rebuilds the provider registry before
+  it answers, so a change is in service by the time the response is sent, and a
+  plugin or a configuration the server cannot use answers the new
+  `invalid-provider` and `invalid-layer` problems.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload
@@ -153,6 +165,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publishes its latest progress at least every two seconds, state, priority,
   instance and failure changes are published at once, and percentage-only
   changes are published at most once per two-second window.
+- An instance configuration round-trips through the view it is read from: a
+  write-only field that echoes the sealed placeholder back keeps the secret the
+  instance stores - which the plugin is handed in the clear - instead of storing
+  the placeholder as the secret, and a placeholder nothing is stored for is
+  refused.
 
 ## [0.1.3] - 2026-10-17
 

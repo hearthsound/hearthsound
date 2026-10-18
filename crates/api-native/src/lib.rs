@@ -36,6 +36,8 @@
 //! | `GET`/`POST /api/v1/admin/plugins`, `POST /api/v1/admin/plugins/upload`, `GET /api/v1/admin/plugins/available` | administrators |
 //! | `GET`/`DELETE /api/v1/admin/plugins/{id}`, `POST /api/v1/admin/plugins/{id}/{approve,enable,disable,decline-upgrade}` | administrators |
 //! | `GET`/`POST /api/v1/admin/plugin-repositories`, `PATCH`/`DELETE /api/v1/admin/plugin-repositories/{id}` | administrators |
+//! | `GET`/`POST /api/v1/admin/providers`, `GET`/`PATCH`/`DELETE /api/v1/admin/providers/{slug}`, `GET /api/v1/admin/providers/{slug}/health` | administrators |
+//! | `GET /api/v1/admin/layers`, `PUT /api/v1/admin/layers/{layer}` | administrators |
 //! | `POST /api/v1/uploads` | any user with `can_upload`, when uploads are enabled |
 //! | `GET /api/v1/events` | any user; each event the caller's audience admits (administrators see all) |
 //! | `POST /api/v1/events/ticket` | any user, a single-use ticket for the stream |
@@ -174,6 +176,16 @@ fn api_router() -> OpenApiRouter<NativeState> {
         .routes(routes!(
             routes::admin_plugin_repositories::delete_repository
         ))
+        .routes(routes!(
+            routes::admin_providers::list_providers,
+            routes::admin_providers::create_provider
+        ))
+        .routes(routes!(routes::admin_providers::get_provider))
+        .routes(routes!(routes::admin_providers::patch_provider))
+        .routes(routes!(routes::admin_providers::delete_provider))
+        .routes(routes!(routes::admin_providers::provider_health))
+        .routes(routes!(routes::admin_layers::list_layers))
+        .routes(routes!(routes::admin_layers::put_layer))
         .routes(routes!(routes::events::create_ticket))
         .routes(routes!(routes::events::stream))
         .merge(

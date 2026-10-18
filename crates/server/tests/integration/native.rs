@@ -2552,3 +2552,516 @@ mod repository_admin {
         fixture.stop().await;
     }
 }
+
+mod provider_admin {
+    use hearthsound_core::Layer;
+    use hearthsound_plugin_host::{PluginRepository, PluginSource};
+    use hearthsound_test_support::{ALBUM_CATALOG, HELLO_CATALOG, HTTP_CATALOG, METADATA_FIXTURE};
+    use serde_json::json;
+
+    use super::*;
+
+    /// The id of the HTTP catalog fixture.
+    const HTTP_CATALOG_ID: &str = "com.example.http-catalog";
+
+    /// The id of the metadata fixture.
+    const METADATA_ID: &str = "com.example.metadata-fixture";
+
+    /// Installs a fixture plugin as approved and enabled.
+    ///
+    /// The provider resources are about configuring instances, so the plugins
+    /// they are configured from are installed directly rather than through the
+    /// plugin routes.
+    async fn install_plugin(fixture: &Fixture, archive: &str, id: &str) {
+        let installed = fixture
+            .services
+            .plugins()
+            .install(&hearthsound_test_support::fixture_plugin(archive))
+            .await
+            .unwrap();
+        let registration = PluginRepository::new(fixture.services.database())
+            .register_approved(&installed, PluginSource::Sideload)
+            .await
+            .unwrap();
+        assert_eq!(registration.id, id);
+    }
+
+    /// Configures one instance through the API and returns its view.
+    async fn create_provider(fixture: &Fixture, slug: &str, plugin_id: &str) -> Value {
+        let response = bearer(
+            fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/providers",
+            Some(json!({ "slug": slug, "pluginId": plugin_id })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED, "the create failed");
+        json(response).await
+    }
+
+    /// Returns the slugs the registry serves for one layer, in order.
+    fn served(fixture: &Fixture, layer: Layer) -> Vec<String> {
+        fixture
+            .services
+            .registry()
+            .layers(layer)
+            .iter()
+            .map(|instance| instance.slug().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_provider_is_configured_changed_and_removed() {
+        let fixture = Fixture::new().await;
+        install_plugin(&fixture, HTTP_CATALOG, HTTP_CATALOG_ID).await;
+
+        // The instance is configured from the plugin, with a secret field.
+        let created = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/providers",
+            Some(json!({
+                "slug": "httpcat",
+                "pluginId": HTTP_CATALOG_ID,
+                "displayName": "HTTP catalog",
+                "serverConfig": {
+                    "url": "https://catalog.example/search",
+                    "coverUrl": "https://covers.example/cover.jpg",
+                },
+            })),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED, "the create failed");
+        let created = json(created).await;
+        assert_eq!(created["slug"], "httpcat");
+        assert_eq!(created["pluginId"], HTTP_CATALOG_ID);
+        assert_eq!(created["displayName"], "HTTP catalog");
+        assert_eq!(created["enabled"], true);
+        assert_eq!(created["serverConfig"]["url"], "[sealed]");
+        assert_eq!(
+            created["serverConfig"]["coverUrl"],
+            "https://covers.example/cover.jpg"
+        );
+        assert_eq!(created["hostConfig"]["maxConcurrent"], 2);
+        assert!(created["health"].is_null());
+        assert!(created["createdAt"].is_i64());
+
+        // The listing and the single read agree with the create.
+        let listed = json(
+            bearer(
+                &fixture,
+                reqwest::Method::GET,
+                "/api/v1/admin/providers",
+                None,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(listed["providers"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["providers"][0], created);
+        let read = bearer(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/admin/providers/httpcat",
+            None,
+        )
+        .await;
+        assert_eq!(read.status(), StatusCode::OK);
+        assert_eq!(json(read).await, created);
+
+        // A patch that echoes the sealed placeholder back keeps the stored
+        // secret: the row holds a sealed value, never the placeholder.
+        let patched = json(
+            bearer(
+                &fixture,
+                reqwest::Method::PATCH,
+                "/api/v1/admin/providers/httpcat",
+                Some(json!({
+                    "displayName": "Renamed",
+                    "serverConfig": {
+                        "url": "[sealed]",
+                        "coverUrl": "https://covers.example/500.jpg",
+                    },
+                })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(patched["displayName"], "Renamed");
+        assert_eq!(patched["serverConfig"]["url"], "[sealed]");
+        assert_eq!(
+            patched["serverConfig"]["coverUrl"],
+            "https://covers.example/500.jpg"
+        );
+        let stored = fixture
+            .services
+            .plugin_repository()
+            .instance_by_slug("httpcat")
+            .await
+            .unwrap()
+            .unwrap()
+            .server_config
+            .unwrap();
+        assert!(stored.contains("$secret"), "{stored}");
+        assert!(!stored.contains("[sealed]"), "{stored}");
+
+        // A patch of the name alone leaves the configuration as it is.
+        let renamed = json(
+            bearer(
+                &fixture,
+                reqwest::Method::PATCH,
+                "/api/v1/admin/providers/httpcat",
+                Some(json!({ "displayName": "Again" })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(renamed["displayName"], "Again");
+        assert_eq!(renamed["serverConfig"]["url"], "[sealed]");
+        assert_eq!(
+            renamed["serverConfig"]["coverUrl"],
+            "https://covers.example/500.jpg"
+        );
+
+        // The patch switches the instance off and on again.
+        let disabled = json(
+            bearer(
+                &fixture,
+                reqwest::Method::PATCH,
+                "/api/v1/admin/providers/httpcat",
+                Some(json!({ "enabled": false })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(disabled["enabled"], false);
+        assert_eq!(disabled["displayName"], "Again");
+        let enabled = json(
+            bearer(
+                &fixture,
+                reqwest::Method::PATCH,
+                "/api/v1/admin/providers/httpcat",
+                Some(json!({ "enabled": true })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(enabled["enabled"], true);
+
+        // An unknown slug is a not-found problem on every route.
+        for (method, body) in [
+            (reqwest::Method::GET, None),
+            (reqwest::Method::PATCH, Some(json!({ "enabled": true }))),
+            (reqwest::Method::DELETE, None),
+        ] {
+            let missing = bearer(&fixture, method, "/api/v1/admin/providers/ghost", body).await;
+            assert_problem(missing, StatusCode::NOT_FOUND, "not-found").await;
+        }
+
+        // Removal takes the instance with it.
+        let removed = bearer(
+            &fixture,
+            reqwest::Method::DELETE,
+            "/api/v1/admin/providers/httpcat",
+            None,
+        )
+        .await;
+        assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+        let gone = bearer(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/admin/providers/httpcat",
+            None,
+        )
+        .await;
+        assert_problem(gone, StatusCode::NOT_FOUND, "not-found").await;
+        let listed = json(
+            bearer(
+                &fixture,
+                reqwest::Method::GET,
+                "/api/v1/admin/providers",
+                None,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(listed["providers"].as_array().unwrap().len(), 0);
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_layer_reorders_the_instances_the_registry_serves() {
+        let fixture = Fixture::new().await;
+        install_plugin(&fixture, HELLO_CATALOG, "com.example.hello-catalog").await;
+        install_plugin(&fixture, ALBUM_CATALOG, "com.example.album-catalog").await;
+        create_provider(&fixture, "hello", "com.example.hello-catalog").await;
+        create_provider(&fixture, "album", "com.example.album-catalog").await;
+
+        // Nothing is assigned yet, and the listing reports every layer this
+        // server can drive.
+        let listed =
+            json(bearer(&fixture, reqwest::Method::GET, "/api/v1/admin/layers", None).await).await;
+        assert_eq!(
+            listed["layers"],
+            json!([
+                { "layer": "catalog", "instances": [] },
+                { "layer": "metadata", "instances": [] },
+                { "layer": "acquisition", "instances": [] },
+                { "layer": "artwork", "instances": [] },
+            ])
+        );
+        assert!(served(&fixture, Layer::Catalog).is_empty());
+
+        // The layer takes the instances in the order the body gives them.
+        let assigned = bearer(
+            &fixture,
+            reqwest::Method::PUT,
+            "/api/v1/admin/layers/catalog",
+            Some(json!(["album", "hello"])),
+        )
+        .await;
+        assert_eq!(assigned.status(), StatusCode::OK);
+        assert_eq!(
+            json(assigned).await,
+            json!({ "layer": "catalog", "instances": ["album", "hello"] })
+        );
+        assert_eq!(served(&fixture, Layer::Catalog), ["album", "hello"]);
+        assert!(served(&fixture, Layer::Metadata).is_empty());
+
+        // The new order is in service as soon as the assignment answers.
+        let reordered = bearer(
+            &fixture,
+            reqwest::Method::PUT,
+            "/api/v1/admin/layers/catalog",
+            Some(json!(["hello"])),
+        )
+        .await;
+        assert_eq!(reordered.status(), StatusCode::OK);
+        assert_eq!(served(&fixture, Layer::Catalog), ["hello"]);
+        let listed =
+            json(bearer(&fixture, reqwest::Method::GET, "/api/v1/admin/layers", None).await).await;
+        assert_eq!(listed["layers"][0]["instances"], json!(["hello"]));
+
+        // An empty body leaves the layer with nothing assigned.
+        let cleared = bearer(
+            &fixture,
+            reqwest::Method::PUT,
+            "/api/v1/admin/layers/catalog",
+            Some(json!([])),
+        )
+        .await;
+        assert_eq!(cleared.status(), StatusCode::OK);
+        assert_eq!(
+            json(cleared).await,
+            json!({ "layer": "catalog", "instances": [] })
+        );
+        assert!(served(&fixture, Layer::Catalog).is_empty());
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_bad_layer_or_an_unknown_plugin_is_unprocessable() {
+        let fixture = Fixture::new().await;
+        install_plugin(&fixture, METADATA_FIXTURE, METADATA_ID).await;
+        create_provider(&fixture, "meta", METADATA_ID).await;
+
+        // A plugin that is not installed.
+        let unknown = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/providers",
+            Some(json!({ "slug": "nope", "pluginId": "com.example.unknown" })),
+        )
+        .await;
+        assert_problem(
+            unknown,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid-provider",
+        )
+        .await;
+
+        // A configuration the plugin's schema rejects.
+        let bad_config = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/providers",
+            Some(json!({
+                "slug": "bad",
+                "pluginId": METADATA_ID,
+                "serverConfig": { "recordings": "not a list" },
+            })),
+        )
+        .await;
+        assert_problem(
+            bad_config,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid-provider",
+        )
+        .await;
+
+        // A slug that is not a legal slug, and one that is taken.
+        let bad_slug = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/providers",
+            Some(json!({ "slug": "NO", "pluginId": METADATA_ID })),
+        )
+        .await;
+        assert_problem(bad_slug, StatusCode::BAD_REQUEST, "invalid-request").await;
+        let taken = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/providers",
+            Some(json!({ "slug": "meta", "pluginId": METADATA_ID })),
+        )
+        .await;
+        assert_problem(taken, StatusCode::CONFLICT, "conflict").await;
+
+        // A layer this server cannot drive, and one it does not know.
+        for layer in ["scrobble", "nonsense"] {
+            let refused = bearer(
+                &fixture,
+                reqwest::Method::PUT,
+                &format!("/api/v1/admin/layers/{layer}"),
+                Some(json!([])),
+            )
+            .await;
+            assert_problem(refused, StatusCode::UNPROCESSABLE_ENTITY, "invalid-layer").await;
+        }
+
+        // A slug that names no instance.
+        let ghost = bearer(
+            &fixture,
+            reqwest::Method::PUT,
+            "/api/v1/admin/layers/metadata",
+            Some(json!(["ghost"])),
+        )
+        .await;
+        assert_problem(ghost, StatusCode::NOT_FOUND, "not-found").await;
+
+        // An instance whose plugin does not provide the layer, and the same
+        // slug twice in one layer.
+        let wrong_layer = bearer(
+            &fixture,
+            reqwest::Method::PUT,
+            "/api/v1/admin/layers/catalog",
+            Some(json!(["meta"])),
+        )
+        .await;
+        assert_problem(
+            wrong_layer,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid-layer",
+        )
+        .await;
+        let twice = bearer(
+            &fixture,
+            reqwest::Method::PUT,
+            "/api/v1/admin/layers/metadata",
+            Some(json!(["meta", "meta"])),
+        )
+        .await;
+        assert_problem(twice, StatusCode::UNPROCESSABLE_ENTITY, "invalid-layer").await;
+
+        // A body that is not an array of slugs.
+        let wrong_body = bearer(
+            &fixture,
+            reqwest::Method::PUT,
+            "/api/v1/admin/layers/metadata",
+            Some(json!({ "instances": ["meta"] })),
+        )
+        .await;
+        assert_problem(wrong_body, StatusCode::BAD_REQUEST, "invalid-request").await;
+
+        // Nothing the refused calls asked for was written.
+        assert!(served(&fixture, Layer::Metadata).is_empty());
+        let listed = json(
+            bearer(
+                &fixture,
+                reqwest::Method::GET,
+                "/api/v1/admin/providers",
+                None,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(listed["providers"].as_array().unwrap().len(), 1);
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_health_check_runs_and_is_visible_afterwards() {
+        let fixture = Fixture::new().await;
+        install_plugin(&fixture, METADATA_FIXTURE, METADATA_ID).await;
+        create_provider(&fixture, "meta", METADATA_ID).await;
+
+        // An instance that is not in service cannot be probed.
+        let idle = bearer(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/admin/providers/meta/health",
+            None,
+        )
+        .await;
+        assert_problem(idle, StatusCode::CONFLICT, "conflict").await;
+
+        // Assigning it to its layer puts it in service.
+        let assigned = bearer(
+            &fixture,
+            reqwest::Method::PUT,
+            "/api/v1/admin/layers/metadata",
+            Some(json!(["meta"])),
+        )
+        .await;
+        assert_eq!(assigned.status(), StatusCode::OK);
+
+        let checked = bearer(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/admin/providers/meta/health",
+            None,
+        )
+        .await;
+        assert_eq!(checked.status(), StatusCode::OK);
+        let checked = json(checked).await;
+        assert_eq!(checked["slug"], "meta");
+        assert_eq!(checked["ok"], true);
+        assert_eq!(checked["detail"], "metadata-fixture ready");
+        assert!(checked["checkedAt"].is_i64());
+
+        // The outcome is recorded, so a later read reports it.
+        let read = json(
+            bearer(
+                &fixture,
+                reqwest::Method::GET,
+                "/api/v1/admin/providers/meta",
+                None,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(read["health"], checked);
+        let listed = json(
+            bearer(
+                &fixture,
+                reqwest::Method::GET,
+                "/api/v1/admin/providers",
+                None,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(listed["providers"][0]["health"], checked);
+
+        // An unknown instance is a not-found problem.
+        let missing = bearer(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/admin/providers/ghost/health",
+            None,
+        )
+        .await;
+        assert_problem(missing, StatusCode::NOT_FOUND, "not-found").await;
+        fixture.stop().await;
+    }
+}

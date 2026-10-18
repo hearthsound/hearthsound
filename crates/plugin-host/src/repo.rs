@@ -801,6 +801,35 @@ impl PluginRepository {
         Ok(())
     }
 
+    /// Records the outcome of one instance health check.
+    ///
+    /// The outcome is stored as the JSON text of what the check reported, so a
+    /// later read shows the same result and when it was taken. The instance's
+    /// `updated_at` is left alone: a probe is not a configuration change.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the instance id.
+    /// - `health`: the outcome as JSON text, or `None` to clear it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::Database`] when the write fails.
+    pub async fn set_instance_health(
+        &self,
+        id: Uuid,
+        health: Option<&str>,
+    ) -> Result<(), RepoError> {
+        sqlx::query!(
+            "UPDATE provider_instances SET health = ? WHERE id = ?",
+            health,
+            id.as_bytes().as_slice(),
+        )
+        .execute(&self.writer)
+        .await?;
+        Ok(())
+    }
+
     /// Deletes one instance and everything that hangs off it.
     ///
     /// The instance's `plugin_kv` rows and its layer assignments go with it,

@@ -83,3 +83,4 @@ pub use updates::{
     PluginUpdate, UPDATE_CHECK_JOB_KIND, UPDATE_CHECK_SCHEDULE, UpdateCheckJobHandler,
     UpdateCheckReport, UpdateChecker,
 };
+pub use validate::HOSTED_LAYERS;

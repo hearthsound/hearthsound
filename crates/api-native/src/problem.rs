@@ -20,6 +20,8 @@
 //! | `too-large` | 413 | an upload exceeds `uploads.max_file_bytes` |
 //! | `unsupported-media` | 415 | an upload is not audio the library indexes |
 //! | `invalid-plugin` | 422 | the archive is not a plugin this server can host |
+//! | `invalid-provider` | 422 | the provider instance cannot be configured this way |
+//! | `invalid-layer` | 422 | the layer cannot take these instances |
 //! | `rate-limited` | 429 | too many failed sign-ins; `Retry-After` says when to retry |
 //! | `internal` | 500 | the server failed; the log has the details |
 //! | `signature-invalid` | 502 | a plugin index is unsigned or its signature does not verify |
@@ -209,6 +211,26 @@ impl Problem {
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid-plugin",
             "Invalid plugin",
+            detail,
+        )
+    }
+
+    /// The instance cannot be configured this way.
+    pub fn invalid_provider(detail: impl Into<String>) -> Problem {
+        Problem::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid-provider",
+            "Invalid provider configuration",
+            detail,
+        )
+    }
+
+    /// The layer cannot take these instances.
+    pub fn invalid_layer(detail: impl Into<String>) -> Problem {
+        Problem::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid-layer",
+            "Invalid layer assignment",
             detail,
         )
     }
