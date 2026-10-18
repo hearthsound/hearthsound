@@ -76,6 +76,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an acquisition provider is enabled, the enabled provider instances of every
   layer, and the vendor features the server implements.
 
+- The `plugins` command manages the whole plugin lifecycle. `install` records an
+  archive as pending approval and prints the permissions it requests with their
+  risk labels and the command that approves it; `approve` grants them or applies
+  a staged upgrade; `enable` and `disable` switch an approved plugin;
+  `decline-upgrade` discards a staged upgrade; `remove` deletes a plugin with the
+  rows and files that went with it; and `list` reports each plugin's state, its
+  requested permissions, and the version waiting for approval.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload

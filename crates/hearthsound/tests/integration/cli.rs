@@ -601,6 +601,8 @@ fn plugins_providers_and_layers_configure_the_hello_fixture() {
     );
     assert!(installed.contains("provides: catalog"), "{installed}");
 
+    succeeded(&sandbox.run(&["plugins", "approve", "com.example.hello-catalog"]));
+
     let listed = succeeded(&sandbox.run(&["plugins", "list"]));
     assert!(
         listed.contains("com.example.hello-catalog 0.1.0"),
@@ -660,7 +662,317 @@ fn plugins_install_can_record_a_bundled_plugin() {
     assert!(installed.contains("(bundled)"), "{installed}");
 
     let listed = succeeded(&sandbox.run(&["plugins", "list"]));
-    assert!(listed.contains("(bundled)"), "{listed}");
+    assert!(listed.contains("(bundled, pending-approval)"), "{listed}");
+}
+
+/// `plugins install` prints the requested permissions and waits for approval.
+#[test]
+fn plugins_install_waits_for_approval_and_reports_the_requested_permissions() {
+    let sandbox = Sandbox::new("");
+    let archive = hearthsound_test_support::fixture_plugin(hearthsound_test_support::HELLO_CATALOG);
+    let id = "com.example.hello-catalog";
+
+    let installed = succeeded(&sandbox.run(&["plugins", "install", archive.to_str().unwrap()]));
+    assert!(
+        installed.contains("installed com.example.hello-catalog 0.1.0 (sideload)"),
+        "{installed}"
+    );
+    assert!(installed.contains("requested permissions:"), "{installed}");
+    assert!(
+        installed.contains("medium") && installed.contains("$config:coverUrl (http.hosts)"),
+        "{installed}"
+    );
+    assert!(
+        installed
+            .contains("approve it with: hearthsound plugins approve com.example.hello-catalog"),
+        "{installed}"
+    );
+
+    let listed = succeeded(&sandbox.run(&["plugins", "list"]));
+    assert!(
+        listed.contains("com.example.hello-catalog 0.1.0 (sideload, pending-approval)"),
+        "{listed}"
+    );
+    assert!(listed.contains("$config:coverUrl (http.hosts)"), "{listed}");
+
+    let approved = succeeded(&sandbox.run(&["plugins", "approve", id]));
+    assert!(
+        approved.contains("approved com.example.hello-catalog 0.1.0 and enabled it"),
+        "{approved}"
+    );
+
+    let listed = succeeded(&sandbox.run(&["plugins", "list"]));
+    assert!(
+        listed.contains("com.example.hello-catalog 0.1.0 (sideload, enabled)"),
+        "{listed}"
+    );
+
+    succeeded(&sandbox.run(&["plugins", "enable", id]));
+    let disabled = succeeded(&sandbox.run(&["plugins", "disable", id]));
+    assert!(
+        disabled.contains("disabled com.example.hello-catalog"),
+        "{disabled}"
+    );
+
+    let listed = succeeded(&sandbox.run(&["plugins", "list"]));
+    assert!(
+        listed.contains("com.example.hello-catalog 0.1.0 (sideload, disabled)"),
+        "{listed}"
+    );
+}
+
+/// A plugin that requests no permissions still waits for approval.
+#[test]
+fn plugins_install_reports_a_plugin_that_requests_no_permissions() {
+    let sandbox = Sandbox::new("");
+    let archive = hearthsound_test_support::fixture_plugin(hearthsound_test_support::ALBUM_CATALOG);
+    let id = "com.example.album-catalog";
+
+    let installed = succeeded(&sandbox.run(&["plugins", "install", archive.to_str().unwrap()]));
+    assert!(
+        installed.contains("installed com.example.album-catalog 0.1.0 (sideload)"),
+        "{installed}"
+    );
+    assert!(installed.contains("requests no permissions"), "{installed}");
+    assert!(
+        installed
+            .contains("approve it with: hearthsound plugins approve com.example.album-catalog"),
+        "{installed}"
+    );
+
+    let listed = succeeded(&sandbox.run(&["plugins", "list"]));
+    assert!(
+        listed.contains("com.example.album-catalog 0.1.0 (sideload, pending-approval)"),
+        "{listed}"
+    );
+    assert!(listed.contains("  requests no permissions"), "{listed}");
+
+    succeeded(&sandbox.run(&["plugins", "approve", id]));
+    let listed = succeeded(&sandbox.run(&["plugins", "list"]));
+    assert!(
+        listed.contains("com.example.album-catalog 0.1.0 (sideload, enabled)"),
+        "{listed}"
+    );
+}
+
+/// A newer version that asks for more waits, and declining it clears the wait.
+#[test]
+fn plugins_decline_upgrade_discards_the_parked_version() {
+    let sandbox = Sandbox::new("");
+    let id = "com.example.hello-catalog";
+    let archive = hearthsound_test_support::fixture_plugin(hearthsound_test_support::HELLO_CATALOG);
+
+    succeeded(&sandbox.run(&["plugins", "install", archive.to_str().unwrap()]));
+    succeeded(&sandbox.run(&["plugins", "approve", id]));
+
+    let upgraded = repacked_hello_catalog(
+        &sandbox.data(),
+        "com.example.hello-catalog-0.2.0.hsplugin",
+        |manifest| {
+            manifest["version"] = serde_json::json!("0.2.0");
+            manifest["permissions"]["http"]["hosts"] =
+                serde_json::json!(["$config:coverUrl", "api.example.com"]);
+        },
+    );
+    let staged = succeeded(&sandbox.run(&["plugins", "install", upgraded.to_str().unwrap()]));
+    assert!(
+        staged.contains("installed com.example.hello-catalog 0.2.0 (sideload)"),
+        "{staged}"
+    );
+
+    let listed = succeeded(&sandbox.run(&["plugins", "list"]));
+    assert!(
+        listed.contains("com.example.hello-catalog 0.1.0 (sideload, upgrade-pending-approval)"),
+        "{listed}"
+    );
+    assert!(listed.contains("waiting for approval: 0.2.0"), "{listed}");
+
+    let declined = succeeded(&sandbox.run(&["plugins", "decline-upgrade", id]));
+    assert!(
+        declined.contains("declined the upgrade to com.example.hello-catalog 0.2.0"),
+        "{declined}"
+    );
+    assert!(
+        declined.contains("com.example.hello-catalog 0.1.0 stays in service"),
+        "{declined}"
+    );
+
+    let listed = succeeded(&sandbox.run(&["plugins", "list"]));
+    assert!(
+        listed.contains("com.example.hello-catalog 0.1.0 (sideload, enabled)"),
+        "{listed}"
+    );
+    assert!(!listed.contains("waiting for approval"), "{listed}");
+    assert!(
+        !sandbox
+            .data()
+            .join("plugins")
+            .join(id)
+            .join("0.2.0")
+            .exists(),
+        "the staged version's files must be removed"
+    );
+}
+
+/// `remove` deletes the plugin, the rows that pointed at it, and its files.
+#[test]
+fn plugins_remove_deletes_the_plugin_and_its_files() {
+    let sandbox = Sandbox::new("");
+    let id = "com.example.hello-catalog";
+    let archive = hearthsound_test_support::fixture_plugin(hearthsound_test_support::HELLO_CATALOG);
+    let downloads = sandbox.data().join("downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+
+    succeeded(&sandbox.run(&["plugins", "install", archive.to_str().unwrap()]));
+    succeeded(&sandbox.run(&["plugins", "approve", id]));
+    succeeded(&sandbox.run(&[
+        "providers",
+        "add",
+        "--plugin",
+        id,
+        "--slug",
+        "hello",
+        "--plugin-config",
+        "{}",
+        "--import-root",
+        &format!("downloads={}:move", downloads.display()),
+    ]));
+    succeeded(&sandbox.run(&["layers", "set", "catalog", "hello"]));
+
+    let removed = succeeded(&sandbox.run(&["plugins", "remove", id]));
+    assert!(
+        removed.contains("removed com.example.hello-catalog 0.1.0 (sideload)"),
+        "{removed}"
+    );
+    assert!(
+        removed.contains("cascaded 1 provider instance and 1 layer assignment"),
+        "{removed}"
+    );
+    assert!(
+        removed.contains(&format!(
+            "removed the files in {}",
+            sandbox.data().join("plugins").join(id).display()
+        )),
+        "{removed}"
+    );
+    assert!(
+        !sandbox.data().join("plugins").join(id).exists(),
+        "the plugin's files must be removed"
+    );
+
+    let listed = succeeded(&sandbox.run(&["plugins", "list"]));
+    assert!(listed.contains("no plugins are installed"), "{listed}");
+}
+
+/// Every lifecycle command refuses an operation its state does not allow.
+#[test]
+fn plugin_lifecycle_commands_refuse_forbidden_operations() {
+    let sandbox = Sandbox::new("");
+    let id = "com.example.hello-catalog";
+    let archive = hearthsound_test_support::fixture_plugin(hearthsound_test_support::HELLO_CATALOG);
+
+    let unknown = sandbox.run(&["plugins", "approve", "com.example.absent"]);
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(
+        stderr(&unknown).contains("no plugin `com.example.absent` is installed"),
+        "{}",
+        stderr(&unknown)
+    );
+
+    succeeded(&sandbox.run(&["plugins", "install", archive.to_str().unwrap()]));
+
+    for command in ["enable", "disable"] {
+        let refused = sandbox.run(&["plugins", command, id]);
+        assert_eq!(refused.status.code(), Some(1));
+        assert!(
+            stderr(&refused).contains("is pending approval"),
+            "{}",
+            stderr(&refused)
+        );
+    }
+
+    let nothing_to_decline = sandbox.run(&["plugins", "decline-upgrade", id]);
+    assert_eq!(nothing_to_decline.status.code(), Some(1));
+    assert!(
+        stderr(&nothing_to_decline).contains("has no staged upgrade"),
+        "{}",
+        stderr(&nothing_to_decline)
+    );
+
+    succeeded(&sandbox.run(&["plugins", "approve", id]));
+    let nothing_to_approve = sandbox.run(&["plugins", "approve", id]);
+    assert_eq!(nothing_to_approve.status.code(), Some(1));
+    assert!(
+        stderr(&nothing_to_approve).contains("has nothing to approve"),
+        "{}",
+        stderr(&nothing_to_approve)
+    );
+
+    let unknown_remove = sandbox.run(&["plugins", "remove", "com.example.absent"]);
+    assert_eq!(unknown_remove.status.code(), Some(1));
+    assert!(
+        stderr(&unknown_remove).contains("no plugin `com.example.absent` is installed"),
+        "{}",
+        stderr(&unknown_remove)
+    );
+}
+
+/// Reads one entry out of a `.hsplugin` archive.
+///
+/// # Parameters
+///
+/// - `archive`: the archive to read.
+/// - `name`: the entry's name inside the archive.
+fn read_entry(archive: &Path, name: &str) -> Vec<u8> {
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(archive).unwrap()).unwrap();
+    let mut buffer = Vec::new();
+    zip.by_name(name).unwrap().read_to_end(&mut buffer).unwrap();
+    buffer
+}
+
+/// Writes an archive holding a manifest and a component.
+///
+/// # Parameters
+///
+/// - `archive`: the path to write.
+/// - `manifest`: the manifest's JSON text.
+/// - `wasm`: the component's bytes.
+fn write_archive(archive: &Path, manifest: &[u8], wasm: &[u8]) {
+    let file = std::fs::File::create(archive).unwrap();
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    writer.start_file("manifest.json", options).unwrap();
+    writer.write_all(manifest).unwrap();
+    writer.start_file("plugin.wasm", options).unwrap();
+    writer.write_all(wasm).unwrap();
+    writer.finish().unwrap();
+}
+
+/// Repacks the hello catalog fixture with an edited manifest.
+///
+/// The component is copied unchanged, so the repacked archive installs exactly
+/// like the fixture and only its manifest differs.
+///
+/// # Parameters
+///
+/// - `dir`: the directory to write the repacked archive into.
+/// - `file_name`: the repacked archive's file name.
+/// - `edit`: the change to make to the fixture's manifest.
+fn repacked_hello_catalog(
+    dir: &Path,
+    file_name: &str,
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> PathBuf {
+    let source = hearthsound_test_support::fixture_plugin(hearthsound_test_support::HELLO_CATALOG);
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&read_entry(&source, "manifest.json")).unwrap();
+    edit(&mut manifest);
+    let manifest = serde_json::to_vec(&manifest).unwrap();
+    let wasm = read_entry(&source, "plugin.wasm");
+    let target = dir.join(file_name);
+    write_archive(&target, &manifest, &wasm);
+    target
 }
 
 /// `layers set` refuses a layer name that does not exist.

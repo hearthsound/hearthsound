@@ -37,3 +37,4 @@ uuid.workspace = true
 hearthsound-test-support = { path = "../test-support" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+zip.workspace = true

@@ -13,6 +13,7 @@
 //! built by the commands that need wasmtime.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -148,6 +149,14 @@ impl Context {
     /// Returns the runtime settings service.
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// Returns the directory the installed plugin trees live under.
+    ///
+    /// Each plugin's files sit in `<plugins_dir>/<id>/<version>`, and removing
+    /// a plugin removes `<plugins_dir>/<id>`.
+    pub fn plugins_dir(&self) -> &Path {
+        &self.config.paths.plugins
     }
 
     /// Returns the secret box of the secret key file.

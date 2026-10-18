@@ -48,7 +48,7 @@ pub enum Command {
     Settings(SettingsArgs),
     /// Manage accounts, credentials, and library folders.
     Admin(AdminArgs),
-    /// Install plugins and list what is installed.
+    /// Install plugins, manage their lifecycle, and list them.
     Plugins(PluginsArgs),
     /// Configure provider instances and list them.
     Providers(ProvidersArgs),
@@ -237,8 +237,18 @@ pub struct PluginsArgs {
 /// Every command under `plugins`.
 #[derive(Debug, Subcommand)]
 pub enum PluginsCommand {
-    /// Install a `.hsplugin` archive and enable it.
+    /// Install a `.hsplugin` archive, which then waits for approval.
     Install(InstallPluginArgs),
+    /// Approve a plugin's requested permissions.
+    Approve(PluginIdArgs),
+    /// Switch an approved plugin on.
+    Enable(PluginIdArgs),
+    /// Switch an approved plugin off.
+    Disable(PluginIdArgs),
+    /// Discard the newer version waiting for approval.
+    DeclineUpgrade(PluginIdArgs),
+    /// Remove a plugin, its rows, and its files.
+    Remove(PluginIdArgs),
     /// List the installed plugins.
     List,
 }
@@ -252,6 +262,14 @@ pub struct InstallPluginArgs {
     /// Record the plugin as shipped with the server rather than sideloaded.
     #[arg(long)]
     pub bundled: bool,
+}
+
+/// The arguments of a command that names one installed plugin.
+#[derive(Debug, Args)]
+pub struct PluginIdArgs {
+    /// The id of the plugin, as its manifest writes it.
+    #[arg(value_name = "ID")]
+    pub id: String,
 }
 
 /// The arguments of `providers`.

@@ -56,7 +56,7 @@ pub use engine::PluginEngine;
 pub use error::{HostError, InstallError};
 pub use files::{FileAccess, FileStat, FilesError};
 pub use host::{InstalledPlugin, PluginHost};
-pub use install::{PluginRegistration, RequestedPermission, Risk};
+pub use install::{PluginRegistration, RequestedPermission, Risk, requested_permissions};
 pub use instance::{ImportRoot, InstanceConfig, InstanceHostConfig};
 pub use instances::{
     InstanceError, InstanceService, InstanceSpec, InstanceView, SECRET_PLACEHOLDER,
