@@ -103,19 +103,99 @@ pub async fn unlike(
     Ok(removed > 0)
 }
 
-/// Brings the personal-library pin of every track a like affects up to date.
+/// Saves an entity into a user's personal library.
+///
+/// A saved entity is a `user_library` row whose origin is `saved`, so it is the
+/// user's own decision rather than an upload's side effect; saving something
+/// already saved refreshes the instant. The personal-library pin of every track
+/// the save affects is refreshed in the same transaction, which is what makes a
+/// saved album pin its member tracks.
 ///
 /// # Parameters
 ///
 /// - `conn`: the connection or transaction to write on.
-/// - `kind`: the kind of entity whose likes changed.
+/// - `user_id`: the account that saves the entity.
+/// - `kind`: the kind of entity that is saved.
+/// - `entity_id`: the entity's id.
+/// - `at`: when the save happened, in unix milliseconds.
+///
+/// # Errors
+///
+/// Returns [`ActivityError::Database`] when the row cannot be written and
+/// [`ActivityError::Library`] when a pin cannot be updated.
+pub(crate) async fn save(
+    conn: &mut SqliteConnection,
+    user_id: Uuid,
+    kind: EntityKind,
+    entity_id: Uuid,
+    at: i64,
+) -> Result<(), ActivityError> {
+    sqlx::query!(
+        "INSERT INTO user_library (user_id, entity_kind, entity_id, origin, added_at) \
+         VALUES (?, ?, ?, 'saved', ?) \
+         ON CONFLICT (user_id, entity_kind, entity_id, origin) \
+         DO UPDATE SET added_at = excluded.added_at",
+        user_id.as_bytes().as_slice(),
+        kind_literal(kind),
+        entity_id.as_bytes().as_slice(),
+        at,
+    )
+    .execute(&mut *conn)
+    .await?;
+    refresh_pins(conn, kind, entity_id).await
+}
+
+/// Removes an entity from a user's personal library.
+///
+/// Only the rows a save wrote are removed: a row whose origin is `upload` stays,
+/// because uploading a file is also a decision to keep it. The personal-library
+/// pin of every track the removal affects is refreshed in the same transaction,
+/// so unsaving an album releases the pins of its member tracks unless a like,
+/// a playlist or an upload still holds them.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `user_id`: the account that no longer saves the entity.
+/// - `kind`: the kind of entity that was saved.
+/// - `entity_id`: the entity's id.
+///
+/// # Errors
+///
+/// Returns [`ActivityError::Database`] when the rows cannot be removed and
+/// [`ActivityError::Library`] when a pin cannot be updated.
+pub(crate) async fn unsave(
+    conn: &mut SqliteConnection,
+    user_id: Uuid,
+    kind: EntityKind,
+    entity_id: Uuid,
+) -> Result<(), ActivityError> {
+    sqlx::query!(
+        "DELETE FROM user_library \
+         WHERE user_id = ? AND entity_kind = ? AND entity_id = ? AND origin = 'saved'",
+        user_id.as_bytes().as_slice(),
+        kind_literal(kind),
+        entity_id.as_bytes().as_slice(),
+    )
+    .execute(&mut *conn)
+    .await?;
+    refresh_pins(conn, kind, entity_id).await
+}
+
+/// Brings the personal-library pin of every track a like or a save affects up to
+/// date.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `kind`: the kind of entity whose likes or saves changed.
 /// - `entity_id`: the entity's id.
 ///
 /// # Errors
 ///
 /// Returns [`ActivityError`] when a row cannot be read or a pin cannot be
 /// written.
-async fn refresh_pins(
+pub(crate) async fn refresh_pins(
     conn: &mut SqliteConnection,
     kind: EntityKind,
     entity_id: Uuid,

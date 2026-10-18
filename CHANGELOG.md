@@ -50,6 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extension and prefetches its next items, so the look-ahead follows the client's
   own order instead of an inferred one.
 
+- Saving an item into a personal library and removing it again keep the
+  personal-library pin in step: a saved album pins its member tracks, and
+  removing a save releases them unless a like, a playlist or an upload still
+  holds them.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload

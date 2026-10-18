@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM user_library WHERE user_id = ? AND entity_kind = ? AND entity_id = ? AND origin = 'saved'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "c04bec4338534ca3ec80021c1456505e6134ed9d690ffd363d744c1becd6fa37"
+}

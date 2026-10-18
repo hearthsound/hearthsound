@@ -9,6 +9,7 @@ mod bookmarks;
 mod common;
 mod dislikes;
 mod feedback;
+mod library;
 mod play_queues;
 mod playlists;
 mod plays;

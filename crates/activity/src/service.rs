@@ -460,4 +460,64 @@ impl ActivityService {
         self.signal.notify();
         Ok(())
     }
+
+    /// Saves entities into a user's personal library.
+    ///
+    /// Each entity becomes a `user_library` row whose origin is `saved`, and the
+    /// whole request is one transaction with the pin refresh it implies: saving
+    /// an album pins its member tracks. Nothing is acquired here; the
+    /// `library.acquire_on_save` decision belongs to the caller that knows the
+    /// user's permission and quota.
+    ///
+    /// # Parameters
+    ///
+    /// - `user_id`: the account that saves the entities.
+    /// - `entities`: the entities to save, each with its kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActivityError`] when a row, a pin, or the commit fails.
+    pub async fn save(
+        &self,
+        user_id: Uuid,
+        entities: &[(EntityKind, Uuid)],
+    ) -> Result<(), ActivityError> {
+        let at = now_millis();
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+        for (kind, entity_id) in entities {
+            feedback::save(&mut tx, user_id, *kind, *entity_id, at).await?;
+        }
+        tx.commit().await?;
+        self.signal.notify();
+        Ok(())
+    }
+
+    /// Removes entities from a user's personal library.
+    ///
+    /// Only the rows a save wrote are removed, so an entity the user also
+    /// uploaded keeps the row that upload wrote, and the pin refresh of the same
+    /// transaction leaves every track pinned that a like, a playlist or an
+    /// upload still holds.
+    ///
+    /// # Parameters
+    ///
+    /// - `user_id`: the account that no longer saves the entities.
+    /// - `entities`: the entities to remove, each with its kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActivityError`] when a row, a pin, or the commit fails.
+    pub async fn unsave(
+        &self,
+        user_id: Uuid,
+        entities: &[(EntityKind, Uuid)],
+    ) -> Result<(), ActivityError> {
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+        for (kind, entity_id) in entities {
+            feedback::unsave(&mut tx, user_id, *kind, *entity_id).await?;
+        }
+        tx.commit().await?;
+        self.signal.notify();
+        Ok(())
+    }
 }

@@ -22,6 +22,8 @@
 //! keep the personal-library pin of every track they affect in step, so a liked
 //! track is permanent in that user's library, and
 //! [`ActivityService::set_rating`] stores a rating of 1 to 5 or clears one.
+//! [`ActivityService::save`] and [`ActivityService::unsave`] are the same
+//! operation for library membership itself.
 //! [`Playlists`] creates and edits playlists, keeping the playlist pin of every
 //! track whose membership changed in step, [`PlayQueues`] stores the queue
 //! each client saved so another client can pick it up, [`Bookmarks`] stores

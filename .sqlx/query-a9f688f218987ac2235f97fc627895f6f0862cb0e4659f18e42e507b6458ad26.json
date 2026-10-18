@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_library (user_id, entity_kind, entity_id, origin, added_at) VALUES (?, ?, ?, 'saved', ?) ON CONFLICT (user_id, entity_kind, entity_id, origin) DO UPDATE SET added_at = excluded.added_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "a9f688f218987ac2235f97fc627895f6f0862cb0e4659f18e42e507b6458ad26"
+}
