@@ -74,7 +74,9 @@ use hearthsound_library::upload::UploadIngest;
 use hearthsound_library::watch::LibraryWatcher;
 use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::instances::InstanceService;
-use hearthsound_plugin_host::{PluginHost, PluginRepository, ProviderRegistry};
+use hearthsound_plugin_host::{
+    IndexClient, PluginAdmin, PluginHost, PluginInstaller, PluginRepository, ProviderRegistry,
+};
 use tower_http::cors::CorsLayer;
 
 use crate::error::ServerError;
@@ -104,6 +106,11 @@ pub struct Services {
     catalog: Arc<CatalogService>,
     /// The write side of the plugin instance and layer tables.
     instances: InstanceService,
+    /// The administrative plugin write path: install, approve, switch, remove.
+    admin: Arc<PluginAdmin>,
+    /// The installer the admin routes install from indexes and repository URLs
+    /// with.
+    installer: Arc<PluginInstaller>,
     /// The ffmpeg process runner.
     ffmpeg: Arc<FfmpegRunner>,
     /// The acquisition orchestrator the pending stream and the admin views use.
@@ -226,7 +233,29 @@ impl Services {
         ));
         log_rebuild(&registry.rebuild().await?);
 
-        let instances = InstanceService::new(Arc::clone(&plugins), repository, secrets.clone());
+        let instances =
+            InstanceService::new(Arc::clone(&plugins), repository.clone(), secrets.clone());
+
+        // reqwest is built without a bundled TLS provider, so ring is installed
+        // as the process default before the first client is built; installing it
+        // again is harmless, which is why the plugin HTTP import does the same.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let http = reqwest::Client::builder()
+            .user_agent(format!("Hearthsound/{}", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(ServerError::HttpClient)?;
+        let admin = Arc::new(PluginAdmin::new(
+            Arc::clone(&plugins),
+            repository.clone(),
+            Some(Arc::clone(&events)),
+        ));
+        let installer = Arc::new(PluginInstaller::new(
+            Arc::clone(&admin),
+            repository.clone(),
+            IndexClient::official(http.clone())?,
+            http,
+            config.paths.plugins.clone(),
+        ));
 
         let catalog = Arc::new(CatalogService::new(
             Arc::clone(&registry),
@@ -344,6 +373,8 @@ impl Services {
             registry,
             catalog,
             instances,
+            admin,
+            installer,
             ffmpeg,
             orchestrator,
             prefetch,
@@ -412,6 +443,22 @@ impl Services {
     /// Returns the plugin instance and layer service.
     pub fn instances(&self) -> &InstanceService {
         &self.instances
+    }
+
+    /// Returns the administrative plugin write path.
+    ///
+    /// The native admin routes install through the installer and approve,
+    /// switch and remove through this service, which is why both are exposed.
+    pub fn admin(&self) -> &Arc<PluginAdmin> {
+        &self.admin
+    }
+
+    /// Returns the plugin installer.
+    ///
+    /// An install resolves an index or a repository URL, verifies the download
+    /// and records the plugin as pending approval.
+    pub fn installer(&self) -> &Arc<PluginInstaller> {
+        &self.installer
     }
 
     /// Returns the ffmpeg process runner.

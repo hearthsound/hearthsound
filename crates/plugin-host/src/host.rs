@@ -140,6 +140,14 @@ impl PluginHost {
         &self.plugins_dir
     }
 
+    /// Returns the resolved settings the host validates manifests against.
+    ///
+    /// The snapshot is the one the host was built with; a setting changed later
+    /// applies to what the next start loads.
+    pub fn settings(&self) -> &Arc<SettingsStore> {
+        &self.settings
+    }
+
     /// Returns the bus the host publishes plugin status events on.
     ///
     /// The host publishes a `plugin.status` event whenever it disables an

@@ -39,6 +39,7 @@ mod host;
 pub mod http;
 pub mod index;
 pub mod install;
+mod installer;
 mod instance;
 pub mod instances;
 pub mod kv;
@@ -59,6 +60,9 @@ pub use files::{FileAccess, FileStat, FilesError};
 pub use host::{InstalledPlugin, PluginHost};
 pub use index::{Index, IndexClient, IndexError, IndexPlugin, IndexVersion, Unavailable};
 pub use install::{PluginRegistration, RequestedPermission, Risk, requested_permissions};
+pub use installer::{
+    AvailableError, AvailablePlugin, AvailableReport, PluginInstaller, RepositoryRef,
+};
 pub use instance::{ImportRoot, InstanceConfig, InstanceHostConfig};
 pub use instances::{
     InstanceError, InstanceService, InstanceSpec, InstanceView, SECRET_PLACEHOLDER,

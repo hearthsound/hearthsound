@@ -10,6 +10,7 @@ mod artwork;
 mod artwork_provider;
 mod catalog_provider;
 mod deadline;
+mod distribution;
 mod http_catalog;
 mod install;
 mod metadata_provider;

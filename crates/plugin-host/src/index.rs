@@ -239,7 +239,7 @@ fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
-/// Why an index lists a plugin this server cannot install.
+/// Why a plugin an index lists cannot be installed here.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unavailable {
     /// Every version of the plugin targets an API version this server does not
@@ -249,6 +249,14 @@ pub enum Unavailable {
         /// The API version this server hosts.
         supported: &'static str,
         /// The API versions the offered versions target, in index order.
+        offered: Vec<String>,
+    },
+    /// The index publishes no such version of the plugin.
+    #[error("the index publishes no version `{requested}`; it offers {}", .offered.join(", "))]
+    NoSuchVersion {
+        /// The version that was requested.
+        requested: String,
+        /// The versions the index offers, in index order.
         offered: Vec<String>,
     },
 }
@@ -318,6 +326,40 @@ impl IndexClient {
             official_url,
             official_public_key,
         }
+    }
+
+    /// Builds a client for the official index.
+    ///
+    /// The client is bound to [`OFFICIAL_INDEX_URL`] and
+    /// [`OFFICIAL_INDEX_PUBLIC_KEY`], so a document fetched from that URL must
+    /// carry a signature the compiled-in key verifies.
+    ///
+    /// # Parameters
+    ///
+    /// - `http`: the HTTP client every request is made with.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IndexError::SignatureInvalid`] when the compiled-in public key
+    /// is not a minisign public key, which can only happen if the constant was
+    /// edited wrongly.
+    pub fn official(http: reqwest::Client) -> Result<IndexClient, IndexError> {
+        let key = parse_public_key(OFFICIAL_INDEX_PUBLIC_KEY).ok_or_else(|| {
+            IndexError::SignatureInvalid {
+                url: OFFICIAL_INDEX_URL.to_owned(),
+            }
+        })?;
+        Ok(IndexClient::new(http, OFFICIAL_INDEX_URL.to_owned(), key))
+    }
+
+    /// Returns the URL of the official index.
+    ///
+    /// # Returns
+    ///
+    /// The URL a document must be fetched from to be verified against the
+    /// official key.
+    pub fn official_url(&self) -> &str {
+        &self.official_url
     }
 
     /// Downloads and verifies one index.
@@ -632,6 +674,12 @@ mod tests {
     /// Returns a client whose official index is the mock server's.
     fn official_client(server: &MockServer, signer: &Signer) -> IndexClient {
         IndexClient::new(http(), official_url(server), signer.verify_key())
+    }
+
+    #[test]
+    fn the_compiled_in_official_key_is_readable() {
+        let client = IndexClient::official(http()).unwrap();
+        assert_eq!(client.official_url(), OFFICIAL_INDEX_URL);
     }
 
     #[tokio::test]

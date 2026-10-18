@@ -26,6 +26,8 @@ hearthsound-jobs = { path = "../jobs" }
 hearthsound-library = { path = "../library" }
 hearthsound-media = { path = "../media" }
 hearthsound-plugin-host = { path = "../plugin-host" }
+reqwest.workspace = true
+rustls.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true

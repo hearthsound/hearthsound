@@ -322,6 +322,11 @@ impl PluginAdmin {
             .ok_or_else(|| AdminError::NotFound(id.to_owned()))
     }
 
+    /// Returns the plugin host the admin installs into.
+    pub(crate) fn host(&self) -> &Arc<PluginHost> {
+        &self.host
+    }
+
     /// Publishes a `plugin.status` event to administrator connections.
     fn publish(&self, plugin_id: &str, state: &str) {
         if let Some(events) = &self.events {
@@ -339,7 +344,7 @@ impl PluginAdmin {
 }
 
 /// Renders bytes as lowercase hexadecimal.
-fn to_hex(bytes: &[u8]) -> String {
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
     bytes
         .iter()
         .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {

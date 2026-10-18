@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use hearthsound_config::ConfigError;
 use hearthsound_core::{Layer, ProviderError, Slug};
+use uuid::Uuid;
 
 use crate::bindings::hearthsound::plugin::types::ProviderError as WitProviderError;
 use crate::manifest::ManifestError;
@@ -97,9 +98,69 @@ pub enum InstallError {
     /// A path that must lie inside the plugins directory resolves elsewhere.
     #[error("`{}` resolves outside the plugins directory", .0.display())]
     OutsidePluginsDir(PathBuf),
-    /// The installed plugin could not be recorded in the database.
+    /// The plugin or repository tables could not be read or written.
     #[error(transparent)]
     Record(#[from] crate::repo::RepoError),
+    /// A plugin setting could not be read.
+    #[error(transparent)]
+    Settings(#[from] hearthsound_config::ConfigError),
+    /// Third-party plugin repositories are switched off.
+    #[error(
+        "third-party plugin repositories are disabled; `plugins.allow_third_party_repositories` is off"
+    )]
+    RepositoriesDisabled,
+    /// The repository is switched off, so its index is not read.
+    #[error("plugin repository {url} is disabled")]
+    RepositoryDisabled {
+        /// The URL of the repository's index document.
+        url: String,
+    },
+    /// No repository is registered under the requested id.
+    #[error("no plugin repository has the id {id}")]
+    UnknownRepository {
+        /// The repository id that was requested.
+        id: Uuid,
+    },
+    /// The index could not be downloaded or its signature does not verify.
+    #[error(transparent)]
+    Index(#[from] crate::index::IndexError),
+    /// The index lists no plugin under the requested id.
+    #[error("the index at {index} lists no plugin `{id}`")]
+    UnknownPlugin {
+        /// The plugin id that was requested.
+        id: String,
+        /// The URL of the index that was read.
+        index: String,
+    },
+    /// The index offers no version this server can install.
+    #[error(transparent)]
+    Unavailable(#[from] crate::index::Unavailable),
+    /// An index entry declares no readable archive digest.
+    #[error("the index at {index} lists `{id}` {version} without a readable sha256")]
+    UnreadableDigest {
+        /// The plugin id.
+        id: String,
+        /// The version whose entry holds the digest.
+        version: String,
+        /// The URL of the index the entry came from.
+        index: String,
+    },
+    /// The plugin archive could not be downloaded.
+    #[error("could not download {url}: {reason}")]
+    Download {
+        /// The URL of the archive.
+        url: String,
+        /// What went wrong.
+        reason: String,
+    },
+    /// The downloaded archive is not the size the index declares.
+    #[error("the archive is {received} bytes, but the index declares {declared}")]
+    SizeMismatch {
+        /// The size the index declares.
+        declared: u64,
+        /// The size of the download.
+        received: u64,
+    },
 }
 
 /// An error from setting up or configuring the plugin host itself.

@@ -37,6 +37,14 @@ pub enum ServerError {
     /// The plugin, instance, or layer tables could not be read.
     #[error(transparent)]
     Provider(#[from] hearthsound_plugin_host::RepoError),
+    /// The client that downloads plugin indexes and archives could not be
+    /// built.
+    #[error("could not build the outbound HTTP client: {0}")]
+    HttpClient(#[source] reqwest::Error),
+    /// The plugin index client could not be built, which can only happen when
+    /// the compiled-in official index key is not a minisign key.
+    #[error(transparent)]
+    PluginIndex(#[from] hearthsound_plugin_host::IndexError),
     /// A system schedule could not be stored.
     #[error(transparent)]
     Jobs(#[from] hearthsound_jobs::JobsError),

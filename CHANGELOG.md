@@ -99,6 +99,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error of its last fetch. A URL identifies one repository, and client ids gain
   the `pr_` prefix for repositories.
 
+- Plugins install from an index: the installer resolves the official index, a
+  repository an administrator registered, or a repository URL it registers on
+  the way in (which `plugins.allow_third_party_repositories` gates), picks the
+  requested or newest compatible version, downloads the archive to a temporary
+  file beside the installed plugins, checks its size and SHA-256 against the
+  index entry, and records the plugin as pending approval. A download that fails
+  or does not match the index leaves no row and no file behind, and listing the
+  available plugins reports the sources that could not be read rather than
+  failing.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload
