@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use clap::{ArgAction, ArgGroup, Args, Parser, Subcommand};
+use clap::{ArgAction, ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 /// The Hearthsound command line.
 #[derive(Debug, Parser)]
@@ -237,7 +237,8 @@ pub struct PluginsArgs {
 /// Every command under `plugins`.
 #[derive(Debug, Subcommand)]
 pub enum PluginsCommand {
-    /// Install a `.hsplugin` archive, which then waits for approval.
+    /// Install a plugin: from a `.hsplugin` archive, from an index, or from an
+    /// index URL. It then waits for approval.
     Install(InstallPluginArgs),
     /// Approve a plugin's requested permissions.
     Approve(PluginIdArgs),
@@ -251,17 +252,104 @@ pub enum PluginsCommand {
     Remove(PluginIdArgs),
     /// List the installed plugins.
     List,
+    /// List the plugins the reachable indexes offer.
+    Available(AvailablePluginsArgs),
+    /// Add, list, and remove the plugin index repositories.
+    Repositories(RepositoriesArgs),
+}
+
+/// Which indexes a `plugins` command covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SourceSelection {
+    /// Every index this server knows: the official index and the repositories
+    /// an administrator registered.
+    Index,
+    /// The one index document at the URL the command was given.
+    Url,
 }
 
 /// The arguments of `plugins install`.
 #[derive(Debug, Args)]
 pub struct InstallPluginArgs {
-    /// The `.hsplugin` archive to install.
-    #[arg(value_name = "FILE")]
-    pub file: PathBuf,
+    /// The `.hsplugin` archive to install, or the plugin id when `--source`
+    /// names an index.
+    #[arg(value_name = "FILE-OR-ID")]
+    pub target: String,
+    /// Install from an index instead of from a file.
+    ///
+    /// `index` covers the official index and every repository an administrator
+    /// registered; `url` covers the index document named by `--url`, which is
+    /// registered as a repository when it is new.
+    #[arg(long, value_name = "index|url", requires_if("url", "url"))]
+    pub source: Option<SourceSelection>,
+    /// The plugin version to install. Without it the newest version this
+    /// server hosts is installed.
+    #[arg(long, value_name = "V", requires = "source")]
+    pub version: Option<String>,
+    /// The URL of the index document to install from.
+    #[arg(long, value_name = "INDEX-URL", requires = "source")]
+    pub url: Option<String>,
     /// Record the plugin as shipped with the server rather than sideloaded.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "source")]
     pub bundled: bool,
+}
+
+/// The arguments of `plugins available`.
+#[derive(Debug, Args)]
+pub struct AvailablePluginsArgs {
+    /// The indexes to list. Defaults to `index`.
+    #[arg(long, value_name = "index|url", requires_if("url", "url"))]
+    pub source: Option<SourceSelection>,
+    /// The URL of the index document to list.
+    #[arg(long, value_name = "INDEX-URL", requires = "source")]
+    pub url: Option<String>,
+    /// List one registered repository, by URL or by `pr_` id.
+    #[arg(long, value_name = "URL-OR-ID", conflicts_with_all = ["source", "url"])]
+    pub repository: Option<String>,
+}
+
+/// The arguments of `plugins repositories`.
+#[derive(Debug, Args)]
+pub struct RepositoriesArgs {
+    /// The repository command to run.
+    #[command(subcommand)]
+    pub command: RepositoriesCommand,
+}
+
+/// Every command under `plugins repositories`.
+#[derive(Debug, Subcommand)]
+pub enum RepositoriesCommand {
+    /// Register a plugin index.
+    Add(AddRepositoryArgs),
+    /// List the registered plugin indexes.
+    List,
+    /// Remove a registered plugin index.
+    Remove(RemoveRepositoryArgs),
+}
+
+/// The arguments of `plugins repositories add`.
+#[derive(Debug, Args)]
+pub struct AddRepositoryArgs {
+    /// The URL of the repository's index document.
+    #[arg(value_name = "URL")]
+    pub url: String,
+    /// The name to show for the repository.
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+    /// The minisign public key the repository signs its index with.
+    ///
+    /// Without it the index is read unsigned and its plugins are reported as
+    /// unverified.
+    #[arg(long, value_name = "MINISIGN-PUBLIC-KEY")]
+    pub public_key: Option<String>,
+}
+
+/// The arguments of `plugins repositories remove`.
+#[derive(Debug, Args)]
+pub struct RemoveRepositoryArgs {
+    /// The repository to remove, by URL or by `pr_` id.
+    #[arg(value_name = "URL-OR-ID")]
+    pub repository: String,
 }
 
 /// The arguments of a command that names one installed plugin.

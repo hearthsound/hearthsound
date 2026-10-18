@@ -917,6 +917,318 @@ fn plugin_lifecycle_commands_refuse_forbidden_operations() {
     );
 }
 
+/// `plugins repositories` registers, lists, and removes plugin indexes.
+///
+/// Nothing here needs an index to answer: a repository is a row, and the fetch
+/// that reads its index happens on the first install or listing.
+#[test]
+fn plugins_repositories_are_added_listed_and_removed() {
+    let sandbox = Sandbox::new("");
+    let url = "https://example.com/v1/index.json";
+    let key = "RWSNpbSdmjDfPZT84aLZeDuF5LxdBt3dieHVj1h+xHQ0aAy0LhH6pURN";
+
+    let added = succeeded(&sandbox.run(&[
+        "plugins",
+        "repositories",
+        "add",
+        url,
+        "--name",
+        "example",
+        "--public-key",
+        key,
+    ]));
+    assert!(added.contains("registered pr_"), "{added}");
+    assert!(added.contains(url), "{added}");
+    assert!(added.contains("  name: example"), "{added}");
+    assert!(
+        added.contains("signed, verified against the public key"),
+        "{added}"
+    );
+    let id = repository_id_of(&added);
+
+    let listed = succeeded(&sandbox.run(&["plugins", "repositories", "list"]));
+    assert!(listed.contains(&format!("{id} {url}")), "{listed}");
+    assert!(listed.contains("  name: example"), "{listed}");
+    assert!(listed.contains("  enabled: yes"), "{listed}");
+    assert!(listed.contains("  index: signed"), "{listed}");
+    assert!(listed.contains("  last fetched: never"), "{listed}");
+
+    let duplicate = sandbox.run(&["plugins", "repositories", "add", url]);
+    assert_eq!(duplicate.status.code(), Some(1));
+    assert!(
+        stderr(&duplicate).contains("is registered already"),
+        "{}",
+        stderr(&duplicate)
+    );
+
+    let removed = succeeded(&sandbox.run(&["plugins", "repositories", "remove", url]));
+    assert!(
+        removed.contains(&format!("removed {id} {url}")),
+        "{removed}"
+    );
+    let listed = succeeded(&sandbox.run(&["plugins", "repositories", "list"]));
+    assert!(
+        listed.contains("no plugin repositories are registered"),
+        "{listed}"
+    );
+
+    // The same index without a public key is recorded as read unverified, and
+    // removal takes the client id as well as the URL.
+    let unsigned = succeeded(&sandbox.run(&["plugins", "repositories", "add", url]));
+    assert!(unsigned.contains("unsigned, read unverified"), "{unsigned}");
+    let id = repository_id_of(&unsigned);
+    let removed = succeeded(&sandbox.run(&["plugins", "repositories", "remove", &id]));
+    assert!(
+        removed.contains(&format!("removed {id} {url}")),
+        "{removed}"
+    );
+
+    let unknown_url = sandbox.run(&["plugins", "repositories", "remove", url]);
+    assert_eq!(unknown_url.status.code(), Some(1));
+    assert!(
+        stderr(&unknown_url).contains("no plugin repository is registered under"),
+        "{}",
+        stderr(&unknown_url)
+    );
+
+    let unknown_id = sandbox.run(&["plugins", "repositories", "remove", &id]);
+    assert_eq!(unknown_id.status.code(), Some(1));
+    assert!(
+        stderr(&unknown_id).contains("no plugin repository has the id"),
+        "{}",
+        stderr(&unknown_id)
+    );
+}
+
+/// Registering a plugin index is gated, as the API's route is.
+#[test]
+fn plugins_repositories_add_is_gated() {
+    let sandbox = Sandbox::new("\"plugins.allow_third_party_repositories\" = false\n");
+    let url = "https://example.com/v1/index.json";
+
+    let refused = sandbox.run(&["plugins", "repositories", "add", url]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        stderr(&refused).contains("plugins.allow_third_party_repositories"),
+        "{}",
+        stderr(&refused)
+    );
+
+    let listed = succeeded(&sandbox.run(&["plugins", "repositories", "list"]));
+    assert!(
+        listed.contains("no plugin repositories are registered"),
+        "{listed}"
+    );
+}
+
+/// An install from an index URL that is not registered yet is gated, and it
+/// leaves neither a repository row nor a plugin behind.
+#[test]
+fn plugins_install_from_an_index_url_is_gated() {
+    let sandbox = Sandbox::new("\"plugins.allow_third_party_repositories\" = false\n");
+    let url = "https://example.com/v1/index.json";
+
+    let refused = sandbox.run(&[
+        "plugins",
+        "install",
+        "--source",
+        "url",
+        "com.example.hello-catalog",
+        "--url",
+        url,
+        "--version",
+        "0.1.0",
+    ]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        stderr(&refused).contains("third-party plugin repositories are disabled"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(stderr(&refused).contains(url), "{}", stderr(&refused));
+
+    let plugins = succeeded(&sandbox.run(&["plugins", "list"]));
+    assert!(plugins.contains("no plugins are installed"), "{plugins}");
+    let repositories = succeeded(&sandbox.run(&["plugins", "repositories", "list"]));
+    assert!(
+        repositories.contains("no plugin repositories are registered"),
+        "{repositories}"
+    );
+}
+
+/// `plugins available` reports a source it cannot read instead of failing.
+#[test]
+fn plugins_available_reports_a_source_it_cannot_read() {
+    let sandbox = Sandbox::new("\"plugins.allow_third_party_repositories\" = false\n");
+    let url = "https://example.com/v1/index.json";
+
+    let listed =
+        succeeded(&sandbox.run(&["plugins", "available", "--source", "url", "--url", url]));
+    assert!(
+        listed.contains("sources that could not be read:"),
+        "{listed}"
+    );
+    assert!(listed.contains(&format!("  {url}: ")), "{listed}");
+    assert!(
+        listed.contains("third-party plugin repositories are disabled"),
+        "{listed}"
+    );
+
+    // A client id of another kind is not a repository.
+    let wrong_kind = sandbox.run(&[
+        "plugins",
+        "available",
+        "--repository",
+        "tr_01m56sh49vegm857f31cfay87s",
+    ]);
+    assert_eq!(wrong_kind.status.code(), Some(1));
+    assert!(
+        stderr(&wrong_kind).contains("is not a repository id"),
+        "{}",
+        stderr(&wrong_kind)
+    );
+}
+
+/// `--url` belongs to `--source url`; `--source index` covers every index.
+#[test]
+fn plugins_install_refuses_an_index_url_with_the_index_source() {
+    let sandbox = Sandbox::new("");
+
+    let refused = sandbox.run(&[
+        "plugins",
+        "install",
+        "--source",
+        "index",
+        "com.example.hello-catalog",
+        "--url",
+        "https://example.com/v1/index.json",
+    ]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        stderr(&refused).contains("--source url --url <INDEX-URL>"),
+        "{}",
+        stderr(&refused)
+    );
+
+    let listed = sandbox.run(&[
+        "plugins",
+        "available",
+        "--source",
+        "index",
+        "--url",
+        "https://example.com/v1/index.json",
+    ]);
+    assert_eq!(listed.status.code(), Some(1));
+    assert!(
+        stderr(&listed).contains("--source url --url <INDEX-URL>"),
+        "{}",
+        stderr(&listed)
+    );
+}
+
+/// The install and listing arguments that name a source are checked by the
+/// parser, which fails before a data directory is opened.
+#[test]
+fn plugins_source_arguments_are_checked_by_the_parser() {
+    let sandbox = Sandbox::new("");
+    let cases: [(&[&str], &str); 6] = [
+        (
+            &[
+                "plugins",
+                "install",
+                "com.example.hello-catalog",
+                "--version",
+                "1.0.0",
+            ],
+            "--source",
+        ),
+        (
+            &[
+                "plugins",
+                "install",
+                "--source",
+                "url",
+                "com.example.hello-catalog",
+            ],
+            "--url",
+        ),
+        (
+            &[
+                "plugins",
+                "install",
+                "--source",
+                "index",
+                "--bundled",
+                "com.example.hello-catalog",
+            ],
+            "--bundled",
+        ),
+        (
+            &[
+                "plugins",
+                "install",
+                "--source",
+                "indexer",
+                "com.example.hello-catalog",
+            ],
+            "invalid value",
+        ),
+        (
+            &[
+                "plugins",
+                "available",
+                "--url",
+                "https://example.com/v1/index.json",
+            ],
+            "--source",
+        ),
+        (
+            &[
+                "plugins",
+                "available",
+                "--source",
+                "index",
+                "--repository",
+                "pr_x",
+            ],
+            "--repository",
+        ),
+    ];
+    for (args, expected) in cases {
+        let refused = sandbox.run(args);
+        assert_eq!(
+            refused.status.code(),
+            Some(2),
+            "{} was not refused by the parser",
+            args.join(" ")
+        );
+        assert!(
+            stderr(&refused).contains(expected),
+            "{}: {}",
+            args.join(" "),
+            stderr(&refused)
+        );
+    }
+}
+
+/// Returns the repository id an add or remove line reports.
+///
+/// # Parameters
+///
+/// - `output`: the command's standard output.
+///
+/// # Panics
+///
+/// Panics when the output holds no repository id.
+fn repository_id_of(output: &str) -> String {
+    output
+        .lines()
+        .flat_map(str::split_whitespace)
+        .find(|word| word.starts_with("pr_"))
+        .expect("the output names a repository id")
+        .to_owned()
+}
+
 /// Reads one entry out of a `.hsplugin` archive.
 ///
 /// # Parameters

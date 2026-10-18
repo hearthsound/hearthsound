@@ -84,6 +84,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rows and files that went with it; and `list` reports each plugin's state, its
   requested permissions, and the version waiting for approval.
 
+- The `plugins` command installs from indexes as well as from files, and
+  administers the repositories it installs from. `plugins install --source index
+  <PLUGIN-ID>` installs the official index's version and falls back to the
+  repositories an administrator registered when that index does not offer the
+  plugin, and `plugins install --source url <PLUGIN-ID> --url <INDEX-URL>`
+  registers a third-party index on the way in, which
+  `plugins.allow_third_party_repositories` gates; both install the plugin as
+  pending approval and print what the file install prints. `plugins available`
+  reports each plugin the reachable indexes offer with its version, its layers
+  and whether it is installed, and prints the sources it could not read instead
+  of failing. `plugins repositories add`, `list` and `remove` administer the
+  repository rows from the command line.
+
 - The server reads plugin indexes. `IndexClient` downloads an index document
   and its minisign signature, verifies the signature against the key the
   repository is known by, and rejects the official index when its signature is

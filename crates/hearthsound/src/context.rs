@@ -23,7 +23,9 @@ use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingSources, SettingsRegistry};
 use hearthsound_db::{Database, MIGRATOR, MigrationOutcome};
 use hearthsound_plugin_host::instances::InstanceService;
-use hearthsound_plugin_host::{PluginHost, PluginRepository};
+use hearthsound_plugin_host::{
+    IndexClient, PluginAdmin, PluginHost, PluginInstaller, PluginRepository,
+};
 
 /// Creates the directory tree, opens the database, and migrates it.
 ///
@@ -188,6 +190,64 @@ impl Context {
         )
         .context("could not build the plugin host")?;
         Ok(Arc::new(host))
+    }
+
+    /// Builds the administrative plugin service over the data directory's
+    /// plugin tree.
+    ///
+    /// The service is given no event bus: a command-line process has no
+    /// subscriber, and the running server notices the writes through its
+    /// data-version watcher.
+    ///
+    /// # Returns
+    ///
+    /// The service, whose plugin tables live in this context's database.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Context::plugin_host`].
+    pub fn plugin_admin(&self) -> anyhow::Result<Arc<PluginAdmin>> {
+        Ok(Arc::new(PluginAdmin::new(
+            self.plugin_host()?,
+            PluginRepository::new(&self.database),
+            None,
+        )))
+    }
+
+    /// Builds the plugin installer over the data directory's plugin tree.
+    ///
+    /// The installer reads index documents and downloads archives over its own
+    /// HTTP client, so installing a plugin from an index needs no running
+    /// server. It is bound to the same compiled-in official index URL and
+    /// public key as the server, and staged downloads go to
+    /// [`Context::plugins_dir`].
+    ///
+    /// # Returns
+    ///
+    /// The installer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Context::plugin_admin`], a failure to build the
+    /// HTTP client, and a failure to read the compiled-in official public key.
+    pub fn installer(&self) -> anyhow::Result<PluginInstaller> {
+        // The workspace builds reqwest without a bundled TLS provider, so ring
+        // is installed as the process default before the first client is built;
+        // installing it again is harmless, which is why the server does the
+        // same.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let http = reqwest::Client::builder()
+            .user_agent(format!("Hearthsound/{}", env!("CARGO_PKG_VERSION")))
+            .build()
+            .context("could not build the HTTP client")?;
+        Ok(PluginInstaller::new(
+            self.plugin_admin()?,
+            PluginRepository::new(&self.database),
+            IndexClient::official(http.clone())
+                .context("could not read the official plugin index key")?,
+            http,
+            self.plugins_dir().to_path_buf(),
+        ))
     }
 
     /// Builds the provider-instance service over a fresh plugin host.
