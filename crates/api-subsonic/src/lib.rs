@@ -132,6 +132,7 @@
 //! | `hsAcquire` | asks the acquisition layer for the named tracks and albums, at the priority the request names |
 //! | `hsGetAcquisitions` | the acquisitions of the caller's account, or of every account for an administrator |
 //! | `hsCancelAcquisition` | ends one acquisition, idempotently |
+//! | `hsSetQueue` | takes the queue a client is playing and prefetches its next items |
 //!
 //! The browse endpoints share one scope rule: an explicit `musicFolderId` of
 //! `1` is the requesting user's personal library and of `2` the server-wide

@@ -17,6 +17,7 @@ pub mod download;
 pub mod feedback;
 pub mod genres;
 pub mod hs_acquisitions;
+pub mod hs_queue;
 pub mod info;
 pub mod now_playing;
 pub mod play_queue;
@@ -45,6 +46,7 @@ pub use genres::{
 pub use hs_acquisitions::{
     hs_acquire, hs_cancel_acquisition, hs_get_acquisitions, hs_get_availability,
 };
+pub use hs_queue::hs_set_queue;
 pub use info::{get_album_info, get_album_info_2, get_artist_info, get_artist_info_2};
 pub use now_playing::get_now_playing;
 pub use play_queue::{

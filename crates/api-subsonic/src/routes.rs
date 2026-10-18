@@ -171,6 +171,7 @@ pub fn routes() -> Router<SubsonicState> {
         "hsCancelAcquisition",
         endpoints::hs_cancel_acquisition,
     );
+    let router = register(router, "hsSetQueue", endpoints::hs_set_queue);
     router.route(NOT_FOUND_PATH, get(not_found).post(not_found))
 }
 

@@ -46,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hearthsound` vendor extension - every account's for an administrator - and
   `hsCancelAcquisition` ends one, idempotently.
 
+- `hsSetQueue` takes the queue a client is playing over the `hearthsound` vendor
+  extension and prefetches its next items, so the look-ahead follows the client's
+  own order instead of an inferred one.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload
