@@ -13,7 +13,8 @@ use hearthsound_acquire::orchestrator::AcquisitionOrchestrator;
 use hearthsound_acquire::prefetch::PrefetchScheduler;
 use hearthsound_activity::ActivityService;
 use hearthsound_auth::{
-    Authenticator, Principal, ResolveError, SubsonicCredentials, TrustedProxies, UserSettings,
+    Authenticator, Principal, ResolveError, Sessions, SubsonicCredentials, TrustedProxies,
+    UserSettings,
 };
 use hearthsound_catalog::CatalogService;
 use hearthsound_config::SettingsStore;
@@ -41,6 +42,8 @@ pub struct SubsonicState {
 struct Inner {
     /// The open database, for the queries later endpoints run.
     database: Arc<Database>,
+    /// The web session table a cookie-authenticated call resolves through.
+    sessions: Sessions,
     /// The settings service, which resolves the tunables of a response.
     settings: Settings,
     /// The per-user setting overrides browse scope resolution reads.
@@ -107,6 +110,8 @@ impl SubsonicState {
     /// # Parameters
     ///
     /// - `database`: the open database.
+    /// - `sessions`: the web session table, shared with the native API so a
+    ///   session one surface issued authenticates on the other.
     /// - `settings`: the settings service; a call reads its current snapshot.
     /// - `authenticator`: the credential resolver, shared with the other
     ///   surfaces so one login rate limiter covers them all.
@@ -126,8 +131,12 @@ impl SubsonicState {
     /// [`with_trusted_proxies`](SubsonicState::with_trusted_proxies) says
     /// otherwise and has no acquisition layer until
     /// [`with_pending_source`](SubsonicState::with_pending_source) adds one.
+    // The constructor takes one argument per service the surface shares, which
+    // is what keeps every one of them explicit at the call site.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         database: Arc<Database>,
+        sessions: Sessions,
         settings: Settings,
         authenticator: Arc<Authenticator>,
         catalog: Arc<CatalogService>,
@@ -148,6 +157,7 @@ impl SubsonicState {
         SubsonicState {
             inner: Arc::new(Inner {
                 database,
+                sessions,
                 settings,
                 user_settings,
                 catalog,
@@ -180,6 +190,7 @@ impl SubsonicState {
         SubsonicState {
             inner: Arc::new(Inner {
                 database: Arc::clone(&self.inner.database),
+                sessions: self.inner.sessions.clone(),
                 settings: self.inner.settings.clone(),
                 user_settings: self.inner.user_settings.clone(),
                 catalog: Arc::clone(&self.inner.catalog),
@@ -212,6 +223,7 @@ impl SubsonicState {
         SubsonicState {
             inner: Arc::new(Inner {
                 database: Arc::clone(&self.inner.database),
+                sessions: self.inner.sessions.clone(),
                 settings: self.inner.settings.clone(),
                 user_settings: self.inner.user_settings.clone(),
                 catalog: Arc::clone(&self.inner.catalog),
@@ -248,6 +260,7 @@ impl SubsonicState {
         SubsonicState {
             inner: Arc::new(Inner {
                 database: Arc::clone(&self.inner.database),
+                sessions: self.inner.sessions.clone(),
                 settings: self.inner.settings.clone(),
                 user_settings: self.inner.user_settings.clone(),
                 catalog: Arc::clone(&self.inner.catalog),
@@ -283,6 +296,7 @@ impl SubsonicState {
         SubsonicState {
             inner: Arc::new(Inner {
                 database: Arc::clone(&self.inner.database),
+                sessions: self.inner.sessions.clone(),
                 settings: self.inner.settings.clone(),
                 user_settings: self.inner.user_settings.clone(),
                 catalog: Arc::clone(&self.inner.catalog),
@@ -315,6 +329,7 @@ impl SubsonicState {
         SubsonicState {
             inner: Arc::new(Inner {
                 database: Arc::clone(&self.inner.database),
+                sessions: self.inner.sessions.clone(),
                 settings: self.inner.settings.clone(),
                 user_settings: self.inner.user_settings.clone(),
                 catalog: Arc::clone(&self.inner.catalog),
@@ -330,6 +345,15 @@ impl SubsonicState {
                 jobs: self.inner.jobs.clone(),
             }),
         }
+    }
+
+    /// Returns the web session table.
+    ///
+    /// `/rest` resolves the `hs_session` cookie through it, so a web client
+    /// signed in through `/api/v1/auth/login` is authenticated on both
+    /// surfaces by the same row.
+    pub fn sessions(&self) -> &Sessions {
+        &self.inner.sessions
     }
 
     /// Returns the open database.
@@ -401,6 +425,7 @@ impl SubsonicState {
         SubsonicState {
             inner: Arc::new(Inner {
                 database: Arc::clone(&self.inner.database),
+                sessions: self.inner.sessions.clone(),
                 settings: self.inner.settings.clone(),
                 user_settings: self.inner.user_settings.clone(),
                 catalog: Arc::clone(&self.inner.catalog),

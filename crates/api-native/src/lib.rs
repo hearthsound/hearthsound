@@ -108,7 +108,9 @@ impl Modify for SecuritySchemes {
         );
         components.add_security_scheme(
             "session",
-            SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::new(auth::SESSION_COOKIE))),
+            SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::new(
+                hearthsound_auth::SESSION_COOKIE,
+            ))),
         );
     }
 }

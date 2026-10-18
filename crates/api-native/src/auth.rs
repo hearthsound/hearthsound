@@ -19,19 +19,16 @@ use axum::extract::FromRequestParts;
 use axum::extract::connect_info::ConnectInfo;
 use axum::http::header::{AUTHORIZATION, COOKIE};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, HeaderValue, Method};
-use hearthsound_auth::{AuthenticationError, Credential, Principal, ResolveError, TrustedProxies};
+use axum::http::{HeaderValue, Method};
+use hearthsound_auth::{
+    AuthenticationError, CSRF_HEADER, Credential, Principal, ResolveError, SESSION_COOKIE,
+    TrustedProxies, session_token,
+};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::problem::{self, Problem};
 use crate::state::NativeState;
-
-/// The cookie that carries a web session token.
-pub const SESSION_COOKIE: &str = "hs_session";
-
-/// The header an unsafe cookie-authenticated request echoes the CSRF token in.
-pub const CSRF_HEADER: &str = "x-hearthsound-csrf";
 
 /// The header a proxy appends the address it received a request from.
 const FORWARDED_FOR: &str = "x-forwarded-for";
@@ -108,7 +105,13 @@ impl FromRequestParts<NativeState> for Authed {
             };
         }
 
-        let Some(token) = session_token(&parts.headers) else {
+        let Some(token) = session_token(
+            parts
+                .headers
+                .get_all(COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok()),
+        ) else {
             return Err(Problem::unauthenticated(
                 "Sign in, or send an API key as `Authorization: Bearer`.",
             ));
@@ -165,26 +168,6 @@ impl FromRequestParts<NativeState> for AdminAuthed {
 /// Returns whether a method cannot change state, and so needs no CSRF token.
 fn is_safe(method: &Method) -> bool {
     matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
-}
-
-/// Reads the session token from the request's cookies.
-///
-/// # Parameters
-///
-/// - `headers`: the request headers.
-///
-/// # Returns
-///
-/// The token, or `None` when no non-empty `hs_session` cookie arrived.
-pub fn session_token(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get_all(COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(';'))
-        .filter_map(|pair| pair.trim().split_once('='))
-        .find(|(name, value)| *name == SESSION_COOKIE && !value.is_empty())
-        .map(|(_, value)| value.to_owned())
 }
 
 /// The address a request came from, as the login rate limit sees it.
@@ -260,21 +243,6 @@ pub fn client_ip(parts: &Parts, trusted: &TrustedProxies) -> IpAddr {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_session_token_is_read_from_any_cookie_header() {
-        let mut headers = HeaderMap::new();
-        headers.append(COOKIE, HeaderValue::from_static("theme=dark"));
-        headers.append(
-            COOKIE,
-            HeaderValue::from_static("a=1; hs_session=abc123; b=2"),
-        );
-        assert_eq!(session_token(&headers).as_deref(), Some("abc123"));
-
-        let mut empty = HeaderMap::new();
-        empty.append(COOKIE, HeaderValue::from_static("hs_session="));
-        assert_eq!(session_token(&empty), None);
-    }
 
     #[test]
     fn the_session_cookie_is_http_only_secure_and_lax() {

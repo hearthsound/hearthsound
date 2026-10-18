@@ -52,7 +52,7 @@ use hearthsound_acquire::prefetch::PrefetchScheduler;
 use hearthsound_activity::{ActivityService, EXPIRE_JOB_KIND, EXPIRE_SCHEDULE, ExpireJobHandler};
 use hearthsound_api_native::{NativeServices, NativeState};
 use hearthsound_api_subsonic::{PendingSource, SubsonicState};
-use hearthsound_auth::{Authenticator, TrustedProxies};
+use hearthsound_auth::{Authenticator, Sessions, TrustedProxies};
 use hearthsound_catalog::CatalogService;
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_config::keys;
@@ -100,6 +100,8 @@ pub struct Services {
     events: Arc<EventBus>,
     /// The credential resolver shared by every surface.
     authenticator: Arc<Authenticator>,
+    /// The web session table, shared by the native API and `/rest`.
+    sessions: Sessions,
     /// The wasmtime plugin host.
     plugins: Arc<PluginHost>,
     /// The provider registry built from the plugin tables.
@@ -217,6 +219,7 @@ impl Services {
         let secret_key = SecretKey::load(&config.secrets.key_file, env)?;
         let secrets = secret_key.secret_box();
         let events = Arc::new(EventBus::new());
+        let sessions = Sessions::new(&database);
 
         let authenticator = Arc::new(Authenticator::new(
             &database,
@@ -399,6 +402,7 @@ impl Services {
             settings,
             events,
             authenticator,
+            sessions: sessions.clone(),
             plugins,
             registry,
             catalog,
@@ -587,6 +591,7 @@ impl Services {
     pub fn native_state(&self) -> NativeState {
         NativeState::new(NativeServices {
             database: Arc::clone(&self.database),
+            sessions: self.sessions.clone(),
             settings: self.settings.clone(),
             authenticator: Arc::clone(&self.authenticator),
             secrets: self.secrets.clone(),
@@ -624,6 +629,7 @@ impl Services {
         let pending: Arc<dyn PendingSource> = self.orchestrator.clone();
         SubsonicState::new(
             Arc::clone(&self.database),
+            self.sessions.clone(),
             self.settings.clone(),
             Arc::clone(&self.authenticator),
             Arc::clone(&self.catalog),

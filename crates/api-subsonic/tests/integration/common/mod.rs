@@ -192,6 +192,7 @@ impl Fixture {
         let events = Arc::new(EventBus::new());
         let state = SubsonicState::new(
             Arc::clone(&database),
+            hearthsound_auth::Sessions::new(&database),
             settings.clone(),
             authenticator,
             Arc::clone(&catalog),

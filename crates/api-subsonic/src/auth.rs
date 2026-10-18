@@ -13,16 +13,27 @@
 //! of `server.trusted_proxies` and sent an `X-Forwarded-For` header, in which
 //! case the header names the client. An untrusted peer's forwarding header is
 //! ignored, because a client can write any header it likes.
+//!
+//! A call that carries none of `u`, `p`, `t`, `s` and `apiKey` may instead
+//! arrive with the `hs_session` cookie a web client signed in with. An
+//! envelope call must then echo the session's CSRF token in
+//! `X-Hearthsound-CSRF`; a binary call cannot send a header from a media
+//! element and is accepted without one, unless a browser labels it
+//! `Sec-Fetch-Site: cross-site`.
 
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 
 use axum::extract::connect_info::ConnectInfo;
 use axum::extract::{FromRequest, Request};
+use axum::http::header::COOKIE;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderName, Method, StatusCode};
 use axum::response::{IntoResponse, Response as HttpResponse};
-use hearthsound_auth::{Principal, TrustedProxies};
+use hearthsound_auth::{
+    AuthenticationError, CSRF_HEADER, Credential, Principal, TrustedProxies, session_token,
+};
+use subtle::ConstantTimeEq;
 
 use crate::params::{Params, read_values};
 use crate::response::{Encoded, Response, SubsonicError};
@@ -30,6 +41,21 @@ use crate::state::SubsonicState;
 
 /// The header a proxy appends the address it received a request from.
 const FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
+
+/// The header a browser sets to tell the server where a request came from.
+const SEC_FETCH_SITE: HeaderName = HeaderName::from_static("sec-fetch-site");
+
+/// Which surface a call belongs to, which decides what cookie authentication
+/// must carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallKind {
+    /// An endpoint that answers a Subsonic envelope; a cookie-authenticated
+    /// call must echo the session's CSRF token.
+    Envelope,
+    /// A media endpoint that answers bytes; a media element cannot set a
+    /// header, so no CSRF token is required.
+    Binary,
+}
 
 /// A `/rest` call with its principal and parameters.
 ///
@@ -127,7 +153,7 @@ impl FromRequest<SubsonicState> for Call {
             Ok(values) => Params::from_values(values),
             Err(rejection) => return Err(rejection.into_response()),
         };
-        match authenticate(state, &parts, &params).await {
+        match authenticate(state, &parts, &params, CallKind::Envelope).await {
             Ok(principal) => Ok(Call {
                 state: state.clone(),
                 principal,
@@ -250,7 +276,7 @@ impl FromRequest<SubsonicState> for JsonCall {
             Err(rejection) => return Err(rejection.into_response()),
         };
         let params = Params::from_values(values);
-        match authenticate(state, &parts, &params).await {
+        match authenticate(state, &parts, &params, CallKind::Envelope).await {
             Ok(principal) => Ok(JsonCall {
                 call: Call {
                     state: state.clone(),
@@ -357,7 +383,7 @@ impl FromRequest<SubsonicState> for BinaryCall {
             Ok(values) => Params::from_values(values),
             Err(rejection) => return Err(rejection.into_response()),
         };
-        match authenticate(state, &parts, &params).await {
+        match authenticate(state, &parts, &params, CallKind::Binary).await {
             Ok(principal) => Ok(BinaryCall {
                 state: state.clone(),
                 principal,
@@ -387,12 +413,19 @@ pub fn forbidden() -> HttpResponse {
 
 /// Resolves the credentials of a request into a principal.
 ///
+/// A call that carries any credential parameter authenticates through it and
+/// ignores the session cookie. A call that carries none falls back to the
+/// `hs_session` cookie; without a cookie the parameter path runs unchanged, so
+/// a call with no credential at all is still told which parameter is missing.
+///
 /// # Parameters
 ///
 /// - `state`: the shared services.
-/// - `parts`: the request's head, which supplies the peer address and the
-///   forwarding header.
+/// - `parts`: the request's head, which supplies the peer address, the
+///   forwarding header, the cookie and the CSRF header.
 /// - `params`: the request's parameters.
+/// - `kind`: whether the endpoint answers an envelope or media bytes, which
+///   decides what a cookie-authenticated call must carry.
 ///
 /// # Errors
 ///
@@ -402,13 +435,105 @@ async fn authenticate(
     state: &SubsonicState,
     parts: &Parts,
     params: &Params,
+    kind: CallKind,
 ) -> Result<Principal, crate::response::SubsonicError> {
+    let credentials = params.credentials();
+    let carries_parameters = credentials.username.is_some()
+        || credentials.password.is_some()
+        || credentials.token.is_some()
+        || credentials.salt.is_some()
+        || credentials.api_key.is_some();
+    if !carries_parameters {
+        let token = session_token(
+            parts
+                .headers
+                .get_all(COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok()),
+        );
+        if let Some(token) = token {
+            return resolve_session(state, parts, &token, kind).await;
+        }
+    }
+
     state
-        .authenticate(
-            client_ip(parts, state.trusted_proxies()),
-            &params.credentials(),
-        )
+        .authenticate(client_ip(parts, state.trusted_proxies()), &credentials)
         .await
+}
+
+/// Resolves the `hs_session` cookie of a call into a principal.
+///
+/// # Parameters
+///
+/// - `state`: the shared services.
+/// - `parts`: the request's head, which supplies the CSRF and `Sec-Fetch-Site`
+///   headers.
+/// - `token`: the token the cookie carried.
+/// - `kind`: whether the call must carry the CSRF token.
+///
+/// # Returns
+///
+/// The principal, authenticated by the session.
+///
+/// # Errors
+///
+/// Returns Subsonic error 40 for an unknown or expired session, for an envelope
+/// call whose CSRF header does not match the session's token, and for a binary
+/// call a browser labelled cross-site; a generic error when the session could
+/// not be resolved.
+async fn resolve_session(
+    state: &SubsonicState,
+    parts: &Parts,
+    token: &str,
+    kind: CallKind,
+) -> Result<Principal, crate::response::SubsonicError> {
+    let record = match state.sessions().resolve(token).await {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            tracing::debug!("rejected an unknown or expired /rest session");
+            return Err(crate::response::SubsonicError::authentication(
+                &AuthenticationError::WrongCredentials,
+            ));
+        }
+        Err(error) => {
+            tracing::error!(%error, "could not resolve the session of a /rest call");
+            return Err(crate::response::SubsonicError::generic());
+        }
+    };
+
+    match kind {
+        CallKind::Envelope => {
+            let echoed = parts
+                .headers
+                .get(CSRF_HEADER)
+                .map(|value| value.as_bytes())
+                .unwrap_or_default();
+            if !bool::from(echoed.ct_eq(record.csrf_token.as_bytes())) {
+                return Err(crate::response::SubsonicError::new(
+                    crate::response::codes::WRONG_CREDENTIALS,
+                    "Cookie-authenticated calls must carry the X-Hearthsound-CSRF header.",
+                ));
+            }
+        }
+        CallKind::Binary => {
+            let cross_site = parts
+                .headers
+                .get(SEC_FETCH_SITE)
+                .and_then(|value| value.to_str().ok())
+                == Some("cross-site");
+            if cross_site {
+                tracing::debug!("refused a cross-site media request authenticated by cookie");
+                return Err(crate::response::SubsonicError::authentication(
+                    &AuthenticationError::WrongCredentials,
+                ));
+            }
+        }
+    }
+
+    Ok(Principal::from_user(
+        &record.user,
+        Credential::Session { id: record.id },
+    ))
 }
 
 /// Returns the status a rejected binary call is answered with.

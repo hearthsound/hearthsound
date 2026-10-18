@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `/rest` surface accepts the web session cookie in place of a credential
+  parameter. An envelope call must echo the session's CSRF token in
+  `X-Hearthsound-CSRF`; a media endpoint is accepted without one, unless the
+  browser marks the request cross-site. A credential parameter still wins when
+  both arrive.
+
 - The native API's OpenAPI document is committed at
   `crates/api-native/openapi.json` and regenerated with `cargo xtask openapi`.
   A test fails when the committed document no longer matches the routes the

@@ -30,6 +30,12 @@ use uuid::Uuid;
 use crate::error::AuthError;
 use crate::user::{User, Users};
 
+/// The cookie that carries a web session token.
+pub const SESSION_COOKIE: &str = "hs_session";
+
+/// The header an unsafe cookie-authenticated request echoes the CSRF token in.
+pub const CSRF_HEADER: &str = "x-hearthsound-csrf";
+
 /// How many random bytes back a session token and a CSRF token.
 const TOKEN_BYTES: usize = 32;
 
@@ -407,7 +413,7 @@ pub(crate) async fn verify_login(
 ///
 /// [`TOKEN_BYTES`] random bytes as lowercase RFC 4648 base32 without padding,
 /// [`TOKEN_LEN`] characters long.
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     let mut bytes = [0u8; TOKEN_BYTES];
     rand::rng().fill(&mut bytes[..]);
     let token = data_encoding::BASE32_NOPAD
@@ -415,6 +421,37 @@ fn random_token() -> String {
         .to_ascii_lowercase();
     debug_assert_eq!(token.len(), TOKEN_LEN);
     token
+}
+
+/// Reads the session token from a request's cookie headers.
+///
+/// A client may split its cookies over several `Cookie` headers, and each one
+/// may hold several `name=value` pairs; any of them may carry the session.
+///
+/// # Parameters
+///
+/// - `cookie_headers`: the `Cookie` header values, in request order.
+///
+/// # Returns
+///
+/// The token, or `None` when no non-empty [`SESSION_COOKIE`] cookie arrived.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_auth::session_token;
+///
+/// let token = session_token(["theme=dark", "a=1; hs_session=abc123; b=2"]);
+/// assert_eq!(token.as_deref(), Some("abc123"));
+/// assert_eq!(session_token(["hs_session="]), None);
+/// ```
+pub fn session_token<'a>(cookie_headers: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    cookie_headers
+        .into_iter()
+        .flat_map(|value| value.split(';'))
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(name, value)| *name == SESSION_COOKIE && !value.is_empty())
+        .map(|(_, value)| value.to_owned())
 }
 
 /// Writes a session's `last_seen_at` without holding up the request.
@@ -499,6 +536,16 @@ mod tests {
     /// Resolves a settings snapshot.
     fn settings() -> SettingsStore {
         SettingsStore::resolve(&SettingsRegistry::builtin(), &SettingSources::default()).unwrap()
+    }
+
+    #[test]
+    fn the_session_token_is_read_from_any_cookie_header() {
+        assert_eq!(
+            session_token(["theme=dark", "a=1; hs_session=abc123; b=2"]).as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(session_token(["hs_session="]), None);
+        assert_eq!(session_token(Vec::new()), None);
     }
 
     #[tokio::test]

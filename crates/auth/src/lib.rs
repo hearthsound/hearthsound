@@ -52,7 +52,9 @@ pub use password::{hash_password, verify_password};
 pub use proxy::{InvalidProxy, TrustedProxies};
 pub use quotas::{Quotas, UserQuota};
 pub use rate_limit::{LoginKey, LoginRateLimiter, RateLimited};
-pub use session::{LoginError, NewSession, SessionRecord, Sessions};
+pub use session::{
+    CSRF_HEADER, LoginError, NewSession, SESSION_COOKIE, SessionRecord, Sessions, session_token,
+};
 pub use subsonic::{
     APP_PASSWORDS_HELP_URL, AuthenticationError, Authenticator, Credential, MIN_SALT_LEN,
     Principal, ResolveError, SubsonicCredentials,

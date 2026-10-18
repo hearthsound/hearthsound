@@ -30,6 +30,9 @@ use crate::tickets::Tickets;
 pub struct NativeServices {
     /// The open database.
     pub database: Arc<Database>,
+    /// The web session table, shared with the `/rest` surface so a session a
+    /// client signed in with there is the one this surface resolves.
+    pub sessions: Sessions,
     /// The runtime settings service.
     pub settings: Settings,
     /// The credential resolver shared with `/rest`, so one login rate limiter
@@ -123,7 +126,7 @@ impl NativeState {
         let database = Arc::clone(&services.database);
         NativeState {
             inner: Arc::new(Inner {
-                sessions: Sessions::new(&database),
+                sessions: services.sessions.clone(),
                 user_settings: UserSettings::new(&database, services.settings.registry().clone()),
                 quotas: Quotas::new(&database),
                 api_keys: ApiKeys::new(&database),
