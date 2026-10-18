@@ -145,6 +145,28 @@ impl PluginRow {
     }
 }
 
+/// One staged upgrade of an installed plugin, held until an administrator
+/// approves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginUpgrade {
+    /// The plugin id, shared with the installed row.
+    pub plugin_id: String,
+    /// The staged version.
+    pub version: String,
+    /// The API version the staged component targets.
+    pub api: String,
+    /// The staged manifest, JSON text.
+    pub manifest: String,
+    /// The SHA-256 of the staged archive.
+    pub sha256: Vec<u8>,
+    /// Where the staged plugin came from.
+    pub source: String,
+    /// The repository the staged plugin was fetched from, if any.
+    pub repository_id: Option<Uuid>,
+    /// When the upgrade was staged, in unix milliseconds.
+    pub staged_at: i64,
+}
+
 /// One row of the `provider_instances` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceRow {
@@ -408,6 +430,149 @@ impl PluginRepository {
             .execute(&self.writer)
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Reads the upgrade staged for one plugin.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the plugin id.
+    ///
+    /// # Returns
+    ///
+    /// The staged upgrade, or `None` when nothing is staged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::Database`] when the row cannot be read.
+    pub async fn upgrade(&self, id: &str) -> Result<Option<PluginUpgrade>, RepoError> {
+        select_upgrade(&self.readers, id).await
+    }
+
+    /// Stages an upgrade for an installed plugin, replacing any staged one.
+    ///
+    /// # Parameters
+    ///
+    /// - `upgrade`: the staged version. Its plugin must already be installed.
+    ///
+    /// # Returns
+    ///
+    /// The upgrade this one replaced, when there was one. The caller prunes
+    /// the files that replaced upgrade staged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::Database`] when the write fails.
+    pub async fn insert_upgrade(
+        &self,
+        upgrade: &PluginUpgrade,
+    ) -> Result<Option<PluginUpgrade>, RepoError> {
+        let mut transaction = self.writer.begin().await?;
+        let replaced = select_upgrade(&mut *transaction, &upgrade.plugin_id).await?;
+        sqlx::query!(
+            "INSERT INTO plugin_upgrades
+                (plugin_id, version, api, manifest, sha256, source, repository_id, staged_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(plugin_id) DO UPDATE SET
+                version = excluded.version,
+                api = excluded.api,
+                manifest = excluded.manifest,
+                sha256 = excluded.sha256,
+                source = excluded.source,
+                repository_id = excluded.repository_id,
+                staged_at = excluded.staged_at",
+            upgrade.plugin_id,
+            upgrade.version,
+            upgrade.api,
+            upgrade.manifest,
+            upgrade.sha256,
+            upgrade.source,
+            upgrade
+                .repository_id
+                .as_ref()
+                .map(|uuid| uuid.as_bytes().as_slice()),
+            upgrade.staged_at,
+        )
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(replaced)
+    }
+
+    /// Applies the staged upgrade to the installed row.
+    ///
+    /// The row takes the staged version, manifest, digest and source, and its
+    /// approved permissions become the staged manifest's requested set. The
+    /// enabled flag is left as it was. The staged row is removed in the same
+    /// transaction.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the plugin id.
+    ///
+    /// # Returns
+    ///
+    /// The updated plugin row, or `None` when no upgrade is staged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError`] when the staged manifest cannot be parsed or the
+    /// write fails.
+    pub async fn apply_upgrade(&self, id: &str) -> Result<Option<PluginRow>, RepoError> {
+        let mut transaction = self.writer.begin().await?;
+        let Some(upgrade) = select_upgrade(&mut *transaction, id).await? else {
+            return Ok(None);
+        };
+        let stored: StoredPermissions = serde_json::from_str(&upgrade.manifest)?;
+        let approved = serde_json::to_string(&stored.permissions)?;
+        sqlx::query!(
+            "UPDATE plugins SET version = ?, api = ?, manifest = ?, sha256 = ?, source = ?,
+                repository_id = ?, approved_permissions = ?
+             WHERE id = ?",
+            upgrade.version,
+            upgrade.api,
+            upgrade.manifest,
+            upgrade.sha256,
+            upgrade.source,
+            upgrade
+                .repository_id
+                .as_ref()
+                .map(|uuid| uuid.as_bytes().as_slice()),
+            approved,
+            id,
+        )
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query!("DELETE FROM plugin_upgrades WHERE plugin_id = ?", id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        self.plugin(id).await
+    }
+
+    /// Discards the staged upgrade, keeping the installed version in service.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the plugin id.
+    ///
+    /// # Returns
+    ///
+    /// The discarded upgrade, or `None` when nothing was staged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::Database`] when the write fails.
+    pub async fn decline_upgrade(&self, id: &str) -> Result<Option<PluginUpgrade>, RepoError> {
+        let mut transaction = self.writer.begin().await?;
+        let removed = select_upgrade(&mut *transaction, id).await?;
+        if removed.is_some() {
+            sqlx::query!("DELETE FROM plugin_upgrades WHERE plugin_id = ?", id)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
+        Ok(removed)
     }
 
     /// Inserts one provider instance.
@@ -721,6 +886,36 @@ fn optional_uuid(column: &'static str, bytes: Option<Vec<u8>>) -> Result<Option<
             })
         })
         .transpose()
+}
+
+/// Reads the upgrade staged for one plugin through any executor.
+///
+/// Returns `None` when nothing is staged.
+async fn select_upgrade<'c, E>(executor: E, id: &str) -> Result<Option<PluginUpgrade>, RepoError>
+where
+    E: sqlx::Executor<'c, Database = sqlx::Sqlite>,
+{
+    let row = sqlx::query!(
+        "SELECT plugin_id, version, api, manifest, sha256, source, repository_id, staged_at
+         FROM plugin_upgrades WHERE plugin_id = ?",
+        id,
+    )
+    .fetch_optional(executor)
+    .await?;
+
+    row.map(|row| -> Result<PluginUpgrade, RepoError> {
+        Ok(PluginUpgrade {
+            plugin_id: row.plugin_id,
+            version: row.version,
+            api: row.api,
+            manifest: row.manifest,
+            sha256: row.sha256,
+            source: row.source,
+            repository_id: optional_uuid("plugin_upgrades.repository_id", row.repository_id)?,
+            staged_at: row.staged_at,
+        })
+    })
+    .transpose()
 }
 
 /// The part of a stored manifest that approval reads.

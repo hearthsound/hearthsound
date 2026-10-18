@@ -1,0 +1,110 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT plugin_id, version, api, manifest, sha256, source, repository_id, staged_at\n         FROM plugin_upgrades WHERE plugin_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "plugin_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "plugin_upgrades",
+            "name": "plugin_id"
+          }
+        }
+      },
+      {
+        "name": "version",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "plugin_upgrades",
+            "name": "version"
+          }
+        }
+      },
+      {
+        "name": "api",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "plugin_upgrades",
+            "name": "api"
+          }
+        }
+      },
+      {
+        "name": "manifest",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "plugin_upgrades",
+            "name": "manifest"
+          }
+        }
+      },
+      {
+        "name": "sha256",
+        "ordinal": 4,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "plugin_upgrades",
+            "name": "sha256"
+          }
+        }
+      },
+      {
+        "name": "source",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "plugin_upgrades",
+            "name": "source"
+          }
+        }
+      },
+      {
+        "name": "repository_id",
+        "ordinal": 6,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "plugin_upgrades",
+            "name": "repository_id"
+          }
+        }
+      },
+      {
+        "name": "staged_at",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "plugin_upgrades",
+            "name": "staged_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "378216a7ece66b60e151e2714a6ce12cad37bab8aaf181981723dcf6f42739e4"
+}

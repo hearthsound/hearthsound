@@ -506,7 +506,7 @@ fn install_blocking(
             api: manifest.api.clone(),
         });
     }
-    let version = plugin_version(&manifest)?;
+    let version = parse_version(&manifest.version)?;
     let target = plugins_dir.join(&manifest.id).join(version.to_string());
     if target.exists() {
         return Err(InstallError::AlreadyInstalled {
@@ -737,12 +737,13 @@ fn load_component(engine: &Engine, cwasm: &Path, wasm: &Path) -> Result<Componen
     Ok(component)
 }
 
-/// Parses the manifest's version, which [`Manifest::parse`] already checked.
-fn plugin_version(manifest: &Manifest) -> Result<semver::Version, InstallError> {
-    semver::Version::parse(&manifest.version).map_err(|error| {
+/// Parses a manifest version, which [`Manifest::parse`] already checked as
+/// text but not as semver.
+pub(crate) fn parse_version(text: &str) -> Result<semver::Version, InstallError> {
+    semver::Version::parse(text).map_err(|error| {
         InstallError::Manifest(ManifestError::Invalid {
             field: "version".to_owned(),
-            value: manifest.version.clone(),
+            value: text.to_owned(),
             reason: error.to_string(),
         })
     })

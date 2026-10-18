@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO plugin_upgrades\n                (plugin_id, version, api, manifest, sha256, source, repository_id, staged_at)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n             ON CONFLICT(plugin_id) DO UPDATE SET\n                version = excluded.version,\n                api = excluded.api,\n                manifest = excluded.manifest,\n                sha256 = excluded.sha256,\n                source = excluded.source,\n                repository_id = excluded.repository_id,\n                staged_at = excluded.staged_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "8e48337298139813093d326d57cd4905f9d5855fe7dbf734e5e2fb5dadca0899"
+}

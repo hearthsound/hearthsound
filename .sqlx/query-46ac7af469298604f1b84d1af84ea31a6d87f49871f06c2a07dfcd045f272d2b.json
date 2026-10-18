@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE plugins SET version = ?, api = ?, manifest = ?, sha256 = ?, source = ?,\n                repository_id = ?, approved_permissions = ?\n             WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "46ac7af469298604f1b84d1af84ea31a6d87f49871f06c2a07dfcd045f272d2b"
+}

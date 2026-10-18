@@ -71,6 +71,18 @@ pub enum InstallError {
         /// The plugin version.
         version: String,
     },
+    /// The offered version is older than the installed one.
+    #[error(
+        "plugin `{id}` version `{requested}` is older than the installed `{installed}`; downgrades are refused"
+    )]
+    Downgrade {
+        /// The plugin id.
+        id: String,
+        /// The version currently installed.
+        installed: String,
+        /// The older version that was offered.
+        requested: String,
+    },
     /// The component does not type-check against the host's world.
     #[error("the component is incompatible with this host: {0}")]
     Incompatible(String),

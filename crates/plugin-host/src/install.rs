@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::host::InstalledPlugin;
 use crate::manifest::Manifest;
-use crate::repo::{PluginRepository, PluginRow, PluginSource};
+use crate::repo::{PluginRepository, PluginRow, PluginSource, PluginUpgrade};
 use crate::repo::{RepoError, now_millis};
 
 /// The `http.maxBodyBytes` above which a request is labelled a raised quota.
@@ -307,15 +307,140 @@ impl PluginRepository {
         };
         self.upsert_plugin(&row).await?;
 
-        Ok(PluginRegistration {
+        Ok(registration(plugin, source))
+    }
+
+    /// Switches the installed row to a new version without staging it.
+    ///
+    /// Used when the new version asks for no permissions the installed one
+    /// lacks. The enabled flag and approval state carry over: an approved
+    /// plugin's approved set becomes the new manifest's permissions, and a
+    /// pending plugin stays pending.
+    ///
+    /// # Parameters
+    ///
+    /// - `plugin`: the new version's install.
+    /// - `existing`: the installed row being replaced.
+    /// - `source`: where the archive came from.
+    /// - `repository_id`: the repository the archive was fetched from, if any.
+    ///
+    /// # Returns
+    ///
+    /// The row as written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::Database`] when the write fails and
+    /// [`RepoError::Serialize`] when the permissions cannot be serialized.
+    pub(crate) async fn switch_version(
+        &self,
+        plugin: &InstalledPlugin,
+        existing: &PluginRow,
+        source: PluginSource,
+        repository_id: Option<Uuid>,
+    ) -> Result<PluginRow, RepoError> {
+        let manifest = plugin.manifest();
+        let approved_permissions = match existing.approved_permissions {
+            Some(_) => Some(serde_json::to_string(&manifest.permissions)?),
+            None => None,
+        };
+        let row = PluginRow {
             id: manifest.id.clone(),
             version: manifest.version.clone(),
             api: manifest.api.clone(),
-            source,
-            requested: requested_permissions(manifest),
-            provides: manifest.provides().to_vec(),
-        })
+            manifest: plugin.manifest_json().to_owned(),
+            sha256: plugin.sha256().to_vec(),
+            source: source.as_str().to_owned(),
+            repository_id,
+            approved_permissions,
+            enabled: existing.enabled,
+            installed_at: now_millis(),
+        };
+        self.upsert_plugin(&row).await?;
+        Ok(row)
     }
+
+    /// Stages a new version of an installed plugin for approval.
+    ///
+    /// The installed row is untouched; the staged version waits in
+    /// `plugin_upgrades` until it is approved or declined.
+    ///
+    /// # Parameters
+    ///
+    /// - `plugin`: the new version's install.
+    /// - `source`: where the archive came from.
+    /// - `repository_id`: the repository the archive was fetched from, if any.
+    ///
+    /// # Returns
+    ///
+    /// The upgrade this one replaced, when one was already staged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::Database`] when the write fails.
+    pub(crate) async fn stage_upgrade(
+        &self,
+        plugin: &InstalledPlugin,
+        source: PluginSource,
+        repository_id: Option<Uuid>,
+    ) -> Result<Option<PluginUpgrade>, RepoError> {
+        let manifest = plugin.manifest();
+        let upgrade = PluginUpgrade {
+            plugin_id: manifest.id.clone(),
+            version: manifest.version.clone(),
+            api: manifest.api.clone(),
+            manifest: plugin.manifest_json().to_owned(),
+            sha256: plugin.sha256().to_vec(),
+            source: source.as_str().to_owned(),
+            repository_id,
+            staged_at: now_millis(),
+        };
+        self.insert_upgrade(&upgrade).await
+    }
+}
+
+/// Builds the registration an install reports, from its manifest.
+///
+/// # Parameters
+///
+/// - `plugin`: the plugin the install produced.
+/// - `source`: where the archive came from.
+///
+/// # Returns
+///
+/// The registration, for display.
+pub(crate) fn registration(plugin: &InstalledPlugin, source: PluginSource) -> PluginRegistration {
+    let manifest = plugin.manifest();
+    PluginRegistration {
+        id: manifest.id.clone(),
+        version: manifest.version.clone(),
+        api: manifest.api.clone(),
+        source,
+        requested: requested_permissions(manifest),
+        provides: manifest.provides().to_vec(),
+    }
+}
+
+/// Reports whether `new` requests a permission that `installed` does not.
+///
+/// Permissions are compared by scope and detail; the risk label is derived
+/// from them and does not change what is granted.
+///
+/// # Parameters
+///
+/// - `new`: the manifest of a staged upgrade.
+/// - `installed`: the manifest of the version in service.
+///
+/// # Returns
+///
+/// `true` when `new` asks for anything `installed` does not.
+pub(crate) fn requests_new_permissions(new: &Manifest, installed: &Manifest) -> bool {
+    let held = requested_permissions(installed);
+    requested_permissions(new).iter().any(|wanted| {
+        !held
+            .iter()
+            .any(|have| have.scope == wanted.scope && have.detail == wanted.detail)
+    })
 }
 
 #[cfg(test)]

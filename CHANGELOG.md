@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enabling a pending plugin is refused. Approval, enabling, disabling and
   removal publish a plugin status event to administrators.
 
+- A newer version of an installed plugin that requests a permission the
+  installed version does not hold waits for approval: the installed version
+  keeps serving until the upgrade is approved, approving it prunes the old
+  version's files, and declining it discards the staged version.
+
 - `hsGetAvailability` answers what the server knows about the tracks and albums a
   client names over the `hearthsound` vendor extension: each entity's
   availability state, whether the requesting account's personal library holds it,

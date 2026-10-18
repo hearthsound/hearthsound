@@ -16,8 +16,9 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::error::InstallError;
-use crate::host::PluginHost;
-use crate::install::PluginRegistration;
+use crate::host::{PluginHost, parse_version};
+use crate::install::{PluginRegistration, registration, requests_new_permissions};
+use crate::manifest::{Manifest, ManifestError};
 use crate::repo::{PluginRepository, PluginRow, PluginSource, PluginState, RepoError};
 
 /// An error from an administrative plugin operation.
@@ -37,6 +38,9 @@ pub enum AdminError {
         /// The state the plugin is in.
         state: &'static str,
     },
+    /// The plugin has no staged upgrade to decline.
+    #[error("plugin `{0}` has no staged upgrade")]
+    NoUpgradeStaged(String),
     /// Installing or removing files failed.
     #[error(transparent)]
     Install(#[from] InstallError),
@@ -76,10 +80,14 @@ impl PluginAdmin {
     /// Installs an archive and records it.
     ///
     /// The archive is checked against `expected_sha256` first, when given, then
-    /// installed, then recorded. An install is pending approval unless
-    /// `approved` is set. Installing a second version of a plugin that is
-    /// already recorded is refused: the new files are removed and the existing
-    /// version keeps running.
+    /// installed, then recorded. A plugin that is not recorded yet is recorded
+    /// as pending approval unless `approved` is set. A newer version of a
+    /// recorded plugin is switched in at once when it requests no permission
+    /// the installed version lacks; the old files are then removed. A newer
+    /// version that requests more is staged as an upgrade instead: the
+    /// installed version keeps serving until [`PluginAdmin::approve`] applies
+    /// it or [`PluginAdmin::decline_upgrade`] discards it. Installing the
+    /// recorded version again is refused, and so is an older version.
     ///
     /// # Parameters
     ///
@@ -87,13 +95,15 @@ impl PluginAdmin {
     /// - `expected_sha256`: the digest the archive must have, when it is known.
     /// - `source`: where the archive came from.
     /// - `repository_id`: the repository the archive was fetched from, if any.
-    /// - `approved`: whether the requested permissions are approved on install.
+    /// - `approved`: whether a plugin that is not recorded yet is approved on
+    ///   install. Upgrades never grant approval.
     ///
     /// # Errors
     ///
     /// Returns [`InstallError::IntegrityFailed`] when the digest differs,
-    /// [`InstallError::AlreadyInstalled`] when a different version is recorded,
-    /// and the host's install errors otherwise.
+    /// [`InstallError::AlreadyInstalled`] when the recorded version is
+    /// installed again, [`InstallError::Downgrade`] when an older version is
+    /// installed, and the host's install errors otherwise.
     pub async fn install_archive(
         &self,
         archive: &Path,
@@ -120,52 +130,144 @@ impl PluginAdmin {
 
         let installed = self.host.install(archive).await?;
         let manifest = installed.manifest();
-        let existing = self.repository.plugin(&manifest.id).await?;
-        if let Some(existing) = existing.filter(|row| row.version != manifest.version) {
+        let Some(existing) = self.repository.plugin(&manifest.id).await? else {
+            let registration = self
+                .repository
+                .record_install(&installed, source, repository_id, approved)
+                .await?;
+            let state = if approved {
+                PluginState::Enabled
+            } else {
+                PluginState::PendingApproval
+            };
+            self.publish(&registration.id, state.as_str());
+            return Ok(registration);
+        };
+
+        let installed_version = parse_version(&existing.version)?;
+        let new_version = parse_version(&manifest.version)?;
+        if new_version <= installed_version {
             self.host
                 .remove_version(&manifest.id, &manifest.version)
                 .await?;
-            return Err(InstallError::AlreadyInstalled {
-                id: manifest.id.clone(),
-                version: existing.version,
+            return Err(if new_version == installed_version {
+                InstallError::AlreadyInstalled {
+                    id: manifest.id.clone(),
+                    version: existing.version,
+                }
+            } else {
+                InstallError::Downgrade {
+                    id: manifest.id.clone(),
+                    installed: existing.version,
+                    requested: manifest.version.clone(),
+                }
             });
         }
 
-        let registration = self
-            .repository
-            .record_install(&installed, source, repository_id, approved)
-            .await?;
-        let state = if approved {
-            PluginState::Enabled
-        } else {
-            PluginState::PendingApproval
+        let installed_manifest: Manifest = serde_json::from_str(&existing.manifest)
+            .map_err(|error| InstallError::Manifest(ManifestError::Parse(error)))?;
+        let serving = existing.approved_permissions.is_some();
+        if serving && requests_new_permissions(manifest, &installed_manifest) {
+            let replaced = self
+                .repository
+                .stage_upgrade(&installed, source, repository_id)
+                .await?;
+            if let Some(replaced) = replaced.filter(|old| old.version != manifest.version) {
+                self.host
+                    .remove_version(&manifest.id, &replaced.version)
+                    .await?;
+            }
+            let staged = registration(&installed, source);
+            self.publish(&staged.id, PluginState::UpgradePendingApproval.as_str());
+            return Ok(staged);
+        }
+
+        let staged = self.repository.upgrade(&manifest.id).await?;
+        let superseded = match staged {
+            Some(staged) if parse_version(&staged.version)? <= new_version => Some(staged),
+            _ => None,
         };
-        self.publish(&registration.id, state.as_str());
-        Ok(registration)
+        let switched = self
+            .repository
+            .switch_version(&installed, &existing, source, repository_id)
+            .await?;
+        if let Some(superseded) = superseded {
+            self.repository.decline_upgrade(&manifest.id).await?;
+            self.host
+                .remove_version(&manifest.id, &superseded.version)
+                .await?;
+        }
+        self.host
+            .remove_version(&manifest.id, &existing.version)
+            .await?;
+        self.publish(&switched.id, switched.state(false).as_str());
+        Ok(registration(&installed, source))
     }
 
-    /// Approves a pending plugin's requested permissions and enables it.
+    /// Approves a plugin's requested permissions, or applies its staged upgrade.
+    ///
+    /// A plugin waiting for its first approval is enabled once approved. A
+    /// plugin with a staged upgrade has the upgrade applied: its row switches to
+    /// the new version and the files of the old version are removed.
     ///
     /// # Errors
     ///
     /// Returns [`AdminError::NotFound`] for an unknown id and
-    /// [`AdminError::NothingToApprove`] when the plugin is not pending approval.
+    /// [`AdminError::NothingToApprove`] when the plugin has neither a first
+    /// approval pending nor a staged upgrade.
     pub async fn approve(&self, id: &str) -> Result<PluginRow, AdminError> {
         let row = self.require(id).await?;
-        let state = row.state(false);
-        if state != PluginState::PendingApproval {
-            return Err(AdminError::NothingToApprove {
+        let upgrade_staged = self.repository.upgrade(id).await?.is_some();
+        let state = row.state(upgrade_staged);
+        match state {
+            PluginState::PendingApproval => {
+                let approved = self
+                    .repository
+                    .approve(id)
+                    .await?
+                    .ok_or_else(|| AdminError::NotFound(id.to_owned()))?;
+                self.publish(id, PluginState::Enabled.as_str());
+                Ok(approved)
+            }
+            PluginState::UpgradePendingApproval => {
+                let old_version = row.version;
+                let applied = self
+                    .repository
+                    .apply_upgrade(id)
+                    .await?
+                    .ok_or_else(|| AdminError::NotFound(id.to_owned()))?;
+                self.host.remove_version(id, &old_version).await?;
+                self.publish(id, applied.state(false).as_str());
+                Ok(applied)
+            }
+            PluginState::Enabled | PluginState::Disabled => Err(AdminError::NothingToApprove {
                 id: id.to_owned(),
                 state: state.as_str(),
-            });
+            }),
         }
-        let approved = self
+    }
+
+    /// Discards a staged upgrade and keeps the installed version in service.
+    ///
+    /// # Returns
+    ///
+    /// The plugin row, which no longer has a staged upgrade.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdminError::NotFound`] for an unknown id and
+    /// [`AdminError::NoUpgradeStaged`] when no upgrade is waiting.
+    pub async fn decline_upgrade(&self, id: &str) -> Result<PluginRow, AdminError> {
+        self.require(id).await?;
+        let declined = self
             .repository
-            .approve(id)
+            .decline_upgrade(id)
             .await?
-            .ok_or_else(|| AdminError::NotFound(id.to_owned()))?;
-        self.publish(id, PluginState::Enabled.as_str());
-        Ok(approved)
+            .ok_or_else(|| AdminError::NoUpgradeStaged(id.to_owned()))?;
+        self.host.remove_version(id, &declined.version).await?;
+        let row = self.require(id).await?;
+        self.publish(id, row.state(false).as_str());
+        Ok(row)
     }
 
     /// Switches an approved plugin on or off.
