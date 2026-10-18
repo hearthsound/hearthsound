@@ -66,6 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   playlist whose expiry has passed is deleted, with its entries, by a sweep every
   fifteen minutes.
 
+- `hsGetServerInfo` reports what the server can do over the `hearthsound` vendor
+  extension: the pending mode of a stream, whether catalog search is on, whether
+  an acquisition provider is enabled, the enabled provider instances of every
+  layer, and the vendor features the server implements.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload

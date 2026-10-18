@@ -20,6 +20,7 @@ mod genres;
 mod hs_acquisitions;
 mod hs_library;
 mod hs_queue;
+mod hs_server;
 mod info;
 mod now_playing;
 mod play_queue;

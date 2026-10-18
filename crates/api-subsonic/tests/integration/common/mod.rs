@@ -198,7 +198,10 @@ impl Fixture {
             activity,
             Arc::clone(&ffmpeg),
             roots.clone(),
-        );
+        )
+        // The registry the catalog layer resolves instances through, so the
+        // vendor endpoints report the layers this fixture enabled.
+        .with_registry(Arc::clone(&registry));
         let state = match pending {
             Some(pending) => state.with_pending_source(pending),
             None => state,

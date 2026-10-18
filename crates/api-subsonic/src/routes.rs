@@ -180,6 +180,7 @@ pub fn routes() -> Router<SubsonicState> {
         "hsSetPlaylistLifetime",
         endpoints::hs_set_playlist_lifetime,
     );
+    let router = register(router, "hsGetServerInfo", endpoints::hs_get_server_info);
     router.route(NOT_FOUND_PATH, get(not_found).post(not_found))
 }
 
