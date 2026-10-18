@@ -165,6 +165,12 @@ pub fn routes() -> Router<SubsonicState> {
     let router = register(router, "scrobble", endpoints::scrobble);
     let router = register(router, "hsGetAvailability", endpoints::hs_get_availability);
     let router = register(router, "hsAcquire", endpoints::hs_acquire);
+    let router = register(router, "hsGetAcquisitions", endpoints::hs_get_acquisitions);
+    let router = register(
+        router,
+        "hsCancelAcquisition",
+        endpoints::hs_cancel_acquisition,
+    );
     router.route(NOT_FOUND_PATH, get(not_found).post(not_found))
 }
 

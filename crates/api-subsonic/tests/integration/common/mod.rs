@@ -447,6 +447,27 @@ impl Fixture {
         (EntityId::from_uuid(IdPrefix::User, user.id), key)
     }
 
+    /// Creates an administrator account with every permission.
+    ///
+    /// # Returns
+    ///
+    /// The account's id and a freshly generated API key.
+    pub async fn admin_account(&self) -> (EntityId, String) {
+        let user = Users::new(&self.database)
+            .create(
+                &self.settings.current(),
+                &NewUser::new("root", "Root", ACCOUNT_PASSWORD, true),
+            )
+            .await
+            .unwrap();
+        let key = ApiKeys::new(&self.database)
+            .generate(user.id, "root")
+            .await
+            .unwrap()
+            .plaintext;
+        (EntityId::from_uuid(IdPrefix::User, user.id), key)
+    }
+
     /// Creates a second account with the given permissions and returns an API
     /// key for it.
     ///

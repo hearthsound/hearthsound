@@ -130,6 +130,8 @@
 //! | `scrobble` | records a play for a stored track; now-playing is accepted and discarded |
 //! | `hsGetAvailability` | what the server knows about the named tracks and albums: their availability, the caller's library membership, and the acquisition in flight |
 //! | `hsAcquire` | asks the acquisition layer for the named tracks and albums, at the priority the request names |
+//! | `hsGetAcquisitions` | the acquisitions of the caller's account, or of every account for an administrator |
+//! | `hsCancelAcquisition` | ends one acquisition, idempotently |
 //!
 //! The browse endpoints share one scope rule: an explicit `musicFolderId` of
 //! `1` is the requesting user's personal library and of `2` the server-wide

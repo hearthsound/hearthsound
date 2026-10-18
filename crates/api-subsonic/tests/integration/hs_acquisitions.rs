@@ -517,3 +517,328 @@ async fn acquire_answers_error_10_without_an_id() {
     .await;
     assert_error(&probe, 10);
 }
+
+#[tokio::test]
+async fn acquisitions_lists_the_callers_active_rows_in_both_encodings() {
+    let (fixture, _seeded, _album, tracks) = fixture().await;
+    let app = fixture.app();
+    acquire(&fixture, tracks[0]).await;
+    acquire(&fixture, tracks[1]).await;
+    let stabilize = |body: &str| {
+        number_acquisitions(
+            &body
+                .replace(&tracks[0].to_string(), "tr_faraway_1")
+                .replace(&tracks[1].to_string(), "tr_faraway_2"),
+        )
+    };
+    let query = format!(
+        "/rest/hsGetAcquisitions?apiKey={}&hearthsound=1",
+        fixture.api_key
+    );
+
+    let json = get(&app, &format!("{query}&f=json")).await;
+    assert_ok(&json);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("hs-acquisitions-json", stabilize(&json.body));
+    });
+
+    let xml = get(&app, &query).await;
+    assert_ok(&xml);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("hs-acquisitions-xml", stabilize(&xml.body));
+    });
+}
+
+#[tokio::test]
+async fn acquisitions_windows_select_active_recent_and_all() {
+    let (fixture, _seeded, _album, tracks) = fixture().await;
+    let app = fixture.app();
+    let active = acquire(&fixture, tracks[0]).await;
+    let ended = acquire(&fixture, tracks[1]).await;
+    fixture
+        .state
+        .acquisitions()
+        .unwrap()
+        .repository()
+        .fail(ended, FailureReason::NoCandidates, None)
+        .await
+        .unwrap();
+    let active = EntityId::from_uuid(IdPrefix::Acquisition, active).to_string();
+    let ended = EntityId::from_uuid(IdPrefix::Acquisition, ended).to_string();
+
+    let recent = get(
+        &app,
+        &format!(
+            "/rest/hsGetAcquisitions?apiKey={}&hearthsound=1&f=json&state=recent",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&recent);
+    assert!(
+        recent.body.contains(&format!("\"id\":\"{ended}\"")),
+        "{}",
+        recent.body
+    );
+    assert!(
+        !recent.body.contains(&format!("\"id\":\"{active}\"")),
+        "{}",
+        recent.body
+    );
+
+    let all = get(
+        &app,
+        &format!(
+            "/rest/hsGetAcquisitions?apiKey={}&hearthsound=1&f=json&state=all",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&all);
+    assert!(
+        all.body.contains(&format!("\"id\":\"{ended}\"")),
+        "{}",
+        all.body
+    );
+    assert!(
+        all.body.contains(&format!("\"id\":\"{active}\"")),
+        "{}",
+        all.body
+    );
+
+    let default = get(
+        &app,
+        &format!(
+            "/rest/hsGetAcquisitions?apiKey={}&hearthsound=1&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&default);
+    assert!(
+        default.body.contains(&format!("\"id\":\"{active}\"")),
+        "{}",
+        default.body
+    );
+    assert!(
+        !default.body.contains(&format!("\"id\":\"{ended}\"")),
+        "{}",
+        default.body
+    );
+}
+
+#[tokio::test]
+async fn acquisitions_page_by_count_and_offset() {
+    let (fixture, _seeded, _album, tracks) = fixture().await;
+    let app = fixture.app();
+    let first = acquire(&fixture, tracks[0]).await;
+    let second = acquire(&fixture, tracks[1]).await;
+    let first = EntityId::from_uuid(IdPrefix::Acquisition, first).to_string();
+    let second = EntityId::from_uuid(IdPrefix::Acquisition, second).to_string();
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsGetAcquisitions?apiKey={}&hearthsound=1&f=json&count=1&offset=1",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&probe);
+    assert!(
+        probe.body.contains(&format!("\"id\":\"{first}\"")),
+        "{}",
+        probe.body
+    );
+    assert!(
+        !probe.body.contains(&format!("\"id\":\"{second}\"")),
+        "{}",
+        probe.body
+    );
+}
+
+#[tokio::test]
+async fn acquisitions_hide_another_accounts_rows_but_not_from_an_admin() {
+    let (fixture, _seeded, _album, tracks) = fixture().await;
+    let app = fixture.app();
+    let (_, other_key) = fixture.account(&["acquire"]).await;
+    let (_, admin_key) = fixture.admin_account().await;
+
+    acquire(&fixture, tracks[0]).await;
+    let their = get(
+        &app,
+        &format!(
+            "/rest/hsAcquire?apiKey={other_key}&hearthsound=1&f=json&id={}",
+            tracks[1]
+        ),
+    )
+    .await;
+    assert_ok(&their);
+    let own = get(
+        &app,
+        &format!(
+            "/rest/hsGetAcquisitions?apiKey={}&hearthsound=1&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&own);
+    assert!(
+        own.body
+            .contains(&format!("\"targetId\":\"{}\"", tracks[0])),
+        "{}",
+        own.body
+    );
+    assert!(
+        !own.body
+            .contains(&format!("\"targetId\":\"{}\"", tracks[1])),
+        "{}",
+        own.body
+    );
+
+    let every = get(
+        &app,
+        &format!("/rest/hsGetAcquisitions?apiKey={admin_key}&hearthsound=1&f=json"),
+    )
+    .await;
+    assert_ok(&every);
+    assert!(
+        every
+            .body
+            .contains(&format!("\"targetId\":\"{}\"", tracks[0])),
+        "{}",
+        every.body
+    );
+    assert!(
+        every
+            .body
+            .contains(&format!("\"targetId\":\"{}\"", tracks[1])),
+        "{}",
+        every.body
+    );
+}
+
+#[tokio::test]
+async fn cancellations_end_an_acquisition_and_release_its_track() {
+    let (fixture, _seeded, _album, tracks) = fixture().await;
+    let app = fixture.app();
+    let id = acquire(&fixture, tracks[0]).await;
+    let acquisition = EntityId::from_uuid(IdPrefix::Acquisition, id).to_string();
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsCancelAcquisition?apiKey={}&hearthsound=1&f=json&id={acquisition}",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&probe);
+    assert!(!probe.body.contains("acquisition"), "{}", probe.body);
+
+    let availability = get(
+        &app,
+        &format!(
+            "/rest/hsGetAvailability?apiKey={}&hearthsound=1&f=json&id={}",
+            fixture.api_key, tracks[0]
+        ),
+    )
+    .await;
+    assert_ok(&availability);
+    assert!(
+        availability.body.contains("\"state\":\"remote\""),
+        "{}",
+        availability.body
+    );
+}
+
+#[tokio::test]
+async fn a_cancellation_of_a_terminal_acquisition_answers_an_empty_success() {
+    let (fixture, _seeded, _album, tracks) = fixture().await;
+    let app = fixture.app();
+    let id = acquire(&fixture, tracks[0]).await;
+    fixture
+        .state
+        .acquisitions()
+        .unwrap()
+        .repository()
+        .fail(id, FailureReason::NoCandidates, None)
+        .await
+        .unwrap();
+    let acquisition = EntityId::from_uuid(IdPrefix::Acquisition, id).to_string();
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsCancelAcquisition?apiKey={}&hearthsound=1&f=json&id={acquisition}",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&probe);
+    assert!(!probe.body.contains("acquisition"), "{}", probe.body);
+}
+
+#[tokio::test]
+async fn cancellations_answer_error_50_for_another_accounts_acquisition() {
+    let (fixture, _seeded, _album, tracks) = fixture().await;
+    let app = fixture.app();
+    let (_, other_key) = fixture.account(&["acquire"]).await;
+    let id = acquire(&fixture, tracks[0]).await;
+    let acquisition = EntityId::from_uuid(IdPrefix::Acquisition, id).to_string();
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsCancelAcquisition?apiKey={other_key}&hearthsound=1&f=json&id={acquisition}"
+        ),
+    )
+    .await;
+    assert_error(&probe, 50);
+}
+
+#[tokio::test]
+async fn cancellations_answer_error_70_for_an_unknown_acquisition() {
+    let (fixture, _seeded, _album, _tracks) = fixture().await;
+    let app = fixture.app();
+    let unknown = EntityId::new(IdPrefix::Acquisition);
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsCancelAcquisition?apiKey={}&hearthsound=1&f=json&id={unknown}",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&probe, 70);
+}
+
+#[tokio::test]
+async fn a_cancellation_answers_error_10_without_an_id() {
+    let (fixture, _seeded, _album, _tracks) = fixture().await;
+    let app = fixture.app();
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsCancelAcquisition?apiKey={}&hearthsound=1",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&probe, 10);
+}
+
+#[tokio::test]
+async fn a_listing_answers_error_70_without_the_vendor_flag() {
+    let (fixture, _seeded, _album, _tracks) = fixture().await;
+    let app = fixture.app();
+
+    let probe = get(
+        &app,
+        &format!("/rest/hsGetAcquisitions?apiKey={}", fixture.api_key),
+    )
+    .await;
+    assert_error(&probe, 70);
+}

@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   over the `hearthsound` vendor extension, at the priority the request carries,
   and answers the acquisition each request produced or attached to.
 
+- `hsGetAcquisitions` lists the acquisitions a client's account requested over the
+  `hearthsound` vendor extension - every account's for an administrator - and
+  `hsCancelAcquisition` ends one, idempotently.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload
