@@ -17,4 +17,5 @@ mod prefetch;
 mod reload;
 mod storage;
 mod stream_pending;
+mod vendor;
 mod watch;

@@ -168,6 +168,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plugin or a configuration the server cannot use answers the new
   `invalid-provider` and `invalid-layer` problems.
 
+- The `hearthsound` vendor extension and the event stream are exercised end to
+  end through a running server: the extension advertisement and the byte
+  identity of a response that did not opt in, the vendor member of a stored
+  track in both encodings, the server capabilities as a setting changes, the
+  availability and acquisition endpoints with their permission and vendor gates,
+  the progress the event stream reports while a download runs, the prefetch a
+  declared queue starts, replay from `Last-Event-ID`, and the pins a playlist's
+  lifetime controls.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload
