@@ -1211,3 +1211,1067 @@ async fn uploads_land_in_the_callers_library_and_are_refused_when_they_should_be
     assert_problem(closed, StatusCode::FORBIDDEN, "permission-denied").await;
     fixture.stop().await;
 }
+
+/// Full-stack tests of `/api/v1/admin/plugins`: installing from a registered
+/// index and from a repository URL, uploading an archive, the sideload and
+/// repository gates, the approval lifecycle over the API, and the listing of
+/// what the indexes offer.
+///
+/// The indexes and archives are served by a mock HTTP server, so the real
+/// download, signature-verification and integrity paths run without a network.
+mod plugin_admin {
+    use std::io::{Read, Write};
+    use std::path::Path;
+    use std::time::Duration;
+
+    use hearthsound_api_native::views::client_id;
+    use hearthsound_core::IdPrefix;
+    use hearthsound_test_support::{METADATA_FIXTURE, fixture_plugin};
+    use minisign::KeyPair;
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    /// The id of the metadata fixture the tests install.
+    const PLUGIN_ID: &str = "com.example.metadata-fixture";
+
+    /// The API version this server hosts.
+    const API: &str = "hearthsound:plugin@0.2.0";
+
+    /// The path an index document is served at in these tests.
+    const INDEX_PATH: &str = "/v1/index.json";
+
+    /// The path the fixture archive is served at in these tests.
+    const ARCHIVE_PATH: &str = "/download/metadata.hsplugin";
+
+    /// The boundary of the multipart bodies the tests send.
+    const BOUNDARY: &str = "----hearthsound-test-boundary";
+
+    /// One signing key pair a test publishes an index with.
+    struct Signer {
+        /// The key pair itself.
+        pair: KeyPair,
+    }
+
+    impl Signer {
+        /// Generates a fresh key pair.
+        fn new() -> Signer {
+            Signer {
+                pair: KeyPair::generate_unencrypted_keypair().unwrap(),
+            }
+        }
+
+        /// Returns the base64 public key of this signer.
+        fn public_key(&self) -> String {
+            self.pair.pk.to_base64()
+        }
+
+        /// Signs one document and returns the `.minisig` text.
+        fn sign(&self, document: &str) -> String {
+            minisign::sign(
+                Some(&self.pair.pk),
+                &self.pair.sk,
+                document.as_bytes(),
+                None,
+                None,
+            )
+            .unwrap()
+            .to_string()
+        }
+    }
+
+    /// Returns the directory the installed plugins live in.
+    fn plugins_dir(fixture: &Fixture) -> &Path {
+        fixture.services.plugins().plugins_dir()
+    }
+
+    /// The bytes of the metadata fixture archive.
+    fn fixture_bytes() -> Vec<u8> {
+        std::fs::read(fixture_plugin(METADATA_FIXTURE)).unwrap()
+    }
+
+    /// Renders bytes as lowercase hexadecimal.
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// Serves one 200 response with a text body.
+    async fn serve_text(server: &MockServer, document_path: &str, body: &str) {
+        Mock::given(method("GET"))
+            .and(path(document_path))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(server)
+            .await;
+    }
+
+    /// Serves one 200 response with a binary body.
+    async fn serve_bytes(server: &MockServer, document_path: &str, body: Vec<u8>) {
+        Mock::given(method("GET"))
+            .and(path(document_path))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(server)
+            .await;
+    }
+
+    /// Builds one index document.
+    fn document(plugins: &[Value]) -> String {
+        json!({
+            "formatVersion": 1,
+            "name": "Test index",
+            "generatedAt": "2026-01-01T00:00:00Z",
+            "plugins": plugins,
+        })
+        .to_string()
+    }
+
+    /// Builds one plugin entry.
+    fn entry(id: &str, official: bool, versions: &[Value]) -> Value {
+        json!({
+            "id": id,
+            "name": "Metadata fixture",
+            "description": "A metadata plugin.",
+            "provides": ["metadata"],
+            "homepage": "https://example.com/metadata",
+            "license": "MIT",
+            "official": official,
+            "versions": versions,
+        })
+    }
+
+    /// Builds one version entry for an archive.
+    fn version(version: &str, api: &str, url: &str, bytes: &[u8], permissions: Value) -> Value {
+        json!({
+            "version": version,
+            "api": api,
+            "url": url,
+            "sha256": hex(&Sha256::digest(bytes)),
+            "size": bytes.len(),
+            "publishedAt": "2026-01-01T00:00:00Z",
+            "changelog": "A release.",
+            "permissions": permissions,
+        })
+    }
+
+    /// Serves a signed index at [`INDEX_PATH`] and returns its URL.
+    async fn serve_signed_index(server: &MockServer, signer: &Signer, index: &str) -> String {
+        serve_text(server, INDEX_PATH, index).await;
+        serve_text(
+            server,
+            &format!("{INDEX_PATH}.minisig"),
+            &signer.sign(index),
+        )
+        .await;
+        format!("{}{INDEX_PATH}", server.uri())
+    }
+
+    /// Registers a repository and returns its client id.
+    async fn register_repository(fixture: &Fixture, url: &str, public_key: Option<&str>) -> String {
+        let row = fixture
+            .services
+            .plugin_repository()
+            .insert_repository(url, Some("test"), public_key, true)
+            .await
+            .unwrap();
+        client_id(IdPrefix::PluginRepository, row.id)
+    }
+
+    /// Installs one plugin from an index through the API and returns its view.
+    ///
+    /// A repository is registered for the index unless `repository` names one.
+    async fn install_from_index(
+        fixture: &Fixture,
+        server: &MockServer,
+        signer: &Signer,
+        index: &str,
+        repository: Option<&str>,
+    ) -> Value {
+        let url = serve_signed_index(server, signer, index).await;
+        let repository = match repository {
+            Some(id) => id.to_owned(),
+            None => register_repository(fixture, &url, Some(&signer.public_key())).await,
+        };
+        let response = bearer(
+            fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugins",
+            Some(json!({
+                "source": "index",
+                "pluginId": PLUGIN_ID,
+                "repositoryId": repository,
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED, "the install failed");
+        json(response).await
+    }
+
+    /// Sends a multipart upload of one `.hsplugin` file.
+    async fn upload(fixture: &Fixture, bytes: &[u8]) -> reqwest::Response {
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(
+            b"Content-Disposition: form-data; name=\"file\"; filename=\"plugin.hsplugin\"\r\n",
+        );
+        body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+        fixture
+            .client
+            .post(format!(
+                "{}/api/v1/admin/plugins/upload",
+                fixture.base_url()
+            ))
+            .header(AUTHORIZATION, format!("Bearer {}", fixture.api_key))
+            .header(
+                CONTENT_TYPE,
+                format!("multipart/form-data; boundary={BOUNDARY}"),
+            )
+            .body(body)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    /// Asserts nothing of a plugin was recorded or written.
+    async fn assert_untouched(fixture: &Fixture, id: &str) {
+        let listed =
+            json(bearer(fixture, reqwest::Method::GET, "/api/v1/admin/plugins", None).await).await;
+        assert!(
+            listed["plugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|plugin| plugin["id"] != id),
+            "the plugin was recorded: {listed}"
+        );
+        assert!(!plugins_dir(fixture).join(id).exists());
+        let leftovers: Vec<String> = std::fs::read_dir(plugins_dir(fixture))
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .filter(|name| name.starts_with(".download-") || name.starts_with(".upload-"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            leftovers.is_empty(),
+            "a temporary file was left behind: {leftovers:?}"
+        );
+    }
+
+    /// Reads one entry out of an archive.
+    fn read_entry(archive: &Path, name: &str) -> Vec<u8> {
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(archive).unwrap()).unwrap();
+        let mut buffer = Vec::new();
+        zip.by_name(name).unwrap().read_to_end(&mut buffer).unwrap();
+        buffer
+    }
+
+    /// Writes the metadata fixture repacked at `version` with `permissions`.
+    ///
+    /// The component is copied unchanged, so only the manifest differs.
+    fn repack(dir: &Path, version: &str, permissions: Value) -> Vec<u8> {
+        let source = fixture_plugin(METADATA_FIXTURE);
+        let mut manifest: Value =
+            serde_json::from_slice(&read_entry(&source, "manifest.json")).unwrap();
+        manifest["version"] = json!(version);
+        manifest["permissions"] = permissions;
+        let wasm = read_entry(&source, "plugin.wasm");
+        let target = dir.join(format!("metadata-{version}.hsplugin"));
+        let file = std::fs::File::create(&target).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file("manifest.json", options).unwrap();
+        writer
+            .write_all(&serde_json::to_vec(&manifest).unwrap())
+            .unwrap();
+        writer.start_file("plugin.wasm", options).unwrap();
+        writer.write_all(&wasm).unwrap();
+        writer.finish().unwrap();
+        std::fs::read(&target).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_plugin_installs_from_a_registered_index_and_is_listed() {
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        let signer = Signer::new();
+        // The archive itself requests the permission, and the index declares
+        // the same set, so the view reports what the install records.
+        let scratch = tempfile::tempdir().unwrap();
+        let bytes = repack(
+            scratch.path(),
+            "0.1.0",
+            json!({ "http": { "hosts": ["api.example.com"] } }),
+        );
+        serve_bytes(&server, ARCHIVE_PATH, bytes.clone()).await;
+        let archive = format!("{}{ARCHIVE_PATH}", server.uri());
+        let index = document(&[entry(
+            PLUGIN_ID,
+            false,
+            &[version(
+                "0.1.0",
+                API,
+                &archive,
+                &bytes,
+                json!({ "http": { "hosts": ["api.example.com"] } }),
+            )],
+        )]);
+        let plugin = install_from_index(&fixture, &server, &signer, &index, None).await;
+
+        assert_eq!(plugin["id"], PLUGIN_ID);
+        assert_eq!(plugin["version"], "0.1.0");
+        assert_eq!(plugin["api"], API);
+        assert_eq!(plugin["provides"], json!(["metadata"]));
+        assert_eq!(plugin["source"], "repository");
+        assert_eq!(plugin["state"], "pending-approval");
+        assert_eq!(plugin["enabled"], false);
+        assert_eq!(plugin["approved"], false);
+        assert!(plugin["update"].is_null());
+        assert!(plugin["installedAt"].is_i64());
+        let repository = plugin["repositoryId"].as_str().unwrap().to_owned();
+        assert!(repository.starts_with("pr_"));
+        let permissions = plugin["requestedPermissions"].as_array().unwrap();
+        assert_eq!(permissions.len(), 1);
+        assert_eq!(permissions[0]["scope"], "http.hosts");
+        assert_eq!(permissions[0]["detail"], "api.example.com");
+        assert_eq!(permissions[0]["risk"], "low");
+        assert!(plugins_dir(&fixture).join(PLUGIN_ID).join("0.1.0").is_dir());
+
+        // The listing and the single read agree with the install's answer.
+        let listed = json(
+            bearer(
+                &fixture,
+                reqwest::Method::GET,
+                "/api/v1/admin/plugins",
+                None,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(listed["plugins"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["plugins"][0], plugin);
+        let read = bearer(
+            &fixture,
+            reqwest::Method::GET,
+            &format!("/api/v1/admin/plugins/{PLUGIN_ID}"),
+            None,
+        )
+        .await;
+        assert_eq!(read.status(), StatusCode::OK);
+        assert_eq!(json(read).await, plugin);
+
+        // An unknown plugin is a not-found problem.
+        let missing = bearer(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/admin/plugins/com.example.unknown",
+            None,
+        )
+        .await;
+        assert_problem(missing, StatusCode::NOT_FOUND, "not-found").await;
+
+        // The next commits read the same repository row.
+        assert_eq!(plugin["repositoryId"], repository);
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn approval_gates_enabling_and_the_lifecycle_steers_the_plugin() {
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        let signer = Signer::new();
+        let bytes = fixture_bytes();
+        serve_bytes(&server, ARCHIVE_PATH, bytes.clone()).await;
+        let archive = format!("{}{ARCHIVE_PATH}", server.uri());
+        let index = document(&[entry(
+            PLUGIN_ID,
+            true,
+            &[version("0.1.0", API, &archive, &bytes, json!({}))],
+        )]);
+        install_from_index(&fixture, &server, &signer, &index, None).await;
+
+        // A pending plugin cannot be switched on, and has nothing to approve
+        // twice.
+        let refused = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            &format!("/api/v1/admin/plugins/{PLUGIN_ID}/enable"),
+            None,
+        )
+        .await;
+        assert_problem(refused, StatusCode::CONFLICT, "conflict").await;
+        let declined = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            &format!("/api/v1/admin/plugins/{PLUGIN_ID}/decline-upgrade"),
+            None,
+        )
+        .await;
+        assert_problem(declined, StatusCode::CONFLICT, "conflict").await;
+
+        // Approval records the permissions and enables the plugin.
+        let approved = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            &format!("/api/v1/admin/plugins/{PLUGIN_ID}/approve"),
+            None,
+        )
+        .await;
+        assert_eq!(approved.status(), StatusCode::OK);
+        let approved = json(approved).await;
+        assert_eq!(approved["state"], "enabled");
+        assert_eq!(approved["approved"], true);
+        assert_eq!(approved["enabled"], true);
+
+        let again = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            &format!("/api/v1/admin/plugins/{PLUGIN_ID}/approve"),
+            None,
+        )
+        .await;
+        assert_problem(again, StatusCode::CONFLICT, "conflict").await;
+
+        // Disabling and enabling an approved plugin.
+        let disabled = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            &format!("/api/v1/admin/plugins/{PLUGIN_ID}/disable"),
+            None,
+        )
+        .await;
+        let disabled = json(disabled).await;
+        assert_eq!(disabled["state"], "disabled");
+        assert_eq!(disabled["enabled"], false);
+        let enabled = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            &format!("/api/v1/admin/plugins/{PLUGIN_ID}/enable"),
+            None,
+        )
+        .await;
+        let enabled = json(enabled).await;
+        assert_eq!(enabled["state"], "enabled");
+        assert_eq!(enabled["enabled"], true);
+
+        // An unknown plugin is a not-found problem on every mutation.
+        let missing = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugins/com.example.unknown/approve",
+            None,
+        )
+        .await;
+        assert_problem(missing, StatusCode::NOT_FOUND, "not-found").await;
+
+        // Removal deletes the rows and the files.
+        let removed = bearer(
+            &fixture,
+            reqwest::Method::DELETE,
+            &format!("/api/v1/admin/plugins/{PLUGIN_ID}"),
+            None,
+        )
+        .await;
+        assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+        let gone = bearer(
+            &fixture,
+            reqwest::Method::GET,
+            &format!("/api/v1/admin/plugins/{PLUGIN_ID}"),
+            None,
+        )
+        .await;
+        assert_problem(gone, StatusCode::NOT_FOUND, "not-found").await;
+        assert!(!plugins_dir(&fixture).join(PLUGIN_ID).exists());
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn an_upgrade_that_requests_new_permissions_waits_for_approval() {
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        let signer = Signer::new();
+        let bytes = fixture_bytes();
+        serve_bytes(&server, ARCHIVE_PATH, bytes.clone()).await;
+        let archive = format!("{}{ARCHIVE_PATH}", server.uri());
+        let index = document(&[entry(
+            PLUGIN_ID,
+            false,
+            &[version("0.1.0", API, &archive, &bytes, json!({}))],
+        )]);
+        install_from_index(&fixture, &server, &signer, &index, None).await;
+        bearer(
+            &fixture,
+            reqwest::Method::POST,
+            &format!("/api/v1/admin/plugins/{PLUGIN_ID}/approve"),
+            None,
+        )
+        .await;
+
+        // A newer version asking for a permission the installed one does not
+        // hold is staged, and the installed version keeps serving.
+        let scratch = tempfile::tempdir().unwrap();
+        let upgrade = repack(
+            scratch.path(),
+            "0.2.0",
+            json!({ "http": { "hosts": ["api.example.com"] } }),
+        );
+        let uploaded = upload(&fixture, &upgrade).await;
+        assert_eq!(uploaded.status(), StatusCode::CREATED);
+        let staged = json(uploaded).await;
+        assert_eq!(staged["state"], "upgrade-pending-approval");
+        assert_eq!(staged["version"], "0.1.0");
+        assert_eq!(staged["enabled"], true);
+        assert!(plugins_dir(&fixture).join(PLUGIN_ID).join("0.2.0").is_dir());
+
+        // Approving applies the upgrade and prunes the old version's files.
+        let applied = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            &format!("/api/v1/admin/plugins/{PLUGIN_ID}/approve"),
+            None,
+        )
+        .await;
+        assert_eq!(applied.status(), StatusCode::OK);
+        let applied = json(applied).await;
+        assert_eq!(applied["state"], "enabled");
+        assert_eq!(applied["version"], "0.2.0");
+        assert_eq!(
+            applied["requestedPermissions"][0]["detail"],
+            "api.example.com"
+        );
+        assert!(plugins_dir(&fixture).join(PLUGIN_ID).join("0.2.0").is_dir());
+        assert!(!plugins_dir(&fixture).join(PLUGIN_ID).join("0.1.0").exists());
+
+        // A further upgrade with a new permission is staged and declined,
+        // which keeps the installed version.
+        let further = repack(
+            scratch.path(),
+            "0.3.0",
+            json!({ "http": { "hosts": ["api.example.com", "api.other.example"] } }),
+        );
+        let staged = json(upload(&fixture, &further).await).await;
+        assert_eq!(staged["state"], "upgrade-pending-approval");
+        let declined = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            &format!("/api/v1/admin/plugins/{PLUGIN_ID}/decline-upgrade"),
+            None,
+        )
+        .await;
+        assert_eq!(declined.status(), StatusCode::OK);
+        let declined = json(declined).await;
+        assert_eq!(declined["state"], "enabled");
+        assert_eq!(declined["version"], "0.2.0");
+        assert!(!plugins_dir(&fixture).join(PLUGIN_ID).join("0.3.0").exists());
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_plugin_installs_from_a_repository_url() {
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        let signer = Signer::new();
+        let bytes = fixture_bytes();
+        serve_bytes(&server, ARCHIVE_PATH, bytes.clone()).await;
+        let archive = format!("{}{ARCHIVE_PATH}", server.uri());
+        let index = serve_signed_index(
+            &server,
+            &signer,
+            &document(&[entry(
+                PLUGIN_ID,
+                false,
+                &[version("0.1.0", API, &archive, &bytes, json!({}))],
+            )]),
+        )
+        .await;
+
+        // The URL is registered on the way in and the plugin lands in it.
+        let installed = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugins",
+            Some(json!({ "source": "url", "pluginId": PLUGIN_ID, "url": index })),
+        )
+        .await;
+        assert_eq!(installed.status(), StatusCode::CREATED);
+        let installed = json(installed).await;
+        assert_eq!(installed["source"], "repository");
+        let repository = installed["repositoryId"].as_str().unwrap();
+        assert!(repository.starts_with("pr_"));
+        let row = fixture
+            .services
+            .plugin_repository()
+            .repositories()
+            .await
+            .unwrap();
+        assert_eq!(row.len(), 1);
+        assert_eq!(row[0].url, index);
+        assert!(row[0].last_fetched_at.is_some());
+
+        // Installing the same version again is a conflict.
+        let again = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugins",
+            Some(json!({ "source": "url", "pluginId": PLUGIN_ID, "url": index })),
+        )
+        .await;
+        assert_problem(again, StatusCode::CONFLICT, "conflict").await;
+
+        // A source that is neither `index` nor `url` is refused.
+        let bad_source = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugins",
+            Some(json!({ "source": "archive", "pluginId": PLUGIN_ID })),
+        )
+        .await;
+        assert_problem(bad_source, StatusCode::BAD_REQUEST, "invalid-request").await;
+
+        // `source` `url` without a URL is refused before anything is fetched.
+        let no_url = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugins",
+            Some(json!({ "source": "url", "pluginId": PLUGIN_ID })),
+        )
+        .await;
+        assert_problem(no_url, StatusCode::BAD_REQUEST, "invalid-request").await;
+
+        // An unknown repository id is a not-found problem.
+        let unknown = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugins",
+            Some(json!({
+                "source": "index",
+                "pluginId": PLUGIN_ID,
+                "repositoryId": "pr_00000000000000000000000000",
+            })),
+        )
+        .await;
+        assert_problem(unknown, StatusCode::NOT_FOUND, "not-found").await;
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_new_third_party_repository_is_gated() {
+        let fixture = Fixture::with_config(|config| {
+            config.settings.insert(
+                "plugins.allow_third_party_repositories".to_owned(),
+                toml::Value::Boolean(false),
+            );
+        })
+        .await;
+        let server = MockServer::start().await;
+        let signer = Signer::new();
+        let bytes = fixture_bytes();
+        serve_bytes(&server, ARCHIVE_PATH, bytes.clone()).await;
+        let archive = format!("{}{ARCHIVE_PATH}", server.uri());
+        let index = serve_signed_index(
+            &server,
+            &signer,
+            &document(&[entry(
+                PLUGIN_ID,
+                false,
+                &[version("0.1.0", API, &archive, &bytes, json!({}))],
+            )]),
+        )
+        .await;
+
+        let refused = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugins",
+            Some(json!({ "source": "url", "pluginId": PLUGIN_ID, "url": index })),
+        )
+        .await;
+        assert_problem(refused, StatusCode::FORBIDDEN, "repositories-disabled").await;
+        assert!(
+            fixture
+                .services
+                .plugin_repository()
+                .repositories()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_untouched(&fixture, PLUGIN_ID).await;
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_plugin_uploads_as_a_sideload_and_the_gate_refuses_it() {
+        let fixture = Fixture::new().await;
+        let bytes = fixture_bytes();
+        let uploaded = upload(&fixture, &bytes).await;
+        assert_eq!(uploaded.status(), StatusCode::CREATED);
+        let plugin = json(uploaded).await;
+        assert_eq!(plugin["id"], PLUGIN_ID);
+        assert_eq!(plugin["version"], "0.1.0");
+        assert_eq!(plugin["source"], "sideload");
+        assert_eq!(plugin["state"], "pending-approval");
+        assert!(plugin.get("repositoryId").is_none());
+        assert!(plugins_dir(&fixture).join(PLUGIN_ID).join("0.1.0").is_dir());
+        let leftovers = std::fs::read_dir(plugins_dir(&fixture))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".upload-"))
+            .count();
+        assert_eq!(leftovers, 0, "the staged upload was not removed");
+        fixture.stop().await;
+
+        // With sideloading off the route refuses before reading the body.
+        let closed = Fixture::with_config(|config| {
+            config.settings.insert(
+                "plugins.allow_sideload".to_owned(),
+                toml::Value::Boolean(false),
+            );
+        })
+        .await;
+        let refused = upload(&closed, &bytes).await;
+        assert_problem(refused, StatusCode::FORBIDDEN, "sideload-disabled").await;
+        assert_untouched(&closed, PLUGIN_ID).await;
+        closed.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_bad_signature_or_a_digest_mismatch_blocks_the_install() {
+        // An index whose signature does not verify is refused, and leaves no
+        // row and no file.
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        let signer = Signer::new();
+        let bytes = fixture_bytes();
+        serve_bytes(&server, ARCHIVE_PATH, bytes.clone()).await;
+        let archive = format!("{}{ARCHIVE_PATH}", server.uri());
+        let index = document(&[entry(
+            PLUGIN_ID,
+            false,
+            &[version("0.1.0", API, &archive, &bytes, json!({}))],
+        )]);
+        let url = format!("{}{INDEX_PATH}", server.uri());
+        // The document is served, but the signature belongs to another one.
+        serve_text(&server, INDEX_PATH, &index).await;
+        serve_text(
+            &server,
+            &format!("{INDEX_PATH}.minisig"),
+            &signer.sign("a different document"),
+        )
+        .await;
+        let repository = register_repository(&fixture, &url, Some(&signer.public_key())).await;
+        let refused = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugins",
+            Some(json!({
+                "source": "index",
+                "pluginId": PLUGIN_ID,
+                "repositoryId": repository,
+            })),
+        )
+        .await;
+        assert_problem(refused, StatusCode::BAD_GATEWAY, "signature-invalid").await;
+        assert_untouched(&fixture, PLUGIN_ID).await;
+        fixture.stop().await;
+
+        // An archive that is not what the index declares is refused.
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        let signer = Signer::new();
+        let bytes = fixture_bytes();
+        serve_bytes(&server, ARCHIVE_PATH, bytes.clone()).await;
+        let archive = format!("{}{ARCHIVE_PATH}", server.uri());
+        let mut broken = version("0.1.0", API, &archive, &bytes, json!({}));
+        broken["sha256"] = json!(hex(&[0u8; 32]));
+        let index = document(&[entry(PLUGIN_ID, false, &[broken])]);
+        let plugin = install_from_index_expecting_failure(&fixture, &server, &signer, &index).await;
+        assert_problem(plugin, StatusCode::BAD_GATEWAY, "integrity-failed").await;
+        assert_untouched(&fixture, PLUGIN_ID).await;
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_index_is_reported_and_recorded() {
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        // Nothing serves the index, so the fetch answers 404.
+        let url = format!("{}{INDEX_PATH}", server.uri());
+        let repository = register_repository(&fixture, &url, None).await;
+
+        let refused = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugins",
+            Some(json!({
+                "source": "index",
+                "pluginId": PLUGIN_ID,
+                "repositoryId": repository,
+            })),
+        )
+        .await;
+        assert_problem(refused, StatusCode::BAD_GATEWAY, "index-unavailable").await;
+        assert_untouched(&fixture, PLUGIN_ID).await;
+
+        // The failed fetch is recorded on the repository's row.
+        let rows = fixture
+            .services
+            .plugin_repository()
+            .repositories()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].last_error.is_some());
+        assert!(rows[0].last_fetched_at.is_some());
+        fixture.stop().await;
+    }
+
+    /// Installs from a signed index that is expected to fail.
+    async fn install_from_index_expecting_failure(
+        fixture: &Fixture,
+        server: &MockServer,
+        signer: &Signer,
+        index: &str,
+    ) -> reqwest::Response {
+        let url = serve_signed_index(server, signer, index).await;
+        let repository = register_repository(fixture, &url, Some(&signer.public_key())).await;
+        bearer(
+            fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugins",
+            Some(json!({
+                "source": "index",
+                "pluginId": PLUGIN_ID,
+                "repositoryId": repository,
+            })),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn an_archive_that_is_not_a_plugin_is_refused() {
+        // The index declares an archive that is not a plugin at all.
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        let signer = Signer::new();
+        let garbage = b"this is not a plugin archive".to_vec();
+        serve_bytes(&server, ARCHIVE_PATH, garbage.clone()).await;
+        let archive = format!("{}{ARCHIVE_PATH}", server.uri());
+        let index = document(&[entry(
+            PLUGIN_ID,
+            false,
+            &[version("0.1.0", API, &archive, &garbage, json!({}))],
+        )]);
+        let refused =
+            install_from_index_expecting_failure(&fixture, &server, &signer, &index).await;
+        assert_problem(refused, StatusCode::UNPROCESSABLE_ENTITY, "invalid-plugin").await;
+        assert_untouched(&fixture, PLUGIN_ID).await;
+        fixture.stop().await;
+
+        // The index offers only a version this server cannot host.
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        let signer = Signer::new();
+        let bytes = fixture_bytes();
+        serve_bytes(&server, ARCHIVE_PATH, bytes.clone()).await;
+        let archive = format!("{}{ARCHIVE_PATH}", server.uri());
+        let index = document(&[entry(
+            PLUGIN_ID,
+            false,
+            &[version(
+                "0.1.0",
+                "hearthsound:plugin@0.3.0",
+                &archive,
+                &bytes,
+                json!({}),
+            )],
+        )]);
+        let refused =
+            install_from_index_expecting_failure(&fixture, &server, &signer, &index).await;
+        assert_problem(refused, StatusCode::UNPROCESSABLE_ENTITY, "invalid-plugin").await;
+        assert_untouched(&fixture, PLUGIN_ID).await;
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn the_available_listing_merges_sources() {
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        let signer = Signer::new();
+        let bytes = fixture_bytes();
+        serve_bytes(&server, ARCHIVE_PATH, bytes.clone()).await;
+        let archive = format!("{}{ARCHIVE_PATH}", server.uri());
+
+        // One signed repository offering the fixture, and one unsigned
+        // repository offering another plugin.
+        let index = serve_signed_index(
+            &server,
+            &signer,
+            &document(&[entry(
+                PLUGIN_ID,
+                false,
+                &[version("0.1.0", API, &archive, &bytes, json!({}))],
+            )]),
+        )
+        .await;
+        let signed = register_repository(&fixture, &index, Some(&signer.public_key())).await;
+        let other_path = "/other/index.json";
+        let other = format!("{}{other_path}", server.uri());
+        serve_text(
+            &server,
+            other_path,
+            &document(&[entry(
+                "com.example.other",
+                false,
+                &[version("2.0.0", API, &archive, &bytes, json!({}))],
+            )]),
+        )
+        .await;
+        let unsigned = register_repository(&fixture, &other, None).await;
+
+        // One repository alone lists only its own plugin, and reports whether
+        // its signature was verified.
+        let listed = json(
+            bearer(
+                &fixture,
+                reqwest::Method::GET,
+                &format!("/api/v1/admin/plugins/available?repositoryId={signed}"),
+                None,
+            )
+            .await,
+        )
+        .await;
+        let plugins = listed["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0]["id"], PLUGIN_ID);
+        assert_eq!(plugins[0]["verified"], true);
+        assert_eq!(plugins[0]["official"], false);
+        assert_eq!(plugins[0]["version"], "0.1.0");
+        assert_eq!(plugins[0]["repositoryId"], signed);
+        assert_eq!(plugins[0]["provides"], json!(["metadata"]));
+        assert!(plugins[0]["unavailable"].is_null());
+
+        // Each registered source lists its own plugin, and reports whether its
+        // signature was verified. The compiled-in official index is left out of
+        // this call on purpose: the server suite serves no network, and the
+        // merged listing that includes it is covered by the plugin host's own
+        // distribution tests, where the index client's URL is injected.
+        let other_listed = json(
+            bearer(
+                &fixture,
+                reqwest::Method::GET,
+                &format!("/api/v1/admin/plugins/available?repositoryId={unsigned}"),
+                None,
+            )
+            .await,
+        )
+        .await;
+        let plugins = other_listed["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0]["id"], "com.example.other");
+        assert_eq!(plugins[0]["verified"], false);
+        assert_eq!(plugins[0]["repositoryId"], unsigned);
+
+        // An unknown repository id is a not-found problem.
+        let unknown = bearer(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/admin/plugins/available?repositoryId=pr_00000000000000000000000000",
+            None,
+        )
+        .await;
+        assert_problem(unknown, StatusCode::NOT_FOUND, "not-found").await;
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn the_listing_reports_the_update_a_check_found() {
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        let signer = Signer::new();
+        let bytes = fixture_bytes();
+        serve_bytes(&server, ARCHIVE_PATH, bytes.clone()).await;
+        let archive = format!("{}{ARCHIVE_PATH}", server.uri());
+        let index = document(&[entry(
+            PLUGIN_ID,
+            false,
+            &[version("0.1.0", API, &archive, &bytes, json!({}))],
+        )]);
+        install_from_index(&fixture, &server, &signer, &index, None).await;
+        bearer(
+            &fixture,
+            reqwest::Method::POST,
+            &format!("/api/v1/admin/plugins/{PLUGIN_ID}/approve"),
+            None,
+        )
+        .await;
+        let plugins = json(
+            bearer(
+                &fixture,
+                reqwest::Method::GET,
+                "/api/v1/admin/plugins",
+                None,
+            )
+            .await,
+        )
+        .await;
+        assert!(plugins["plugins"][0]["update"].is_null());
+
+        // The repository starts publishing a newer compatible version.
+        server.reset().await;
+        serve_signed_index(
+            &server,
+            &signer,
+            &document(&[entry(
+                PLUGIN_ID,
+                false,
+                &[version("0.2.0", API, &archive, &bytes, json!({}))],
+            )]),
+        )
+        .await;
+
+        // A restart runs the update check with the plugin installed, so the
+        // listing reports the update the check found.
+        let api_key = fixture.api_key.clone();
+        let dir = fixture.stop().await;
+        let fixture = Fixture::reopen(dir, api_key).await;
+        let mut found = false;
+        for _ in 0..100 {
+            if let Some(report) = fixture.services.update_job().last_check()
+                && report
+                    .updates
+                    .iter()
+                    .any(|update| update.plugin_id == PLUGIN_ID)
+            {
+                found = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(found, "the update check found no update");
+
+        let plugins = json(
+            bearer(
+                &fixture,
+                reqwest::Method::GET,
+                "/api/v1/admin/plugins",
+                None,
+            )
+            .await,
+        )
+        .await;
+        let plugin = &plugins["plugins"][0];
+        assert_eq!(plugin["version"], "0.1.0");
+        assert_eq!(plugin["state"], "enabled");
+        assert_eq!(plugin["update"]["version"], "0.2.0");
+        // The update asks for nothing new, so approving it is not required.
+        assert_eq!(plugin["update"]["requiresApproval"], false);
+        fixture.stop().await;
+    }
+}

@@ -108,6 +108,8 @@ pub struct Services {
     catalog: Arc<CatalogService>,
     /// The write side of the plugin instance and layer tables.
     instances: InstanceService,
+    /// The plugin tables the admin views and the repository routes read.
+    plugin_repository: PluginRepository,
     /// The administrative plugin write path: install, approve, switch, remove.
     admin: Arc<PluginAdmin>,
     /// The installer the admin routes install from indexes and repository URLs
@@ -401,6 +403,7 @@ impl Services {
             registry,
             catalog,
             instances,
+            plugin_repository: repository.clone(),
             admin,
             installer,
             update_checker,
@@ -473,6 +476,15 @@ impl Services {
     /// Returns the plugin instance and layer service.
     pub fn instances(&self) -> &InstanceService {
         &self.instances
+    }
+
+    /// Returns the plugin tables.
+    ///
+    /// The administrative plugin views and the repository routes read the
+    /// installed rows, their staged upgrades and the repositories an
+    /// administrator registered through it.
+    pub fn plugin_repository(&self) -> &PluginRepository {
+        &self.plugin_repository
     }
 
     /// Returns the administrative plugin write path.
@@ -588,6 +600,13 @@ impl Services {
             jobs: Arc::clone(&self.queue),
             watcher: Arc::clone(&self.watcher),
             events: Arc::clone(&self.events),
+            plugins: Arc::clone(&self.plugins),
+            instances: self.instances.clone(),
+            admin: Arc::clone(&self.admin),
+            installer: Arc::clone(&self.installer),
+            update_checker: Arc::clone(&self.update_checker),
+            update_job: Arc::clone(&self.update_job),
+            plugin_repository: self.plugin_repository.clone(),
         })
     }
 

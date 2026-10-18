@@ -202,6 +202,7 @@ pub enum InstanceError {
 /// [`PluginRepository`], loads the plugin's component through the
 /// [`PluginHost`] when it has to run `lifecycle.validate-config`, and seals and
 /// opens secrets with the server's [`SecretBox`].
+#[derive(Clone)]
 pub struct InstanceService {
     host: Arc<PluginHost>,
     repository: PluginRepository,

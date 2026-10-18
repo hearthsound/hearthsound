@@ -1875,17 +1875,22 @@ dependencies = [
  "hearthsound-plugin-host",
  "hearthsound-test-support",
  "md-5",
+ "minisign",
  "reqwest",
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "sqlx",
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "tower-http 0.7.1",
  "tracing",
  "uuid",
+ "wiremock",
+ "zip",
 ]
 
 [[package]]

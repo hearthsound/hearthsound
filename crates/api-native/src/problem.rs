@@ -12,13 +12,19 @@
 //! | `csrf-failed` | 403 | a cookie-authenticated unsafe request without the matching `X-Hearthsound-CSRF` header |
 //! | `permission-denied` | 403 | the caller lacks the permission the action needs |
 //! | `quota-exceeded` | 403 | the caller's daily acquisition quota is spent |
+//! | `sideload-disabled` | 403 | plugin sideloading is switched off |
+//! | `repositories-disabled` | 403 | third-party plugin repositories are switched off |
 //! | `not-found` | 404 | the resource does not exist |
 //! | `invalid-request` | 400 | the request is malformed or names something invalid |
 //! | `conflict` | 409 | the request contradicts the current state |
 //! | `too-large` | 413 | an upload exceeds `uploads.max_file_bytes` |
 //! | `unsupported-media` | 415 | an upload is not audio the library indexes |
+//! | `invalid-plugin` | 422 | the archive is not a plugin this server can host |
 //! | `rate-limited` | 429 | too many failed sign-ins; `Retry-After` says when to retry |
 //! | `internal` | 500 | the server failed; the log has the details |
+//! | `signature-invalid` | 502 | a plugin index is unsigned or its signature does not verify |
+//! | `integrity-failed` | 502 | a plugin archive is not what the index declares |
+//! | `index-unavailable` | 502 | a plugin index or an archive could not be downloaded |
 
 use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderValue, StatusCode};
@@ -137,6 +143,26 @@ impl Problem {
         )
     }
 
+    /// Plugin sideloading is switched off.
+    pub fn sideload_disabled(detail: impl Into<String>) -> Problem {
+        Problem::new(
+            StatusCode::FORBIDDEN,
+            "sideload-disabled",
+            "Plugin sideloading disabled",
+            detail,
+        )
+    }
+
+    /// Third-party plugin repositories are switched off.
+    pub fn repositories_disabled(detail: impl Into<String>) -> Problem {
+        Problem::new(
+            StatusCode::FORBIDDEN,
+            "repositories-disabled",
+            "Third-party plugin repositories disabled",
+            detail,
+        )
+    }
+
     /// The resource does not exist.
     pub fn not_found(detail: impl Into<String>) -> Problem {
         Problem::new(StatusCode::NOT_FOUND, "not-found", "Not found", detail)
@@ -173,6 +199,46 @@ impl Problem {
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "unsupported-media",
             "Unsupported media",
+            detail,
+        )
+    }
+
+    /// The archive is not a plugin this server can host.
+    pub fn invalid_plugin(detail: impl Into<String>) -> Problem {
+        Problem::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid-plugin",
+            "Invalid plugin",
+            detail,
+        )
+    }
+
+    /// A plugin index is unsigned or its signature does not verify.
+    pub fn signature_invalid(detail: impl Into<String>) -> Problem {
+        Problem::new(
+            StatusCode::BAD_GATEWAY,
+            "signature-invalid",
+            "Plugin index signature invalid",
+            detail,
+        )
+    }
+
+    /// A plugin archive is not what the index declares.
+    pub fn integrity_failed(detail: impl Into<String>) -> Problem {
+        Problem::new(
+            StatusCode::BAD_GATEWAY,
+            "integrity-failed",
+            "Plugin archive integrity check failed",
+            detail,
+        )
+    }
+
+    /// A plugin index or an archive could not be downloaded.
+    pub fn index_unavailable(detail: impl Into<String>) -> Problem {
+        Problem::new(
+            StatusCode::BAD_GATEWAY,
+            "index-unavailable",
+            "Plugin index unavailable",
             detail,
         )
     }

@@ -16,7 +16,10 @@ use hearthsound_library::maintenance::StorageMaintainer;
 use hearthsound_library::scan::LibraryScanner;
 use hearthsound_library::upload::UploadIngest;
 use hearthsound_library::watch::LibraryWatcher;
-use hearthsound_plugin_host::ProviderRegistry;
+use hearthsound_plugin_host::{
+    InstanceService, PluginAdmin, PluginHost, PluginInstaller, PluginRepository, ProviderRegistry,
+    UpdateCheckJobHandler, UpdateChecker,
+};
 
 use crate::tickets::Tickets;
 
@@ -54,6 +57,22 @@ pub struct NativeServices {
     pub watcher: Arc<LibraryWatcher>,
     /// The server event bus.
     pub events: Arc<EventBus>,
+    /// The wasmtime plugin host, which owns the plugins directory and the
+    /// files of every installed plugin.
+    pub plugins: Arc<PluginHost>,
+    /// The write side of the plugin instance and layer tables.
+    pub instances: InstanceService,
+    /// The administrative plugin lifecycle: install, approve, switch, remove.
+    pub admin: Arc<PluginAdmin>,
+    /// The installer that resolves plugin indexes and repository URLs.
+    pub installer: Arc<PluginInstaller>,
+    /// The checker the admin views read pending plugin updates from.
+    pub update_checker: Arc<UpdateChecker>,
+    /// The update-check job, which holds what the last completed check found.
+    pub update_job: Arc<UpdateCheckJobHandler>,
+    /// The plugin tables: the installed rows, their staged upgrades, and the
+    /// repositories an administrator registered.
+    pub plugin_repository: PluginRepository,
 }
 
 /// The shared state of the native router.

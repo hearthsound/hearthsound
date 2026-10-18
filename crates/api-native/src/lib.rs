@@ -33,6 +33,8 @@
 //! | `GET`/`PATCH /api/v1/admin/settings` | administrators |
 //! | `GET /api/v1/admin/acquisitions`, `POST /api/v1/admin/acquisitions/{id}/cancel`, `POST /api/v1/admin/acquisitions/{id}/retry` | administrators |
 //! | `GET /api/v1/admin/storage`, `POST /api/v1/admin/storage/evict` | administrators |
+//! | `GET`/`POST /api/v1/admin/plugins`, `POST /api/v1/admin/plugins/upload`, `GET /api/v1/admin/plugins/available` | administrators |
+//! | `GET`/`DELETE /api/v1/admin/plugins/{id}`, `POST /api/v1/admin/plugins/{id}/{approve,enable,disable,decline-upgrade}` | administrators |
 //! | `POST /api/v1/uploads` | any user with `can_upload`, when uploads are enabled |
 //! | `GET /api/v1/events` | any user; each event the caller's audience admits (administrators see all) |
 //! | `POST /api/v1/events/ticket` | any user, a single-use ticket for the stream |
@@ -152,13 +154,25 @@ fn api_router() -> OpenApiRouter<NativeState> {
         .routes(routes!(routes::admin_acquisitions::retry_acquisition))
         .routes(routes!(routes::admin_storage::get_storage))
         .routes(routes!(routes::admin_storage::evict_storage))
+        .routes(routes!(
+            routes::admin_plugins::list_plugins,
+            routes::admin_plugins::install_plugin
+        ))
+        .routes(routes!(routes::admin_plugins::list_available))
+        .routes(routes!(routes::admin_plugins::get_plugin))
+        .routes(routes!(routes::admin_plugins::delete_plugin))
+        .routes(routes!(routes::admin_plugins::approve_plugin))
+        .routes(routes!(routes::admin_plugins::enable_plugin))
+        .routes(routes!(routes::admin_plugins::disable_plugin))
+        .routes(routes!(routes::admin_plugins::decline_upgrade))
         .routes(routes!(routes::events::create_ticket))
         .routes(routes!(routes::events::stream))
         .merge(
-            // The upload route alone lifts axum's 2 MB multipart body limit:
+            // The upload routes alone lift axum's 2 MB multipart body limit:
             // the limit is per router and the JSON routes keep theirs.
             OpenApiRouter::new()
                 .routes(routes!(routes::uploads::upload))
+                .routes(routes!(routes::admin_plugins::upload_plugin))
                 .layer(DefaultBodyLimit::disable()),
         )
 }
@@ -174,6 +188,7 @@ fn api_router() -> OpenApiRouter<NativeState> {
 /// ```
 /// let document = hearthsound_api_native::openapi();
 /// assert!(document.paths.paths.contains_key("/api/v1/system/info"));
+/// assert!(document.paths.paths.contains_key("/api/v1/admin/plugins/{id}/approve"));
 /// ```
 pub fn openapi() -> utoipa::openapi::OpenApi {
     api_router().split_for_parts().1

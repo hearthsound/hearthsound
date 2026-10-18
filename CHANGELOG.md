@@ -120,6 +120,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   staged for approval instead, and what the last check found stays available to
   the administrative views.
 
+- The native admin API administers the plugin platform. `GET`/`POST
+  /api/v1/admin/plugins` list the installed plugins and install one from the
+  official index, a registered repository or a repository URL that is registered
+  on the way in; `POST /api/v1/admin/plugins/upload` takes a `.hsplugin` file when
+  `plugins.allow_sideload` is on; `GET /api/v1/admin/plugins/available` lists what
+  the reachable indexes offer and reports the sources that could not be read.
+  `GET`/`DELETE /api/v1/admin/plugins/{id}` read and remove a plugin, and
+  approve, enable, disable and decline-upgrade steer its lifecycle, rebuilding
+  the provider registry before the answer is sent. Each plugin is reported with
+  its state, source, requested permissions and their risk labels, whether it is
+  approved, and the version the last update check found; the plugin problems
+  answer `signature-invalid`, `integrity-failed`, `index-unavailable`,
+  `invalid-plugin`, `sideload-disabled` and `repositories-disabled`.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload
