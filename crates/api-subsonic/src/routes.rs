@@ -163,6 +163,7 @@ pub fn routes() -> Router<SubsonicState> {
     let router = register(router, "stream", endpoints::stream);
     let router = register(router, "getCoverArt", endpoints::get_cover_art);
     let router = register(router, "scrobble", endpoints::scrobble);
+    let router = register(router, "hsGetAvailability", endpoints::hs_get_availability);
     router.route(NOT_FOUND_PATH, get(not_found).post(not_found))
 }
 

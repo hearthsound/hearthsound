@@ -128,10 +128,15 @@
 //! | `stream` | the track's media bytes: the stored file with ranges and validators, or a transcode |
 //! | `getCoverArt` | the stored entity's own image, or the issuing instance's through the catalog layer; local images are served unscaled |
 //! | `scrobble` | records a play for a stored track; now-playing is accepted and discarded |
+//! | `hsGetAvailability` | what the server knows about the named tracks and albums: their availability, the caller's library membership, and the acquisition in flight |
 //!
 //! The browse endpoints share one scope rule: an explicit `musicFolderId` of
 //! `1` is the requesting user's personal library and of `2` the server-wide
 //! view, and a request without one reads the user's `subsonic.default_scope`.
+//!
+//! The `hs` endpoints belong to the `hearthsound` vendor extension and are
+//! answered only when the request carries `hearthsound=1`; without it they answer
+//! Subsonic error 70, the way an endpoint this server does not implement does.
 //!
 //! `search3`, `getSong`, `getAlbum`, and `getArtist` also answer for entities
 //! the server has not stored: a catalog provider's entity is projected with an

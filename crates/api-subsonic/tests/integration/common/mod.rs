@@ -14,6 +14,8 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
 use axum::response::Response as HttpResponse;
+use hearthsound_acquire::orchestrator::{AcquisitionOrchestrator, AcquisitionStorage};
+use hearthsound_acquire::prefetch::PrefetchScheduler;
 use hearthsound_activity::ActivityService;
 use hearthsound_api_subsonic::{PendingSource, SubsonicState};
 use hearthsound_auth::{ApiKeys, AppPasswords, Authenticator, NewUser, Users};
@@ -22,11 +24,13 @@ use hearthsound_config::secret::SecretBox;
 use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingSources, SettingValue, SettingsRegistry, keys};
 use hearthsound_core::events::EventBus;
-use hearthsound_core::{EntityId, IdPrefix, Layer};
+use hearthsound_core::{Availability, EntityId, IdPrefix, Layer};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_jobs::{JobQueue, QueueOptions};
-use hearthsound_library::StorageRoots;
 use hearthsound_library::scan::LibraryScanner;
+use hearthsound_library::{
+    AlbumInput, ArtistCredit, LibraryRepository, Origin, StorageRoots, TrackInput,
+};
 use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::{
     InstanceService, InstanceSpec, PluginHost, PluginRepository, PluginSource, ProviderRegistry,
@@ -75,6 +79,10 @@ pub struct Fixture {
     pub app_password: String,
     /// The shared state the router is built with.
     pub state: SubsonicState,
+    /// The catalog layer the state and the acquisition layer share.
+    pub catalog: Arc<CatalogService>,
+    /// The event bus the acquisition layer publishes on.
+    pub events: Arc<EventBus>,
     /// The managed storage roots the state resolves stored files against.
     pub roots: StorageRoots,
     /// The ffmpeg runner the state transcodes and verifies through.
@@ -181,11 +189,12 @@ impl Fixture {
         std::fs::create_dir_all(roots.cache.as_path()).unwrap();
         std::fs::create_dir_all(dir.path().join("artwork")).unwrap();
         let ffmpeg = Arc::new(FfmpegRunner::new(None, 2));
+        let events = Arc::new(EventBus::new());
         let state = SubsonicState::new(
             Arc::clone(&database),
             settings.clone(),
             authenticator,
-            catalog,
+            Arc::clone(&catalog),
             activity,
             Arc::clone(&ffmpeg),
             roots.clone(),
@@ -197,7 +206,7 @@ impl Fixture {
         // The scanner the scan endpoints report and the queue they enqueue on.
         let scanner = Arc::new(LibraryScanner::new(
             &database,
-            Arc::new(EventBus::new()),
+            Arc::clone(&events),
             settings.clone(),
         ));
         let jobs = Arc::new(JobQueue::new(&database, QueueOptions::default()));
@@ -211,6 +220,8 @@ impl Fixture {
             api_key,
             app_password,
             state,
+            catalog,
+            events,
             roots,
             ffmpeg,
             artwork,
@@ -399,12 +410,20 @@ impl Fixture {
         path
     }
 
-    /// Creates a second account with the given permissions and returns an API
-    /// key for it.
+    /// Creates a second account with the given permissions and returns its id
+    /// and an API key for it.
     ///
     /// The permissions are written to `users.default_permissions` first, which
     /// is where a new account's permission flags come from.
-    pub async fn account_with(&self, permissions: &[&str]) -> String {
+    ///
+    /// # Parameters
+    ///
+    /// - `permissions`: the permission names, for example `acquire`.
+    ///
+    /// # Returns
+    ///
+    /// The account's id and a freshly generated API key.
+    pub async fn account(&self, permissions: &[&str]) -> (EntityId, String) {
         self.settings
             .set(
                 keys::USERS_DEFAULT_PERMISSIONS.name(),
@@ -420,11 +439,97 @@ impl Fixture {
             )
             .await
             .unwrap();
-        ApiKeys::new(&self.database)
+        let key = ApiKeys::new(&self.database)
             .generate(user.id, "limited")
             .await
             .unwrap()
-            .plaintext
+            .plaintext;
+        (EntityId::from_uuid(IdPrefix::User, user.id), key)
+    }
+
+    /// Creates a second account with the given permissions and returns an API
+    /// key for it.
+    ///
+    /// # Parameters
+    ///
+    /// - `permissions`: the permission names, for example `acquire`.
+    pub async fn account_with(&self, permissions: &[&str]) -> String {
+        self.account(permissions).await.1
+    }
+
+    /// Adds the acquisition layer and the prefetch scheduler over the fixture's
+    /// own database.
+    ///
+    /// The layer is not started, so an acquisition a test asks for stays in the
+    /// state its admission wrote until the test walks it on, which is what makes
+    /// a snapshot of one stable.
+    ///
+    /// # Returns
+    ///
+    /// The orchestrator the state now answers from.
+    pub async fn add_acquisition_layer(&mut self) -> Arc<AcquisitionOrchestrator> {
+        let staging = self._dir.path().join("storage/staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        let orchestrator = Arc::new(AcquisitionOrchestrator::new(
+            Arc::clone(&self.database),
+            self.settings.clone(),
+            Arc::clone(&self.registry),
+            Arc::clone(&self.catalog),
+            Arc::clone(&self.ffmpeg),
+            Arc::clone(&self.events),
+            AcquisitionStorage::new(staging, self.roots.clone()),
+        ));
+        let prefetch = Arc::new(PrefetchScheduler::new(Arc::clone(&orchestrator)));
+        self.state = self
+            .state
+            .clone()
+            .with_acquisitions(Arc::clone(&orchestrator))
+            .with_prefetch(prefetch)
+            .with_registry(Arc::clone(&self.registry));
+        orchestrator
+    }
+
+    /// Inserts a catalog-only album with the given number of tracks.
+    ///
+    /// The tracks carry no file, so each one's availability is `remote`: they
+    /// are what a client asks the acquisition layer for.
+    ///
+    /// # Parameters
+    ///
+    /// - `title`: the album title; its tracks are titled `<title> <number>`.
+    /// - `tracks`: how many tracks to insert.
+    ///
+    /// # Returns
+    ///
+    /// The album's id and its track ids, in playing order.
+    pub async fn remote_album(&self, title: &str, tracks: usize) -> (EntityId, Vec<EntityId>) {
+        let library = LibraryRepository::new(&self.database);
+        let artist = "The Faraway";
+        let mut input = AlbumInput::new(title, Origin::Catalog);
+        input.display_artist = Some(artist.to_owned());
+        let album = library
+            .upsert_album(&input, &[ArtistCredit::new(artist, "main")])
+            .await
+            .unwrap();
+        let mut ids = Vec::with_capacity(tracks);
+        for number in 1..=tracks {
+            let mut track = TrackInput::new(
+                format!("{title} {number}"),
+                Origin::Catalog,
+                Availability::Remote,
+            );
+            track.album_id = Some(album);
+            track.display_artist = Some(artist.to_owned());
+            track.track_number = Some(i64::try_from(number).unwrap());
+            track.duration_ms = Some(200_000);
+            ids.push(
+                library
+                    .insert_track(&track, &[ArtistCredit::new(artist, "main")], &[])
+                    .await
+                    .unwrap(),
+            );
+        }
+        (album, ids)
     }
 }
 

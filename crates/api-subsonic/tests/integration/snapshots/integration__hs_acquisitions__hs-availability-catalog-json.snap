@@ -1,0 +1,5 @@
+---
+source: crates/api-subsonic/tests/integration/hs_acquisitions.rs
+expression: "&probe.body"
+---
+{"subsonic-response":{"status":"ok","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.3","openSubsonic":true,"availabilities":{"availability":[{"id":"x_hello_t_d1jprv3f5nt74rb3dcpk2","state":"remote","inLibrary":false},{"id":"x_hello_t_d1jprv3f5nt74rb3dcpkj","state":"remote","inLibrary":false}]}}}

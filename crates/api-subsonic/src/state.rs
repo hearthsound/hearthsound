@@ -9,6 +9,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use hearthsound_acquire::orchestrator::AcquisitionOrchestrator;
 use hearthsound_acquire::prefetch::PrefetchScheduler;
 use hearthsound_activity::ActivityService;
 use hearthsound_auth::{
@@ -22,6 +23,7 @@ use hearthsound_jobs::JobQueue;
 use hearthsound_library::StorageRoots;
 use hearthsound_library::scan::LibraryScanner;
 use hearthsound_media::FfmpegRunner;
+use hearthsound_plugin_host::ProviderRegistry;
 
 use crate::response::SubsonicError;
 use crate::stream::{PendingSource, StreamService};
@@ -36,7 +38,6 @@ pub struct SubsonicState {
 }
 
 /// The services one [`SubsonicState`] holds.
-#[derive(Debug)]
 struct Inner {
     /// The open database, for the queries later endpoints run.
     database: Arc<Database>,
@@ -56,12 +57,48 @@ struct Inner {
     authenticator: Arc<Authenticator>,
     /// The prefetch scheduler, when the composition root has one.
     prefetch: Option<Arc<PrefetchScheduler>>,
+    /// The acquisition layer, when the composition root has one.
+    acquisitions: Option<Arc<AcquisitionOrchestrator>>,
+    /// The provider registry, when the composition root has one.
+    registry: Option<Arc<ProviderRegistry>>,
     /// The proxies whose forwarding headers are trusted.
     trusted_proxies: Arc<TrustedProxies>,
     /// The library scanner, when the composition root has one.
     scanner: Option<Arc<LibraryScanner>>,
     /// The job queue, when the composition root has one.
     jobs: Option<Arc<JobQueue>>,
+}
+
+impl std::fmt::Debug for Inner {
+    /// Writes the services, naming the two that do not implement [`Debug`]
+    /// themselves by whether the state holds one.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Inner")
+            .field("database", &self.database)
+            .field("settings", &self.settings)
+            .field("user_settings", &self.user_settings)
+            .field("catalog", &self.catalog)
+            .field("activity", &self.activity)
+            .field("stream", &self.stream)
+            .field("ffmpeg", &self.ffmpeg)
+            .field("authenticator", &self.authenticator)
+            .field("prefetch", &self.prefetch)
+            .field(
+                "acquisitions",
+                &self
+                    .acquisitions
+                    .as_ref()
+                    .map(|_| "AcquisitionOrchestrator"),
+            )
+            .field(
+                "registry",
+                &self.registry.as_ref().map(|_| "ProviderRegistry"),
+            )
+            .field("trusted_proxies", &self.trusted_proxies)
+            .field("scanner", &self.scanner)
+            .field("jobs", &self.jobs)
+            .finish()
+    }
 }
 
 impl SubsonicState {
@@ -119,6 +156,8 @@ impl SubsonicState {
                 ffmpeg,
                 authenticator,
                 prefetch: None,
+                acquisitions: None,
+                registry: None,
                 trusted_proxies: Arc::new(TrustedProxies::default()),
                 scanner: None,
                 jobs: None,
@@ -149,6 +188,8 @@ impl SubsonicState {
                 ffmpeg: Arc::clone(&self.inner.ffmpeg),
                 authenticator: Arc::clone(&self.inner.authenticator),
                 prefetch: self.inner.prefetch.clone(),
+                acquisitions: self.inner.acquisitions.clone(),
+                registry: self.inner.registry.clone(),
                 trusted_proxies: Arc::new(trusted_proxies),
                 scanner: self.inner.scanner.clone(),
                 jobs: self.inner.jobs.clone(),
@@ -179,6 +220,8 @@ impl SubsonicState {
                 ffmpeg: Arc::clone(&self.inner.ffmpeg),
                 authenticator: Arc::clone(&self.inner.authenticator),
                 prefetch: self.inner.prefetch.clone(),
+                acquisitions: self.inner.acquisitions.clone(),
+                registry: self.inner.registry.clone(),
                 trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
                 scanner: self.inner.scanner.clone(),
                 jobs: self.inner.jobs.clone(),
@@ -213,6 +256,75 @@ impl SubsonicState {
                 ffmpeg: Arc::clone(&self.inner.ffmpeg),
                 authenticator: Arc::clone(&self.inner.authenticator),
                 prefetch: Some(prefetch),
+                acquisitions: self.inner.acquisitions.clone(),
+                registry: self.inner.registry.clone(),
+                trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
+                scanner: self.inner.scanner.clone(),
+                jobs: self.inner.jobs.clone(),
+            }),
+        }
+    }
+
+    /// Sets the acquisition layer the vendor endpoints answer from.
+    ///
+    /// # Parameters
+    ///
+    /// - `acquisitions`: the orchestrator, which must be the same one the
+    ///   composition root started, so an acquisition a client asks for over the
+    ///   vendor extension is the one the server's workers run.
+    ///
+    /// # Returns
+    ///
+    /// The state, sharing everything else with the state it was called on.
+    /// Without an acquisition layer, `hsGetAvailability` reports the availability
+    /// the library stores without the acquisition fields, and the endpoints that
+    /// admit, list or cancel an acquisition answer a generic error.
+    pub fn with_acquisitions(self, acquisitions: Arc<AcquisitionOrchestrator>) -> SubsonicState {
+        SubsonicState {
+            inner: Arc::new(Inner {
+                database: Arc::clone(&self.inner.database),
+                settings: self.inner.settings.clone(),
+                user_settings: self.inner.user_settings.clone(),
+                catalog: Arc::clone(&self.inner.catalog),
+                activity: Arc::clone(&self.inner.activity),
+                stream: self.inner.stream.clone(),
+                ffmpeg: Arc::clone(&self.inner.ffmpeg),
+                authenticator: Arc::clone(&self.inner.authenticator),
+                prefetch: self.inner.prefetch.clone(),
+                acquisitions: Some(acquisitions),
+                registry: self.inner.registry.clone(),
+                trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
+                scanner: self.inner.scanner.clone(),
+                jobs: self.inner.jobs.clone(),
+            }),
+        }
+    }
+
+    /// Sets the provider registry the vendor endpoints read the layers from.
+    ///
+    /// # Parameters
+    ///
+    /// - `registry`: the registry, which must be the one the composition root
+    ///   built over the plugin tables, so what a response reports about the
+    ///   enabled layers is what the server is running.
+    ///
+    /// # Returns
+    ///
+    /// The state, sharing everything else with the state it was called on.
+    pub fn with_registry(self, registry: Arc<ProviderRegistry>) -> SubsonicState {
+        SubsonicState {
+            inner: Arc::new(Inner {
+                database: Arc::clone(&self.inner.database),
+                settings: self.inner.settings.clone(),
+                user_settings: self.inner.user_settings.clone(),
+                catalog: Arc::clone(&self.inner.catalog),
+                activity: Arc::clone(&self.inner.activity),
+                stream: self.inner.stream.clone(),
+                ffmpeg: Arc::clone(&self.inner.ffmpeg),
+                authenticator: Arc::clone(&self.inner.authenticator),
+                prefetch: self.inner.prefetch.clone(),
+                acquisitions: self.inner.acquisitions.clone(),
+                registry: Some(registry),
                 trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
                 scanner: self.inner.scanner.clone(),
                 jobs: self.inner.jobs.clone(),
@@ -297,6 +409,8 @@ impl SubsonicState {
                 ffmpeg: Arc::clone(&self.inner.ffmpeg),
                 authenticator: Arc::clone(&self.inner.authenticator),
                 prefetch: self.inner.prefetch.clone(),
+                acquisitions: self.inner.acquisitions.clone(),
+                registry: self.inner.registry.clone(),
                 trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
                 scanner: Some(scanner),
                 jobs: Some(jobs),
@@ -355,6 +469,31 @@ impl SubsonicState {
     /// and notes nothing.
     pub fn prefetch(&self) -> Option<&Arc<PrefetchScheduler>> {
         self.inner.prefetch.as_ref()
+    }
+
+    /// Returns the acquisition layer, when the composition root built one.
+    ///
+    /// The vendor acquisition endpoints read an acquisition's progress and its
+    /// ledger rows through it, so what a client is told about a job is what the
+    /// server's workers are doing.
+    ///
+    /// # Returns
+    ///
+    /// The orchestrator, or `None` for a state built without one.
+    pub fn acquisitions(&self) -> Option<&Arc<AcquisitionOrchestrator>> {
+        self.inner.acquisitions.as_ref()
+    }
+
+    /// Returns the provider registry, when the composition root built one.
+    ///
+    /// The vendor endpoints report which provider layers the server serves
+    /// through it.
+    ///
+    /// # Returns
+    ///
+    /// The registry, or `None` for a state built without one.
+    pub fn registry(&self) -> Option<&Arc<ProviderRegistry>> {
+        self.inner.registry.as_ref()
     }
 
     /// Returns the stream service.

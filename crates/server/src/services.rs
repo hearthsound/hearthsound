@@ -517,6 +517,8 @@ impl Services {
         )
         .with_pending_source(pending)
         .with_prefetch(Arc::clone(&self.prefetch))
+        .with_acquisitions(Arc::clone(&self.orchestrator))
+        .with_registry(Arc::clone(&self.registry))
         .with_trusted_proxies(self.trusted_proxies.clone())
         .with_scanner(Arc::clone(&self.scanner), Arc::clone(&self.queue))
     }

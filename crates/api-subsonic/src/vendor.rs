@@ -68,17 +68,20 @@ pub(crate) async fn decorate(
 }
 
 /// The entity one client id names, once resolved.
-struct Subject {
+pub(crate) struct Subject {
     /// The kind of the entity, always track, album or artist.
-    kind: EntityKind,
+    pub(crate) kind: EntityKind,
     /// The stored record, when the id names one or a catalog id resolves to one.
-    entity: Option<EntityId>,
+    pub(crate) entity: Option<EntityId>,
     /// Whether the id is a catalog id.
-    catalog: bool,
+    pub(crate) catalog: bool,
 }
 
 /// Maps a client id to its subject, or `None` for ids the decorator skips.
-async fn resolve(state: &SubsonicState, raw: &str) -> Result<Option<Subject>, SubsonicError> {
+pub(crate) async fn resolve(
+    state: &SubsonicState,
+    raw: &str,
+) -> Result<Option<Subject>, SubsonicError> {
     match ClientId::parse(raw) {
         Ok(ClientId::Entity(id)) => Ok(id
             .kind()
@@ -119,37 +122,53 @@ fn decorable(kind: EntityKind) -> bool {
 }
 
 /// The batch reads behind every decorated member.
-struct Facts {
+pub(crate) struct Facts {
     /// The stored availability of every track in scope.
-    availability: HashMap<EntityId, Availability>,
+    pub(crate) availability: HashMap<EntityId, Availability>,
     /// The preferred media file of every track in scope that has one.
-    files: HashMap<EntityId, MediaFile>,
+    pub(crate) files: HashMap<EntityId, MediaFile>,
     /// The tracks in the personal scope.
-    personal_tracks: HashSet<EntityId>,
+    pub(crate) personal_tracks: HashSet<EntityId>,
     /// The albums in the personal scope.
-    personal_albums: HashSet<EntityId>,
+    pub(crate) personal_albums: HashSet<EntityId>,
     /// The artists in the personal scope.
-    personal_artists: HashSet<EntityId>,
+    pub(crate) personal_artists: HashSet<EntityId>,
     /// The tracks the user disliked.
-    disliked_tracks: HashSet<Uuid>,
+    pub(crate) disliked_tracks: HashSet<Uuid>,
     /// The albums the user disliked.
-    disliked_albums: HashSet<Uuid>,
+    pub(crate) disliked_albums: HashSet<Uuid>,
     /// The artists the user disliked.
-    disliked_artists: HashSet<Uuid>,
+    pub(crate) disliked_artists: HashSet<Uuid>,
     /// The active acquisition of every track that has one.
-    active: HashMap<EntityId, AcquisitionRow>,
+    pub(crate) active: HashMap<EntityId, AcquisitionRow>,
     /// The member tracks of every album in scope.
-    album_tracks: HashMap<EntityId, Vec<EntityId>>,
+    pub(crate) album_tracks: HashMap<EntityId, Vec<EntityId>>,
     /// The credited tracks of every artist in scope.
-    artist_tracks: HashMap<EntityId, Vec<EntityId>>,
+    pub(crate) artist_tracks: HashMap<EntityId, Vec<EntityId>>,
 }
 
-/// Runs the batch reads for `subjects` and builds each member object.
-async fn members_for(
+/// Runs the batch reads behind every vendor view of `subjects`.
+///
+/// # Parameters
+///
+/// - `state`: the endpoint state, whose database the reads use.
+/// - `user`: the account the personal state is read for.
+/// - `subjects`: the resolved entities, keyed by the id the client wrote.
+///
+/// # Returns
+///
+/// The facts every vendor view of those subjects is built from: availability,
+/// preferred files, personal membership, dislikes, active acquisitions, and the
+/// member tracks of the albums and artists in scope.
+///
+/// # Errors
+///
+/// Returns a generic [`SubsonicError`] when a read fails.
+pub(crate) async fn facts(
     state: &SubsonicState,
     user: Uuid,
     subjects: &HashMap<String, Subject>,
-) -> Result<HashMap<String, Object>, SubsonicError> {
+) -> Result<Facts, SubsonicError> {
     let track_ids = entities(subjects, EntityKind::Track);
     let album_ids = entities(subjects, EntityKind::Album);
     let artist_ids = entities(subjects, EntityKind::Artist);
@@ -213,6 +232,31 @@ async fn members_for(
         album_tracks,
         artist_tracks,
     };
+    Ok(facts)
+}
+
+/// Builds the `hearthsound` member of every subject that has one.
+///
+/// # Parameters
+///
+/// - `state`: the endpoint state.
+/// - `user`: the account the personal state is read for.
+/// - `subjects`: the resolved entities, keyed by the id the client wrote.
+///
+/// # Returns
+///
+/// The member of each subject, keyed by the id the client wrote. A subject that
+/// names nothing stored has no member.
+///
+/// # Errors
+///
+/// Returns a generic [`SubsonicError`] when a read fails.
+async fn members_for(
+    state: &SubsonicState,
+    user: Uuid,
+    subjects: &HashMap<String, Subject>,
+) -> Result<HashMap<String, Object>, SubsonicError> {
+    let facts = facts(state, user, subjects).await?;
     Ok(subjects
         .iter()
         .filter_map(|(raw, subject)| {
@@ -221,63 +265,120 @@ async fn members_for(
         .collect())
 }
 
-/// Builds the `hearthsound` object of one subject, or `None` when there is none.
-fn member_for(facts: &Facts, subject: &Subject) -> Option<Object> {
+/// What one subject is, once the facts are read.
+///
+/// This is the derivation both vendor surfaces share: the `hearthsound` member
+/// of a response and the `hsGetAvailability` entry of an availability answer are
+/// built from the same standing, so the two never disagree about an entity.
+pub(crate) struct Standing<'a> {
+    /// The stored entity the subject resolved to, when it resolved to one.
+    pub(crate) entity: Option<EntityId>,
+    /// The availability of the entity, aggregated over its member tracks for an
+    /// album or an artist.
+    pub(crate) availability: Availability,
+    /// Whether the requesting user's personal library holds the entity.
+    pub(crate) in_library: bool,
+    /// The member tracks the aggregation read; empty for a track.
+    pub(crate) members: &'a [EntityId],
+}
+
+/// Derives the standing of one subject from the facts.
+///
+/// # Parameters
+///
+/// - `facts`: the batch reads of every subject in scope.
+/// - `subject`: the resolved subject.
+///
+/// # Returns
+///
+/// The standing, or `None` for a stored track id that names no track. A catalog
+/// id that nothing has materialized stands as `remote` and outside every
+/// library, which is what a client needs to know before it asks for the entity.
+pub(crate) fn standing<'a>(facts: &'a Facts, subject: &Subject) -> Option<Standing<'a>> {
     let Some(id) = subject.entity else {
-        return Some(unresolved());
+        return Some(Standing {
+            entity: None,
+            availability: Availability::Remote,
+            in_library: false,
+            members: &[],
+        });
     };
     match subject.kind {
-        EntityKind::Track => track_member(facts, subject, id),
+        EntityKind::Track => {
+            let availability = match facts.availability.get(&id) {
+                Some(availability) => *availability,
+                None if subject.catalog => Availability::Remote,
+                None => return None,
+            };
+            Some(Standing {
+                entity: Some(id),
+                availability,
+                in_library: facts.personal_tracks.contains(&id),
+                members: &[],
+            })
+        }
         EntityKind::Album => {
             let members = facts.album_tracks.get(&id).map_or(&[][..], Vec::as_slice);
-            let in_library = facts.personal_albums.contains(&id)
-                || members.iter().any(|t| facts.personal_tracks.contains(t));
-            let server = members.iter().any(|t| facts.files.contains_key(t));
-            Some(group_member(
-                aggregate(members, facts),
-                in_library,
-                facts.disliked_albums.contains(&id.uuid()),
-                origin(subject.catalog, in_library, server),
-            ))
+            Some(Standing {
+                entity: Some(id),
+                availability: aggregate(members, facts),
+                in_library: facts.personal_albums.contains(&id)
+                    || members.iter().any(|t| facts.personal_tracks.contains(t)),
+                members,
+            })
         }
         EntityKind::Artist => {
             let members = facts.artist_tracks.get(&id).map_or(&[][..], Vec::as_slice);
-            let in_library = facts.personal_artists.contains(&id)
-                || members.iter().any(|t| facts.personal_tracks.contains(t));
-            let server = members.iter().any(|t| facts.files.contains_key(t));
-            Some(group_member(
-                aggregate(members, facts),
-                in_library,
-                facts.disliked_artists.contains(&id.uuid()),
-                origin(subject.catalog, in_library, server),
-            ))
+            Some(Standing {
+                entity: Some(id),
+                availability: aggregate(members, facts),
+                in_library: facts.personal_artists.contains(&id)
+                    || members.iter().any(|t| facts.personal_tracks.contains(t)),
+                members,
+            })
         }
         _ => None,
     }
 }
 
-/// Builds the member of a track, which carries the acquisition and quality fields.
-fn track_member(facts: &Facts, subject: &Subject, id: EntityId) -> Option<Object> {
-    let availability = match facts.availability.get(&id) {
-        Some(availability) => *availability,
-        None if subject.catalog => Availability::Remote,
-        None => return None,
+/// Builds the `hearthsound` object of one subject, or `None` when there is none.
+fn member_for(facts: &Facts, subject: &Subject) -> Option<Object> {
+    let standing = standing(facts, subject)?;
+    let Some(id) = standing.entity else {
+        return Some(unresolved());
     };
-    let file = facts.files.get(&id);
-    let in_library = facts.personal_tracks.contains(&id);
-    let local =
-        file.is_some() && matches!(availability, Availability::Local | Availability::Cached);
+    let disliked = match subject.kind {
+        EntityKind::Track => facts.disliked_tracks.contains(&id.uuid()),
+        EntityKind::Album => facts.disliked_albums.contains(&id.uuid()),
+        EntityKind::Artist => facts.disliked_artists.contains(&id.uuid()),
+        _ => false,
+    };
+    let server = if subject.kind == EntityKind::Track {
+        facts.files.contains_key(&id)
+            && matches!(
+                standing.availability,
+                Availability::Local | Availability::Cached
+            )
+    } else {
+        standing
+            .members
+            .iter()
+            .any(|track| facts.files.contains_key(track))
+    };
     let mut member = base(
-        availability,
-        in_library,
-        facts.disliked_tracks.contains(&id.uuid()),
-        origin(subject.catalog, in_library, local),
+        standing.availability,
+        standing.in_library,
+        disliked,
+        origin(subject.catalog, standing.in_library, server),
     );
+    if subject.kind != EntityKind::Track {
+        return Some(member);
+    }
     if let Some(row) = facts.active.get(&id) {
         let acquisition = EntityId::from_uuid(IdPrefix::Acquisition, row.id);
         member = member.set("acquisitionId", acquisition.to_string());
     }
-    if let Some(file) = file {
+    if let Some(file) = facts.files.get(&id) {
         member = member.set("quality", quality(file));
     }
     Some(member)
@@ -300,16 +401,6 @@ fn base(
         .set("inLibrary", in_library)
         .set("disliked", disliked)
         .set("origin", origin)
-}
-
-/// The member of an album or artist, which carries no acquisition or quality.
-fn group_member(
-    availability: Availability,
-    in_library: bool,
-    disliked: bool,
-    origin: &'static str,
-) -> Object {
-    base(availability, in_library, disliked, origin)
 }
 
 /// The origin of an item: catalog results always report catalog, personal items

@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enabling a pending plugin is refused. Approval, enabling, disabling and
   removal publish a plugin status event to administrators.
 
+- `hsGetAvailability` answers what the server knows about the tracks and albums a
+  client names over the `hearthsound` vendor extension: each entity's
+  availability state, whether the requesting account's personal library holds it,
+  and the acquisition in flight for a track.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload
