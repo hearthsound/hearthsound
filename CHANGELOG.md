@@ -177,6 +177,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   declared queue starts, replay from `Last-Event-ID`, and the pins a playlist's
   lifetime controls.
 
+- The plugin platform is exercised end to end in
+  `crates/server/tests/integration/plugin_admin.rs`, which serves every index
+  document and every archive from a mock HTTP server: the metadata fixture
+  installs from an index URL both through the administrative API and through the
+  command line's `plugins install`, each install waits for approval, is refused
+  an enable and cannot be configured into a provider until it is approved, and
+  is served by the provider registry once it is. An index whose signature does
+  not verify and an archive whose digest is not the one the index declares both
+  fail closed and leave no row and no file behind, and a plugin uploaded through
+  the multipart route installs while the sideload gate refuses it once the
+  setting is off.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload

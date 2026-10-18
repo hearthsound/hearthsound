@@ -13,6 +13,7 @@ mod health;
 mod multi_user;
 mod native;
 mod on_demand;
+mod plugin_admin;
 mod prefetch;
 mod reload;
 mod storage;
