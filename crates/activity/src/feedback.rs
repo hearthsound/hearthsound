@@ -11,9 +11,11 @@
 //! layer for what a user likes, and the storage maintainer moves the files the
 //! pins imply.
 //!
-//! A dislike is the other `user_feedback` value. It pins nothing and never
-//! replaces a like here: a rating of one counts as a dislike only when the
-//! user does not like the entity (`subsonic.rating_one_is_dislike`).
+//! A dislike is the other `user_feedback` value and pins nothing. A rating of
+//! one records one only when the user does not like the entity
+//! (`subsonic.rating_one_is_dislike`) and leaves a like in place, while the
+//! dislike a user asks for directly replaces whatever they held; clearing
+//! removes either.
 
 use hearthsound_core::{EntityId, EntityKind, IdPrefix, PinReason};
 use hearthsound_library::retention;
@@ -101,6 +103,84 @@ pub async fn unlike(
         refresh_pins(conn, kind, entity_id).await?;
     }
     Ok(removed > 0)
+}
+
+/// Records a dislike, replacing whatever feedback the user held.
+///
+/// Unlike [`dislike_unless_liked`], which a rating of one uses and which leaves
+/// an explicit like in place, this is the dislike a user asked for directly: a
+/// like is replaced. A dislike pins nothing, so the personal-library pin of
+/// every track the change affects is refreshed in the same transaction and a
+/// like that was the only holder of a pin releases it.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `user_id`: the account that dislikes the entity.
+/// - `kind`: the kind of entity.
+/// - `entity_id`: the entity's id.
+/// - `at`: when the dislike happened, in unix milliseconds.
+///
+/// # Errors
+///
+/// Returns [`ActivityError::Database`] when the row cannot be written and
+/// [`ActivityError::Library`] when a pin cannot be updated.
+pub async fn dislike(
+    conn: &mut SqliteConnection,
+    user_id: Uuid,
+    kind: EntityKind,
+    entity_id: Uuid,
+    at: i64,
+) -> Result<(), ActivityError> {
+    sqlx::query!(
+        "INSERT INTO user_feedback (user_id, entity_kind, entity_id, value, at) \
+         VALUES (?, ?, ?, 'dislike', ?) \
+         ON CONFLICT (user_id, entity_kind, entity_id) \
+         DO UPDATE SET value = 'dislike', at = excluded.at",
+        user_id.as_bytes().as_slice(),
+        kind_literal(kind),
+        entity_id.as_bytes().as_slice(),
+        at,
+    )
+    .execute(&mut *conn)
+    .await?;
+    refresh_pins(conn, kind, entity_id).await
+}
+
+/// Removes whatever feedback a user holds about an entity.
+///
+/// Both a like and a dislike are removed, which is what the vendor extension's
+/// `none` means: the entity is unrated. The personal-library pin of every track
+/// the removal affects is refreshed in the same transaction, so clearing a like
+/// releases the pin nothing else holds.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `user_id`: the account whose feedback is removed.
+/// - `kind`: the kind of entity.
+/// - `entity_id`: the entity's id.
+///
+/// # Errors
+///
+/// Returns [`ActivityError::Database`] when the rows cannot be removed and
+/// [`ActivityError::Library`] when a pin cannot be updated.
+pub async fn clear(
+    conn: &mut SqliteConnection,
+    user_id: Uuid,
+    kind: EntityKind,
+    entity_id: Uuid,
+) -> Result<(), ActivityError> {
+    sqlx::query!(
+        "DELETE FROM user_feedback \
+         WHERE user_id = ? AND entity_kind = ? AND entity_id = ?",
+        user_id.as_bytes().as_slice(),
+        kind_literal(kind),
+        entity_id.as_bytes().as_slice(),
+    )
+    .execute(&mut *conn)
+    .await?;
+    refresh_pins(conn, kind, entity_id).await
 }
 
 /// Saves an entity into a user's personal library.

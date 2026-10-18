@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO user_feedback (user_id, entity_kind, entity_id, value, at) VALUES (?, ?, ?, 'dislike', ?) ON CONFLICT (user_id, entity_kind, entity_id) DO UPDATE SET value = 'dislike', at = excluded.at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "11b61ffa71ea5c9d66f5aca6cac0f69ce86348dd0296f2191a5e6e4e93877c04"
+}

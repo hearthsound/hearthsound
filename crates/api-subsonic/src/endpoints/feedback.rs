@@ -121,24 +121,24 @@ async fn toggle(call: &Call, like: bool) -> Encoded {
         return call.encode(Response::failed(browse::failure("a star change", &error)));
     }
     if like {
-        acquire_liked(call, user, &entities).await;
+        adopt_saved(call, user, &entities).await;
     }
     call.encode(Response::ok())
 }
 
-/// Acquires the remote tracks of what a user just liked.
+/// Acquires the remote tracks of what a user just liked or saved.
 ///
-/// A like is a save (`library.acquire_on_save`), so a liked track or album that
-/// is not stored is acquired at priority `queue` under the user's permission
-/// and quota. The like is already recorded; a refusal or an error here is only
-/// logged.
+/// A like and a save are adoptions (`library.acquire_on_save`), so a liked or
+/// saved track or album that is not stored is acquired at priority `queue` under
+/// the user's permission and quota. The change is already recorded; a refusal or
+/// an error here is only logged.
 ///
 /// # Parameters
 ///
 /// - `call`: the authenticated call.
-/// - `user`: the user who liked the entities.
-/// - `entities`: the liked entities.
-async fn acquire_liked(call: &Call, user: Uuid, entities: &[(EntityKind, Uuid)]) {
+/// - `user`: the user who liked or saved the entities.
+/// - `entities`: the liked or saved entities.
+pub(super) async fn adopt_saved(call: &Call, user: Uuid, entities: &[(EntityKind, Uuid)]) {
     let Some(prefetch) = call.state().prefetch() else {
         return;
     };

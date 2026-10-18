@@ -23,7 +23,8 @@
 //! track is permanent in that user's library, and
 //! [`ActivityService::set_rating`] stores a rating of 1 to 5 or clears one.
 //! [`ActivityService::save`] and [`ActivityService::unsave`] are the same
-//! operation for library membership itself.
+//! operation for library membership itself, and
+//! [`ActivityService::set_feedback`] writes a like, a dislike, or neither.
 //! [`Playlists`] creates and edits playlists, keeping the playlist pin of every
 //! track whose membership changed in step, [`PlayQueues`] stores the queue
 //! each client saved so another client can pick it up, [`Bookmarks`] stores
@@ -81,7 +82,7 @@ mod session;
 pub use annotations::{Annotation, MAX_IDS_PER_QUERY, disliked_ids, load as load_annotations};
 pub use bookmarks::{Bookmark, Bookmarks};
 pub use error::ActivityError;
-pub use feedback::{like, refresh_user_library_pin, unlike};
+pub use feedback::{clear, dislike, like, refresh_user_library_pin, unlike};
 pub use now_playing::{
     DEFAULT_CLIENT, NowPlaying, NowPlayingEntry, PLAYING_GRACE_MS, PLAYING_GRACE_UNKNOWN_MS,
 };
@@ -95,7 +96,7 @@ pub use reports::{
     InMemoryReports, LISTENED_HALF_MS, MIN_TRACK_MS, PlaybackOutcome, PlaybackReport,
     PlaybackState, SCROBBLE_DEDUPE_MS,
 };
-pub use service::{ActivityService, Scrobble, ScrobbleOutcome};
+pub use service::{ActivityService, Feedback, Scrobble, ScrobbleOutcome};
 pub use session::{AudioDelivered, SessionOptions, StreamSession, StreamSessions};
 
 /// The statement a transaction that reads before it writes starts with.

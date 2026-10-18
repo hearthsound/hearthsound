@@ -55,6 +55,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removing a save releases them unless a like, a playlist or an upload still
   holds them.
 
+- `hsSave` and `hsUnsave` add tracks, albums and artists to a personal library
+  or remove them over the `hearthsound` vendor extension, and `hsSetFeedback`
+  records a like, which is the `star` operation including the acquisition a save
+  performs, a dislike, which replaces a like and pins nothing, or neither.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload

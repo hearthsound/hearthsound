@@ -97,6 +97,29 @@ pub enum ScrobbleOutcome {
     AlreadyRecorded,
 }
 
+/// What one user thinks of one entity.
+///
+/// The three values are the like, the dislike, and the absence of either, which
+/// is what the vendor extension's `like`, `dislike`, and `none` name.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_activity::Feedback;
+///
+/// assert_ne!(Feedback::Like, Feedback::Dislike);
+/// assert_ne!(Feedback::Dislike, Feedback::None);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feedback {
+    /// A like, the operation `star` performs.
+    Like,
+    /// A dislike, which replaces a like and pins nothing.
+    Dislike,
+    /// Neither: whichever feedback the user held is removed.
+    None,
+}
+
 /// Play recording and the per-stream guard that decides what counts.
 ///
 /// The service pairs the [`Plays`] repository with the [`StreamSessions`]
@@ -455,6 +478,45 @@ impl ActivityService {
         let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
         for (kind, entity_id) in entities {
             feedback::unlike(&mut tx, user_id, *kind, *entity_id).await?;
+        }
+        tx.commit().await?;
+        self.signal.notify();
+        Ok(())
+    }
+
+    /// Sets what one user thinks of one entity.
+    ///
+    /// The three values are the ones the vendor extension expresses: a like,
+    /// which is the `star` operation and pins the entity, a dislike, which
+    /// replaces a like and pins nothing, and neither, which removes whichever
+    /// the user held. The whole request is one transaction with the
+    /// personal-library pin refresh it implies. Nothing is acquired here; the
+    /// caller that knows the user's permission and quota asks the acquisition
+    /// layer for what a like saves.
+    ///
+    /// # Parameters
+    ///
+    /// - `user_id`: the account whose feedback changes.
+    /// - `kind`: the kind of entity.
+    /// - `entity_id`: the entity's id.
+    /// - `feedback`: the like, dislike, or removal to record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActivityError`] when a row, a pin, or the commit fails.
+    pub async fn set_feedback(
+        &self,
+        user_id: Uuid,
+        kind: EntityKind,
+        entity_id: Uuid,
+        feedback: Feedback,
+    ) -> Result<(), ActivityError> {
+        let at = now_millis();
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+        match feedback {
+            Feedback::Like => feedback::like(&mut tx, user_id, kind, entity_id, at).await?,
+            Feedback::Dislike => feedback::dislike(&mut tx, user_id, kind, entity_id, at).await?,
+            Feedback::None => feedback::clear(&mut tx, user_id, kind, entity_id).await?,
         }
         tx.commit().await?;
         self.signal.notify();

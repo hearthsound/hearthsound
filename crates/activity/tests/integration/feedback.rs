@@ -1,8 +1,10 @@
-//! Tests for likes and the personal-library pin they keep in step.
+//! Tests for likes, dislikes, and the personal-library pin they keep in step.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use hearthsound_activity::ActivityService;
+use std::time::Duration;
+
+use hearthsound_activity::{ActivityService, Feedback};
 use hearthsound_core::EntityKind;
 use hearthsound_db::Database;
 use hearthsound_library::LibraryRepository;
@@ -174,5 +176,177 @@ async fn unliking_keeps_a_saved_tracks_pin() {
     assert!(
         is_pinned(&library, tracks[0]).await,
         "the saved row still pins the track"
+    );
+}
+
+/// Returns the feedback value one user holds about an entity.
+async fn feedback_value(
+    database: &Database,
+    user: Uuid,
+    kind: &str,
+    entity: Uuid,
+) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT value FROM user_feedback WHERE user_id = ? AND entity_kind = ? AND entity_id = ?",
+    )
+    .bind(user.as_bytes().as_slice())
+    .bind(kind)
+    .bind(entity.as_bytes().as_slice())
+    .fetch_optional(database.readers())
+    .await
+    .unwrap()
+}
+
+/// A like set through the feedback operation pins the track, like a star does.
+#[tokio::test]
+async fn a_like_feedback_pins_a_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let signal = activity.maintenance_signal().clone();
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+
+    activity
+        .set_feedback(user, EntityKind::Track, tracks[0], Feedback::Like)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        feedback_value(&database, user, "track", tracks[0])
+            .await
+            .as_deref(),
+        Some("like")
+    );
+    assert!(is_pinned(&library, tracks[0]).await);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), signal.notified())
+            .await
+            .is_ok(),
+        "the change woke the maintenance worker"
+    );
+}
+
+/// A dislike replaces a like and releases the pin the like held; on its own it
+/// pins nothing.
+#[tokio::test]
+async fn a_dislike_replaces_a_like_and_unpins() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let user = insert_user(&database).await;
+    let (album, tracks) = insert_album(&library).await;
+
+    activity
+        .star(user, &[(EntityKind::Album, album)])
+        .await
+        .unwrap();
+    for track in &tracks {
+        assert!(is_pinned(&library, *track).await);
+    }
+
+    activity
+        .set_feedback(user, EntityKind::Album, album, Feedback::Dislike)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        feedback_value(&database, user, "album", album)
+            .await
+            .as_deref(),
+        Some("dislike")
+    );
+    for track in &tracks {
+        assert!(!is_pinned(&library, *track).await, "a dislike pins nothing");
+    }
+}
+
+/// Clearing removes whichever feedback the user held.
+#[tokio::test]
+async fn clearing_removes_a_like_or_a_dislike() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+
+    activity
+        .set_feedback(user, EntityKind::Track, tracks[0], Feedback::Like)
+        .await
+        .unwrap();
+    activity
+        .set_feedback(user, EntityKind::Track, tracks[0], Feedback::None)
+        .await
+        .unwrap();
+    assert_eq!(
+        feedback_value(&database, user, "track", tracks[0]).await,
+        None
+    );
+    assert!(
+        !is_pinned(&library, tracks[0]).await,
+        "clearing the like released the pin"
+    );
+
+    activity
+        .set_feedback(user, EntityKind::Track, tracks[0], Feedback::Dislike)
+        .await
+        .unwrap();
+    activity
+        .set_feedback(user, EntityKind::Track, tracks[0], Feedback::None)
+        .await
+        .unwrap();
+    assert_eq!(
+        feedback_value(&database, user, "track", tracks[0]).await,
+        None
+    );
+
+    // Clearing feedback that was never recorded is not an error.
+    activity
+        .set_feedback(user, EntityKind::Track, tracks[1], Feedback::None)
+        .await
+        .unwrap();
+    assert_eq!(
+        feedback_value(&database, user, "track", tracks[1]).await,
+        None
+    );
+}
+
+/// A dislike of one user does not touch another user's like or pin.
+#[tokio::test]
+async fn one_users_dislike_keeps_another_users_like() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let (first, second) = (insert_user(&database).await, insert_user(&database).await);
+    let (_, tracks) = insert_album(&library).await;
+
+    activity
+        .set_feedback(first, EntityKind::Track, tracks[0], Feedback::Like)
+        .await
+        .unwrap();
+    activity
+        .set_feedback(second, EntityKind::Track, tracks[0], Feedback::Dislike)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        feedback_value(&database, first, "track", tracks[0])
+            .await
+            .as_deref(),
+        Some("like")
+    );
+    assert_eq!(
+        feedback_value(&database, second, "track", tracks[0])
+            .await
+            .as_deref(),
+        Some("dislike")
+    );
+    assert!(
+        is_pinned(&library, tracks[0]).await,
+        "the other user still likes the track"
     );
 }
