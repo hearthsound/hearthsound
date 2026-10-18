@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM playlists WHERE is_temporary = 1 AND expires_at IS NOT NULL AND expires_at <= ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "fea940fdea987f2b01811bb043f15981fb8507e460f54bda19a100a408df24f6"
+}

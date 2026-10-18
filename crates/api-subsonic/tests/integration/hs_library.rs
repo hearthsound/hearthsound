@@ -485,3 +485,208 @@ async fn a_library_write_answers_error_70_without_the_vendor_flag() {
     }
     assert!(!in_personal_library(&fixture, EntityKind::Track, tracks[0]).await);
 }
+
+/// Creates a playlist of `tracks` owned by the fixture's account.
+async fn playlist(fixture: &Fixture, name: &str, tracks: &[EntityId]) -> EntityId {
+    fixture
+        .state
+        .activity()
+        .playlists()
+        .create(fixture.user_id.uuid(), name, None, false, tracks)
+        .await
+        .unwrap()
+        .id
+}
+
+/// Converting a playlist to temporary releases its pins and converting it back
+/// to permanent restores them.
+#[tokio::test]
+async fn converting_a_playlist_pins_and_releases_its_tracks() {
+    let (fixture, _, tracks) = fixture(2).await;
+    let app = fixture.app();
+    let id = playlist(&fixture, "Synced", &tracks).await;
+    for track in &tracks {
+        assert!(is_pinned(&fixture, *track).await);
+    }
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsSetPlaylistLifetime?apiKey={}&hearthsound=1&f=json&playlistId={id}&temporary=true&expiresAt=4000",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&probe);
+    insta::assert_snapshot!("hs-playlist-lifetime-json", &probe.body);
+    for track in &tracks {
+        assert!(
+            !is_pinned(&fixture, *track).await,
+            "a temporary playlist pins nothing"
+        );
+    }
+    let listed = fixture
+        .state
+        .activity()
+        .playlists()
+        .get(id, fixture.user_id.uuid())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(listed.is_temporary);
+    assert_eq!(listed.expires_at, Some(4_000));
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsSetPlaylistLifetime?apiKey={}&hearthsound=1&f=json&playlistId={id}&temporary=false",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&probe);
+    for track in &tracks {
+        assert!(is_pinned(&fixture, *track).await);
+    }
+}
+
+/// The conversion answers the XML encoding as well.
+#[tokio::test]
+async fn converting_a_playlist_answers_the_xml_encoding_as_well() {
+    let (fixture, _, tracks) = fixture(1).await;
+    let app = fixture.app();
+    let id = playlist(&fixture, "Synced", &tracks).await;
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsSetPlaylistLifetime?apiKey={}&hearthsound=1&playlistId={id}&temporary=true",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&probe);
+    insta::assert_snapshot!("hs-playlist-lifetime-xml", &probe.body);
+}
+
+/// Only the playlist's owner may convert it.
+#[tokio::test]
+async fn converting_another_accounts_playlist_is_not_authorized() {
+    let (fixture, _, tracks) = fixture(1).await;
+    let app = fixture.app();
+    let id = playlist(&fixture, "Mine", &tracks).await;
+    let (_, other_key) = fixture.account(&[]).await;
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsSetPlaylistLifetime?apiKey={}&hearthsound=1&f=json&playlistId={id}&temporary=true",
+            other_key
+        ),
+    )
+    .await;
+    assert_error(&probe, 50);
+    assert!(
+        is_pinned(&fixture, tracks[0]).await,
+        "the refused conversion changed nothing"
+    );
+}
+
+/// An unknown or malformed playlist id is refused as not found.
+#[tokio::test]
+async fn a_lifetime_request_naming_an_unknown_playlist_is_refused() {
+    let (fixture, _, _) = fixture(1).await;
+    let app = fixture.app();
+    let unknown = EntityId::new(IdPrefix::Playlist);
+
+    for id in [unknown.to_string(), "nonsense".to_owned()] {
+        let probe = get(
+            &app,
+            &format!(
+                "/rest/hsSetPlaylistLifetime?apiKey={}&hearthsound=1&f=json&playlistId={id}&temporary=true",
+                fixture.api_key
+            ),
+        )
+        .await;
+        assert_error(&probe, 70);
+    }
+}
+
+/// The playlist and the temporary flag are required.
+#[tokio::test]
+async fn a_lifetime_request_without_its_parameters_is_refused() {
+    let (fixture, _, tracks) = fixture(1).await;
+    let app = fixture.app();
+    let id = playlist(&fixture, "Mine", &tracks).await;
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsSetPlaylistLifetime?apiKey={}&hearthsound=1&f=json&temporary=true",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&probe, 10);
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsSetPlaylistLifetime?apiKey={}&hearthsound=1&f=json&playlistId={id}",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&probe, 10);
+}
+
+/// A flag that is not a boolean and an expiry that is not a time are refused.
+#[tokio::test]
+async fn a_malformed_lifetime_value_is_refused() {
+    let (fixture, _, tracks) = fixture(1).await;
+    let app = fixture.app();
+    let id = playlist(&fixture, "Mine", &tracks).await;
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsSetPlaylistLifetime?apiKey={}&hearthsound=1&f=json&playlistId={id}&temporary=maybe",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&probe, 0);
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsSetPlaylistLifetime?apiKey={}&hearthsound=1&f=json&playlistId={id}&temporary=true&expiresAt=soon",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&probe, 0);
+    assert!(
+        is_pinned(&fixture, tracks[0]).await,
+        "a refused request changed nothing"
+    );
+}
+
+/// The endpoint is answered only for a request that opted into the extension.
+#[tokio::test]
+async fn a_lifetime_change_answers_error_70_without_the_vendor_flag() {
+    let (fixture, _, tracks) = fixture(1).await;
+    let app = fixture.app();
+    let id = playlist(&fixture, "Mine", &tracks).await;
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsSetPlaylistLifetime?apiKey={}&f=json&playlistId={id}&temporary=true",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&probe, 70);
+    assert!(is_pinned(&fixture, tracks[0]).await);
+}

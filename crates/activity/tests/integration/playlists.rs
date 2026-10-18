@@ -2,7 +2,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use hearthsound_activity::{ActivityError, PlaylistUpdate, Playlists};
+use hearthsound_activity::{
+    ActivityError, EXPIRE_JOB_KIND, ExpireJobHandler, PlaylistUpdate, Playlists,
+};
 use hearthsound_core::EntityId;
 use hearthsound_library::LibraryRepository;
 use uuid::Uuid;
@@ -252,4 +254,197 @@ async fn an_empty_name_is_refused() {
         matches!(refused, ActivityError::InvalidName { .. }),
         "{refused:?}"
     );
+}
+
+/// A temporary playlist is listed like any other and pins none of its tracks;
+/// making it permanent pins them again.
+#[tokio::test]
+async fn a_temporary_playlist_pins_nothing_until_it_is_permanent() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let playlist = Playlists::new(&database);
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let ids = entities(&tracks);
+    let temporary = playlist
+        .create(user, "Synced", None, false, &ids)
+        .await
+        .unwrap();
+    assert!(!temporary.is_temporary);
+    assert_eq!(temporary.expires_at, None);
+
+    let temporary = playlist
+        .set_lifetime(temporary.id, user, true, Some(4_000))
+        .await
+        .unwrap();
+    assert!(temporary.is_temporary);
+    assert_eq!(temporary.expires_at, Some(4_000));
+    assert_eq!(order(&temporary, &ids), [0, 1]);
+    for track in &ids {
+        assert!(
+            !is_pinned(&library, track.uuid()).await,
+            "a temporary playlist pins nothing"
+        );
+    }
+    let listed = playlist.list(user, None).await.unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|playlist| (playlist.name.as_str(), playlist.is_temporary))
+            .collect::<Vec<_>>(),
+        [("Synced", true)],
+        "a temporary playlist is listed like any other"
+    );
+
+    let permanent = playlist
+        .set_lifetime(temporary.id, user, false, Some(4_000))
+        .await
+        .unwrap();
+    assert!(!permanent.is_temporary);
+    assert_eq!(
+        permanent.expires_at, None,
+        "a permanent playlist never expires"
+    );
+    for track in &ids {
+        assert!(is_pinned(&library, track.uuid()).await);
+    }
+}
+
+/// Converting a playlist is the owner's decision only.
+#[tokio::test]
+async fn only_the_owner_may_convert_a_playlist() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let playlist = Playlists::new(&database);
+    let (owner, other) = (insert_user(&database).await, insert_user(&database).await);
+    let (_, tracks) = insert_album(&library).await;
+    let created = playlist
+        .create(owner, "Synced", None, false, &entities(&tracks))
+        .await
+        .unwrap();
+
+    let refused = playlist
+        .set_lifetime(created.id, other, true, None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, ActivityError::NotOwner { .. }),
+        "{refused:?}"
+    );
+    assert!(
+        is_pinned(&library, tracks[0]).await,
+        "the refused conversion pinned nothing"
+    );
+
+    let unknown = playlist
+        .set_lifetime(
+            EntityId::new(hearthsound_core::IdPrefix::Playlist),
+            owner,
+            true,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(unknown, ActivityError::UnknownPlaylist { .. }),
+        "{unknown:?}"
+    );
+}
+
+/// The sweeper deletes a temporary playlist whose expiry has passed, and leaves
+/// a permanent one and a temporary one without an expiry alone.
+#[tokio::test]
+async fn the_sweeper_deletes_only_expired_temporary_playlists() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let playlist = Playlists::new(&database);
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let ids = entities(&tracks);
+
+    let expired = playlist
+        .create(user, "Expired", None, false, &ids)
+        .await
+        .unwrap();
+    playlist
+        .set_lifetime(expired.id, user, true, Some(1_000))
+        .await
+        .unwrap();
+    let later = playlist
+        .create(user, "Later", None, false, &ids)
+        .await
+        .unwrap();
+    playlist
+        .set_lifetime(later.id, user, true, Some(9_000))
+        .await
+        .unwrap();
+    let no_expiry = playlist
+        .create(user, "Never", None, false, &ids)
+        .await
+        .unwrap();
+    playlist
+        .set_lifetime(no_expiry.id, user, true, None)
+        .await
+        .unwrap();
+    let permanent = playlist
+        .create(user, "Permanent", None, false, &ids)
+        .await
+        .unwrap();
+
+    assert_eq!(playlist.delete_expired(5_000).await.unwrap(), 1);
+    assert!(playlist.get(expired.id, user).await.unwrap().is_none());
+    for kept in [later.id, no_expiry.id, permanent.id] {
+        assert!(playlist.get(kept, user).await.unwrap().is_some());
+    }
+    assert_eq!(
+        playlist.delete_expired(5_000).await.unwrap(),
+        0,
+        "a second sweep finds nothing"
+    );
+    // Deleting a temporary playlist releases nothing by itself: the tracks it
+    // held are still pinned by the permanent playlist that also holds them.
+    for track in &ids {
+        assert!(is_pinned(&library, track.uuid()).await);
+    }
+}
+
+/// The expiry job runs the same sweep the repository offers.
+#[tokio::test]
+async fn the_expiry_job_deletes_what_has_passed() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let playlist = Playlists::new(&database);
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let created = playlist
+        .create(user, "Synced", None, false, &entities(&tracks))
+        .await
+        .unwrap();
+    playlist
+        .set_lifetime(created.id, user, true, Some(0))
+        .await
+        .unwrap();
+
+    let handler = ExpireJobHandler::new(playlist.clone());
+    let job = hearthsound_jobs::Job {
+        id: Uuid::now_v7(),
+        kind: EXPIRE_JOB_KIND.into(),
+        payload: None,
+        state: hearthsound_jobs::JobState::Running,
+        priority: hearthsound_core::Priority::Background,
+        attempts: 1,
+        run_at: 0,
+        locked_until: None,
+        last_error: None,
+        created_at: 0,
+        updated_at: 0,
+    };
+    hearthsound_jobs::JobHandler::handle(&handler, job)
+        .await
+        .unwrap();
+    assert!(playlist.get(created.id, user).await.unwrap().is_none());
 }

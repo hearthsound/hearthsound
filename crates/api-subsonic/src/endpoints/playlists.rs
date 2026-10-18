@@ -360,7 +360,7 @@ fn playlist_id(call: &Call, parameter: &'static str) -> Result<EntityId, Subsoni
 /// # Errors
 ///
 /// Answers Subsonic error 70 when the value is not a playlist id.
-fn parse_playlist_id(value: &str) -> Result<EntityId, SubsonicError> {
+pub(super) fn parse_playlist_id(value: &str) -> Result<EntityId, SubsonicError> {
     match ClientId::parse(value) {
         Ok(ClientId::Entity(id)) if id.kind() == PLAYLIST_PREFIX => Ok(id),
         _ => {

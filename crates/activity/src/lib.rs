@@ -89,7 +89,8 @@ pub use now_playing::{
 pub use play::Plays;
 pub use play_queues::{PlayQueues, SavedQueue};
 pub use playlists::{
-    MAX_PLAYLIST_NAME, Playlist, PlaylistEntry, PlaylistUpdate, Playlists, refresh_playlist_pin,
+    EXPIRE_JOB_KIND, EXPIRE_SCHEDULE, ExpireJobHandler, MAX_PLAYLIST_NAME, Playlist, PlaylistEntry,
+    PlaylistUpdate, Playlists, refresh_playlist_pin,
 };
 pub use ratings::{MAX_RATING, set_rating};
 pub use reports::{

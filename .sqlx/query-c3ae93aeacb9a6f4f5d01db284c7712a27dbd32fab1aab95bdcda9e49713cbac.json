@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, owner_user_id, name, comment, is_public, created_at, updated_at FROM playlists WHERE id = ?",
+  "query": "SELECT id, owner_user_id, name, comment, is_public, is_temporary, expires_at, created_at, updated_at FROM playlists WHERE (owner_user_id = ?1 OR is_public = 1) AND (?2 IS NULL OR owner_user_id = ?2) ORDER BY name, id",
   "describe": {
     "columns": [
       {
@@ -59,8 +59,30 @@
         }
       },
       {
-        "name": "created_at",
+        "name": "is_temporary",
         "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "playlists",
+            "name": "is_temporary"
+          }
+        }
+      },
+      {
+        "name": "expires_at",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "playlists",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 7,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -71,7 +93,7 @@
       },
       {
         "name": "updated_at",
-        "ordinal": 6,
+        "ordinal": 8,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -82,7 +104,7 @@
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 2
     },
     "nullable": [
       false,
@@ -91,8 +113,10 @@
       true,
       false,
       false,
+      true,
+      false,
       false
     ]
   },
-  "hash": "6916f0a2c7180cf5c01361fc91d7c7e2796398f11dcd31328768bc830af62d99"
+  "hash": "c3ae93aeacb9a6f4f5d01db284c7712a27dbd32fab1aab95bdcda9e49713cbac"
 }

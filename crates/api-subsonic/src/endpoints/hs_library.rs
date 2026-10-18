@@ -14,6 +14,11 @@
 //! acquisition layer for the remote tracks the request names, under the
 //! requester's permission and quota.
 //!
+//! `hsSetPlaylistLifetime` belongs here too, because a playlist's lifetime is a
+//! statement about the library: a permanent playlist pins every track it holds
+//! and a temporary one pins none, so converting a playlist to permanent is what
+//! makes the tracks of a synchronized playlist permanent for its owner.
+//!
 //! Every endpoint here belongs to the `hearthsound` vendor extension, so each one
 //! is answered only when the request carries `hearthsound=1` and answers Subsonic
 //! error 70 without it.
@@ -36,6 +41,9 @@ const UNSAVE_OPERATION: &str = "hsUnsave";
 
 /// The operation name a feedback change reports.
 const FEEDBACK_OPERATION: &str = "hsSetFeedback";
+
+/// The operation name a playlist lifetime change reports.
+const LIFETIME_OPERATION: &str = "hsSetPlaylistLifetime";
 
 /// The `value` a feedback request carries for a like.
 const LIKE: &str = "like";
@@ -181,6 +189,104 @@ pub async fn hs_set_feedback(call: Call) -> Encoded {
         adopt_saved(&call, user, &entities).await;
     }
     call.encode(Response::ok())
+}
+
+/// Answers `hsSetPlaylistLifetime`: converts a playlist between temporary and
+/// permanent.
+///
+/// A permanent playlist pins every track it holds, so converting one to
+/// permanent makes its tracks permanent in the requesting account's library; a
+/// temporary playlist pins none of them, so converting one back releases them
+/// unless a like, an upload or another playlist still holds them. Only the
+/// playlist's owner may do this.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call. `playlistId` names the playlist,
+///   `temporary` is `true` or `false`, and `expiresAt` optionally names the
+///   instant the playlist expires at, in unix milliseconds. The request must
+///   carry `hearthsound=1`.
+///
+/// # Returns
+///
+/// An empty successful envelope, or a failed envelope.
+///
+/// # Errors
+///
+/// Answers Subsonic error 70 when the request does not carry `hearthsound=1`
+/// and when `playlistId` is malformed or names no playlist, error 10 when
+/// `playlistId` or `temporary` is missing, error 0 when `temporary` is not a
+/// boolean or `expiresAt` is not a non-negative number, error 50 when the
+/// playlist belongs to another account, and a generic error when a write fails.
+pub async fn hs_set_playlist_lifetime(call: Call) -> Encoded {
+    if !call.vendor_enabled() {
+        return call.encode(Response::failed(SubsonicError::not_found()));
+    }
+    let Some(value) = parameter(&call, "playlistId") else {
+        return call.encode(Response::failed(SubsonicError::missing_parameter(
+            "playlistId",
+        )));
+    };
+    let id = match super::playlists::parse_playlist_id(value) {
+        Ok(id) => id,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let Some(value) = parameter(&call, "temporary") else {
+        return call.encode(Response::failed(SubsonicError::missing_parameter(
+            "temporary",
+        )));
+    };
+    let temporary = match value.parse::<bool>() {
+        Ok(temporary) => temporary,
+        Err(_) => {
+            return call.encode(Response::failed(SubsonicError::new(
+                codes::GENERIC,
+                "`temporary` is true or false.",
+            )));
+        }
+    };
+    let expires_at = match parameter(&call, "expiresAt") {
+        Some(value) => match value.parse::<i64>() {
+            Ok(expires_at) if expires_at >= 0 => Some(expires_at),
+            _ => {
+                return call.encode(Response::failed(SubsonicError::new(
+                    codes::GENERIC,
+                    "`expiresAt` is a unix time in milliseconds.",
+                )));
+            }
+        },
+        None => None,
+    };
+
+    let user = call.principal().user_id.uuid();
+    match call
+        .state()
+        .activity()
+        .playlists()
+        .set_lifetime(id, user, temporary, expires_at)
+        .await
+    {
+        Ok(_) => call.encode(Response::ok()),
+        Err(error) => call.encode(Response::failed(playlist_failure(&error))),
+    }
+}
+
+/// Maps a playlist write failure onto the failure envelope.
+///
+/// # Parameters
+///
+/// - `error`: the failure the repository returned.
+///
+/// # Returns
+///
+/// Subsonic error 70 for a playlist that does not exist, error 50 for one that
+/// belongs to another account, and the generic browse failure otherwise.
+fn playlist_failure(error: &hearthsound_activity::ActivityError) -> SubsonicError {
+    match error {
+        hearthsound_activity::ActivityError::UnknownPlaylist { .. } => SubsonicError::not_found(),
+        hearthsound_activity::ActivityError::NotOwner { .. } => SubsonicError::not_authorized(),
+        other => browse::failure(LIFETIME_OPERATION, other),
+    }
 }
 
 /// Reads the entities a request names, materializing catalog ids.

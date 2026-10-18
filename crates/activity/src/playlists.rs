@@ -6,12 +6,18 @@
 //! refreshed in the same transaction: a track carries the `playlist` pin while
 //! it is in any non-temporary playlist.
 //!
-//! The playlists this crate writes are all permanent. `is_temporary` exists for
-//! the synced playlists of the discovery work, which expire; a temporary
-//! playlist pins nothing.
+//! A playlist is permanent unless it is made temporary. A temporary playlist is
+//! one the server produced for a bounded purpose - a synced playlist, for
+//! example - and it pins none of the tracks it holds, so those tracks stay
+//! evictable until [`Playlists::set_lifetime`] makes the playlist permanent. A
+//! temporary playlist may carry an expiry, and [`Playlists::delete_expired`],
+//! which the `playlists.expire` job runs, deletes the ones whose expiry has
+//! passed.
 
+use async_trait::async_trait;
 use hearthsound_core::{EntityId, IdPrefix, PinReason};
 use hearthsound_db::Database;
+use hearthsound_jobs::{Job, JobError, JobHandler};
 use hearthsound_library::maintenance::MaintenanceSignal;
 use hearthsound_library::retention;
 use sqlx::{SqliteConnection, SqlitePool};
@@ -47,6 +53,18 @@ pub struct Playlist {
     pub comment: Option<String>,
     /// Whether every user may see it.
     pub is_public: bool,
+    /// Whether it is temporary.
+    ///
+    /// A temporary playlist holds tracks the server put there - a synced
+    /// playlist, for example - and pins none of them, so its tracks are
+    /// evictable until the playlist is made permanent.
+    pub is_temporary: bool,
+    /// When it expires, in unix milliseconds.
+    ///
+    /// Only a temporary playlist carries an expiry, and a temporary playlist
+    /// without one never expires by itself. [`Playlists::delete_expired`]
+    /// removes the temporary playlists whose expiry has passed.
+    pub expires_at: Option<i64>,
     /// When it was created, in unix milliseconds.
     pub created_at: i64,
     /// When it last changed, in unix milliseconds.
@@ -129,6 +147,10 @@ struct PlaylistRow {
     comment: Option<String>,
     /// The visibility flag.
     is_public: i64,
+    /// The temporary flag.
+    is_temporary: i64,
+    /// The expiry instant.
+    expires_at: Option<i64>,
     /// The creation instant.
     created_at: i64,
     /// The last-change instant.
@@ -238,6 +260,8 @@ impl Playlists {
             name: name.to_owned(),
             comment: comment.map(str::to_owned),
             is_public: public,
+            is_temporary: false,
+            expires_at: None,
             created_at: now,
             updated_at: now,
             entries,
@@ -413,6 +437,97 @@ impl Playlists {
         Ok(deleted > 0)
     }
 
+    /// Converts a playlist between temporary and permanent.
+    ///
+    /// A permanent playlist pins every track it holds; a temporary one pins
+    /// none, so its tracks are evictable again. The new state and the playlist
+    /// pin of every entry are written in one transaction, which is what keeps a
+    /// conversion from leaving a track pinned by a playlist that no longer
+    /// holds it.
+    ///
+    /// A permanent playlist has no expiry, so the expiry is cleared when the
+    /// playlist is made permanent; a temporary playlist without one never
+    /// expires by itself.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the playlist to convert.
+    /// - `editor`: the account making the change; it must own the playlist.
+    /// - `temporary`: whether the playlist is temporary afterwards.
+    /// - `expires_at`: when it expires afterwards, in unix milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// The playlist, with its new lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActivityError::UnknownPlaylist`] when no playlist has that id,
+    /// [`ActivityError::NotOwner`] when `editor` does not own it, and
+    /// [`ActivityError::Database`] or [`ActivityError::Library`] when a write
+    /// fails.
+    pub async fn set_lifetime(
+        &self,
+        id: EntityId,
+        editor: Uuid,
+        temporary: bool,
+        expires_at: Option<i64>,
+    ) -> Result<Playlist, ActivityError> {
+        let mut tx = self.writer.begin_with(crate::READ_THEN_WRITE).await?;
+        let mut playlist = load_or_unknown(&mut tx, id).await?;
+        check_owner(&playlist, editor)?;
+        let expires_at = expires_at.filter(|_| temporary);
+        let now = now_millis();
+        sqlx::query!(
+            "UPDATE playlists SET is_temporary = ?, expires_at = ?, updated_at = ? WHERE id = ?",
+            temporary,
+            expires_at,
+            now,
+            entity_key(id),
+        )
+        .execute(&mut *tx)
+        .await?;
+        for track in playlist.track_ids() {
+            refresh_playlist_pin(&mut tx, track).await?;
+        }
+        tx.commit().await?;
+        self.signal.notify();
+        playlist.is_temporary = temporary;
+        playlist.expires_at = expires_at;
+        playlist.updated_at = now;
+        Ok(playlist)
+    }
+
+    /// Deletes the temporary playlists whose expiry has passed.
+    ///
+    /// The entries go with the playlist, and no pin has to be released: a
+    /// temporary playlist pins nothing while it exists, so removing it changes
+    /// no track.
+    ///
+    /// # Parameters
+    ///
+    /// - `now`: the instant to compare the expiries against, in unix
+    ///   milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// How many playlists were deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActivityError::Database`] when the rows cannot be deleted.
+    pub async fn delete_expired(&self, now: i64) -> Result<u64, ActivityError> {
+        let deleted = sqlx::query!(
+            "DELETE FROM playlists \
+             WHERE is_temporary = 1 AND expires_at IS NOT NULL AND expires_at <= ?",
+            now,
+        )
+        .execute(&self.writer)
+        .await?
+        .rows_affected();
+        Ok(deleted)
+    }
+
     /// Reads one playlist.
     ///
     /// # Parameters
@@ -466,10 +581,10 @@ impl Playlists {
         let mut conn = self.readers.acquire().await?;
         let rows = sqlx::query_as!(
             PlaylistRow,
-            "SELECT id, owner_user_id, name, comment, is_public, created_at, updated_at \
+            "SELECT id, owner_user_id, name, comment, is_public, is_temporary, expires_at, \
+                    created_at, updated_at \
              FROM playlists \
-             WHERE is_temporary = 0 \
-               AND (owner_user_id = ?1 OR is_public = 1) \
+             WHERE (owner_user_id = ?1 OR is_public = 1) \
                AND (?2 IS NULL OR owner_user_id = ?2) \
              ORDER BY name, id",
             viewer.as_bytes().as_slice(),
@@ -517,6 +632,8 @@ async fn decode_row(row: PlaylistRow) -> Result<Playlist, ActivityError> {
         name: row.name,
         comment: row.comment,
         is_public: row.is_public != 0,
+        is_temporary: row.is_temporary != 0,
+        expires_at: row.expires_at,
         created_at: row.created_at,
         updated_at: row.updated_at,
         entries: Vec::new(),
@@ -562,7 +679,8 @@ async fn load(
 ) -> Result<Option<Playlist>, ActivityError> {
     let row = sqlx::query_as!(
         PlaylistRow,
-        "SELECT id, owner_user_id, name, comment, is_public, created_at, updated_at \
+        "SELECT id, owner_user_id, name, comment, is_public, is_temporary, expires_at, \
+                created_at, updated_at \
          FROM playlists WHERE id = ?",
         entity_key(id),
     )
@@ -792,4 +910,65 @@ pub async fn refresh_playlist_pin(
         retention::remove_pin_reason(conn, track_id, PinReason::Playlist).await?;
     }
     Ok(wanted)
+}
+
+/// The job kind of the playlist expiry sweep.
+pub const EXPIRE_JOB_KIND: &str = "playlists.expire";
+
+/// The cron expression of the playlist expiry sweep: every 15 minutes.
+///
+/// A temporary playlist is one the server produced for a bounded purpose, so an
+/// expiry that has passed is a small cleanup rather than an urgent one; a
+/// quarter-hour cadence keeps the table from holding playlists nobody wants
+/// without waking the process often.
+pub const EXPIRE_SCHEDULE: &str = "*/15 * * * *";
+
+/// Deletes the temporary playlists whose expiry has passed for the
+/// `playlists.expire` job.
+///
+/// The server registers it under [`EXPIRE_JOB_KIND`] and schedules it at
+/// [`EXPIRE_SCHEDULE`], so a temporary playlist that nobody converts or deletes
+/// goes away on its own.
+#[derive(Debug, Clone)]
+pub struct ExpireJobHandler {
+    /// The playlist repository the sweep runs through.
+    playlists: Playlists,
+}
+
+impl ExpireJobHandler {
+    /// Builds the handler.
+    ///
+    /// # Parameters
+    ///
+    /// - `playlists`: the playlist repository the sweep runs through.
+    ///
+    /// # Returns
+    ///
+    /// The handler.
+    pub fn new(playlists: Playlists) -> ExpireJobHandler {
+        ExpireJobHandler { playlists }
+    }
+}
+
+#[async_trait]
+impl JobHandler for ExpireJobHandler {
+    /// Deletes every temporary playlist whose expiry has passed.
+    ///
+    /// # Parameters
+    ///
+    /// - `job`: the claimed job, used for its kind in the log line.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JobError`] when the delete fails, so the queue retries it on
+    /// its retry schedule.
+    async fn handle(&self, job: Job) -> Result<(), JobError> {
+        match self.playlists.delete_expired(now_millis()).await {
+            Ok(deleted) => {
+                tracing::debug!(kind = %job.kind, deleted, "swept expired temporary playlists");
+                Ok(())
+            }
+            Err(error) => Err(JobError::new(error.to_string())),
+        }
+    }
 }

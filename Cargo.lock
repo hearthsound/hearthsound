@@ -1564,8 +1564,10 @@ dependencies = [
 name = "hearthsound-activity"
 version = "0.1.3"
 dependencies = [
+ "async-trait",
  "hearthsound-core",
  "hearthsound-db",
+ "hearthsound-jobs",
  "hearthsound-library",
  "serde_json",
  "sqlx",
@@ -1573,6 +1575,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

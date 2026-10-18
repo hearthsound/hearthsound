@@ -136,6 +136,7 @@
 //! | `hsSave` | adds the named tracks, albums and artists to the caller's personal library |
 //! | `hsUnsave` | removes the named entities from the caller's personal library |
 //! | `hsSetFeedback` | records a like, a dislike, or neither, for the named entities |
+//! | `hsSetPlaylistLifetime` | converts an owned playlist between temporary and permanent, which pins or releases its tracks |
 //!
 //! The browse endpoints share one scope rule: an explicit `musicFolderId` of
 //! `1` is the requesting user's personal library and of `2` the server-wide

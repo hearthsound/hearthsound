@@ -49,7 +49,7 @@ use std::sync::Arc;
 
 use hearthsound_acquire::orchestrator::{AcquisitionOrchestrator, AcquisitionStorage};
 use hearthsound_acquire::prefetch::PrefetchScheduler;
-use hearthsound_activity::ActivityService;
+use hearthsound_activity::{ActivityService, EXPIRE_JOB_KIND, EXPIRE_SCHEDULE, ExpireJobHandler};
 use hearthsound_api_native::{NativeServices, NativeState};
 use hearthsound_api_subsonic::{PendingSource, SubsonicState};
 use hearthsound_auth::{Authenticator, TrustedProxies};
@@ -291,6 +291,10 @@ impl Services {
             MAINTENANCE_JOB_KIND,
             Arc::new(MaintenanceJobHandler::new(Arc::clone(&maintainer))),
         );
+        runner.register(
+            EXPIRE_JOB_KIND,
+            Arc::new(ExpireJobHandler::new(activity.playlists().clone())),
+        );
         let runner = Arc::new(runner);
 
         let watcher = Arc::new(LibraryWatcher::new(
@@ -316,6 +320,9 @@ impl Services {
                 MAINTENANCE_JOB_KIND,
                 MAINTENANCE_SCHEDULE,
             ))
+            .await?;
+        scheduler
+            .upsert(ScheduleSpec::system(EXPIRE_JOB_KIND, EXPIRE_SCHEDULE))
             .await?;
 
         let trusted_proxies = TrustedProxies::parse(config.server.trusted_proxies.iter().cloned())?;

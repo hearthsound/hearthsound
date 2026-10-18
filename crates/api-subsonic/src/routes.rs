@@ -175,6 +175,11 @@ pub fn routes() -> Router<SubsonicState> {
     let router = register(router, "hsSave", endpoints::hs_save);
     let router = register(router, "hsUnsave", endpoints::hs_unsave);
     let router = register(router, "hsSetFeedback", endpoints::hs_set_feedback);
+    let router = register(
+        router,
+        "hsSetPlaylistLifetime",
+        endpoints::hs_set_playlist_lifetime,
+    );
     router.route(NOT_FOUND_PATH, get(not_found).post(not_found))
 }
 

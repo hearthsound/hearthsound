@@ -60,6 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records a like, which is the `star` operation including the acquisition a save
   performs, a dislike, which replaces a like and pins nothing, or neither.
 
+- Playlists carry a lifetime. `hsSetPlaylistLifetime` converts an owned playlist
+  between temporary and permanent: a temporary playlist pins none of its tracks,
+  so they stay evictable, and converting it to permanent pins them. A temporary
+  playlist whose expiry has passed is deleted, with its entries, by a sweep every
+  fifteen minutes.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload
