@@ -4,7 +4,8 @@
 //! has no dependency on `hearthsound-jobs`, or whose kind belongs to no single
 //! domain crate. The library scanner's handler lives in `hearthsound-library`
 //! because scanning is that crate's work; the plugin key-value sweep lives here
-//! because the host owns the `plugin_kv` table but may not depend on the queue.
+//! because the host owns the `plugin_kv` table and the sweep needs nothing but
+//! the database handle the composition root already holds.
 
 use std::sync::Arc;
 

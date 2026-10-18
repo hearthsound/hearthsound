@@ -109,6 +109,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   available plugins reports the sources that could not be read rather than
   failing.
 
+- The server checks for plugin updates in the background. An hourly job looks
+  for a newer version of every installed plugin in the index it came from - the
+  official index for official and bundled plugins, their own repository for
+  plugins installed from one, and nothing for a sideloaded file - reads each
+  index once per check, and skips the check until `plugins.update_check_hours`
+  have passed since the last completed one, which a value of zero turns off
+  entirely. With `plugins.auto_update` on it installs every update it finds; an
+  upgrade that requests a permission the installed version does not hold is
+  staged for approval instead, and what the last check found stays available to
+  the administrative views.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload

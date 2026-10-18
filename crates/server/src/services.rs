@@ -62,7 +62,8 @@ use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore};
 use hearthsound_core::events::EventBus;
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_jobs::{
-    JobQueue, JobRunner, JobRunnerOptions, QueueOptions, ScheduleSpec, Scheduler, SchedulerOptions,
+    JobHandler, JobQueue, JobRunner, JobRunnerOptions, QueueOptions, ScheduleSpec, Scheduler,
+    SchedulerOptions,
 };
 use hearthsound_library::StorageRoots;
 use hearthsound_library::maintenance::{
@@ -76,6 +77,7 @@ use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::instances::InstanceService;
 use hearthsound_plugin_host::{
     IndexClient, PluginAdmin, PluginHost, PluginInstaller, PluginRepository, ProviderRegistry,
+    UPDATE_CHECK_JOB_KIND, UPDATE_CHECK_SCHEDULE, UpdateCheckJobHandler, UpdateChecker,
 };
 use tower_http::cors::CorsLayer;
 
@@ -111,6 +113,10 @@ pub struct Services {
     /// The installer the admin routes install from indexes and repository URLs
     /// with.
     installer: Arc<PluginInstaller>,
+    /// The checker the background job and the admin views read.
+    update_checker: Arc<UpdateChecker>,
+    /// The update-check job, which holds what the last check found.
+    update_job: Arc<UpdateCheckJobHandler>,
     /// The ffmpeg process runner.
     ffmpeg: Arc<FfmpegRunner>,
     /// The acquisition orchestrator the pending stream and the admin views use.
@@ -256,6 +262,11 @@ impl Services {
             http,
             config.paths.plugins.clone(),
         ));
+        let update_checker = Arc::new(UpdateChecker::new(
+            Arc::clone(&installer),
+            repository.clone(),
+        ));
+        let update_job = Arc::new(UpdateCheckJobHandler::new(Arc::clone(&update_checker)));
 
         let catalog = Arc::new(CatalogService::new(
             Arc::clone(&registry),
@@ -324,6 +335,8 @@ impl Services {
             EXPIRE_JOB_KIND,
             Arc::new(ExpireJobHandler::new(activity.playlists().clone())),
         );
+        let update_handler: Arc<dyn JobHandler> = update_job.clone();
+        runner.register(UPDATE_CHECK_JOB_KIND, update_handler);
         let runner = Arc::new(runner);
 
         let watcher = Arc::new(LibraryWatcher::new(
@@ -353,6 +366,21 @@ impl Services {
         scheduler
             .upsert(ScheduleSpec::system(EXPIRE_JOB_KIND, EXPIRE_SCHEDULE))
             .await?;
+        scheduler
+            .upsert(ScheduleSpec::system(
+                UPDATE_CHECK_JOB_KIND,
+                UPDATE_CHECK_SCHEDULE,
+            ))
+            .await?;
+
+        // The first check of a process runs here rather than on the next tick,
+        // so a server that was down for a week looks for plugin updates as soon
+        // as it serves. It runs beside the request path: a slow or unreachable
+        // index must not hold up the server coming up.
+        let startup = Arc::clone(&update_job);
+        tokio::spawn(async move {
+            startup.check_if_due().await;
+        });
 
         let trusted_proxies = TrustedProxies::parse(config.server.trusted_proxies.iter().cloned())?;
         let cors = crate::cors::layer(&config.server.cors_origins)?;
@@ -375,6 +403,8 @@ impl Services {
             instances,
             admin,
             installer,
+            update_checker,
+            update_job,
             ffmpeg,
             orchestrator,
             prefetch,
@@ -459,6 +489,19 @@ impl Services {
     /// and records the plugin as pending approval.
     pub fn installer(&self) -> &Arc<PluginInstaller> {
         &self.installer
+    }
+
+    /// Returns the plugin update checker.
+    pub fn update_checker(&self) -> &Arc<UpdateChecker> {
+        &self.update_checker
+    }
+
+    /// Returns the handler that holds what the last plugin update check found.
+    ///
+    /// The admin views read the pending updates from it rather than reading
+    /// every index again.
+    pub fn update_job(&self) -> &Arc<UpdateCheckJobHandler> {
+        &self.update_job
     }
 
     /// Returns the ffmpeg process runner.

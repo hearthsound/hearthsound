@@ -50,6 +50,7 @@ mod pool;
 pub mod registry;
 mod repo;
 mod state;
+mod updates;
 mod validate;
 
 pub use admin::{AdminError, PluginAdmin};
@@ -78,3 +79,7 @@ pub use repo::{
     RepositoryRow,
 };
 pub use state::InstanceState;
+pub use updates::{
+    PluginUpdate, UPDATE_CHECK_JOB_KIND, UPDATE_CHECK_SCHEDULE, UpdateCheckJobHandler,
+    UpdateCheckReport, UpdateChecker,
+};

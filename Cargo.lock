@@ -1829,6 +1829,7 @@ dependencies = [
  "hearthsound-config",
  "hearthsound-core",
  "hearthsound-db",
+ "hearthsound-jobs",
  "hearthsound-test-support",
  "jsonschema",
  "minisign",

@@ -14,11 +14,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore};
+use hearthsound_core::{Priority, new_uuid_v7};
 use hearthsound_db::{Database, MIGRATOR};
+use hearthsound_jobs::{Job, JobHandler, JobKind, JobState};
 use hearthsound_plugin_host::manifest::SUPPORTED_API;
 use hearthsound_plugin_host::{
     IndexClient, InstallError, PluginAdmin, PluginHost, PluginInstaller, PluginRepository,
-    PluginSource, PluginState, RepositoryRef, Unavailable,
+    PluginSource, PluginState, RepositoryRef, UPDATE_CHECK_JOB_KIND, Unavailable,
+    UpdateCheckJobHandler, UpdateChecker,
 };
 use hearthsound_test_support::{METADATA_FIXTURE, fixture_plugin};
 use minisign::KeyPair;
@@ -39,6 +42,9 @@ const REPOSITORY_PATH: &str = "/repo/index.json";
 
 /// The path the metadata fixture's archive is served at in these tests.
 const ARCHIVE_PATH: &str = "/download/metadata.hsplugin";
+
+/// The path the metadata fixture's newer archive is served at in these tests.
+const NEW_ARCHIVE_PATH: &str = "/download/metadata-0.2.0.hsplugin";
 
 /// One signing key pair the tests publish an index with.
 struct Signer {
@@ -156,6 +162,19 @@ impl Env {
     /// The URL the metadata fixture's archive is served at.
     fn archive_url(&self) -> String {
         format!("{}{ARCHIVE_PATH}", self.server.uri())
+    }
+
+    /// The URL the metadata fixture's newer archive is served at.
+    fn new_archive_url(&self) -> String {
+        format!("{}{NEW_ARCHIVE_PATH}", self.server.uri())
+    }
+
+    /// The update checker over this environment's installer.
+    fn checker(&self) -> Arc<UpdateChecker> {
+        Arc::new(UpdateChecker::new(
+            Arc::clone(&self.installer),
+            self.repository.clone(),
+        ))
     }
 
     /// Serves the official index and its signature.
@@ -784,4 +803,280 @@ async fn the_third_party_gate_refuses_an_unregistered_url() {
         matches!(disabled, InstallError::RepositoryDisabled { .. }),
         "expected a disabled repository error, got {disabled:?}"
     );
+}
+
+/// Serves the official index offering 0.1.0 and 0.2.0 of the metadata fixture.
+///
+/// The 0.2.0 archive is repacked with `permissions`, so an upgrade can be made
+/// to ask for nothing new or for something new.
+///
+/// # Returns
+///
+/// The bytes of the 0.2.0 archive.
+async fn serve_two_versions(env: &Env, permissions: Value) -> Vec<u8> {
+    let old = metadata_bytes();
+    let new = metadata_bytes_at(env.dir.path(), "0.2.0", permissions.clone());
+    serve_bytes(&env.server, ARCHIVE_PATH, old.clone()).await;
+    serve_bytes(&env.server, NEW_ARCHIVE_PATH, new.clone()).await;
+    let document = document(&[plugin(
+        METADATA_ID,
+        true,
+        &[
+            version("0.1.0", SUPPORTED_API, &env.archive_url(), &old, json!({})),
+            version(
+                "0.2.0",
+                SUPPORTED_API,
+                &env.new_archive_url(),
+                &new,
+                permissions,
+            ),
+        ],
+    )]);
+    env.serve_official(&document).await;
+    new
+}
+
+/// Installs the metadata fixture at 0.1.0 from the official index and approves
+/// it.
+async fn install_approved_v1(env: &Env) {
+    env.installer
+        .install_from_index(METADATA_ID, Some("0.1.0"), Some(RepositoryRef::Official))
+        .await
+        .unwrap();
+    env.admin.approve(METADATA_ID).await.unwrap();
+}
+
+/// Builds the job the update-check handler is registered under.
+fn update_job() -> Job {
+    Job {
+        id: new_uuid_v7(),
+        kind: JobKind::new(UPDATE_CHECK_JOB_KIND),
+        payload: None,
+        state: JobState::Running,
+        priority: Priority::Queue,
+        attempts: 1,
+        run_at: 0,
+        locked_until: None,
+        last_error: None,
+        created_at: 0,
+        updated_at: 0,
+    }
+}
+
+#[tokio::test]
+async fn a_newer_compatible_version_is_listed() {
+    let env = Env::new().await;
+    serve_two_versions(&env, json!({})).await;
+    env.installer
+        .install_from_index(METADATA_ID, Some("0.1.0"), Some(RepositoryRef::Official))
+        .await
+        .unwrap();
+
+    let updates = env.checker().check().await;
+
+    assert_eq!(updates.len(), 1);
+    let update = &updates[0];
+    assert_eq!(update.plugin_id, METADATA_ID);
+    assert_eq!(update.current, "0.1.0");
+    assert_eq!(update.version, "0.2.0");
+    assert_eq!(update.source, PluginSource::Official);
+    assert_eq!(update.repository_id, None);
+}
+
+#[tokio::test]
+async fn a_bundled_plugin_is_checked_against_the_official_index() {
+    let env = Env::new().await;
+    serve_two_versions(&env, json!({})).await;
+    env.admin
+        .install_archive(
+            &fixture_plugin(METADATA_FIXTURE),
+            None,
+            PluginSource::Bundled,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+
+    let updates = env.checker().check().await;
+
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].current, "0.1.0");
+    assert_eq!(updates[0].version, "0.2.0");
+    assert_eq!(updates[0].source, PluginSource::Bundled);
+}
+
+#[tokio::test]
+async fn a_sideloaded_plugin_is_never_updated() {
+    let env = Env::new().await;
+    serve_two_versions(&env, json!({})).await;
+    env.admin
+        .install_archive(
+            &fixture_plugin(METADATA_FIXTURE),
+            None,
+            PluginSource::Sideload,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+    // The official index publishes a newer version of the same plugin, and the
+    // sideloaded install is still not checked against it.
+    assert!(env.checker().check().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_repository_plugin_is_checked_against_its_repository() {
+    let env = Env::new().await;
+    let old = metadata_bytes();
+    let new = metadata_bytes_at(env.dir.path(), "0.2.0", json!({}));
+    serve_bytes(&env.server, ARCHIVE_PATH, old.clone()).await;
+    serve_bytes(&env.server, NEW_ARCHIVE_PATH, new.clone()).await;
+    env.serve_repository(&document(&[plugin(
+        METADATA_ID,
+        false,
+        &[
+            version("0.1.0", SUPPORTED_API, &env.archive_url(), &old, json!({})),
+            version(
+                "0.2.0",
+                SUPPORTED_API,
+                &env.new_archive_url(),
+                &new,
+                json!({}),
+            ),
+        ],
+    )]))
+    .await;
+    // The official index publishes a much newer version of the same plugin,
+    // which a plugin installed from a repository is not checked against.
+    env.serve_official(&document(&[plugin(
+        METADATA_ID,
+        true,
+        &[version(
+            "9.0.0",
+            SUPPORTED_API,
+            &env.new_archive_url(),
+            &new,
+            json!({}),
+        )],
+    )]))
+    .await;
+
+    env.installer
+        .install_from_url(METADATA_ID, &env.repository_url(), Some("0.1.0"))
+        .await
+        .unwrap();
+
+    let updates = env.checker().check().await;
+
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].version, "0.2.0");
+    assert_eq!(updates[0].source, PluginSource::Repository);
+    let row = env.repository.plugin(METADATA_ID).await.unwrap().unwrap();
+    assert!(row.repository_id.is_some());
+    assert_eq!(updates[0].repository_id, row.repository_id);
+}
+
+#[tokio::test]
+async fn auto_update_applies_an_upgrade_that_asks_for_nothing_new() {
+    let env = Env::with_settings(&[("HEARTHSOUND__PLUGINS__AUTO_UPDATE", "true")]).await;
+    serve_two_versions(&env, json!({})).await;
+    install_approved_v1(&env).await;
+
+    let checker = env.checker();
+    let updates = checker.check().await;
+    assert_eq!(updates.len(), 1);
+
+    let applied = checker.apply_auto_updates(&updates).await;
+
+    assert_eq!(applied, updates);
+    let row = env.repository.plugin(METADATA_ID).await.unwrap().unwrap();
+    assert_eq!(row.version, "0.2.0");
+    assert!(row.enabled);
+    assert_eq!(row.state(false), PluginState::Enabled);
+    assert!(env.repository.upgrade(METADATA_ID).await.unwrap().is_none());
+    assert!(env.plugins_dir().join(METADATA_ID).join("0.2.0").is_dir());
+    assert!(!env.plugins_dir().join(METADATA_ID).join("0.1.0").exists());
+    assert_no_downloads(&env);
+
+    // The plugin now serves the newest version, so nothing is left to install.
+    assert!(checker.check().await.is_empty());
+}
+
+#[tokio::test]
+async fn an_upgrade_that_asks_for_more_waits_for_approval() {
+    let env = Env::with_settings(&[("HEARTHSOUND__PLUGINS__AUTO_UPDATE", "true")]).await;
+    let permissions = json!({"http": {"hosts": ["api.example.com"]}});
+    serve_two_versions(&env, permissions).await;
+    install_approved_v1(&env).await;
+
+    let checker = env.checker();
+    let updates = checker.check().await;
+    assert_eq!(updates.len(), 1);
+
+    let applied = checker.apply_auto_updates(&updates).await;
+
+    assert_eq!(applied, updates);
+    let row = env.repository.plugin(METADATA_ID).await.unwrap().unwrap();
+    assert_eq!(row.version, "0.1.0");
+    assert_eq!(row.state(true), PluginState::UpgradePendingApproval);
+    let staged = env.repository.upgrade(METADATA_ID).await.unwrap().unwrap();
+    assert_eq!(staged.version, "0.2.0");
+    assert!(env.plugins_dir().join(METADATA_ID).join("0.1.0").is_dir());
+    assert!(env.plugins_dir().join(METADATA_ID).join("0.2.0").is_dir());
+
+    // The staged version is not installed a second time.
+    assert!(checker.apply_auto_updates(&updates).await.is_empty());
+
+    // Approving it switches the plugin over and prunes the version it replaced.
+    let approved = env.admin.approve(METADATA_ID).await.unwrap();
+    assert_eq!(approved.version, "0.2.0");
+    assert!(!env.plugins_dir().join(METADATA_ID).join("0.1.0").exists());
+}
+
+#[tokio::test]
+async fn the_first_check_is_due_and_the_next_waits_for_the_interval() {
+    let env = Env::new().await;
+    serve_two_versions(&env, json!({})).await;
+    env.installer
+        .install_from_index(METADATA_ID, Some("0.1.0"), Some(RepositoryRef::Official))
+        .await
+        .unwrap();
+
+    let handler = UpdateCheckJobHandler::new(env.checker());
+    assert!(handler.last_check().is_none());
+
+    let report = handler.check_if_due().await.unwrap();
+    assert_eq!(report.updates.len(), 1);
+    assert_eq!(report.updates[0].version, "0.2.0");
+    assert!(report.checked_at > 0);
+    assert_eq!(handler.last_check().unwrap(), report);
+
+    // The interval has not passed, and the scheduled job does nothing either.
+    assert!(handler.check_if_due().await.is_none());
+    handler.handle(update_job()).await.unwrap();
+    assert_eq!(handler.last_check().unwrap(), report);
+
+    // Automatic updates are off by default, so the plugin still serves 0.1.0
+    // and has nothing staged.
+    let row = env.repository.plugin(METADATA_ID).await.unwrap().unwrap();
+    assert_eq!(row.version, "0.1.0");
+    assert!(env.repository.upgrade(METADATA_ID).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_zero_hour_interval_switches_the_check_off() {
+    let env = Env::with_settings(&[("HEARTHSOUND__PLUGINS__UPDATE_CHECK_HOURS", "0")]).await;
+    serve_two_versions(&env, json!({})).await;
+    env.installer
+        .install_from_index(METADATA_ID, Some("0.1.0"), Some(RepositoryRef::Official))
+        .await
+        .unwrap();
+
+    let handler = UpdateCheckJobHandler::new(env.checker());
+
+    assert!(handler.check_if_due().await.is_none());
+    handler.handle(update_job()).await.unwrap();
+    assert!(handler.last_check().is_none());
 }
