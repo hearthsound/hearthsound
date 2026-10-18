@@ -54,17 +54,73 @@ pub(crate) async fn decorate(
     let mut raw = HashSet::new();
     collect_ids(payload, &mut raw);
     let mut subjects = HashMap::new();
-    for id in raw {
-        if let Some(subject) = resolve(state, &id).await? {
-            subjects.insert(id, subject);
+    for id in &raw {
+        if let Some(subject) = resolve(state, id).await? {
+            subjects.insert(id.clone(), subject);
         }
     }
-    if subjects.is_empty() {
+    let mut members = if subjects.is_empty() {
+        HashMap::new()
+    } else {
+        members_for(state, user, &subjects).await?
+    };
+    members.extend(playlist_members(state, user, &raw).await?);
+    if members.is_empty() {
         return Ok(());
     }
-    let members = members_for(state, user, &subjects).await?;
     apply_object(payload, &members);
     Ok(())
+}
+
+/// Builds the `hearthsound` member of every playlist object in the payload.
+///
+/// A playlist's member reports its lifetime: whether it is temporary, and when
+/// it expires. The read goes through the same visibility rule the playlist
+/// endpoints use, so only a playlist the caller may see is decorated.
+///
+/// # Parameters
+///
+/// - `state`: the endpoint state.
+/// - `user`: the account the playlists are read for.
+/// - `ids`: every id string the payload holds.
+///
+/// # Returns
+///
+/// The member of every playlist id that names a visible playlist, keyed by the
+/// id the client wrote.
+///
+/// # Errors
+///
+/// Returns a generic [`SubsonicError`] when a read fails.
+async fn playlist_members(
+    state: &SubsonicState,
+    user: Uuid,
+    ids: &HashSet<String>,
+) -> Result<HashMap<String, Object>, SubsonicError> {
+    let mut members = HashMap::new();
+    for raw in ids {
+        let Ok(ClientId::Entity(id)) = ClientId::parse(raw) else {
+            continue;
+        };
+        if id.kind() != IdPrefix::Playlist {
+            continue;
+        }
+        let playlist = state
+            .activity()
+            .playlists()
+            .get(id, user)
+            .await
+            .map_err(|error| fail(&error))?;
+        let Some(playlist) = playlist else {
+            continue;
+        };
+        let mut member = Object::new().set("temporary", playlist.is_temporary);
+        if let Some(expires_at) = playlist.expires_at {
+            member = member.set("expiresAt", expires_at);
+        }
+        members.insert(raw.clone(), member);
+    }
+    Ok(members)
 }
 
 /// The entity one client id names, once resolved.

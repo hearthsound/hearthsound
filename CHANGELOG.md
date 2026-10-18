@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Playlist objects carry a `hearthsound` member when `hearthsound=1` is sent:
+  whether the playlist is temporary and, for a temporary one, when it expires.
+  The member is on the playlist objects of `getPlaylists`, `getPlaylist` and
+  `createPlaylist`; without the flag those responses are unchanged.
+
 - `GET /api/v1/uploads` lists the audio files the caller uploaded, newest
   first, one cursor page at a time. Every entry names the track and its album
   by the client ids the Subsonic endpoints accept, with the artist, the album

@@ -80,6 +80,115 @@ fn playlist_id(body: &str) -> Option<String> {
     Some(rest[..end].to_owned())
 }
 
+/// A playlist object carries its lifetime when the vendor extension is asked
+/// for, and the standard response stays the standard one without it.
+#[tokio::test]
+async fn the_playlist_lifetime_rides_the_vendor_extension() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+    let key = fixture.api_key.clone();
+
+    let created = get(
+        &app,
+        &format!(
+            "/rest/createPlaylist?name=Evening&songId={}&apiKey={key}&f=json",
+            seeded.alpha_tracks[0]
+        ),
+    )
+    .await;
+    assert_ok(&created);
+    let id = playlist_id(&created.body).expect("the response carries the playlist id");
+
+    let mut filters = SNAPSHOT_FILTERS.to_vec();
+    filters.push((r#"pl_[0-9a-z]+"#, "pl_ID"));
+
+    // Without the flag neither the listing nor the playlist carries a member.
+    let standard = get(&app, &format!("/rest/getPlaylists?apiKey={key}&f=json")).await;
+    assert_ok(&standard);
+    assert!(
+        !standard.body.contains("\"hearthsound\":{"),
+        "a standard response has no vendor member: {}",
+        standard.body
+    );
+
+    // A permanent playlist reports its lifetime as permanent.
+    let permanent = get(
+        &app,
+        &format!("/rest/getPlaylist?id={id}&apiKey={key}&hearthsound=1&f=json"),
+    )
+    .await;
+    assert_ok(&permanent);
+    assert!(
+        permanent.body.contains("\"temporary\":false"),
+        "{}",
+        permanent.body
+    );
+    insta::with_settings!({filters => filters.clone()}, {
+        insta::assert_snapshot!(
+            "playlist-lifetime-permanent-json",
+            seeded.stabilize(&permanent.body)
+        );
+    });
+
+    // The same playlist made temporary reports its expiry.
+    let made = get(
+        &app,
+        &format!(
+            "/rest/hsSetPlaylistLifetime?apiKey={key}&hearthsound=1&f=json&playlistId={id}&temporary=true&expiresAt=4000"
+        ),
+    )
+    .await;
+    assert_ok(&made);
+    let temporary = get(
+        &app,
+        &format!("/rest/getPlaylist?id={id}&apiKey={key}&hearthsound=1&f=json"),
+    )
+    .await;
+    assert_ok(&temporary);
+    assert!(
+        temporary.body.contains("\"temporary\":true"),
+        "{}",
+        temporary.body
+    );
+    assert!(
+        temporary.body.contains("\"expiresAt\":4000"),
+        "{}",
+        temporary.body
+    );
+    insta::with_settings!({filters => filters.clone()}, {
+        insta::assert_snapshot!(
+            "playlist-lifetime-temporary-json",
+            seeded.stabilize(&temporary.body)
+        );
+    });
+
+    // The listing carries the member of every playlist it lists, in both
+    // encodings.
+    let listed = get(
+        &app,
+        &format!("/rest/getPlaylists?apiKey={key}&hearthsound=1&f=json"),
+    )
+    .await;
+    assert_ok(&listed);
+    assert!(listed.body.contains("\"hearthsound\":{"), "{}", listed.body);
+    insta::with_settings!({filters => filters.clone()}, {
+        insta::assert_snapshot!(
+            "playlist-lifetime-listing-json",
+            seeded.stabilize(&listed.body)
+        );
+    });
+    let xml = get(
+        &app,
+        &format!("/rest/getPlaylists?apiKey={key}&hearthsound=1"),
+    )
+    .await;
+    assert_ok(&xml);
+    assert!(xml.body.contains("<hearthsound"), "{}", xml.body);
+    insta::with_settings!({filters => filters}, {
+        insta::assert_snapshot!("playlist-lifetime-listing-xml", seeded.stabilize(&xml.body));
+    });
+}
+
 /// `createPlaylist` stores a playlist whose entries `getPlaylist` lists.
 #[tokio::test]
 async fn a_playlist_round_trip() {

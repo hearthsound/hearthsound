@@ -67,10 +67,11 @@ pub async fn get_playlists(call: Call) -> Encoded {
         };
         playlists.push(playlist_object(playlist, &names, duration, Vec::new()));
     }
-    call.encode(Response::ok().member(
+    call.respond(Response::ok().member(
         "playlists",
         Object::new().set("playlist", Array::new(playlists)),
     ))
+    .await
 }
 
 /// Answers `getPlaylist`: one playlist with its entries.
@@ -184,7 +185,8 @@ pub async fn create_playlist(call: Call) -> Encoded {
         Err(error) => return call.encode(Response::failed(error)),
     };
     let playlist = playlist_object(&playlist, &names, duration, entries);
-    call.encode(Response::ok().member("playlist", playlist))
+    call.respond(Response::ok().member("playlist", playlist))
+        .await
 }
 
 /// Answers `updatePlaylist`: changes one owned playlist.
