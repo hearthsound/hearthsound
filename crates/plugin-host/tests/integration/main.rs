@@ -15,3 +15,4 @@ mod install;
 mod metadata_provider;
 mod plugin_log;
 mod provisioning;
+mod repositories;

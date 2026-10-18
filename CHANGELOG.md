@@ -93,6 +93,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that targets the API version this server hosts, reporting the API versions an
   incompatible entry offers instead.
 
+- The plugin repositories an administrator adds are stored, listed, changed and
+  removed: each keeps its index URL, the name to show for it, the minisign
+  public key its index is signed with, whether it is queried, and the time and
+  error of its last fetch. A URL identifies one repository, and client ids gain
+  the `pr_` prefix for repositories.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload

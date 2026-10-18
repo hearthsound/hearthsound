@@ -167,6 +167,26 @@ pub struct PluginUpgrade {
     pub staged_at: i64,
 }
 
+/// One row of the `plugin_repositories` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryRow {
+    /// The repository id, generated when the repository is added.
+    pub id: Uuid,
+    /// The URL of the repository's index document.
+    pub url: String,
+    /// The name shown to administrators, when one was given.
+    pub name: Option<String>,
+    /// The minisign public key text the repository signs its index with, when
+    /// it is signed.
+    pub public_key: Option<String>,
+    /// Whether the repository is queried for its index.
+    pub enabled: bool,
+    /// When the index was last fetched, in unix milliseconds.
+    pub last_fetched_at: Option<i64>,
+    /// What went wrong on the last fetch, or `None` when it read the index.
+    pub last_error: Option<String>,
+}
+
 /// One row of the `provider_instances` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceRow {
@@ -223,6 +243,9 @@ pub enum RepoError {
         /// Why the value could not be read.
         reason: String,
     },
+    /// A repository with the same URL is registered already.
+    #[error("a plugin repository for `{0}` is registered already")]
+    DuplicateUrl(String),
 }
 
 /// The repositories of the plugin tables.
@@ -866,6 +889,307 @@ impl PluginRepository {
         transaction.commit().await?;
         Ok(())
     }
+
+    /// Inserts one plugin repository.
+    ///
+    /// The repository id is generated here, so an administrator only supplies
+    /// what they typed.
+    ///
+    /// # Parameters
+    ///
+    /// - `url`: the URL of the repository's index document. It identifies the
+    ///   repository and is unique across them.
+    /// - `name`: the name to show for the repository, or `None` to let the URL
+    ///   stand for it.
+    /// - `public_key`: the minisign public key text the repository signs its
+    ///   index with, or `None` for a repository that is not signed.
+    /// - `enabled`: whether the repository is queried for its index.
+    ///
+    /// # Returns
+    ///
+    /// The stored row. Its `last_fetched_at` and `last_error` stay empty until
+    /// the repository is fetched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::DuplicateUrl`] when another repository is registered
+    /// under `url` already, and [`RepoError::Database`] when the write fails.
+    pub async fn insert_repository(
+        &self,
+        url: &str,
+        name: Option<&str>,
+        public_key: Option<&str>,
+        enabled: bool,
+    ) -> Result<RepositoryRow, RepoError> {
+        let id = new_uuid_v7();
+        let inserted = sqlx::query!(
+            "INSERT INTO plugin_repositories (id, url, name, public_key, enabled)
+             VALUES (?, ?, ?, ?, ?)",
+            id.as_bytes().as_slice(),
+            url,
+            name,
+            public_key,
+            enabled,
+        )
+        .execute(&self.writer)
+        .await;
+
+        match inserted {
+            Ok(_) => Ok(RepositoryRow {
+                id,
+                url: url.to_owned(),
+                name: name.map(str::to_owned),
+                public_key: public_key.map(str::to_owned),
+                enabled,
+                last_fetched_at: None,
+                last_error: None,
+            }),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                Err(RepoError::DuplicateUrl(url.to_owned()))
+            }
+            Err(error) => Err(RepoError::Database(error)),
+        }
+    }
+
+    /// Reads one plugin repository.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the repository's primary key, the UUID behind its `pr_` client
+    ///   id.
+    ///
+    /// # Returns
+    ///
+    /// The row, or `None` when no repository has this id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::Database`] when the row cannot be read and
+    /// [`RepoError::Malformed`] when its stored id is not a UUID.
+    pub async fn repository(&self, id: Uuid) -> Result<Option<RepositoryRow>, RepoError> {
+        let row = sqlx::query!(
+            "SELECT id, url, name, public_key, enabled, last_fetched_at, last_error
+             FROM plugin_repositories WHERE id = ?",
+            id.as_bytes().as_slice(),
+        )
+        .fetch_optional(&self.readers)
+        .await?;
+
+        row.map(|row| {
+            repository_row(
+                row.id,
+                row.url,
+                row.name,
+                row.public_key,
+                row.enabled,
+                row.last_fetched_at,
+                row.last_error,
+            )
+        })
+        .transpose()
+    }
+
+    /// Reads one plugin repository by its URL.
+    ///
+    /// # Parameters
+    ///
+    /// - `url`: the URL of the repository's index document.
+    ///
+    /// # Returns
+    ///
+    /// The row, or `None` when no repository is registered under this URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::Database`] when the row cannot be read and
+    /// [`RepoError::Malformed`] when its stored id is not a UUID.
+    pub async fn repository_by_url(&self, url: &str) -> Result<Option<RepositoryRow>, RepoError> {
+        let row = sqlx::query!(
+            "SELECT id, url, name, public_key, enabled, last_fetched_at, last_error
+             FROM plugin_repositories WHERE url = ?",
+            url,
+        )
+        .fetch_optional(&self.readers)
+        .await?;
+
+        row.map(|row| {
+            repository_row(
+                row.id,
+                row.url,
+                row.name,
+                row.public_key,
+                row.enabled,
+                row.last_fetched_at,
+                row.last_error,
+            )
+        })
+        .transpose()
+    }
+
+    /// Reads every plugin repository, ordered by URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::Database`] when the rows cannot be read and
+    /// [`RepoError::Malformed`] when a stored id is not a UUID.
+    pub async fn repositories(&self) -> Result<Vec<RepositoryRow>, RepoError> {
+        let rows = sqlx::query!(
+            "SELECT id, url, name, public_key, enabled, last_fetched_at, last_error
+             FROM plugin_repositories ORDER BY url",
+        )
+        .fetch_all(&self.readers)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                repository_row(
+                    row.id,
+                    row.url,
+                    row.name,
+                    row.public_key,
+                    row.enabled,
+                    row.last_fetched_at,
+                    row.last_error,
+                )
+            })
+            .collect()
+    }
+
+    /// Changes the mutable fields of one plugin repository.
+    ///
+    /// The URL is not mutable: a different URL is a different repository.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the repository id.
+    /// - `name`: the name to show, `None` clearing the stored one.
+    /// - `public_key`: the signing key to verify the repository's index with,
+    ///   `None` clearing it and making the repository unsigned.
+    /// - `enabled`: whether the repository is queried for its index.
+    ///
+    /// # Returns
+    ///
+    /// The updated row, or `None` when no repository has this id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::Database`] when the write or the read back fails.
+    pub async fn update_repository(
+        &self,
+        id: Uuid,
+        name: Option<&str>,
+        public_key: Option<&str>,
+        enabled: bool,
+    ) -> Result<Option<RepositoryRow>, RepoError> {
+        sqlx::query!(
+            "UPDATE plugin_repositories SET name = ?, public_key = ?, enabled = ? WHERE id = ?",
+            name,
+            public_key,
+            enabled,
+            id.as_bytes().as_slice(),
+        )
+        .execute(&self.writer)
+        .await?;
+        self.repository(id).await
+    }
+
+    /// Deletes one plugin repository.
+    ///
+    /// Plugins installed from the repository keep their rows; their
+    /// `repository_id` becomes null.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the repository id.
+    ///
+    /// # Returns
+    ///
+    /// Whether a row was removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::Database`] when the write fails.
+    pub async fn delete_repository(&self, id: Uuid) -> Result<bool, RepoError> {
+        let result = sqlx::query!(
+            "DELETE FROM plugin_repositories WHERE id = ?",
+            id.as_bytes().as_slice(),
+        )
+        .execute(&self.writer)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Records the outcome of one fetch of a repository's index.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the repository id.
+    /// - `fetched_at`: when the fetch finished, in unix milliseconds.
+    /// - `error`: what went wrong, or `None` when the index was read. A
+    ///   successful fetch clears the error of an earlier one.
+    ///
+    /// # Returns
+    ///
+    /// The updated row, or `None` when no repository has this id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::Database`] when the write or the read back fails.
+    pub async fn record_fetch(
+        &self,
+        id: Uuid,
+        fetched_at: i64,
+        error: Option<&str>,
+    ) -> Result<Option<RepositoryRow>, RepoError> {
+        sqlx::query!(
+            "UPDATE plugin_repositories SET last_fetched_at = ?, last_error = ? WHERE id = ?",
+            fetched_at,
+            error,
+            id.as_bytes().as_slice(),
+        )
+        .execute(&self.writer)
+        .await?;
+        self.repository(id).await
+    }
+}
+
+/// Builds a repository row from its stored columns.
+///
+/// # Parameters
+///
+/// - `id`: the stored primary key.
+/// - `url`: the stored index URL.
+/// - `name`: the stored display name.
+/// - `public_key`: the stored signing key text.
+/// - `enabled`: the stored enabled flag, as SQLite holds it.
+/// - `last_fetched_at`: when the index was last fetched, in unix milliseconds.
+/// - `last_error`: the last fetch failure.
+///
+/// # Errors
+///
+/// Returns [`RepoError::Malformed`] when `id` is not a UUID.
+fn repository_row(
+    id: Vec<u8>,
+    url: String,
+    name: Option<String>,
+    public_key: Option<String>,
+    enabled: i64,
+    last_fetched_at: Option<i64>,
+    last_error: Option<String>,
+) -> Result<RepositoryRow, RepoError> {
+    let id = Uuid::from_slice(&id).map_err(|error| RepoError::Malformed {
+        column: "plugin_repositories.id",
+        reason: error.to_string(),
+    })?;
+    Ok(RepositoryRow {
+        id,
+        url,
+        name,
+        public_key,
+        enabled: enabled != 0,
+        last_fetched_at,
+        last_error,
+    })
 }
 
 /// Reads an instance id from its stored bytes.

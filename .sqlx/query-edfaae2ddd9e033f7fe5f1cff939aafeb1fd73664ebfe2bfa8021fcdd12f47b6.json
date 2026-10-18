@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE plugin_repositories SET name = ?, public_key = ?, enabled = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "edfaae2ddd9e033f7fe5f1cff939aafeb1fd73664ebfe2bfa8021fcdd12f47b6"
+}

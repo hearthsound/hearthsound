@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE plugin_repositories SET last_fetched_at = ?, last_error = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "900e857c2027eaf954b23cd95f8df4ac262e08e920d9eabcbfdce6e0e8543407"
+}

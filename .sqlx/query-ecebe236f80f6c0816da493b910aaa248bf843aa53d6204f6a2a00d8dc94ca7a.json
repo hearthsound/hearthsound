@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO plugin_repositories (id, url, name, public_key, enabled)\n             VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "ecebe236f80f6c0816da493b910aaa248bf843aa53d6204f6a2a00d8dc94ca7a"
+}

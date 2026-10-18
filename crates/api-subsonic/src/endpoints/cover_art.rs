@@ -291,7 +291,8 @@ async fn local(
         | IdPrefix::ApiKey
         | IdPrefix::AppPassword
         | IdPrefix::LibraryFolder
-        | IdPrefix::Upload => Ok(None),
+        | IdPrefix::Upload
+        | IdPrefix::PluginRepository => Ok(None),
     }
 }
 

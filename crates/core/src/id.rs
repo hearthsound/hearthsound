@@ -111,6 +111,8 @@ pub enum IdPrefix {
     LibraryFolder,
     /// An upload (`up`).
     Upload,
+    /// A plugin repository (`pr`).
+    PluginRepository,
 }
 
 impl IdPrefix {
@@ -118,7 +120,7 @@ impl IdPrefix {
     ///
     /// The order matches the variant declaration order and is stable across
     /// releases.
-    pub const ALL: [IdPrefix; 10] = [
+    pub const ALL: [IdPrefix; 11] = [
         IdPrefix::Track,
         IdPrefix::Album,
         IdPrefix::Artist,
@@ -129,6 +131,7 @@ impl IdPrefix {
         IdPrefix::AppPassword,
         IdPrefix::LibraryFolder,
         IdPrefix::Upload,
+        IdPrefix::PluginRepository,
     ];
 
     /// Returns the two-letter prefix written into a client id.
@@ -152,6 +155,7 @@ impl IdPrefix {
             IdPrefix::AppPassword => "ap",
             IdPrefix::LibraryFolder => "lf",
             IdPrefix::Upload => "up",
+            IdPrefix::PluginRepository => "pr",
         }
     }
 
@@ -184,7 +188,8 @@ impl IdPrefix {
             | IdPrefix::ApiKey
             | IdPrefix::AppPassword
             | IdPrefix::LibraryFolder
-            | IdPrefix::Upload => None,
+            | IdPrefix::Upload
+            | IdPrefix::PluginRepository => None,
         }
     }
 
@@ -664,6 +669,17 @@ mod tests {
             assert_eq!(ClientId::parse(&text).unwrap(), ClientId::Entity(id));
             assert_eq!(text.parse::<ClientId>().unwrap(), ClientId::Entity(id));
         }
+    }
+
+    #[test]
+    fn plugin_repository_ids_carry_the_pr_prefix() {
+        let id = EntityId::new(IdPrefix::PluginRepository);
+        let text = id.to_string();
+        assert_eq!(IdPrefix::PluginRepository.as_str(), "pr");
+        assert!(text.starts_with("pr_"));
+        assert_eq!(text.len(), 3 + PAYLOAD_LEN);
+        assert_eq!(ClientId::parse(&text).unwrap(), ClientId::Entity(id));
+        assert_eq!(IdPrefix::PluginRepository.entity_kind(), None);
     }
 
     #[test]

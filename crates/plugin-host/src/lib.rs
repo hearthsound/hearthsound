@@ -71,5 +71,6 @@ pub use registry::{
 };
 pub use repo::{
     Assignment, InstanceRow, PluginRepository, PluginRow, PluginSource, PluginState, RepoError,
+    RepositoryRow,
 };
 pub use state::InstanceState;
