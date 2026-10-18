@@ -2275,3 +2275,280 @@ mod plugin_admin {
         fixture.stop().await;
     }
 }
+
+mod repository_admin {
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    /// The path an index document is served at in these tests.
+    const INDEX_PATH: &str = "/v1/index.json";
+
+    /// The URL of a repository no test serves.
+    const UNKNOWN: &str = "pr_00000000000000000000000000";
+
+    #[tokio::test]
+    async fn repositories_are_added_listed_changed_and_removed() {
+        let fixture = Fixture::new().await;
+
+        // A signed repository with everything the resource takes.
+        let created = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugin-repositories",
+            Some(json!({
+                "url": "https://plugins.example/v1/index.json",
+                "name": "Example",
+                "publicKey": "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3",
+            })),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = json(created).await;
+        let id = created["id"].as_str().unwrap().to_owned();
+        assert!(id.starts_with("pr_"), "{created}");
+        assert_eq!(created["url"], "https://plugins.example/v1/index.json");
+        assert_eq!(created["name"], "Example");
+        assert_eq!(
+            created["publicKey"],
+            "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3"
+        );
+        assert_eq!(created["enabled"], true);
+        assert_eq!(created["verified"], true);
+        // Nothing has fetched the index yet, so the row carries no history.
+        assert!(created.get("lastFetchedAt").is_none(), "{created}");
+        assert!(created.get("lastError").is_none(), "{created}");
+
+        // A repository without a key is read unsigned and reported unverified.
+        let unsigned = json(
+            bearer(
+                &fixture,
+                reqwest::Method::POST,
+                "/api/v1/admin/plugin-repositories",
+                Some(json!({ "url": "https://other.example/v1/index.json" })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(unsigned["name"], serde_json::Value::Null);
+        assert_eq!(unsigned["verified"], false);
+        assert!(unsigned.get("publicKey").is_none(), "{unsigned}");
+
+        let listed = json(
+            bearer(
+                &fixture,
+                reqwest::Method::GET,
+                "/api/v1/admin/plugin-repositories",
+                None,
+            )
+            .await,
+        )
+        .await;
+        let rows = listed["repositories"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        // The listing is by URL, and agrees with what the writes answered.
+        assert_eq!(rows[0], unsigned);
+        assert_eq!(rows[1], created);
+
+        // A patch changes the mutable fields and clears what it sends as null.
+        let patched = json(
+            bearer(
+                &fixture,
+                reqwest::Method::PATCH,
+                &format!("/api/v1/admin/plugin-repositories/{id}"),
+                Some(json!({ "name": "Renamed", "publicKey": null, "enabled": false })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(patched["name"], "Renamed");
+        assert_eq!(patched["enabled"], false);
+        assert_eq!(patched["verified"], false);
+        assert!(patched.get("publicKey").is_none(), "{patched}");
+        assert_eq!(patched["url"], "https://plugins.example/v1/index.json");
+
+        // An empty patch leaves every field as it was.
+        let unchanged = json(
+            bearer(
+                &fixture,
+                reqwest::Method::PATCH,
+                &format!("/api/v1/admin/plugin-repositories/{id}"),
+                Some(json!({})),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(unchanged, patched);
+
+        // Removal answers no content, and the row is gone.
+        let removed = bearer(
+            &fixture,
+            reqwest::Method::DELETE,
+            &format!("/api/v1/admin/plugin-repositories/{id}"),
+            None,
+        )
+        .await;
+        assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+        let listed = json(
+            bearer(
+                &fixture,
+                reqwest::Method::GET,
+                "/api/v1/admin/plugin-repositories",
+                None,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(listed["repositories"].as_array().unwrap().len(), 1);
+
+        // An id that names no repository is a not-found problem on every route.
+        for method in [reqwest::Method::PATCH, reqwest::Method::DELETE] {
+            let missing = bearer(
+                &fixture,
+                method.clone(),
+                &format!("/api/v1/admin/plugin-repositories/{UNKNOWN}"),
+                if method == reqwest::Method::PATCH {
+                    Some(json!({ "enabled": true }))
+                } else {
+                    None
+                },
+            )
+            .await;
+            assert_problem(missing, StatusCode::NOT_FOUND, "not-found").await;
+        }
+        let missing = bearer(
+            &fixture,
+            reqwest::Method::PATCH,
+            "/api/v1/admin/plugin-repositories/not-an-id",
+            Some(json!({ "enabled": true })),
+        )
+        .await;
+        assert_problem(missing, StatusCode::NOT_FOUND, "not-found").await;
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_url_is_a_conflict() {
+        let fixture = Fixture::new().await;
+        let body = json!({ "url": "https://plugins.example/v1/index.json" });
+        let first = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugin-repositories",
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        let again = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugin-repositories",
+            Some(body),
+        )
+        .await;
+        assert_problem(again, StatusCode::CONFLICT, "conflict").await;
+        assert_eq!(
+            fixture
+                .services
+                .plugin_repository()
+                .repositories()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn registering_a_repository_is_gated() {
+        let fixture = Fixture::with_config(|config| {
+            config.settings.insert(
+                "plugins.allow_third_party_repositories".to_owned(),
+                toml::Value::Boolean(false),
+            );
+        })
+        .await;
+        let refused = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugin-repositories",
+            Some(json!({ "url": "https://plugins.example/v1/index.json" })),
+        )
+        .await;
+        assert_problem(refused, StatusCode::FORBIDDEN, "repositories-disabled").await;
+        assert!(
+            fixture
+                .services
+                .plugin_repository()
+                .repositories()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_fetch_is_recorded_on_the_repository() {
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        // The index answers 500, so the fetch fails and the failure is
+        // recorded on the row the listing and the views report.
+        Mock::given(method("GET"))
+            .and(path(INDEX_PATH))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let url = format!("{}{INDEX_PATH}", server.uri());
+        let created = json(
+            bearer(
+                &fixture,
+                reqwest::Method::POST,
+                "/api/v1/admin/plugin-repositories",
+                Some(json!({ "url": url, "name": "Broken" })),
+            )
+            .await,
+        )
+        .await;
+        let id = created["id"].as_str().unwrap().to_owned();
+
+        // Listing what the repository offers reads its index and reports the
+        // failure rather than failing itself.
+        let listed = json(
+            bearer(
+                &fixture,
+                reqwest::Method::GET,
+                &format!("/api/v1/admin/plugins/available?repositoryId={id}"),
+                None,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(listed["plugins"].as_array().unwrap().len(), 0);
+        assert_eq!(listed["errors"][0]["source"], url.as_str());
+
+        // The fetched repository now carries the outcome.
+        let read = json(
+            bearer(
+                &fixture,
+                reqwest::Method::GET,
+                "/api/v1/admin/plugin-repositories",
+                None,
+            )
+            .await,
+        )
+        .await;
+        let repository = &read["repositories"][0];
+        assert_eq!(repository["id"], id);
+        assert!(repository["lastFetchedAt"].is_i64(), "{repository}");
+        assert!(
+            repository["lastError"].as_str().unwrap().contains("500"),
+            "{repository}"
+        );
+        fixture.stop().await;
+    }
+}

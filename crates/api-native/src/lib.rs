@@ -35,6 +35,7 @@
 //! | `GET /api/v1/admin/storage`, `POST /api/v1/admin/storage/evict` | administrators |
 //! | `GET`/`POST /api/v1/admin/plugins`, `POST /api/v1/admin/plugins/upload`, `GET /api/v1/admin/plugins/available` | administrators |
 //! | `GET`/`DELETE /api/v1/admin/plugins/{id}`, `POST /api/v1/admin/plugins/{id}/{approve,enable,disable,decline-upgrade}` | administrators |
+//! | `GET`/`POST /api/v1/admin/plugin-repositories`, `PATCH`/`DELETE /api/v1/admin/plugin-repositories/{id}` | administrators |
 //! | `POST /api/v1/uploads` | any user with `can_upload`, when uploads are enabled |
 //! | `GET /api/v1/events` | any user; each event the caller's audience admits (administrators see all) |
 //! | `POST /api/v1/events/ticket` | any user, a single-use ticket for the stream |
@@ -165,6 +166,14 @@ fn api_router() -> OpenApiRouter<NativeState> {
         .routes(routes!(routes::admin_plugins::enable_plugin))
         .routes(routes!(routes::admin_plugins::disable_plugin))
         .routes(routes!(routes::admin_plugins::decline_upgrade))
+        .routes(routes!(
+            routes::admin_plugin_repositories::list_repositories,
+            routes::admin_plugin_repositories::create_repository
+        ))
+        .routes(routes!(routes::admin_plugin_repositories::patch_repository))
+        .routes(routes!(
+            routes::admin_plugin_repositories::delete_repository
+        ))
         .routes(routes!(routes::events::create_ticket))
         .routes(routes!(routes::events::stream))
         .merge(

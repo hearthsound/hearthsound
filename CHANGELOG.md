@@ -134,6 +134,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answer `signature-invalid`, `integrity-failed`, `index-unavailable`,
   `invalid-plugin`, `sideload-disabled` and `repositories-disabled`.
 
+- The native admin API manages the plugin repositories an administrator trusts.
+  `GET`/`POST /api/v1/admin/plugin-repositories` list them and register one,
+  which `plugins.allow_third_party_repositories` gates and which refuses a URL
+  that is registered already with a `conflict`;
+  `PATCH`/`DELETE /api/v1/admin/plugin-repositories/{id}` change the name, the
+  minisign public key and whether the repository is queried, or remove it. Each
+  repository reports whether its index is verified against a configured public
+  key, and the time and error of its last fetch.
+
 ### Changed
 
 - Server events are addressed to an audience: acquisition progress and upload
