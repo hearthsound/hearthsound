@@ -25,6 +25,9 @@ pub enum ServerError {
     /// The runtime settings could not be loaded from their layers.
     #[error(transparent)]
     Settings(#[from] hearthsound_config::settings::SettingsError),
+    /// The account tables could not be read while the services were composed.
+    #[error(transparent)]
+    Auth(#[from] hearthsound_auth::AuthError),
     /// A runtime setting could not be read as its declared type.
     #[error(transparent)]
     Setting(#[from] hearthsound_config::ConfigError),

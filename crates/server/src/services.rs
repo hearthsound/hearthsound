@@ -52,7 +52,7 @@ use hearthsound_acquire::prefetch::PrefetchScheduler;
 use hearthsound_activity::{ActivityService, EXPIRE_JOB_KIND, EXPIRE_SCHEDULE, ExpireJobHandler};
 use hearthsound_api_native::{NativeServices, NativeState};
 use hearthsound_api_subsonic::{PendingSource, SubsonicState};
-use hearthsound_auth::{Authenticator, Sessions, TrustedProxies};
+use hearthsound_auth::{Authenticator, Sessions, SetupGate, TrustedProxies, Users};
 use hearthsound_catalog::CatalogService;
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_config::keys;
@@ -102,6 +102,9 @@ pub struct Services {
     authenticator: Arc<Authenticator>,
     /// The web session table, shared by the native API and `/rest`.
     sessions: Sessions,
+    /// The one-time token that opens the first-run setup, empty once an
+    /// account exists.
+    setup: Arc<SetupGate>,
     /// The wasmtime plugin host.
     plugins: Arc<PluginHost>,
     /// The provider registry built from the plugin tables.
@@ -220,6 +223,11 @@ impl Services {
         let secrets = secret_key.secret_box();
         let events = Arc::new(EventBus::new());
         let sessions = Sessions::new(&database);
+        // The setup link only exists while no account does; the check is the
+        // same query the API's own `required` answer reads.
+        let setup = Arc::new(SetupGate::new(
+            Users::new(&database).list().await?.is_empty(),
+        ));
 
         let authenticator = Arc::new(Authenticator::new(
             &database,
@@ -403,6 +411,7 @@ impl Services {
             events,
             authenticator,
             sessions: sessions.clone(),
+            setup: Arc::clone(&setup),
             plugins,
             registry,
             catalog,
@@ -462,6 +471,14 @@ impl Services {
     /// Returns the wasmtime plugin host.
     pub fn plugins(&self) -> &Arc<PluginHost> {
         &self.plugins
+    }
+
+    /// Returns the first-run setup gate.
+    ///
+    /// The native API accepts the setup link through it, and the serving
+    /// process logs the URL that carries its token.
+    pub fn setup(&self) -> &Arc<SetupGate> {
+        &self.setup
     }
 
     /// Returns the provider registry.
@@ -592,6 +609,7 @@ impl Services {
         NativeState::new(NativeServices {
             database: Arc::clone(&self.database),
             sessions: self.sessions.clone(),
+            setup: Arc::clone(&self.setup),
             base_url_is_https: self
                 .config
                 .server

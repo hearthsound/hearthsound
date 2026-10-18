@@ -23,7 +23,8 @@
 //! [`AuthenticationError`] carrying the Subsonic error code. It also signs a web
 //! client in with its account password and resolves the `Authorization: Bearer`
 //! key of the native API, and [`Sessions`] issues and resolves the cookie
-//! sessions that client keeps.
+//! sessions that client keeps. [`SetupGate`] holds the one-time token the
+//! first-run setup link carries while the server has no account.
 //!
 //! Library code takes plain values and reads [`hearthsound_config::SettingsStore`]
 //! snapshots handed to it by the composition root; it never reads the process
@@ -38,6 +39,7 @@ mod proxy;
 pub mod quotas;
 mod rate_limit;
 mod session;
+mod setup;
 mod subsonic;
 mod user;
 mod user_settings;
@@ -55,6 +57,7 @@ pub use rate_limit::{LoginKey, LoginRateLimiter, RateLimited};
 pub use session::{
     CSRF_HEADER, LoginError, NewSession, SESSION_COOKIE, SessionRecord, Sessions, session_token,
 };
+pub use setup::SetupGate;
 pub use subsonic::{
     APP_PASSWORDS_HELP_URL, AuthenticationError, Authenticator, Credential, MIN_SALT_LEN,
     Principal, ResolveError, SubsonicCredentials,

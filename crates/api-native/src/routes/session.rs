@@ -11,11 +11,12 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
+use axum::http::HeaderValue;
 use axum::http::StatusCode;
 use axum::http::header::{SET_COOKIE, USER_AGENT};
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
-use hearthsound_auth::{Credential, LoginError};
+use hearthsound_auth::{Credential, LoginError, User};
 use hearthsound_config::keys;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -110,16 +111,49 @@ pub async fn login(
         &state.services().trusted_proxies,
         state.services().base_url_is_https,
     );
+    let user_agent = parts
+        .headers
+        .get(USER_AGENT)
+        .and_then(|value| value.to_str().ok());
+    let (body, cookie) = start_session(&state, &user, user_agent, secure).await?;
+    Ok(([(SET_COOKIE, cookie)], Json(body)).into_response())
+}
+
+/// Starts a web session for an account and renders the answer a sign-in sends.
+///
+/// This is what both the sign-in route and the first-run setup use, so a
+/// freshly created administrator is signed in exactly the way a returning one
+/// is.
+///
+/// # Parameters
+///
+/// - `state`: the native state, which reads `auth.session_ttl_days`, stores the
+///   session, and purges the expired ones.
+/// - `user`: the account the session belongs to.
+/// - `user_agent`: the client's `User-Agent` header, when it sent one.
+/// - `secure`: whether the request arrived over HTTPS, which decides the
+///   cookie's `Secure` attribute.
+///
+/// # Returns
+///
+/// The response body and the `Set-Cookie` header value.
+///
+/// # Errors
+///
+/// Answers `internal` when the session lifetime cannot be read, the session
+/// cannot be stored, or the cookie cannot be rendered.
+pub(crate) async fn start_session(
+    state: &NativeState,
+    user: &User,
+    user_agent: Option<&str>,
+    secure: bool,
+) -> Result<(LoginResponse, HeaderValue), Problem> {
     let days = state
         .settings()
         .current()
         .get(keys::AUTH_SESSION_TTL_DAYS)
         .map_err(|error| problem::internal("reading auth.session_ttl_days", &error))?;
     let ttl_secs = u64::try_from(days).unwrap_or(1).max(1) * SECS_PER_DAY;
-    let user_agent = parts
-        .headers
-        .get(USER_AGENT)
-        .and_then(|value| value.to_str().ok());
     let session = state
         .sessions()
         .create(user.id, user_agent, Duration::from_secs(ttl_secs))
@@ -139,11 +173,11 @@ pub async fn login(
     )
     .ok_or_else(Problem::internal)?;
     let body = LoginResponse {
-        user: UserView::from(&user),
+        user: UserView::from(user),
         csrf_token: session.csrf_token,
         expires_at: session.expires_at,
     };
-    Ok(([(SET_COOKIE, cookie)], Json(body)).into_response())
+    Ok((body, cookie))
 }
 
 /// Ends the request's web session and clears the cookie.

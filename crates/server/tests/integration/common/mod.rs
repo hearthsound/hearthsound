@@ -63,31 +63,54 @@ impl Fixture {
     /// - `adjust`: changes the configuration the default config file loads to,
     ///   before the services are built from it.
     pub async fn with_config(adjust: impl FnOnce(&mut BootstrapConfig)) -> Fixture {
+        Fixture::build(adjust, true).await
+    }
+
+    /// Builds a server whose users table is empty.
+    ///
+    /// This is the state a fresh deployment starts in: the first-run setup link
+    /// is the only way in, and the fixture has no API key to fall back on.
+    ///
+    /// # Returns
+    ///
+    /// The fixture, with an empty API key, an empty app password and a nil
+    /// account id.
+    pub async fn without_account() -> Fixture {
+        Fixture::build(|_| {}, false).await
+    }
+
+    /// Builds a server, creating the test account unless `account` is false.
+    async fn build(adjust: impl FnOnce(&mut BootstrapConfig), account: bool) -> Fixture {
         install_crypto_provider();
         let dir = tempfile::tempdir().unwrap();
         let mut config = write_config(dir.path());
         adjust(&mut config);
         let secret_key = SecretKey::load(&config.secrets.key_file, &BTreeMap::new()).unwrap();
         let services = Services::build(config, &BTreeMap::new()).await.unwrap();
-        let user = Users::new(services.database())
-            .create(
-                &services.settings().current(),
-                &NewUser::new(USERNAME, "Echo", ACCOUNT_PASSWORD, true),
-            )
-            .await
-            .unwrap();
-        let api_key = ApiKeys::new(services.database())
-            .generate(user.id, "test")
-            .await
-            .unwrap()
-            .plaintext;
-        // The secret box is the one the composition root loaded, so the app
-        // password this writes is one the running server can decrypt.
-        let app_password = AppPasswords::new(services.database(), secret_key.secret_box())
-            .generate(user.id, "test")
-            .await
-            .unwrap()
-            .plaintext;
+        let (user_id, api_key, app_password) = if account {
+            let user = Users::new(services.database())
+                .create(
+                    &services.settings().current(),
+                    &NewUser::new(USERNAME, "Echo", ACCOUNT_PASSWORD, true),
+                )
+                .await
+                .unwrap();
+            let api_key = ApiKeys::new(services.database())
+                .generate(user.id, "test")
+                .await
+                .unwrap()
+                .plaintext;
+            // The secret box is the one the composition root loaded, so the app
+            // password this writes is one the running server can decrypt.
+            let app_password = AppPasswords::new(services.database(), secret_key.secret_box())
+                .generate(user.id, "test")
+                .await
+                .unwrap()
+                .plaintext;
+            (user.id, api_key, app_password)
+        } else {
+            (Uuid::nil(), String::new(), String::new())
+        };
 
         let server = Server::start_on(Arc::clone(&services), "127.0.0.1:0".parse().unwrap())
             .await
@@ -99,7 +122,7 @@ impl Fixture {
             services,
             api_key,
             app_password,
-            user_id: user.id,
+            user_id,
             client: reqwest::Client::new(),
         }
     }

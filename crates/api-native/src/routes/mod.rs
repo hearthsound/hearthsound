@@ -12,5 +12,6 @@ pub mod admin_users;
 pub mod events;
 pub mod me;
 pub mod session;
+pub mod setup;
 pub mod system;
 pub mod uploads;

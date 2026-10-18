@@ -114,6 +114,15 @@ impl Server {
 
         let workers = spawn_workers(&services, shutdown.clone());
 
+        // The one bootstrap credential of the whole server: a fresh database
+        // has no account, and the only way to create one is this link. It is
+        // logged exactly once per process and stops working as soon as it is
+        // used.
+        if let Some(token) = services.setup().token().await {
+            let url = setup_url(&services.config().server.base_url, local_addr, &token);
+            tracing::warn!(url = %url, "No administrator exists yet; open the setup URL to create one");
+        }
+
         tracing::info!(address = %local_addr, "serving");
 
         Ok(Server {
@@ -374,5 +383,75 @@ async fn wait_for_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Builds the URL that opens the first-run setup.
+///
+/// # Parameters
+///
+/// - `base_url`: the value of `server.base_url`; an empty value derives the
+///   address from what the server bound.
+/// - `local_addr`: the address the listener is bound to.
+/// - `token`: the setup gate's token.
+///
+/// # Returns
+///
+/// The URL, with the token in its query string. A server bound to an
+/// unspecified address is reachable as `localhost` on the port it bound, and an
+/// IPv6 address appears in brackets.
+fn setup_url(base_url: &str, local_addr: std::net::SocketAddr, token: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if !base.is_empty() {
+        return format!("{base}/setup?token={token}");
+    }
+    if local_addr.ip().is_unspecified() {
+        return format!("http://localhost:{}/setup?token={token}", local_addr.port());
+    }
+    format!("http://{local_addr}/setup?token={token}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_setup_url_follows_the_configured_base_url() {
+        let addr: std::net::SocketAddr = "127.0.0.1:4327".parse().unwrap();
+        assert_eq!(
+            setup_url("https://music.example.com/", addr, "abc"),
+            "https://music.example.com/setup?token=abc"
+        );
+        assert_eq!(
+            setup_url("https://music.example.com", addr, "abc"),
+            "https://music.example.com/setup?token=abc"
+        );
+    }
+
+    #[test]
+    fn the_setup_url_derives_the_address_without_a_base_url() {
+        let anywhere: std::net::SocketAddr = "0.0.0.0:4327".parse().unwrap();
+        assert_eq!(
+            setup_url("", anywhere, "abc"),
+            "http://localhost:4327/setup?token=abc"
+        );
+
+        let v6_any: std::net::SocketAddr = "[::]:4327".parse().unwrap();
+        assert_eq!(
+            setup_url("", v6_any, "abc"),
+            "http://localhost:4327/setup?token=abc"
+        );
+
+        let loopback: std::net::SocketAddr = "127.0.0.1:4327".parse().unwrap();
+        assert_eq!(
+            setup_url("", loopback, "abc"),
+            "http://127.0.0.1:4327/setup?token=abc"
+        );
+
+        let v6: std::net::SocketAddr = "[::1]:4327".parse().unwrap();
+        assert_eq!(
+            setup_url("", v6, "abc"),
+            "http://[::1]:4327/setup?token=abc"
+        );
     }
 }

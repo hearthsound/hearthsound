@@ -24,7 +24,7 @@ sqlx.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 time.workspace = true
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
 tracing.workspace = true
 uuid.workspace = true
 

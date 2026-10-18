@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A server whose users table is empty logs the URL of a one-time setup link at
+  startup. `GET /api/v1/setup` reports whether the setup is still open, and
+  `POST /api/v1/setup` accepts the link's token once, creates the first
+  administrator, and answers the same sign-in the sign-in route answers. The
+  token is compared in constant time, a failed attempt counts against the login
+  rate limit, and the link stops working as soon as it is used.
+
 - The session cookie carries `Secure` only when the request arrived over
   HTTPS, which is when `server.base_url` is an `https://` URL or when a
   trusted proxy reports `https` in `X-Forwarded-Proto`. A LAN deployment over

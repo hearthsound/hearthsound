@@ -16,6 +16,7 @@ mod on_demand;
 mod plugin_admin;
 mod prefetch;
 mod reload;
+mod setup;
 mod storage;
 mod stream_pending;
 mod vendor;

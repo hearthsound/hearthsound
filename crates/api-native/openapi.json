@@ -2705,6 +2705,98 @@
         ]
       }
     },
+    "/api/v1/setup": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Reports whether the server still needs its first administrator.",
+        "description": "# Errors\n\nAnswers `internal` when the users table cannot be read.",
+        "operationId": "setup_status",
+        "responses": {
+          "200": {
+            "description": "Whether the setup is still open",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupStatus"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Creates the first administrator from the setup link.",
+        "description": "# Errors\n\nAnswers `conflict` when an account already exists, `invalid-request` when\nthe username or the password is empty, `rate-limited` once the setup\nfailures spent the budget of the client address or of the `setup` key,\n`unauthenticated` when the token is not the one the server logged, and\n`internal` when the account cannot be created.",
+        "operationId": "complete_setup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The administrator exists and is signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The username or the password is empty",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The setup link is not valid",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The server already has an account",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many failed setup attempts",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/system/info": {
       "get": {
         "tags": [
@@ -4375,6 +4467,49 @@
           "user": {
             "$ref": "#/components/schemas/UserView",
             "description": "The account."
+          }
+        }
+      },
+      "SetupRequest": {
+        "type": "object",
+        "description": "The one-time link and the administrator it creates.",
+        "required": [
+          "token",
+          "username",
+          "password"
+        ],
+        "properties": {
+          "displayName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name to display; the username is used when it is absent."
+          },
+          "password": {
+            "type": "string",
+            "description": "The account password."
+          },
+          "token": {
+            "type": "string",
+            "description": "The token from the setup URL's query string."
+          },
+          "username": {
+            "type": "string",
+            "description": "The administrator's sign-in name."
+          }
+        }
+      },
+      "SetupStatus": {
+        "type": "object",
+        "description": "Whether the server still needs its first administrator.",
+        "required": [
+          "required"
+        ],
+        "properties": {
+          "required": {
+            "type": "boolean",
+            "description": "`true` while the users table is empty."
           }
         }
       },

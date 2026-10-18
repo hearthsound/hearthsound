@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use hearthsound_acquire::orchestrator::AcquisitionOrchestrator;
 use hearthsound_auth::{
-    ApiKeys, AppPasswords, Authenticator, Quotas, Sessions, TrustedProxies, UserSettings, Users,
+    ApiKeys, AppPasswords, Authenticator, Quotas, Sessions, SetupGate, TrustedProxies,
+    UserSettings, Users,
 };
 use hearthsound_config::secret::SecretBox;
 use hearthsound_config::settings::Settings;
@@ -33,6 +34,9 @@ pub struct NativeServices {
     /// The web session table, shared with the `/rest` surface so a session a
     /// client signed in with there is the one this surface resolves.
     pub sessions: Sessions,
+    /// The one-time token the first-run setup link carries, shared with the
+    /// composition root that logs the URL for it.
+    pub setup: Arc<SetupGate>,
     /// Whether `server.base_url` names an `https://` address, computed once at
     /// startup. The session cookie carries `Secure` when this is set or when the
     /// request came through a trusted proxy over HTTPS.
@@ -169,6 +173,11 @@ impl NativeState {
     /// Returns the web session table.
     pub fn sessions(&self) -> &Sessions {
         &self.inner.sessions
+    }
+
+    /// Returns the first-run setup gate.
+    pub fn setup(&self) -> &Arc<SetupGate> {
+        &self.inner.services.setup
     }
 
     /// Returns the per-user setting overrides.

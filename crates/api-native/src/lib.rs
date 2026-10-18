@@ -24,6 +24,7 @@
 //! | Resource | Who |
 //! |---|---|
 //! | `GET /api/v1/system/info` | any user |
+//! | `GET`/`POST /api/v1/setup` | anyone, while the server has no account |
 //! | `POST /api/v1/auth/login`, `POST /api/v1/auth/logout`, `GET /api/v1/auth/session` | anyone / any user |
 //! | `GET`/`POST /api/v1/me/api-keys`, `DELETE /api/v1/me/api-keys/{id}` | any user, own keys |
 //! | `GET`/`POST /api/v1/me/app-passwords`, `DELETE /api/v1/me/app-passwords/{id}` | any user, own app passwords |
@@ -119,6 +120,8 @@ impl Modify for SecuritySchemes {
 fn api_router() -> OpenApiRouter<NativeState> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(routes::system::system_info))
+        .routes(routes!(routes::setup::setup_status))
+        .routes(routes!(routes::setup::complete_setup))
         .routes(routes!(routes::session::login))
         .routes(routes!(routes::session::logout))
         .routes(routes!(routes::session::session))
