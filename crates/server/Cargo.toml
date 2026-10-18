@@ -26,12 +26,13 @@ hearthsound-jobs = { path = "../jobs" }
 hearthsound-library = { path = "../library" }
 hearthsound-media = { path = "../media" }
 hearthsound-plugin-host = { path = "../plugin-host" }
+mime_guess.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net", "rt", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "net", "rt", "signal", "sync", "time"] }
 tower-http.workspace = true
 tracing.workspace = true
 

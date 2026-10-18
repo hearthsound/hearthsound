@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The server serves a web client out of `web.root` when it is set. The server
+  root answers the client's entry document to a request that accepts HTML and
+  keeps answering the JSON status object to every other request; a path the
+  client's own router owns falls back to the entry document, and a hashed asset
+  below `_app/immutable/` is served with its content type and a one-year cache
+  life. A `web.root` that does not name a directory is a startup error.
+
 - Playlist objects carry a `hearthsound` member when `hearthsound=1` is sent:
   whether the playlist is temporary and, for a temporary one, when it expires.
   The member is on the playlist objects of `getPlaylists`, `getPlaylist` and

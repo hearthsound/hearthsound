@@ -49,26 +49,6 @@ async fn readyz_refuses_a_database_from_another_schema_version() {
     assert_eq!(response.text().await.unwrap(), "not ready");
 }
 
-/// The server root answers the JSON status object.
-#[tokio::test]
-async fn root_answers_a_json_status() {
-    let fixture = crate::common::Fixture::new().await;
-
-    let response = fixture.get("/").await;
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let body = response.text().await.unwrap();
-
-    assert_eq!(content_type.as_deref(), Some("application/json"));
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
-        serde_json::json!({"status": "ok"})
-    );
-}
-
 /// A `/rest` call with an API key created through `hearthsound-auth` succeeds.
 #[tokio::test]
 async fn rest_accepts_an_api_key_created_through_auth() {
@@ -165,29 +145,35 @@ async fn a_restart_keeps_the_secret_key() {
 
 /// The server root answers the JSON body a client probes it with.
 ///
-/// A client that asks for the root to learn whether it is talking to a
-/// Hearthsound server must be answered with JSON, not with the web client's
-/// HTML, whatever it put in `Accept`.
+/// The root serves the web client's entry document only when a client is
+/// available and the request asks for HTML. A deployment without a client
+/// directory has nothing to serve, so a client that probes the root to learn
+/// whether it is talking to a Hearthsound server - with no `Accept` header, with
+/// `*/*`, or asking for HTML - gets the status object.
 #[tokio::test]
 async fn the_server_root_answers_json() {
     let fixture = crate::common::Fixture::new().await;
 
-    let response = fixture
-        .client
-        .get(format!("{}/", fixture.base_url()))
-        .header("accept", "text/html,application/xhtml+xml")
-        .send()
-        .await
-        .unwrap();
+    for accept in [None, Some("*/*"), Some("text/html,application/xhtml+xml")] {
+        let mut request = fixture.client.get(format!("{}/", fixture.base_url()));
+        if let Some(accept) = accept {
+            request = request.header("accept", accept);
+        }
+        let response = request.send().await.unwrap();
 
-    assert_eq!(response.status(), 200);
-    assert_eq!(
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok()),
-        Some("application/json"),
-        "the root is JSON even for a client that asks for HTML"
-    );
-    assert_eq!(response.text().await.unwrap(), r#"{"status":"ok"}"#);
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json"),
+            "the root is JSON with accept {accept:?}"
+        );
+        assert_eq!(
+            response.text().await.unwrap(),
+            r#"{"status":"ok"}"#,
+            "the root body with accept {accept:?}"
+        );
+    }
 }

@@ -3,23 +3,25 @@
 //! [`Services::build`] performs the startup sequence in the order the services
 //! depend on each other:
 //!
-//! 1. create the data and storage directory trees ([`crate::paths`]);
-//! 2. open the database and apply pending migrations, after a `VACUUM INTO`
+//! 1. resolve the web client's asset source, which fails when `web.root` is
+//!    set but is not a directory;
+//! 2. create the data and storage directory trees ([`crate::paths`]);
+//! 3. open the database and apply pending migrations, after a `VACUUM INTO`
 //!    backup when the database already holds data;
-//! 3. load the runtime settings, resolved as environment, config file,
+//! 4. load the runtime settings, resolved as environment, config file,
 //!    database, then default;
-//! 4. load the 32-byte secret key, creating it on first start;
-//! 5. build the event bus, the authenticator (with the login rate limit from
+//! 5. load the 32-byte secret key, creating it on first start;
+//! 6. build the event bus, the authenticator (with the login rate limit from
 //!    `auth.login_rate_limit_per_minute`), the plugin host, the provider
 //!    registry (rebuilt from the plugin tables), and the catalog layer over
 //!    that registry;
-//! 6. build the ffmpeg runner capped by `stream.max_concurrent_transcodes`, the
+//! 7. build the ffmpeg runner capped by `stream.max_concurrent_transcodes`, the
 //!    acquisition orchestrator over the catalog, registry and storage, and start
 //!    its scheduler, then the library scanner, the activity service, the
 //!    managed storage roots and the storage maintainer that keeps their files
 //!    in step with the pins, the job queue, the job runner, and the cron
 //!    scheduler with the system schedules;
-//! 7. build the trusted-proxy list and the CORS policy ([`crate::cors`]).
+//! 8. build the trusted-proxy list and the CORS policy ([`crate::cors`]).
 //!
 //! Every service is shared through an `Arc`, so a handler, a job, or an
 //! endpoint clones the handle it needs and holds nothing else.
@@ -83,6 +85,7 @@ use tower_http::cors::CorsLayer;
 
 use crate::error::ServerError;
 use crate::jobs::{KvSweepJobHandler, PLUGIN_KV_SWEEP_CRON, PLUGIN_KV_SWEEP_JOB_KIND};
+use crate::web::WebAssets;
 
 /// Every long-lived service of one server process.
 ///
@@ -159,6 +162,8 @@ pub struct Services {
     /// The CORS layer `server.cors_origins` describes, or `None` when it is
     /// empty and cross-origin reads are denied.
     cors: Option<CorsLayer>,
+    /// The web client's files, from `web.root` when it is set.
+    web: WebAssets,
 }
 
 impl Services {
@@ -203,6 +208,10 @@ impl Services {
         config: BootstrapConfig,
         env: &BTreeMap<String, String>,
     ) -> Result<Arc<Services>, ServerError> {
+        // Resolved first: a `web.root` that is not a directory is a
+        // configuration mistake, and it fails before anything is created on
+        // disk.
+        let web = WebAssets::resolve(config.web.root.as_deref())?;
         crate::paths::prepare(&config)?;
 
         let database = Arc::new(Database::open(&config.database.path).await?);
@@ -437,6 +446,7 @@ impl Services {
             storage_roots,
             trusted_proxies,
             cors,
+            web,
         }))
     }
 
@@ -672,6 +682,14 @@ impl Services {
     /// Returns the CORS layer, or `None` when cross-origin reads are denied.
     pub(crate) fn cors(&self) -> Option<&CorsLayer> {
         self.cors.as_ref()
+    }
+
+    /// Returns the web client's files.
+    ///
+    /// The root and the router's fallback serve them; which source they come
+    /// from is decided once, when the services are built.
+    pub fn web(&self) -> &WebAssets {
+        &self.web
     }
 
     /// Resolves `server.bind` and `server.port` into a socket address.

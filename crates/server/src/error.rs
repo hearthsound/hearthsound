@@ -64,6 +64,15 @@ pub enum ServerError {
         /// The configured value.
         origin: String,
     },
+    /// `web.root` is set but does not name a directory.
+    #[error("`web.root` (`{path}`) is not a directory: {source}")]
+    WebRoot {
+        /// The configured path.
+        path: PathBuf,
+        /// Why the path could not be used.
+        #[source]
+        source: std::io::Error,
+    },
     /// The configured bind address and port do not resolve to a socket address.
     #[error("`{addr}` is not a usable listen address: {source}")]
     Listen {

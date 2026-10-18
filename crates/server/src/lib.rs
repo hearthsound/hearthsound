@@ -8,10 +8,13 @@
 //! [`Services`] is that set of services; [`Server`] adds the HTTP listener, the
 //! background workers, and shutdown.
 //!
-//! Mounted surfaces are `/rest` (the Subsonic router), `/healthz` and `/readyz`
-//! (liveness and readiness), and `GET /` (a JSON status object until the web
-//! client lands). [`hearthsound_api_subsonic`] owns `/rest`; this crate only
-//! wires it to the services and adds the request-tracing layer.
+//! Mounted surfaces are `/rest` (the Subsonic router), `/api/v1` (the native
+//! API), `/healthz` and `/readyz` (liveness and readiness), and the server root,
+//! which serves the web client (`web.root` when it is set) plus the JSON status
+//! object a client that asks for JSON gets.
+//! [`hearthsound_api_subsonic`] owns `/rest` and [`hearthsound_api_native`] owns
+//! `/api/v1`; this crate only wires them to the services and adds the
+//! request-tracing layer.
 //!
 //! While it runs, the server watches `PRAGMA data_version` for commits made by
 //! another connection, because a command-line command writes the database
@@ -55,7 +58,9 @@ pub mod paths;
 mod reload;
 mod server;
 mod services;
+pub mod web;
 
 pub use error::ServerError;
 pub use server::Server;
 pub use services::Services;
+pub use web::WebAssets;

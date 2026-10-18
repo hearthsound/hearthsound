@@ -1879,6 +1879,7 @@ dependencies = [
  "hearthsound-plugin-host",
  "hearthsound-test-support",
  "md-5",
+ "mime_guess",
  "minisign",
  "reqwest",
  "rustls",

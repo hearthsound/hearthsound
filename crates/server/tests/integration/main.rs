@@ -21,4 +21,5 @@ mod storage;
 mod stream_pending;
 mod vendor;
 mod watch;
+mod web;
 mod web_session;
