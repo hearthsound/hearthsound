@@ -7,19 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-18
+
 ### Added
-
-- Batch lookups for personal membership, preferred media files, dislikes and
-  acquisition rows, read in chunks of 500 ids, so a listing answers a whole page
-  with a fixed number of queries.
-
-- A staged plugin upgrade table: each installed plugin can hold one upgrade
-  waiting for approval, with its version, manifest, digest, source and
-  repository, and the staged upgrade is removed with its plugin.
 
 - A server event stream at `GET /api/v1/events` that replays missed events from
   `Last-Event-ID`. It accepts a bearer key, a session cookie, or a single-use
   ticket from `POST /api/v1/events/ticket` for clients that cannot set headers.
+  A client whose missed events have left the replay window is told to refetch
+  its state over REST with a `system.notice` frame instead of silently missing
+  them.
 
 - The Subsonic `getOpenSubsonicExtensions` response advertises the `hearthsound`
   vendor extension at version 1.
@@ -27,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Subsonic responses carry a `hearthsound` member on tracks, albums and artists
   when `hearthsound=1` is sent, reporting availability, library membership,
   dislike state, origin and, for tracks, the active acquisition and file quality.
+  Without the flag a response is byte-identical to the standard one.
 
 - Freshly installed plugins wait for approval before they can be enabled:
   approving records the requested permissions and enables the plugin, and
@@ -36,7 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A newer version of an installed plugin that requests a permission the
   installed version does not hold waits for approval: the installed version
   keeps serving until the upgrade is approved, approving it prunes the old
-  version's files, and declining it discards the staged version.
+  version's files, and declining it discards the staged version. A plugin can
+  hold one staged upgrade at a time, and removing the plugin removes whatever is
+  staged for it.
 
 - `hsGetAvailability` answers what the server knows about the tracks and albums a
   client names over the `hearthsound` vendor extension: each entity's
@@ -55,15 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extension and prefetches its next items, so the look-ahead follows the client's
   own order instead of an inferred one.
 
-- Saving an item into a personal library and removing it again keep the
+- `hsSave` and `hsUnsave` add tracks, albums and artists to a personal library
+  or remove them over the `hearthsound` vendor extension, keeping the
   personal-library pin in step: a saved album pins its member tracks, and
   removing a save releases them unless a like, a playlist or an upload still
-  holds them.
-
-- `hsSave` and `hsUnsave` add tracks, albums and artists to a personal library
-  or remove them over the `hearthsound` vendor extension, and `hsSetFeedback`
-  records a like, which is the `star` operation including the acquisition a save
-  performs, a dislike, which replaces a like and pins nothing, or neither.
+  holds them. `hsSetFeedback` records a like, which is the `star` operation
+  including the acquisition a save performs, a dislike, which replaces a like
+  and pins nothing, or neither.
 
 - Playlists carry a lifetime. `hsSetPlaylistLifetime` converts an owned playlist
   between temporary and permanent: a temporary playlist pins none of its tracks,
@@ -97,14 +95,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of failing. `plugins repositories add`, `list` and `remove` administer the
   repository rows from the command line.
 
-- The server reads plugin indexes. `IndexClient` downloads an index document
-  and its minisign signature, verifies the signature against the key the
-  repository is known by, and rejects the official index when its signature is
-  missing or does not verify; a third-party repository without a configured key
-  is accepted unsigned as unverified. The client also carries the URL and
-  public key of the official index, and picks the newest version of a plugin
-  that targets the API version this server hosts, reporting the API versions an
-  incompatible entry offers instead.
+- The server reads plugin indexes. It downloads an index document and its
+  minisign signature, verifies the signature against the key the repository is
+  known by, and rejects the official index when its signature is missing or does
+  not verify; a third-party repository without a configured key is accepted
+  unsigned and its plugins are reported as unverified. The official index URL
+  and public key are built into the server, and the version offered for a plugin
+  is the newest one that targets the plugin API this server hosts; an entry with
+  no compatible version is listed with the reason it cannot be installed here.
 
 - The plugin repositories an administrator adds are stored, listed, changed and
   removed: each keeps its index URL, the name to show for it, the minisign
@@ -115,12 +113,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plugins install from an index: the installer resolves the official index, a
   repository an administrator registered, or a repository URL it registers on
   the way in (which `plugins.allow_third_party_repositories` gates), picks the
-  requested or newest compatible version, downloads the archive to a temporary
-  file beside the installed plugins, checks its size and SHA-256 against the
-  index entry, and records the plugin as pending approval. A download that fails
-  or does not match the index leaves no row and no file behind, and listing the
-  available plugins reports the sources that could not be read rather than
-  failing.
+  requested or newest compatible version, and verifies the archive's size and
+  SHA-256 against the index entry before recording the plugin as pending
+  approval. A download that fails or does not match the index leaves no row and
+  no file behind, and listing the available plugins reports the sources that
+  could not be read rather than failing.
 
 - The server checks for plugin updates in the background. An hourly job looks
   for a newer version of every installed plugin in the index it came from - the
@@ -167,27 +164,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it answers, so a change is in service by the time the response is sent, and a
   plugin or a configuration the server cannot use answers the new
   `invalid-provider` and `invalid-layer` problems.
-
-- The `hearthsound` vendor extension and the event stream are exercised end to
-  end through a running server: the extension advertisement and the byte
-  identity of a response that did not opt in, the vendor member of a stored
-  track in both encodings, the server capabilities as a setting changes, the
-  availability and acquisition endpoints with their permission and vendor gates,
-  the progress the event stream reports while a download runs, the prefetch a
-  declared queue starts, replay from `Last-Event-ID`, and the pins a playlist's
-  lifetime controls.
-
-- The plugin platform is exercised end to end in
-  `crates/server/tests/integration/plugin_admin.rs`, which serves every index
-  document and every archive from a mock HTTP server: the metadata fixture
-  installs from an index URL both through the administrative API and through the
-  command line's `plugins install`, each install waits for approval, is refused
-  an enable and cannot be configured into a provider until it is approved, and
-  is served by the provider registry once it is. An index whose signature does
-  not verify and an archive whose digest is not the one the index declares both
-  fail closed and leave no row and no file behind, and a plugin uploaded through
-  the multipart route installs while the sideload gate refuses it once the
-  setting is off.
 
 ### Changed
 

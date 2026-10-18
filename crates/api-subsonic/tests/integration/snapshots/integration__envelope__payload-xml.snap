@@ -2,4 +2,4 @@
 source: crates/api-subsonic/tests/integration/envelope.rs
 expression: "response.render(ResponseFormat::Xml)"
 ---
-<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="hearthsound" serverVersion="0.1.3" openSubsonic="true"><license valid="true"/><musicFolders><musicFolder id="1" name="My Library"/><musicFolder id="2" name="Server"/></musicFolders></subsonic-response>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="hearthsound" serverVersion="0.1.4" openSubsonic="true"><license valid="true"/><musicFolders><musicFolder id="1" name="My Library"/><musicFolder id="2" name="Server"/></musicFolders></subsonic-response>
