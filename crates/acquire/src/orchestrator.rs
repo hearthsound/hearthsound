@@ -1173,6 +1173,13 @@ impl AcquisitionOrchestrator {
     }
 
     /// Runs the scheduler loop.
+    ///
+    /// Every sweep that claims nothing must leave the [`Notify`] empty: a
+    /// wake-up left behind by an empty sweep makes [`Notify::notified`] return
+    /// at once, and the loop then sweeps again without ever sleeping, which is
+    /// how an idle server ends up spinning at a full core. Only a sweep that
+    /// claimed an acquisition, and the release of a slot whose pipeline task
+    /// finished, notify the loop.
     async fn schedule(self: Arc<Self>) {
         loop {
             if let Err(error) = self.dispatch().await {
@@ -1187,6 +1194,11 @@ impl AcquisitionOrchestrator {
 
     /// Claims and starts as many queued acquisitions as there are free slots.
     ///
+    /// A slot this sweep reserved and then found no work for is freed without
+    /// a wake-up: an empty sweep changes nothing, so waking the scheduler for it
+    /// would only make the next sweep empty too. A slot is released with a
+    /// wake-up only by the task that used it.
+    ///
     /// # Errors
     ///
     /// Returns the error of the setting read or ledger query that stopped the
@@ -1198,11 +1210,11 @@ impl AcquisitionOrchestrator {
                 return Ok(());
             }
             let Some(row) = self.inner.repository.next_queued().await? else {
-                self.release_slot();
+                self.free_slot();
                 return Ok(());
             };
             if !self.inner.repository.claim(row.id).await? {
-                self.release_slot();
+                self.free_slot();
                 continue;
             }
             tracing::debug!(acquisition = %row.id, priority = row.priority.as_str(), "claimed an acquisition");
@@ -2060,14 +2072,32 @@ impl AcquisitionOrchestrator {
 
     /// Releases a worker slot and wakes the scheduler.
     ///
+    /// The wake-up is for a finished pipeline task: the scheduler has to look
+    /// for the next queued acquisition now that a slot is free again.
+    ///
     /// # Panics
     ///
     /// Panics in debug builds when no slot was taken, which is a bookkeeping
     /// bug in this module.
     fn release_slot(&self) {
+        self.free_slot();
+        self.notify_work();
+    }
+
+    /// Returns a worker slot without waking the scheduler.
+    ///
+    /// This is the release of a sweep that reserved a slot and then found
+    /// nothing to run. Nothing changed for anyone waiting, and a stored permit
+    /// would make [`Notify::notified`] return immediately, so the scheduler
+    /// would sweep in a loop instead of sleeping.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds when no slot was taken, which is a bookkeeping
+    /// bug in this module.
+    fn free_slot(&self) {
         let previous = self.inner.running.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "a worker slot was released twice");
-        self.notify_work();
     }
 
     /// Wakes the scheduler.
@@ -2089,4 +2119,106 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::BTreeMap;
+
+    use hearthsound_catalog::CatalogService;
+    use hearthsound_config::SettingSources;
+    use hearthsound_config::SettingsRegistry;
+    use hearthsound_config::secret::SecretKey;
+    use hearthsound_db::MIGRATOR;
+    use hearthsound_plugin_host::{PluginHost, PluginRepository, ProviderRegistry};
+
+    /// Builds an orchestrator over an empty ledger in `dir`.
+    ///
+    /// The plugin tree is empty, so no instance is configured and nothing the
+    /// scheduler claims could run; these tests only exercise the sweep and the
+    /// wake-ups it leaves behind.
+    async fn idle_orchestrator(dir: &std::path::Path) -> Arc<AcquisitionOrchestrator> {
+        let database = Arc::new(Database::open(&dir.join("hearthsound.db")).await.unwrap());
+        database
+            .migrate(&MIGRATOR, &dir.join("backups"))
+            .await
+            .unwrap();
+        let settings = Settings::load(
+            database.writer().clone(),
+            SettingsRegistry::builtin(),
+            SettingSources::default(),
+        )
+        .await
+        .unwrap();
+        let host = Arc::new(
+            PluginHost::new(
+                dir.join("plugins"),
+                settings.current(),
+                Arc::clone(&database),
+            )
+            .unwrap(),
+        );
+        let secrets = SecretKey::load(&dir.join("secret.key"), &BTreeMap::new())
+            .unwrap()
+            .secret_box();
+        let registry = Arc::new(ProviderRegistry::new(
+            host,
+            PluginRepository::new(&database),
+            secrets,
+        ));
+        let catalog = Arc::new(CatalogService::new(
+            Arc::clone(&registry),
+            Arc::clone(&database),
+            settings.clone(),
+            dir.join("artwork"),
+        ));
+        Arc::new(AcquisitionOrchestrator::new(
+            database,
+            settings,
+            registry,
+            catalog,
+            Arc::new(FfmpegRunner::new(None, 8)),
+            Arc::new(EventBus::new()),
+            AcquisitionStorage::new(
+                dir.join("storage/staging"),
+                StorageRoots::new(dir.join("storage/library"), dir.join("storage/cache")),
+            ),
+        ))
+    }
+
+    /// How long a wake-up may take to arrive before a test calls it missing.
+    const WAKE_TIMEOUT: Duration = Duration::from_millis(100);
+
+    #[tokio::test]
+    async fn an_empty_sweep_leaves_the_scheduler_asleep() {
+        let dir = tempfile::tempdir().unwrap();
+        let orchestrator = idle_orchestrator(dir.path()).await;
+
+        orchestrator.dispatch().await.unwrap();
+        assert_eq!(orchestrator.running(), 0);
+
+        // A permit left behind here would make every `notified()` return at
+        // once, so the scheduler would sweep without ever sleeping.
+        assert!(
+            tokio::time::timeout(WAKE_TIMEOUT, orchestrator.inner.notify.notified())
+                .await
+                .is_err(),
+            "an empty sweep must not leave a wake-up behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn releasing_the_slot_of_a_finished_acquisition_wakes_the_scheduler() {
+        let dir = tempfile::tempdir().unwrap();
+        let orchestrator = idle_orchestrator(dir.path()).await;
+
+        assert!(orchestrator.try_reserve_slot().unwrap());
+        orchestrator.release_slot();
+
+        tokio::time::timeout(WAKE_TIMEOUT, orchestrator.inner.notify.notified())
+            .await
+            .expect("releasing a used slot wakes the scheduler for the next queued acquisition");
+    }
 }

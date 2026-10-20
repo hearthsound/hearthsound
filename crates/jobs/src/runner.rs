@@ -374,7 +374,7 @@ async fn idle(queue: &JobQueue, options: &JobRunnerOptions, shutdown: &Shutdown)
 /// - `options`: supplies the heartbeat interval.
 /// - `job`: the claimed job.
 async fn run_job(
-    queue: &JobQueue,
+    queue: &Arc<JobQueue>,
     handlers: &HashMap<JobKind, Arc<dyn JobHandler>>,
     options: &JobRunnerOptions,
     job: Job,
@@ -436,6 +436,14 @@ async fn run_job(
 /// worker reclaimed it after the lock expired - so the handler is left to
 /// finish and its result is recorded like any other.
 ///
+/// The extension runs in a task of its own rather than as an awaited branch
+/// beside the handler. A handler that is inside a write transaction holds the
+/// database's single write connection, so an extension waiting for that
+/// connection would hold up every later poll of the handler, and a handler that
+/// is not polled never commits its transaction: the extension would time out,
+/// the handler would only advance between timeouts, and every other write in
+/// the process would queue behind a connection that is never released.
+///
 /// # Parameters
 ///
 /// - `queue`: the queue holding the claim.
@@ -448,28 +456,44 @@ async fn run_job(
 ///
 /// Whatever the handler returned.
 async fn handle_with_heartbeat(
-    queue: &JobQueue,
+    queue: &Arc<JobQueue>,
     handler: &dyn JobHandler,
     job: &Job,
     heartbeat_interval: Duration,
 ) -> Result<(), JobError> {
     let period = heartbeat_interval.max(Duration::from_millis(1));
-    let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+    let (extended, mut extensions) = tokio::sync::mpsc::unbounded_channel();
+    let extending = {
+        let queue = Arc::clone(queue);
+        let id = job.id;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(period).await;
+                if extended.send(queue.extend_lock(id).await).is_err() {
+                    return;
+                }
+            }
+        })
+    };
+
     let handling = handler.handle(job.clone());
     tokio::pin!(handling);
-
-    loop {
+    let mut heartbeat_alive = true;
+    let result = loop {
         tokio::select! {
-            result = &mut handling => return result,
-            _ = heartbeat.tick() => match queue.extend_lock(job.id).await {
-                Ok(true) => {}
-                Ok(false) => {
+            result = &mut handling => break result,
+            result = extensions.recv(), if heartbeat_alive => match result {
+                Some(Ok(true)) => {}
+                Some(Ok(false)) => {
                     tracing::debug!(job = %job.id, "the job is no longer claimed; the handler runs on");
                 }
-                Err(error) => {
+                Some(Err(error)) => {
                     tracing::warn!(job = %job.id, %error, "extending the job lock failed");
                 }
+                None => heartbeat_alive = false,
             },
         }
-    }
+    };
+    extending.abort();
+    result
 }

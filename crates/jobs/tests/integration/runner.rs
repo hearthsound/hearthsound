@@ -67,6 +67,49 @@ impl JobHandler for Slow {
     }
 }
 
+/// Holds the database's writer connection in a transaction while it works, the
+/// way a scan batch or an import does.
+struct HoldsTheWriter {
+    /// The database whose writer connection the handler keeps checked out.
+    database: Arc<hearthsound_db::Database>,
+    /// Signals that the handler committed its transaction.
+    finished: UnboundedSender<()>,
+}
+
+#[async_trait]
+impl JobHandler for HoldsTheWriter {
+    async fn handle(&self, _job: Job) -> Result<(), JobError> {
+        let mut transaction = self
+            .database
+            .writer()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| JobError::new(error.to_string()))?;
+        for index in 0..10 {
+            // The awaits are what a claim extension must not starve: a handler
+            // that is not polled never commits, so the connection it holds is
+            // never released either.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let id = uuid::Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO users (id, username, display_name, password_hash, created_at, \
+                                    updated_at) VALUES (?, ?, 'User', 'x', 0, 0)",
+            )
+            .bind(id.as_bytes().as_slice())
+            .bind(format!("writer-{index}-{id}"))
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| JobError::new(error.to_string()))?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| JobError::new(error.to_string()))?;
+        let _ = self.finished.send(());
+        Ok(())
+    }
+}
+
 /// Signals that it started and then blocks far past any test's shutdown grace
 /// period.
 struct Stuck {
@@ -321,6 +364,57 @@ async fn a_long_handler_keeps_its_claim_alive() {
     shutdown.trigger();
     running.await.unwrap();
 
+    assert_eq!(queue.get(enqueued.id).await.unwrap(), None);
+}
+
+/// A handler that keeps the writer connection inside a transaction finishes even
+/// while its claim is being extended.
+///
+/// The extension needs that same connection, so it has to run beside the
+/// handler: awaited in the runner's own select loop it parks the handler, the
+/// handler never commits, and every other write queues behind the connection for
+/// the pool's acquire timeout. That is the wedge a large watched folder caused.
+#[tokio::test]
+async fn a_handler_holding_the_writer_is_not_starved_by_its_heartbeat() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = Arc::new(open_database(dir.path()).await);
+    let queue = Arc::new(JobQueue::new(
+        &database,
+        QueueOptions {
+            lock_duration: Duration::from_millis(100),
+            ..QueueOptions::default()
+        },
+    ));
+
+    let (finished, mut finished_rx) = mpsc::unbounded_channel();
+    let mut runner = JobRunner::new(
+        Arc::clone(&queue),
+        JobRunnerOptions {
+            workers: 1,
+            poll_interval: Duration::from_millis(10),
+            heartbeat_interval: Duration::from_millis(20),
+            ..JobRunnerOptions::default()
+        },
+    );
+    runner.register(
+        "library.scan",
+        Arc::new(HoldsTheWriter {
+            database: Arc::clone(&database),
+            finished,
+        }),
+    );
+
+    let shutdown = Shutdown::new();
+    let running = start(Arc::new(runner), &shutdown);
+
+    let enqueued = queue.enqueue(NewJob::new("library.scan")).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), finished_rx.recv())
+        .await
+        .expect("the handler finishes while its claim is extended")
+        .expect("the handler signalled its result");
+
+    shutdown.trigger();
+    running.await.unwrap();
     assert_eq!(queue.get(enqueued.id).await.unwrap(), None);
 }
 

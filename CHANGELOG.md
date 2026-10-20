@@ -57,6 +57,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Scanning a large watched folder no longer wedges the database writer. The job
+  runner extended a running job's claim inside the same loop that drove the
+  handler, so an extension that waited for the single write connection stopped
+  the handler that held it from being polled: its transaction stayed open, every
+  other write queued behind it, and scans, sign-ins and admin writes failed with
+  the pool's acquire timeout. The claim is now extended from a task of its own,
+  which leaves the handler running while the extension waits.
+
+- The acquisition scheduler no longer burns a core while the queue is empty. A
+  sweep that found nothing to claim released its worker slot with a wake-up,
+  which left `Notify` holding a permit, so the loop woke itself and swept again
+  without ever sleeping. An empty sweep now releases the slot silently; the wake
+  that follows a finished acquisition is unchanged.
+
 - A request carries the address of the connection it arrived on, so the login
   rate limit is keyed on the client's address and `server.trusted_proxies`
   decides whether an `X-Forwarded-For` header names the client. Previously

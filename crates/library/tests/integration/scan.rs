@@ -5,11 +5,13 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore, settings::Settings};
 use hearthsound_core::events::EventBus;
 use hearthsound_core::{Availability, StorageClass};
 use hearthsound_db::{Database, MIGRATOR};
+use hearthsound_jobs::{JobQueue, JobRunner, JobRunnerOptions, JobState, QueueOptions, Shutdown};
 use hearthsound_library::artwork::{CoverArt, cover_for_file, track_cover};
 use hearthsound_library::scan::{
     LibraryScanner, SCAN_JOB_KIND, ScanJobHandler, ScanRequest, ScanStatus,
@@ -892,4 +894,109 @@ async fn the_scan_job_handler_runs_a_scan() {
         .await
         .unwrap();
     assert_eq!(library.list_artists().await.unwrap().len(), 1);
+}
+
+/// A full scan of one folder and several incremental scans of it finish while
+/// another writer keeps using the database.
+///
+/// The scans queue behind one folder lock and the runner extends their claims
+/// while a batch's write transaction holds the single writer connection. A claim
+/// extension that waited for that connection would leave the transaction open,
+/// and every other write would queue behind it until the pool's acquire timeout;
+/// this is the shape a large watched folder puts the server in.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_scans_of_one_folder_keep_the_writer_available() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(migrated(dir.path()).await);
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir_all(&music).unwrap();
+    for album in 0..4 {
+        let album_dir = music.join(format!("Album {album}"));
+        std::fs::create_dir_all(&album_dir).unwrap();
+        for track in 1..=4 {
+            write_song(
+                &album_dir,
+                &format!("Track {track}"),
+                "Scan Artist",
+                &format!("Album {album}"),
+            )
+            .await;
+        }
+    }
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+
+    let scanner = Arc::new(scanner_for(&db, Arc::new(EventBus::new())).await);
+    let queue = Arc::new(JobQueue::new(&db, QueueOptions::default()));
+    let mut runner = JobRunner::new(
+        Arc::clone(&queue),
+        JobRunnerOptions {
+            workers: 4,
+            poll_interval: Duration::from_millis(10),
+            heartbeat_interval: Duration::from_millis(5),
+            ..JobRunnerOptions::default()
+        },
+    );
+    runner.register(
+        SCAN_JOB_KIND,
+        Arc::new(ScanJobHandler::new(Arc::clone(&scanner))),
+    );
+    let shutdown = Shutdown::new();
+    let running = {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move { runner.run(shutdown).await })
+    };
+
+    scanner
+        .request_scan(&queue, &ScanRequest::folder(folder.id))
+        .await
+        .unwrap();
+    for _ in 0..6 {
+        let request = ScanRequest::folder(folder.id).paths(["Album 0".to_owned()]);
+        scanner.request_scan(&queue, &request).await.unwrap();
+    }
+
+    // Another writer - a session's last-seen stamp, an admin edit - must keep
+    // getting the connection while the scans run.
+    let writing = {
+        let db = Arc::clone(&db);
+        tokio::spawn(async move {
+            for index in 0..40 {
+                let id = uuid::Uuid::now_v7();
+                let write = sqlx::query(
+                    "INSERT INTO users (id, username, display_name, password_hash, created_at, \
+                                        updated_at) VALUES (?, ?, 'User', 'x', 0, 0)",
+                )
+                .bind(id.as_bytes().as_slice())
+                .bind(format!("scan-{index}-{id}"))
+                .execute(db.writer());
+                tokio::time::timeout(Duration::from_secs(10), write)
+                    .await
+                    .expect("a write gets the writer while the scans run")
+                    .expect("the write succeeds");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let ready = queue.count(JobState::Ready).await.unwrap();
+        let claimed = queue.count(JobState::Running).await.unwrap();
+        if ready + claimed == 0 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the scans finish in time");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    writing.await.unwrap();
+
+    let tracks: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks")
+        .fetch_one(db.readers())
+        .await
+        .unwrap();
+    assert_eq!(tracks, 16);
+
+    shutdown.trigger();
+    running.await.unwrap();
 }
