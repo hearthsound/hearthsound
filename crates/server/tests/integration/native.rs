@@ -718,6 +718,91 @@ async fn administrators_manage_accounts_permissions_and_quotas() {
     fixture.stop().await;
 }
 
+/// A member may not read or change anything an administrator owns.
+#[tokio::test]
+async fn members_cannot_reach_any_administration_resource() {
+    let fixture = Fixture::new().await;
+    let created = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/users",
+        Some(serde_json::json!({
+            "username": "member",
+            "password": "correct horse",
+        })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let member = json(created).await;
+    let member_id = member["id"].as_str().unwrap().to_owned();
+
+    let (cookie, csrf) = session_of(&fixture, "member", "correct horse").await;
+    let me =
+        hearthsound_core::EntityId::from_uuid(hearthsound_core::IdPrefix::User, fixture.user_id);
+
+    for path in [
+        "/api/v1/admin/users",
+        "/api/v1/admin/users/{me}",
+        "/api/v1/admin/folders",
+        "/api/v1/admin/layers",
+        "/api/v1/admin/plugins",
+        "/api/v1/admin/plugins/available",
+        "/api/v1/admin/providers",
+        "/api/v1/admin/storage",
+        "/api/v1/admin/acquisitions",
+        "/api/v1/admin/settings",
+        "/api/v1/admin/plugin-repositories",
+    ] {
+        let path = path.replace("{me}", &me.to_string());
+        let refused = fixture
+            .client
+            .get(format!("{}{path}", fixture.base_url()))
+            .header(reqwest::header::COOKIE, &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_problem(refused, StatusCode::FORBIDDEN, "forbidden").await;
+    }
+
+    // A member cannot create, change, or delete accounts and folders either.
+    let writes = [
+        (
+            reqwest::Method::POST,
+            "/api/v1/admin/users".to_owned(),
+            Some(serde_json::json!({ "username": "intruder", "password": "correct horse" })),
+        ),
+        (
+            reqwest::Method::PATCH,
+            format!("/api/v1/admin/users/{me}"),
+            Some(serde_json::json!({ "displayName": "Taken over" })),
+        ),
+        (
+            reqwest::Method::DELETE,
+            format!("/api/v1/admin/users/{me}"),
+            None,
+        ),
+        (
+            reqwest::Method::DELETE,
+            format!("/api/v1/admin/users/{member_id}"),
+            None,
+        ),
+    ];
+    for (method, path, body) in writes {
+        let response = fixture
+            .client
+            .request(method, format!("{}{path}", fixture.base_url()))
+            .header(reqwest::header::COOKIE, &cookie)
+            .header("x-hearthsound-csrf", &csrf)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(serde_json::to_vec(&body.unwrap_or(serde_json::json!({}))).unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_problem(response, StatusCode::FORBIDDEN, "forbidden").await;
+    }
+    fixture.stop().await;
+}
+
 /// Writes a small tagged album into a directory.
 pub(crate) async fn write_album(dir: &std::path::Path, artist: &str, album: &str) {
     use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};

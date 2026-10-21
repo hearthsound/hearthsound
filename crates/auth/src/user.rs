@@ -542,11 +542,13 @@ impl Users {
     /// default permissions no longer resolve, and [`AuthError::Database`] when
     /// the insert fails.
     pub async fn create(&self, settings: &SettingsStore, new: &NewUser) -> Result<User, AuthError> {
-        let username = new.username.trim();
-        if username.is_empty() {
+        if new.username.trim().is_empty() {
             return Err(AuthError::EmptyField { field: "username" });
         }
-        validate_username(username)?;
+        // Checked as typed: a surrounding space is a character the rules do not
+        // allow, not padding to trim away.
+        validate_username(&new.username)?;
+        let username = new.username.as_str();
         if new.password.is_empty() {
             return Err(AuthError::EmptyField { field: "password" });
         }
@@ -1220,6 +1222,14 @@ mod tests {
         }
         for (refused, rule) in [
             ("ab", "a username is at least three characters long"),
+            (
+                "name ",
+                "a username holds letters, digits, dots, dashes and underscores only",
+            ),
+            (
+                " member",
+                "a username holds letters, digits, dots, dashes and underscores only",
+            ),
             (
                 "test user 100000%",
                 "a username holds letters, digits, dots, dashes and underscores only",
