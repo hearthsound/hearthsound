@@ -325,8 +325,11 @@ pub async fn get_song(call: Call) -> Encoded {
 
 /// Answers `getAlbumList2`: the albums in scope in a fixed order.
 ///
-/// The supported types are `newest`, `alphabeticalByName`, and `random`; the
-/// remaining types of the base protocol are answered with error 0.
+/// The supported types are `newest`, `alphabeticalByName`, `alphabeticalByArtist`,
+/// `random`, `highest`, `frequent`, `recent`, `starred`, `byYear` and `byGenre`.
+/// The four activity types list only the albums that carry their activity:
+/// `highest` the albums the account rated, `frequent` and `recent` the albums it
+/// played, and `starred` the albums it liked.
 ///
 /// # Parameters
 ///

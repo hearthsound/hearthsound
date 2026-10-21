@@ -456,7 +456,9 @@ async fn get_album_list_2_orders_by_the_users_activity() {
         }
     };
 
-    // Each order is checked by the position of the albums it moves.
+    // Each order lists only the albums that carry its activity, in its order.
+    // Delta was rated 5 and played twice, Alpha rated 2 and played once, and
+    // Bright was never rated or played, so it belongs to no order but starred.
     for (list_type, first, second) in [
         ("highest", seeded.delta, seeded.alpha),
         ("frequent", seeded.delta, seeded.alpha),
@@ -471,18 +473,22 @@ async fn get_album_list_2_orders_by_the_users_activity() {
             .expect("the second album is listed");
         assert!(first_at < second_at, "{list_type}: {body}");
         assert!(
+            !body.contains(&seeded.bright.to_string()),
+            "{list_type} lists an album without the activity: {body}"
+        );
+        assert!(
             body.contains("\"userRating\""),
             "{list_type} reports the rating: {body}"
         );
     }
 
-    // The liked album comes first in the starred order, with the unliked ones
-    // after it in name order.
+    // The starred order carries the liked album and nothing else.
     let body = listed("starred").await;
-    let bright = body.find(&seeded.bright.to_string()).unwrap();
-    let alpha = body.find(&seeded.alpha.to_string()).unwrap();
-    let delta = body.find(&seeded.delta.to_string()).unwrap();
-    assert!(bright < alpha && alpha < delta, "starred: {body}");
+    assert!(body.contains(&seeded.bright.to_string()), "starred: {body}");
+    assert!(
+        !body.contains(&seeded.alpha.to_string()) && !body.contains(&seeded.delta.to_string()),
+        "starred lists an album that is not liked: {body}"
+    );
     assert!(body.contains("\"starred\""), "starred: {body}");
 
     // Every album of another order carries no rating of its own except where

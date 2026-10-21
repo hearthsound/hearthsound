@@ -1104,23 +1104,23 @@ async fn album_lists_follow_the_users_activity() {
     for (sort, expected, reason) in [
         (
             AlbumSort::Highest { user },
-            ["Album A", "Album B", "Album C"],
-            "the highest rating comes first and an unrated album last",
+            &["Album A", "Album B"][..],
+            "only rated albums are listed, the highest first",
         ),
         (
             AlbumSort::Frequent { user },
-            ["Album A", "Album B", "Album C"],
-            "the most played album comes first",
+            &["Album A", "Album B"][..],
+            "only played albums are listed, the most played first",
         ),
         (
             AlbumSort::Recent { user },
-            ["Album B", "Album A", "Album C"],
-            "the most recently played album comes first",
+            &["Album B", "Album A"][..],
+            "only played albums are listed, the most recently played first",
         ),
         (
             AlbumSort::Starred { user },
-            ["Album B", "Album A", "Album C"],
-            "the liked album comes first",
+            &["Album B"][..],
+            "only liked albums are listed",
         ),
     ] {
         let listed = query::list_albums(&mut conn, scope, sort, -1, 0)

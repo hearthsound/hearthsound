@@ -735,7 +735,34 @@ pub async fn list_albums(
             );
         }
     }
+    // The lists that read what the user did carry only the albums that have
+    // that activity: an album never played is not recently played, and an
+    // unrated album has no place in a rating order.
     match &sort {
+        AlbumSort::Highest { user } => {
+            builder
+                .push(" AND EXISTS (SELECT 1 FROM user_ratings r WHERE r.user_id = ")
+                .push_bind(user.as_bytes().to_vec())
+                .push(" AND r.entity_kind = 'album' AND r.entity_id = al.id AND r.rating > 0)");
+        }
+        AlbumSort::Frequent { user } => {
+            builder
+                .push(" AND EXISTS (SELECT 1 FROM plays p JOIN tracks t ON t.id = p.track_id WHERE p.user_id = ")
+                .push_bind(user.as_bytes().to_vec())
+                .push(" AND t.album_id = al.id)");
+        }
+        AlbumSort::Recent { user } => {
+            builder
+                .push(" AND EXISTS (SELECT 1 FROM plays p JOIN tracks t ON t.id = p.track_id WHERE p.user_id = ")
+                .push_bind(user.as_bytes().to_vec())
+                .push(" AND t.album_id = al.id)");
+        }
+        AlbumSort::Starred { user } => {
+            builder
+                .push(" AND EXISTS (SELECT 1 FROM user_feedback f WHERE f.user_id = ")
+                .push_bind(user.as_bytes().to_vec())
+                .push(" AND f.entity_kind = 'album' AND f.value = 'like' AND f.entity_id = al.id)");
+        }
         AlbumSort::ByYear { from, to } => {
             let (low, high) = if from <= to {
                 (*from, *to)
