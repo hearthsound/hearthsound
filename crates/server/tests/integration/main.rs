@@ -15,6 +15,7 @@ mod native;
 mod on_demand;
 mod plugin_admin;
 mod prefetch;
+mod queue;
 mod reload;
 mod setup;
 mod storage;

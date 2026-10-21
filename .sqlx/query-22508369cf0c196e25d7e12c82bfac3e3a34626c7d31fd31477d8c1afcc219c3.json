@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (SELECT 1 FROM playlists WHERE id = ? AND (owner_user_id = ? OR is_public = 1))",
+  "describe": {
+    "columns": [
+      {
+        "name": "EXISTS (SELECT 1 FROM playlists WHERE id = ? AND (owner_user_id = ? OR is_public = 1))",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "22508369cf0c196e25d7e12c82bfac3e3a34626c7d31fd31477d8c1afcc219c3"
+}

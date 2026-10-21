@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `GET /api/v1/library/queue` answers a whole collection for the player:
+  `source=songs`, `liked`, `uploads`, `playlist:<id>`, `album:<id>`,
+  `artist:<id>` or `artist-top:<id>`, every item in the collection's own order
+  and in the library row's shape. `from=<track id>` names the start and comes
+  back as `startIndex`; an unknown source is a 400 `unknown-source` problem, a
+  missing playlist, album or artist a 404 `not-found`, and a `from` outside the
+  source a 404 `not-in-source`. The read is scoped to the caller's personal
+  library, so another account's private playlist or folder content never
+  appears.
+
 - The server serves a web client out of `web.root` when it is set. The server
   root answers the client's entry document to a request that accepts HTML and
   keeps answering the JSON status object to every other request; a path the

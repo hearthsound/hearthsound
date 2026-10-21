@@ -193,6 +193,7 @@ fn api_router() -> OpenApiRouter<NativeState> {
         .routes(routes!(routes::admin_layers::put_layer))
         .routes(routes!(routes::events::create_ticket))
         .routes(routes!(routes::events::stream))
+        .routes(routes!(routes::library::collection_queue))
         .merge(
             // The upload routes alone lift axum's 2 MB multipart body limit:
             // the limit is per router and the JSON routes keep theirs.

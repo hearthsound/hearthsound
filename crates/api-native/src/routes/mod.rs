@@ -10,6 +10,7 @@ pub mod admin_settings;
 pub mod admin_storage;
 pub mod admin_users;
 pub mod events;
+pub mod library;
 pub mod me;
 pub mod session;
 pub mod setup;

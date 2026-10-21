@@ -15,7 +15,9 @@
 //! | `sideload-disabled` | 403 | plugin sideloading is switched off |
 //! | `repositories-disabled` | 403 | third-party plugin repositories are switched off |
 //! | `not-found` | 404 | the resource does not exist |
+//! | `not-in-source` | 404 | a queue's `from` track is not in the collection |
 //! | `invalid-request` | 400 | the request is malformed or names something invalid |
+//! | `unknown-source` | 400 | a queue names a collection this server does not know |
 //! | `conflict` | 409 | the request contradicts the current state |
 //! | `too-large` | 413 | an upload exceeds `uploads.max_file_bytes` |
 //! | `unsupported-media` | 415 | an upload is not audio the library indexes |
@@ -176,6 +178,26 @@ impl Problem {
             StatusCode::BAD_REQUEST,
             "invalid-request",
             "Invalid request",
+            detail,
+        )
+    }
+
+    /// A collection source this server does not recognise.
+    pub fn unknown_source(detail: impl Into<String>) -> Problem {
+        Problem::new(
+            StatusCode::BAD_REQUEST,
+            "unknown-source",
+            "Unknown queue source",
+            detail,
+        )
+    }
+
+    /// The track a queue was asked to start at is not in the collection.
+    pub fn not_in_source(detail: impl Into<String>) -> Problem {
+        Problem::new(
+            StatusCode::NOT_FOUND,
+            "not-in-source",
+            "Track not in the source",
             detail,
         )
     }

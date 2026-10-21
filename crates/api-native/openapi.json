@@ -2347,6 +2347,86 @@
         ]
       }
     },
+    "/api/v1/library/queue": {
+      "get": {
+        "tags": [
+          "library"
+        ],
+        "summary": "Queues a whole collection for the caller's player.",
+        "description": "One request answers every track of the collection, in the collection's own\norder: the library's sort order for `songs`, the like order for `liked`, the\nupload order for `uploads`, the playlist's own order, the album's disc and\ntrack order, and the artist's play count order. Nothing is paged and nothing\nis truncated.\n\n# Parameters\n\n- `authed`: the caller, whose library the collection is read from.\n- `state`: the shared services.\n- `query`: the source and, optionally, the track to start at.\n\n# Returns\n\nThe collection's items, the position of `from` in them (`0` when absent),\nand the source.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `unknown-source` (400) for a\nsource this server does not offer, `not-found` (404) when the playlist,\nalbum or artist is unknown or outside the caller's library, `not-in-source`\n(404) when `from` is not one of the collection's tracks, and `internal` when\nthe read fails.",
+        "operationId": "collection_queue",
+        "parameters": [
+          {
+            "name": "source",
+            "in": "query",
+            "description": "The collection: `songs`, `liked`, `uploads`, `playlist:<id>`, `album:<id>`, `artist:<id>` or `artist-top:<id>`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "The track id the player starts at; absent starts at the first item",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The whole collection, in its own order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The source is unknown",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The playlist, album or artist is unknown, or `from` is not in the collection",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/me/api-keys": {
       "get": {
         "tags": [
@@ -4261,6 +4341,101 @@
             "type": "integer",
             "format": "int64",
             "description": "When the instance was last changed, in unix milliseconds."
+          }
+        }
+      },
+      "QueueItemView": {
+        "type": "object",
+        "description": "One track of a queue.\n\nThe fields are the ones a library row draws: the player streams by `id`,\nshows `title`, `artist`, `album` and `coverArt`, uses `duration` for its\ntimeline, and reads `availability`, `rating`, `liked` and `disliked` for its\nbadges and controls.",
+        "required": [
+          "id",
+          "title",
+          "coverArt",
+          "availability",
+          "liked",
+          "disliked"
+        ],
+        "properties": {
+          "album": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The album's title; `null` when the track has no album."
+          },
+          "artist": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The credited artists, comma separated; `null` when unknown."
+          },
+          "availability": {
+            "type": "string",
+            "description": "The track's availability: `local`, `cached`, `acquiring`, `remote` or\n`unavailable`."
+          },
+          "coverArt": {
+            "type": "string",
+            "description": "The id to pass to `/rest/getCoverArt`: the album's id, or the track's\nown id when it has no album."
+          },
+          "disliked": {
+            "type": "boolean",
+            "description": "Whether the caller disliked the track."
+          },
+          "duration": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The track's length in seconds; `null` when unknown."
+          },
+          "id": {
+            "type": "string",
+            "description": "The track's client id (`tr_...`), which `/rest/stream` accepts."
+          },
+          "liked": {
+            "type": "boolean",
+            "description": "Whether the caller liked the track."
+          },
+          "rating": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The caller's rating, from 1 to 5; `null` when the track is unrated."
+          },
+          "title": {
+            "type": "string",
+            "description": "The track's title."
+          }
+        }
+      },
+      "QueueView": {
+        "type": "object",
+        "description": "A whole collection, ready to hand to the player.",
+        "required": [
+          "items",
+          "startIndex",
+          "source"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QueueItemView"
+            },
+            "description": "Every track of the collection, in the collection's own order."
+          },
+          "source": {
+            "type": "string",
+            "description": "The source the items were read from, echoed back."
+          },
+          "startIndex": {
+            "type": "integer",
+            "description": "The position of the requested `from` track; `0` when none was named.",
+            "minimum": 0
           }
         }
       },

@@ -1552,6 +1552,370 @@ pub async fn list_tracks(
     track_views(conn, rows).await
 }
 
+/// One track of a collection queue.
+///
+/// The row carries everything a client needs to enqueue the track and draw it
+/// without a second request: the title, the credited artist, the album, the
+/// length, the availability, and the caller's rating and feedback.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_core::{Availability, EntityId, IdPrefix};
+/// use hearthsound_library::query::QueueItem;
+///
+/// let item = QueueItem {
+///     track_id: EntityId::new(IdPrefix::Track),
+///     title: "Example".to_owned(),
+///     artist: None,
+///     album_id: None,
+///     album: None,
+///     duration_ms: Some(1_000),
+///     availability: Availability::Local,
+///     rating: None,
+///     liked: false,
+///     disliked: false,
+/// };
+/// assert_eq!(item.duration_ms, Some(1_000));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueItem {
+    /// The track's client id.
+    pub track_id: EntityId,
+    /// The track's title.
+    pub title: String,
+    /// The credited artists, comma separated, or the display artist the tags
+    /// carried; `None` when neither is known.
+    pub artist: Option<String>,
+    /// The album the track belongs to, when it has one.
+    pub album_id: Option<EntityId>,
+    /// The album's title, when the track belongs to one.
+    pub album: Option<String>,
+    /// The track's length in milliseconds, when it is known.
+    pub duration_ms: Option<i64>,
+    /// The track's availability on this server.
+    pub availability: Availability,
+    /// The caller's rating, from 1 to 5; `None` when the track is unrated.
+    pub rating: Option<i64>,
+    /// Whether the caller liked the track.
+    pub liked: bool,
+    /// Whether the caller disliked the track.
+    pub disliked: bool,
+}
+
+/// The collection a queue is read for.
+///
+/// Every variant names the caller's own view: the personal library, the
+/// caller's likes and uploads, a playlist the caller may see, or an album and
+/// an artist inside the caller's library. The server scope is not offered here,
+/// so a queue can never include a track the caller's library does not hold
+/// (except the remaining tracks of an album the caller's library contains,
+/// which every client may already stream).
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_core::{EntityId, IdPrefix};
+/// use hearthsound_library::query::QueueCollection;
+///
+/// let album = EntityId::new(IdPrefix::Album);
+/// assert_ne!(QueueCollection::Album(album), QueueCollection::Artist(album));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueCollection {
+    /// The caller's whole personal library, in the order the Songs view uses.
+    Songs,
+    /// The tracks the caller liked, most recently liked first.
+    Liked,
+    /// The tracks the caller uploaded, newest first.
+    Uploads,
+    /// One playlist the caller owns or that is public, in its own order.
+    Playlist(EntityId),
+    /// One album inside the caller's library, in disc and track order.
+    Album(EntityId),
+    /// One artist's tracks: the tracks with plays first, by play count, then
+    /// the rest in album order.
+    Artist(EntityId),
+    /// One artist's played tracks only, by play count.
+    ArtistTop(EntityId),
+}
+
+/// Lists every track of one collection, in the collection's own order.
+///
+/// The rows are read in one statement, after a one-row visibility check for a
+/// playlist, album or artist: they carry the album, the artist, the
+/// availability and the caller's annotations, so a queue never costs a query
+/// per track. The scope is the caller's personal library, exactly as
+/// [`list_tracks`] defines it, so another user's playlist and unowned folder
+/// content never appear.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `user_id`: the account whose library, likes, uploads and annotations are
+///   read.
+/// - `collection`: the collection to read.
+///
+/// # Returns
+///
+/// The tracks in the collection's order, or `None` when the collection is a
+/// playlist, album or artist the caller may not see.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails or a stored literal or id is
+/// malformed.
+pub async fn queue(
+    conn: &mut SqliteConnection,
+    user_id: Uuid,
+    collection: QueueCollection,
+) -> Result<Option<Vec<QueueItem>>, LibraryError> {
+    let user = user_id.as_bytes().to_vec();
+    let visible = match collection {
+        QueueCollection::Songs | QueueCollection::Liked | QueueCollection::Uploads => true,
+        QueueCollection::Playlist(id) => playlist_visible(conn, user_id, id).await?,
+        QueueCollection::Album(id) => album_in_scope(conn, Scope::Personal { user_id }, id).await?,
+        QueueCollection::Artist(id) | QueueCollection::ArtistTop(id) => {
+            artist_in_scope(conn, Scope::Personal { user_id }, id).await?
+        }
+    };
+    if !visible {
+        return Ok(None);
+    }
+
+    // The projection and the personal scope are shared by every source and
+    // bind the user id, so the statement is assembled rather than written as
+    // one compile-checked literal; `top_tracks_for_artist` builds its query the
+    // same way for the same reason.
+    let mut builder = QueryBuilder::<Sqlite>::new("");
+    match collection {
+        QueueCollection::Songs => {
+            push_personal_scope(&mut builder, &user);
+            push_queue_projection(&mut builder, &user);
+            builder.push(
+                " FROM tracks t JOIN scope_tracks st ON st.track_id = t.id \
+                 LEFT JOIN albums al ON al.id = t.album_id \
+                 ORDER BY t.sort_title, t.id",
+            );
+        }
+        QueueCollection::Liked => {
+            push_queue_projection(&mut builder, &user);
+            builder
+                .push(
+                    " FROM user_feedback f JOIN tracks t ON t.id = f.entity_id \
+                     LEFT JOIN albums al ON al.id = t.album_id \
+                     WHERE f.user_id = ",
+                )
+                .push_bind(user.clone())
+                .push(
+                    " AND f.entity_kind = 'track' AND f.value = 'like' \
+                     ORDER BY f.at DESC, f.entity_id",
+                );
+        }
+        QueueCollection::Uploads => {
+            push_queue_projection(&mut builder, &user);
+            builder
+                .push(
+                    " FROM user_library ul JOIN tracks t ON t.id = ul.entity_id \
+                     LEFT JOIN albums al ON al.id = t.album_id \
+                     WHERE ul.user_id = ",
+                )
+                .push_bind(user.clone())
+                .push(
+                    " AND ul.entity_kind = 'track' AND ul.origin = 'upload' \
+                     ORDER BY ul.added_at DESC, ul.entity_id ASC",
+                );
+        }
+        QueueCollection::Playlist(playlist_id) => {
+            push_queue_projection(&mut builder, &user);
+            builder
+                .push(
+                    " FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id \
+                     LEFT JOIN albums al ON al.id = t.album_id \
+                     WHERE pt.playlist_id = ",
+                )
+                .push_bind(entity_key(playlist_id))
+                .push(" ORDER BY pt.position");
+        }
+        QueueCollection::Album(album_id) => {
+            push_queue_projection(&mut builder, &user);
+            builder
+                .push(
+                    " FROM tracks t LEFT JOIN albums al ON al.id = t.album_id \
+                     WHERE t.album_id = ",
+                )
+                .push_bind(entity_key(album_id))
+                .push(
+                    " ORDER BY t.disc_number IS NULL, t.disc_number, \
+                     t.track_number IS NULL, t.track_number, t.sort_title, t.id",
+                );
+        }
+        QueueCollection::Artist(artist_id) | QueueCollection::ArtistTop(artist_id) => {
+            push_personal_scope(&mut builder, &user);
+            push_queue_projection(&mut builder, &user);
+            builder
+                .push(
+                    " FROM tracks t JOIN scope_tracks st ON st.track_id = t.id \
+                     LEFT JOIN albums al ON al.id = t.album_id \
+                     WHERE t.id IN (SELECT track_id FROM track_artists WHERE artist_id = ",
+                )
+                .push_bind(entity_key(artist_id))
+                .push(")");
+            if matches!(collection, QueueCollection::ArtistTop(_)) {
+                builder.push(" AND EXISTS (SELECT 1 FROM plays p WHERE p.track_id = t.id)");
+            }
+            builder.push(
+                " ORDER BY (SELECT count(*) FROM plays p WHERE p.track_id = t.id) DESC, \
+                 al.year, t.disc_number, t.track_number, t.id",
+            );
+        }
+    }
+
+    let rows = builder
+        .build_query_as::<QueueRow>()
+        .fetch_all(&mut *conn)
+        .await?;
+    let items = rows
+        .into_iter()
+        .map(QueueRow::into_item)
+        .collect::<Result<Vec<_>, LibraryError>>()?;
+    Ok(Some(items))
+}
+
+/// Appends the columns every queue row projects.
+///
+/// The caller writes the statement up to `SELECT` (and, for the scopes that
+/// need one, its `WITH` clause); this writes the select list and the three
+/// binds of the caller's annotations. The album's title is joined as `al` by
+/// every source.
+///
+/// # Parameters
+///
+/// - `builder`: the builder to append to.
+/// - `user`: the 16 raw bytes of the account whose annotations are read.
+fn push_queue_projection(builder: &mut QueryBuilder<Sqlite>, user: &[u8]) {
+    builder
+        .push(
+            "SELECT t.id AS id, t.title AS title, \
+             COALESCE(NULLIF(t.display_artist, ''), \
+                 (SELECT group_concat(ar.name, ', ') FROM track_artists ta \
+                  JOIN artists ar ON ar.id = ta.artist_id WHERE ta.track_id = t.id)) AS artist, \
+             t.album_id AS album_id, al.title AS album, t.duration_ms AS duration_ms, \
+             t.availability AS availability, \
+             (SELECT r.rating FROM user_ratings r WHERE r.user_id = ",
+        )
+        .push_bind(user.to_vec())
+        .push(
+            " AND r.entity_kind = 'track' AND r.entity_id = t.id) AS rating, \
+             EXISTS (SELECT 1 FROM user_feedback f WHERE f.user_id = ",
+        )
+        .push_bind(user.to_vec())
+        .push(
+            " AND f.entity_kind = 'track' AND f.value = 'like' \
+             AND f.entity_id = t.id) AS liked, \
+             EXISTS (SELECT 1 FROM user_feedback f WHERE f.user_id = ",
+        )
+        .push_bind(user.to_vec())
+        .push(
+            " AND f.entity_kind = 'track' AND f.value = 'dislike' \
+             AND f.entity_id = t.id) AS disliked",
+        );
+}
+
+/// Reports whether an account may see a playlist.
+///
+/// The rule is the one playlist listings apply: the owner sees it, and
+/// everybody sees a public one.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `user_id`: the account reading the playlist.
+/// - `playlist_id`: the playlist to test.
+///
+/// # Returns
+///
+/// `true` when the playlist exists and the account may see it.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when the query fails.
+async fn playlist_visible(
+    conn: &mut SqliteConnection,
+    user_id: Uuid,
+    playlist_id: EntityId,
+) -> Result<bool, LibraryError> {
+    let visible: i64 = sqlx::query_scalar!(
+        "SELECT EXISTS (SELECT 1 FROM playlists WHERE id = ? \
+                        AND (owner_user_id = ? OR is_public = 1))",
+        entity_key(playlist_id),
+        user_id.as_bytes().as_slice(),
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(visible != 0)
+}
+
+/// One stored queue row.
+#[derive(sqlx::FromRow)]
+struct QueueRow {
+    /// The track's primary key.
+    id: Vec<u8>,
+    /// The track's title.
+    title: String,
+    /// The credited artists, comma separated.
+    artist: Option<String>,
+    /// The album's primary key, when the track has an album.
+    album_id: Option<Vec<u8>>,
+    /// The album's title, when the track has an album.
+    album: Option<String>,
+    /// The track's length in milliseconds.
+    duration_ms: Option<i64>,
+    /// The stored availability literal.
+    availability: String,
+    /// The caller's rating, when the track is rated.
+    rating: Option<i64>,
+    /// `1` when the caller liked the track.
+    liked: i64,
+    /// `1` when the caller disliked the track.
+    disliked: i64,
+}
+
+impl QueueRow {
+    /// Converts a stored row into a queue item.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when a stored id is not a UUID or the
+    /// availability literal is unknown.
+    fn into_item(self) -> Result<QueueItem, LibraryError> {
+        let availability = self.availability.parse::<Availability>().map_err(|_| {
+            LibraryError::UnknownLiteral {
+                kind: "availability",
+                value: self.availability,
+            }
+        })?;
+        let album_id = self
+            .album_id
+            .as_deref()
+            .map(|bytes| decode_entity(IdPrefix::Album, bytes))
+            .transpose()
+            .map_err(LibraryError::from)?;
+        Ok(QueueItem {
+            track_id: decode_entity(IdPrefix::Track, &self.id).map_err(LibraryError::from)?,
+            title: self.title,
+            artist: self.artist.filter(|name| !name.is_empty()),
+            album_id,
+            album: self.album,
+            duration_ms: self.duration_ms,
+            availability,
+            rating: self.rating,
+            liked: self.liked != 0,
+            disliked: self.disliked != 0,
+        })
+    }
+}
+
 /// Searches the local full-text index.
 ///
 /// The query text is sanitized into an FTS5 prefix query by [`sanitize_match`],
