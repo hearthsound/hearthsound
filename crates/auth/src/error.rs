@@ -33,6 +33,18 @@ pub enum AuthError {
         /// The name of the field that was empty.
         field: &'static str,
     },
+    /// A username was submitted that the rules do not allow.
+    ///
+    /// A username is 3 to 32 characters of letters, digits, dot, dash and
+    /// underscore, and it starts and ends with a letter or a digit, so it can
+    /// be typed in a URL, a log line and a shell without quoting.
+    #[error("username `{username}` is not allowed: {rule}")]
+    InvalidUsername {
+        /// The username that was refused.
+        username: String,
+        /// The rule the username broke, as a sentence.
+        rule: &'static str,
+    },
     /// A username was submitted that an account already uses.
     ///
     /// Usernames are compared case-insensitively, so `Echo` and `echo` name the

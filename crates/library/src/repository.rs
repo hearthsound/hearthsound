@@ -23,7 +23,7 @@ use crate::error::LibraryError;
 use crate::media_files::StoredFileState;
 use crate::model::{
     Album, AlbumInput, Artist, ArtistCredit, ArtistInput, Credit, Genre, LibraryFolder,
-    ManagedMediaFile, MediaFile, MediaFileInput, ScannedMediaFile, Track, TrackInput,
+    ManagedMediaFile, MediaFile, MediaFileInput, Origin, ScannedMediaFile, Track, TrackInput,
 };
 use crate::{READ_THEN_WRITE, albums, artists, folders, media_files, retention, tracks};
 
@@ -203,6 +203,61 @@ impl LibraryRepository {
         let folder = folders::add_library_folder(&mut tx, path, owner_user_id).await?;
         tx.commit().await?;
         Ok(folder)
+    }
+
+    /// Removes a library folder, its file records and the tracks only it held,
+    /// in its own transaction.
+    ///
+    /// A track that still has a file in the library or the cache keeps its row;
+    /// a local track whose last file this folder held is deleted, exactly as the
+    /// scanner's pruning does, and the caller publishes the change. Nothing
+    /// inside the folder on disk is removed or moved.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the folder's UUIDv7 primary key.
+    ///
+    /// # Returns
+    ///
+    /// The tracks that were deleted, so the caller can announce them; an empty
+    /// list when the folder held nothing or no longer exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when the write fails.
+    pub async fn remove_library_folder(&self, id: Uuid) -> Result<Vec<EntityId>, LibraryError> {
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+        // The folder's files stop pinning their tracks before they go.
+        retention::repin_folder_tracks(&mut tx, id, false).await?;
+        let files = media_files::list_folder_media_files(&mut tx, id).await?;
+        let mut removed: Vec<EntityId> = Vec::new();
+        for state in files.values() {
+            media_files::delete_media_file(&mut tx, state.id).await?;
+            let remaining =
+                media_files::list_media_files_for_track(&mut tx, state.track_id).await?;
+            if !remaining.is_empty() {
+                continue;
+            }
+            match tracks::get_track(&mut tx, state.track_id).await? {
+                Some(track) if track.origin == Origin::Local => {
+                    tracks::delete_track(&mut tx, state.track_id).await?;
+                    removed.push(state.track_id);
+                }
+                Some(_) => {
+                    tracks::set_track_availability(
+                        &mut tx,
+                        state.track_id,
+                        Availability::Remote,
+                        None,
+                    )
+                    .await?;
+                }
+                None => {}
+            }
+        }
+        folders::delete_library_folder(&mut tx, id).await?;
+        tx.commit().await?;
+        Ok(removed)
     }
 
     /// Renames a library folder in its own transaction.

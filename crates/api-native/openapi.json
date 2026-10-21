@@ -324,6 +324,48 @@
       }
     },
     "/api/v1/admin/folders/{id}": {
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Removes a library folder.",
+        "description": "The folder's file records and the tracks only it held go with it, exactly as\na scan's pruning removes a file the folder lost; a track that still has a\nfile in the library or the cache stays. Nothing inside the folder on disk is\nremoved, moved or renamed, and the folder's watcher stops.\n\n# Errors\n\nAnswers `not-found` for an unknown folder.",
+        "operationId": "delete_folder",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The folder's client id (`lf_...`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The folder is gone"
+          },
+          "404": {
+            "description": "No such folder",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
       "patch": {
         "tags": [
           "admin"
@@ -2023,6 +2065,58 @@
           },
           "404": {
             "description": "No such account",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Deletes an account.",
+        "description": "The account's sessions, keys, playlists, feedback, ratings and quota go with\nit through the foreign keys; a folder it owned becomes generic and the files\nit uploaded keep their rows without an uploader. The files on disk are not\ntouched.\n\n# Errors\n\nAnswers `not-found` for an unknown account, and `conflict` when the caller\nwould delete their own account.",
+        "operationId": "delete_user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The account's client id (`us_...`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The account is gone"
+          },
+          "404": {
+            "description": "No such account",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The deletion would lock the server out",
             "content": {
               "application/problem+json": {
                 "schema": {

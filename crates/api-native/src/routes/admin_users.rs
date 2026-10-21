@@ -127,6 +127,9 @@ fn write_problem(context: &str, error: AuthError) -> Problem {
         AuthError::EmptyField { field } => {
             Problem::invalid_request(format!("`{field}` must not be empty."))
         }
+        AuthError::InvalidUsername { username, rule } => {
+            Problem::invalid_request(format!("The username `{username}` is not allowed: {rule}."))
+        }
         AuthError::UsernameTaken { username } => {
             Problem::conflict(format!("The username `{username}` is taken."))
         }
@@ -136,6 +139,53 @@ fn write_problem(context: &str, error: AuthError) -> Problem {
         }
         error => problem::internal(context, &error),
     }
+}
+
+/// Deletes an account.
+///
+/// The account's sessions, keys, playlists, feedback, ratings and quota go with
+/// it through the foreign keys; a folder it owned becomes generic and the files
+/// it uploaded keep their rows without an uploader. The files on disk are not
+/// touched.
+///
+/// # Errors
+///
+/// Answers `not-found` for an unknown account, and `conflict` when the caller
+/// would delete their own account.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/admin/users/{id}",
+    tag = "admin",
+    params(("id" = String, Path, description = "The account's client id (`us_...`)")),
+    responses(
+        (status = 204, description = "The account is gone"),
+        (status = 404, description = "No such account", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The deletion would lock the server out", body = Problem, content_type = "application/problem+json"),
+    ),
+    security(("bearer" = []), ("session" = []))
+)]
+pub async fn delete_user(
+    AdminAuthed(admin): AdminAuthed,
+    State(state): State<NativeState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, Problem> {
+    let id = parse_id(&id, IdPrefix::User)?;
+    existing(&state, id).await?;
+    if id == admin.user_id() {
+        return Err(Problem::conflict(
+            "Administrators cannot delete their own account.",
+        ));
+    }
+    let deleted = state
+        .users()
+        .delete(id)
+        .await
+        .map_err(|error| problem::internal("deleting an account", &error))?;
+    if !deleted {
+        return Err(Problem::not_found("No such account."));
+    }
+    tracing::info!(admin = %admin.user_id(), user = %id, "deleted an account");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Builds the administrator's view of one account.

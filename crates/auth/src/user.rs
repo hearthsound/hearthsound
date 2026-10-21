@@ -439,6 +439,58 @@ impl UserRow {
     }
 }
 
+/// The longest username the rules allow.
+pub const USERNAME_MAX_LENGTH: usize = 32;
+
+/// The shortest username the rules allow.
+pub const USERNAME_MIN_LENGTH: usize = 3;
+
+/// Checks a username against the rules a login name must keep.
+///
+/// The rules exist so that a username can appear in a URL, a log line and a
+/// shell without quoting, and so that names that look like SQL, markup or a
+/// path cannot be created by mistake: 3 to 32 characters of `A-Z`, `a-z`,
+/// `0-9`, `.`, `-` and `_`, starting and ending with a letter or a digit.
+///
+/// # Parameters
+///
+/// - `username`: the trimmed login name to check.
+///
+/// # Returns
+///
+/// `Ok(())` when the name is allowed.
+///
+/// # Errors
+///
+/// Returns [`AuthError::InvalidUsername`] naming the first rule the name breaks.
+pub fn validate_username(username: &str) -> Result<(), AuthError> {
+    let refused = |rule: &'static str| AuthError::InvalidUsername {
+        username: username.to_owned(),
+        rule,
+    };
+    if username.chars().count() < USERNAME_MIN_LENGTH {
+        return Err(refused("a username is at least three characters long"));
+    }
+    if username.chars().count() > USERNAME_MAX_LENGTH {
+        return Err(refused("a username is at most 32 characters long"));
+    }
+    let allowed =
+        |character: char| character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_');
+    if !username.chars().all(allowed) {
+        return Err(refused(
+            "a username holds letters, digits, dots, dashes and underscores only",
+        ));
+    }
+    let edge =
+        |character: Option<char>| matches!(character, Some(found) if found.is_ascii_alphanumeric());
+    if !edge(username.chars().next()) || !edge(username.chars().next_back()) {
+        return Err(refused(
+            "a username starts and ends with a letter or a digit",
+        ));
+    }
+    Ok(())
+}
+
 impl Users {
     /// Builds the repository over a database.
     ///
@@ -494,6 +546,7 @@ impl Users {
         if username.is_empty() {
             return Err(AuthError::EmptyField { field: "username" });
         }
+        validate_username(username)?;
         if new.password.is_empty() {
             return Err(AuthError::EmptyField { field: "password" });
         }
@@ -551,6 +604,32 @@ impl Users {
         self.find_by_id(id)
             .await?
             .ok_or_else(|| AuthError::UnknownUser { user_id: id })
+    }
+
+    /// Deletes an account and everything only it owned.
+    ///
+    /// The foreign keys carry the cleanup: sessions, API keys, app passwords,
+    /// playlists, feedback, ratings, quotas and activity go with the row, a
+    /// folder the account owned becomes generic, and a file it uploaded keeps
+    /// its row without an uploader. The account's files on disk are never
+    /// touched.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the account's UUIDv7 primary key.
+    ///
+    /// # Returns
+    ///
+    /// `true` when a row was deleted, `false` when no account has that id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::Database`] when the write fails.
+    pub async fn delete(&self, id: Uuid) -> Result<bool, AuthError> {
+        let deleted = sqlx::query!("DELETE FROM users WHERE id = ?", id.as_bytes().as_slice())
+            .execute(&self.writer)
+            .await?;
+        Ok(deleted.rows_affected() > 0)
     }
 
     /// Reads an account by its id.
@@ -1129,6 +1208,73 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, AuthError::UnknownUser { .. }));
+    }
+
+    #[test]
+    fn usernames_keep_the_rules() {
+        for allowed in ["echo", "ada-2", "a.b_c", "User_1000"] {
+            assert!(
+                validate_username(allowed).is_ok(),
+                "{allowed} should be allowed"
+            );
+        }
+        for (refused, rule) in [
+            ("ab", "a username is at least three characters long"),
+            (
+                "test user 100000%",
+                "a username holds letters, digits, dots, dashes and underscores only",
+            ),
+            (
+                "DROP TABLE Users;",
+                "a username holds letters, digits, dots, dashes and underscores only",
+            ),
+            (
+                "-echo",
+                "a username starts and ends with a letter or a digit",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    validate_username(refused),
+                    Err(AuthError::InvalidUsername { rule: found, .. }) if found == rule
+                ),
+                "{refused} should be refused with {rule}"
+            );
+        }
+        let long = "x".repeat(USERNAME_MAX_LENGTH + 1);
+        assert!(matches!(
+            validate_username(&long),
+            Err(AuthError::InvalidUsername { rule, .. }) if rule == "a username is at most 32 characters long"
+        ));
+    }
+
+    #[tokio::test]
+    async fn creating_an_account_with_a_refused_username_fails() {
+        let (_dir, db) = database().await;
+        let users = Users::new(&db);
+        let settings = settings(&[]);
+        let error = users
+            .create(
+                &settings,
+                &NewUser::new("DROP TABLE Users;", "", "hunter2", false),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AuthError::InvalidUsername { .. }));
+    }
+
+    #[tokio::test]
+    async fn deleting_an_account_removes_it() {
+        let (_dir, db) = database().await;
+        let users = Users::new(&db);
+        let settings = settings(&[]);
+        let user = users
+            .create(&settings, &NewUser::new("temporary", "", "hunter2", false))
+            .await
+            .unwrap();
+        assert!(users.delete(user.id).await.unwrap());
+        assert!(users.find_by_id(user.id).await.unwrap().is_none());
+        assert!(!users.delete(user.id).await.unwrap());
     }
 
     #[tokio::test]

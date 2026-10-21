@@ -80,6 +80,7 @@ async fn a_missing_or_wrong_credential_is_unauthenticated() {
 
     let unknown = bearer_get(&fixture, "/api/v1/nothing/here").await;
     assert_problem(unknown, StatusCode::NOT_FOUND, "not-found").await;
+
     fixture.stop().await;
 }
 
@@ -673,6 +674,47 @@ async fn administrators_manage_accounts_permissions_and_quotas() {
     )
     .await;
     assert_problem(missing, StatusCode::NOT_FOUND, "not-found").await;
+
+    // A username that could be a sentence, a path or SQL is refused.
+    let refused = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/users",
+        Some(serde_json::json!({
+            "username": "DROP TABLE Users;",
+            "password": "correct horse",
+        })),
+    )
+    .await;
+    assert_problem(refused, StatusCode::BAD_REQUEST, "invalid-request").await;
+
+    // Deleting an account removes it; deleting your own account is refused.
+    let removed = bearer(
+        &fixture,
+        reqwest::Method::DELETE,
+        &format!("/api/v1/admin/users/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    let gone = bearer(
+        &fixture,
+        reqwest::Method::GET,
+        &format!("/api/v1/admin/users/{id}"),
+        None,
+    )
+    .await;
+    assert_problem(gone, StatusCode::NOT_FOUND, "not-found").await;
+    let myself =
+        hearthsound_core::EntityId::from_uuid(hearthsound_core::IdPrefix::User, fixture.user_id);
+    let refused = bearer(
+        &fixture,
+        reqwest::Method::DELETE,
+        &format!("/api/v1/admin/users/{myself}"),
+        None,
+    )
+    .await;
+    assert_problem(refused, StatusCode::CONFLICT, "conflict").await;
     fixture.stop().await;
 }
 
@@ -839,6 +881,37 @@ async fn folders_are_added_with_an_owner_or_as_generic() {
     )
     .await;
     assert_problem(unknown, StatusCode::NOT_FOUND, "not-found").await;
+
+    // Removing the folder takes its file records with it; the file on disk is
+    // never touched. Removing it again answers not-found.
+    let removed = bearer(
+        &fixture,
+        reqwest::Method::DELETE,
+        &format!("/api/v1/admin/folders/{folder}"),
+        None,
+    )
+    .await;
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    assert!(root.join("01 - Song 1.mp3").is_file());
+    let listed = json(
+        bearer(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/admin/folders",
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert!(listed["folders"].as_array().unwrap().is_empty());
+    let again = bearer(
+        &fixture,
+        reqwest::Method::DELETE,
+        &format!("/api/v1/admin/folders/{folder}"),
+        None,
+    )
+    .await;
+    assert_problem(again, StatusCode::NOT_FOUND, "not-found").await;
     fixture.stop().await;
 }
 

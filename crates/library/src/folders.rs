@@ -248,6 +248,38 @@ pub async fn rename_library_folder(
     Ok(affected > 0)
 }
 
+/// Deletes a library folder row.
+///
+/// The row's file records and any track only it held are removed by the caller
+/// in the same transaction, so no media file is left pointing at a folder that
+/// no longer exists. Nothing inside the folder on disk is touched.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `id`: the folder's UUIDv7 primary key.
+///
+/// # Returns
+///
+/// `true` when a row was deleted, `false` when no folder has that id.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when the write fails.
+pub async fn delete_library_folder(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+) -> Result<bool, LibraryError> {
+    let affected = sqlx::query!(
+        "DELETE FROM library_folders WHERE id = ?",
+        id.as_bytes().as_slice()
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
+}
+
 /// Associates a library folder with a user, or makes it generic.
 ///
 /// This writes the ownership column only. The `folder` pin reason and the

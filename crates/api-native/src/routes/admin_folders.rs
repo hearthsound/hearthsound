@@ -13,7 +13,8 @@ use std::path::{Path as FsPath, PathBuf};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use hearthsound_core::IdPrefix;
+use hearthsound_core::events::{LibraryChange, LibraryChanged, ServerEvent};
+use hearthsound_core::{EntityKind, IdPrefix};
 use hearthsound_library::scan::ScanRequest;
 use hearthsound_library::{LibraryFolder, LibraryRepository};
 use serde::{Deserialize, Serialize};
@@ -390,6 +391,53 @@ pub async fn patch_folder(
     tracing::info!(admin = %admin.user_id(), folder = %id, "changed a library folder");
     let folder = existing(&library, id).await?;
     Ok(Json(FolderView::from(&folder)))
+}
+
+/// Removes a library folder.
+///
+/// The folder's file records and the tracks only it held go with it, exactly as
+/// a scan's pruning removes a file the folder lost; a track that still has a
+/// file in the library or the cache stays. Nothing inside the folder on disk is
+/// removed, moved or renamed, and the folder's watcher stops.
+///
+/// # Errors
+///
+/// Answers `not-found` for an unknown folder.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/admin/folders/{id}",
+    tag = "admin",
+    params(("id" = String, Path, description = "The folder's client id (`lf_...`)")),
+    responses(
+        (status = 204, description = "The folder is gone"),
+        (status = 404, description = "No such folder", body = Problem, content_type = "application/problem+json"),
+    ),
+    security(("bearer" = []), ("session" = []))
+)]
+pub async fn delete_folder(
+    _admin: AdminAuthed,
+    State(state): State<NativeState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, Problem> {
+    let id = parse_id(&id, IdPrefix::LibraryFolder)?;
+    let library = LibraryRepository::new(state.database());
+    existing(&library, id).await?;
+    let removed = library
+        .remove_library_folder(id)
+        .await
+        .map_err(|error| problem::internal("removing a folder", &error))?;
+    for track in removed {
+        state
+            .services()
+            .events
+            .publish(ServerEvent::LibraryChanged(LibraryChanged {
+                entity_kind: EntityKind::Track,
+                entity_id: track.to_string(),
+                change: LibraryChange::Removed,
+            }));
+    }
+    reconcile_watchers(&state).await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Queues a scan of one folder.

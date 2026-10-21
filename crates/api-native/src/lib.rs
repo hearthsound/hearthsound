@@ -145,13 +145,15 @@ fn api_router() -> OpenApiRouter<NativeState> {
         ))
         .routes(routes!(
             routes::admin_users::get_user,
-            routes::admin_users::patch_user
+            routes::admin_users::patch_user,
+            routes::admin_users::delete_user
         ))
         .routes(routes!(
             routes::admin_folders::list_folders,
             routes::admin_folders::create_folder
         ))
         .routes(routes!(routes::admin_folders::patch_folder))
+        .routes(routes!(routes::admin_folders::delete_folder))
         .routes(routes!(routes::admin_folders::scan_folder))
         .routes(routes!(
             routes::admin_settings::list_settings,
