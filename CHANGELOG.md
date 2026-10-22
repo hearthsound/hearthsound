@@ -78,6 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Creating the first administrator with a username that breaks the name rule
+  is refused with `invalid-request` before the one-time setup link is spent,
+  instead of answering `internal` after the link is gone.
+
 - A watched library folder no longer rescans itself forever. The watcher acted
   on every event its engine reported, including the opens a scan produces:
   inotify subscribes to `IN_OPEN`, so walking a folder and probing its files

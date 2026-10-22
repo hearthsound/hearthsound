@@ -17,7 +17,7 @@ use axum::http::StatusCode;
 use axum::http::header::SET_COOKIE;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
-use hearthsound_auth::{NewUser, User};
+use hearthsound_auth::{AuthError, NewUser, User, validate_username};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -94,7 +94,7 @@ pub async fn setup_status(State(state): State<NativeState>) -> Result<Json<Setup
     request_body = SetupRequest,
     responses(
         (status = 201, description = "The administrator exists and is signed in", body = LoginResponse),
-        (status = 400, description = "The username or the password is empty", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "The username or the password is empty, or the username breaks the name rule", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "The setup link is not valid", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The server already has an account", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "Too many failed setup attempts", body = Problem, content_type = "application/problem+json"),
@@ -113,6 +113,14 @@ pub async fn complete_setup(
         return Err(Problem::invalid_request(
             "The setup needs a username and a password.",
         ));
+    }
+    // The name rule is checked before the one-time link is spent, so a typo
+    // costs the wizard nothing.
+    if let Err(AuthError::InvalidUsername { rule, .. }) = validate_username(request.username.trim())
+    {
+        return Err(Problem::invalid_request(format!(
+            "The username is not allowed: {rule}."
+        )));
     }
 
     let limiter = state.authenticator().limiter();

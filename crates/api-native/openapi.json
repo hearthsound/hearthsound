@@ -2929,7 +2929,7 @@
             }
           },
           "400": {
-            "description": "The username or the password is empty",
+            "description": "The username or the password is empty, or the username breaks the name rule",
             "content": {
               "application/problem+json": {
                 "schema": {

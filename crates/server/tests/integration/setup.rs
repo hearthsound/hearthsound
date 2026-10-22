@@ -156,3 +156,23 @@ async fn the_setup_needs_a_username_and_a_password() {
     assert_eq!(empty_password.status(), StatusCode::BAD_REQUEST);
     fixture.stop().await;
 }
+
+/// A username that breaks the shape rule is refused without spending the
+/// link, so the next attempt with a proper name still creates the account.
+#[tokio::test]
+async fn the_setup_refuses_a_username_that_breaks_the_rule() {
+    let fixture = Fixture::without_account().await;
+    let token = fixture.services.setup().token().await.unwrap();
+
+    let refused = complete_setup(&fixture, &token, "bad user").await;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body(refused).await["code"], "invalid-request");
+    assert!(
+        fixture.services.setup().token().await.is_some(),
+        "a refused username must not spend the link"
+    );
+
+    let accepted = complete_setup(&fixture, &token, "echo").await;
+    assert_eq!(accepted.status(), StatusCode::CREATED);
+    fixture.stop().await;
+}
