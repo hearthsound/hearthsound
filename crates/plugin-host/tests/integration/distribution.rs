@@ -640,7 +640,7 @@ async fn the_listing_merges_sources_and_reports_the_failed_one() {
             SUPPORTED_API,
             &env.archive_url(),
             &bytes,
-            json!({}),
+            json!({"http": {"hosts": ["api.example.com"]}, "kv": {"maxBytes": 2097152}}),
         )],
     )]))
     .await;
@@ -680,6 +680,24 @@ async fn the_listing_merges_sources_and_reports_the_failed_one() {
     let official = &report.plugins[0];
     assert!(official.official && official.verified);
     assert_eq!(official.version.as_deref(), Some("0.1.0"));
+    let described: Vec<(&str, &str, &str)> = official
+        .permissions
+        .iter()
+        .map(|permission| {
+            (
+                permission.scope,
+                permission.risk.as_str(),
+                permission.detail.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        described,
+        [
+            ("http.hosts", "low", "api.example.com"),
+            ("kv.maxBytes", "low", "2097152 bytes"),
+        ]
+    );
     let third_party = &report.plugins[1];
     assert!(!third_party.official);
     assert!(!third_party.verified);

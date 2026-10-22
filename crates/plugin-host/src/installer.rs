@@ -40,7 +40,7 @@ use uuid::Uuid;
 use crate::admin::{PluginAdmin, to_hex};
 use crate::error::InstallError;
 use crate::index::{Index, IndexClient, IndexPlugin, IndexVersion, Unavailable};
-use crate::install::PluginRegistration;
+use crate::install::{PluginRegistration, RequestedPermission, requested_permissions_of};
 use crate::manifest::SUPPORTED_API;
 use crate::repo::{PluginRepository, PluginSource, RepoError, RepositoryRow, now_millis};
 
@@ -586,6 +586,7 @@ impl AvailableReport {
         let repository_id = source.repository_id();
         let verified = source.verified();
         for plugin in &source.index.plugins {
+            let newest = plugin.newest_compatible();
             self.plugins.push(AvailablePlugin {
                 id: plugin.id.clone(),
                 name: plugin.name.clone(),
@@ -596,9 +597,10 @@ impl AvailableReport {
                 official: plugin.official,
                 verified,
                 repository_id,
-                version: plugin
-                    .newest_compatible()
-                    .map(|version| version.version.clone()),
+                version: newest.map(|version| version.version.clone()),
+                permissions: newest
+                    .map(|version| requested_permissions_of(&version.permissions))
+                    .unwrap_or_default(),
                 unavailable: plugin.unavailable(),
             });
         }
@@ -628,6 +630,10 @@ pub struct AvailablePlugin {
     pub repository_id: Option<Uuid>,
     /// The newest version this server can install, when the index offers one.
     pub version: Option<String>,
+    /// What the offered version requests, labelled by risk; the index does not
+    /// carry `resources`, so raised resource limits show only once the plugin
+    /// is installed.
+    pub permissions: Vec<RequestedPermission>,
     /// Why the plugin cannot be installed here, when it cannot.
     pub unavailable: Option<Unavailable>,
 }

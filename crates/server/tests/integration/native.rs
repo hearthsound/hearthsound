@@ -2444,7 +2444,13 @@ mod plugin_admin {
             &document(&[entry(
                 PLUGIN_ID,
                 false,
-                &[version("0.1.0", API, &archive, &bytes, json!({}))],
+                &[version(
+                    "0.1.0",
+                    API,
+                    &archive,
+                    &bytes,
+                    json!({"http": {"hosts": ["api.example.com"]}}),
+                )],
             )]),
         )
         .await;
@@ -2483,6 +2489,15 @@ mod plugin_admin {
         assert_eq!(plugins[0]["version"], "0.1.0");
         assert_eq!(plugins[0]["repositoryId"], signed);
         assert_eq!(plugins[0]["provides"], json!(["metadata"]));
+        assert_eq!(
+            plugins[0]["permissions"],
+            json!([{
+                "scope": "http.hosts",
+                "detail": "api.example.com",
+                "risk": "low",
+            }]),
+            "the listing describes what the offered version requests"
+        );
         assert!(plugins[0]["unavailable"].is_null());
         assert_eq!(
             plugins[0]["isDefault"], false,

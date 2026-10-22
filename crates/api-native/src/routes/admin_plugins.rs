@@ -186,6 +186,9 @@ pub struct AvailablePluginView {
     pub repository_id: Option<String>,
     /// The newest version this server can install, when the index offers one.
     pub version: Option<String>,
+    /// What the offered version requests, with risk labels; empty when no
+    /// version is compatible with this server.
+    pub permissions: Vec<PermissionView>,
     /// Why the plugin cannot be installed here, when it cannot.
     pub unavailable: Option<UnavailableView>,
 }
@@ -896,6 +899,11 @@ fn available_plugin_view(plugin: AvailablePlugin) -> AvailablePluginView {
             .repository_id
             .map(|id| client_id(IdPrefix::PluginRepository, id)),
         version: plugin.version,
+        permissions: plugin
+            .permissions
+            .iter()
+            .map(PermissionView::from)
+            .collect(),
         unavailable: plugin.unavailable.map(|reason| UnavailableView {
             code: unavailable_code(&reason).to_owned(),
             detail: reason.to_string(),

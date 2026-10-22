@@ -3342,7 +3342,8 @@
           "homepage",
           "license",
           "official",
-          "verified"
+          "verified",
+          "permissions"
         ],
         "properties": {
           "description": {
@@ -3372,6 +3373,13 @@
           "official": {
             "type": "boolean",
             "description": "Whether the index says the project itself publishes the plugin."
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermissionView"
+            },
+            "description": "What the offered version requests, with risk labels; empty when no\nversion is compatible with this server."
           },
           "provides": {
             "type": "array",

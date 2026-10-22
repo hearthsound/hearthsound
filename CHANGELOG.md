@@ -43,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   something, so the running server serves the updated plugin without a
   restart.
 
+- The available-plugin listing carries `permissions`: what the offered version
+  asks for, with risk labels, so an administrator can see it before installing.
+
 ## [0.1.5] - 2026-10-22
 
 ### Added
