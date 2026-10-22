@@ -1118,7 +1118,9 @@ async fn an_automatic_update_is_served_without_a_restart() {
 
 #[tokio::test]
 async fn the_first_check_is_due_and_the_next_waits_for_the_interval() {
-    let env = Env::new().await;
+    // Automatic updates are switched off here so the test observes only the
+    // check schedule.
+    let env = Env::with_settings(&[("HEARTHSOUND__PLUGINS__AUTO_UPDATE", "false")]).await;
     serve_two_versions(&env, json!({})).await;
     env.installer
         .install_from_index(METADATA_ID, Some("0.1.0"), Some(RepositoryRef::Official))
@@ -1139,10 +1141,27 @@ async fn the_first_check_is_due_and_the_next_waits_for_the_interval() {
     handler.handle(update_job()).await.unwrap();
     assert_eq!(handler.last_check().unwrap(), report);
 
-    // Automatic updates are off by default, so the plugin still serves 0.1.0
-    // and has nothing staged.
+    // Automatic updates are off here, so the plugin still serves 0.1.0 and has
+    // nothing staged.
     let row = env.repository.plugin(METADATA_ID).await.unwrap().unwrap();
     assert_eq!(row.version, "0.1.0");
+    assert!(env.repository.upgrade(METADATA_ID).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn the_default_check_installs_an_update() {
+    let env = Env::new().await;
+    serve_two_versions(&env, json!({})).await;
+    install_v1(&env).await;
+
+    UpdateCheckJobHandler::new(env.checker())
+        .check_if_due()
+        .await
+        .unwrap();
+
+    let row = env.repository.plugin(METADATA_ID).await.unwrap().unwrap();
+    assert_eq!(row.version, "0.2.0");
+    assert!(row.enabled);
     assert!(env.repository.upgrade(METADATA_ID).await.unwrap().is_none());
 }
 

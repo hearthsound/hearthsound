@@ -2580,6 +2580,17 @@ mod plugin_admin {
         )
         .await;
 
+        // The second check only reports, so automatic updates are switched off
+        // before it runs.
+        let patched = bearer(
+            &fixture,
+            reqwest::Method::PATCH,
+            "/api/v1/admin/settings",
+            Some(serde_json::json!({ "settings": { "plugins.auto_update": false } })),
+        )
+        .await;
+        assert_eq!(patched.status(), StatusCode::OK);
+
         // A restart runs the update check with the plugin installed, so the
         // listing reports the update the check found.
         let api_key = fixture.api_key.clone();

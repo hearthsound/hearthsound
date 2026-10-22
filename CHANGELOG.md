@@ -52,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   administrator commits to it. It is gated by `plugins.allow_sideload` like the
   upload route.
 
+- `plugins.auto_update` is on by default: a new install applies the plugin
+  updates its checks find, and an update that widens the installed permission
+  set is still held for review.
+
 ## [0.1.5] - 2026-10-22
 
 ### Added

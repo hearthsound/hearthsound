@@ -1050,7 +1050,7 @@ impl SettingsRegistry {
                 def(
                     keys::PLUGINS_AUTO_UPDATE,
                     SettingKind::Bool,
-                    SettingValue::Bool(false),
+                    SettingValue::Bool(true),
                     "Whether plugin updates are installed automatically",
                 ),
                 def(
