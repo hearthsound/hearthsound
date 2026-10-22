@@ -4943,6 +4943,7 @@
           "cache",
           "folders",
           "pinnedTracks",
+          "filesystems",
           "policy"
         ],
         "properties": {
@@ -4950,16 +4951,12 @@
             "$ref": "#/components/schemas/ClassView",
             "description": "The managed evictable files under `<storage>/cache`."
           },
-          "filesystem": {
-            "oneOf": [
-              {
-                "$ref": "#/components/schemas/FilesystemView",
-                "description": "The filesystem under the cache root, when its space can be read."
-              },
-              {
-                "type": "null"
-              }
-            ]
+          "filesystems": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FilesystemView"
+            },
+            "description": "The space of every distinct filesystem the server reads or writes on:\nthe storage root's and each scanned folder's, one entry per device. The\nview adds their totals and free space, because a music library usually\nlives on a larger disk than the server's own storage."
           },
           "folders": {
             "$ref": "#/components/schemas/ClassView",

@@ -72,8 +72,11 @@ pub struct StorageReport {
     pub folders: ClassView,
     /// How many tracks carry at least one pin reason.
     pub pinned_tracks: u64,
-    /// The filesystem under the cache root, when its space can be read.
-    pub filesystem: Option<FilesystemView>,
+    /// The space of every distinct filesystem the server reads or writes on:
+    /// the storage root's and each scanned folder's, one entry per device. The
+    /// view adds their totals and free space, because a music library usually
+    /// lives on a larger disk than the server's own storage.
+    pub filesystems: Vec<FilesystemView>,
     /// The settings that decide what is kept and evicted.
     pub policy: StoragePolicy,
 }
@@ -230,7 +233,11 @@ pub async fn get_storage(
         cache: usage.cache.into(),
         folders: usage.folders.into(),
         pinned_tracks: usage.pinned_tracks,
-        filesystem: usage.filesystem.map(FilesystemView::from),
+        filesystems: usage
+            .filesystems
+            .into_iter()
+            .map(FilesystemView::from)
+            .collect(),
         policy,
     }))
 }

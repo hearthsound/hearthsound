@@ -708,7 +708,7 @@ async fn the_usage_report_counts_each_storage_class() {
     assert_eq!(usage.library.bytes, 1000);
     assert_eq!(usage.folders.files, 0);
     assert_eq!(usage.pinned_tracks, 1);
-    assert_eq!(usage.filesystem.unwrap().available_bytes, 5);
+    assert_eq!(usage.filesystems[0].available_bytes, 5);
 }
 
 /// Returns a track's active pin reasons.

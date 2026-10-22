@@ -118,7 +118,7 @@ pub struct FilesystemSpace {
 }
 
 /// What the managed roots and the scanned folders hold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageUsage {
     /// The managed permanent files under `<storage>/library`.
     pub library: ClassUsage,
@@ -128,8 +128,44 @@ pub struct StorageUsage {
     pub folders: ClassUsage,
     /// How many tracks carry at least one pin reason.
     pub pinned_tracks: u64,
-    /// The filesystem under the cache root, when its space can be read.
-    pub filesystem: Option<FilesystemSpace>,
+    /// One entry per filesystem the server reads or writes on, each counted
+    /// once: the storage root's filesystem and every scanned folder's. The
+    /// admin view adds their totals and free space, because a library usually
+    /// lives on a larger disk than the server's own storage.
+    pub filesystems: Vec<FilesystemSpace>,
+}
+
+/// Returns the device id of the filesystem a path is on.
+///
+/// # Parameters
+///
+/// - `path`: a path on the filesystem.
+///
+/// # Returns
+///
+/// The device id, or `None` when the path cannot be examined. Platforms
+/// without a device id count every path as its own filesystem.
+#[cfg(unix)]
+fn device_of(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|meta| meta.dev())
+}
+
+/// Returns a stand-in device id on platforms without one.
+///
+/// # Parameters
+///
+/// - `path`: the path to tell apart from the others.
+///
+/// # Returns
+///
+/// A hash of the path, so distinct paths count as distinct filesystems.
+#[cfg(not(unix))]
+fn device_of(path: &std::path::Path) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    Some(hasher.finish())
 }
 
 /// Reads how much space a filesystem has.
@@ -870,7 +906,7 @@ impl StorageMaintainer {
             cache: ClassUsage::default(),
             folders: ClassUsage::default(),
             pinned_tracks: 0,
-            filesystem: self.space.space(&self.roots.cache),
+            filesystems: Vec::new(),
         };
         for row in rows {
             let class = ClassUsage {
@@ -889,7 +925,52 @@ impl StorageMaintainer {
         .fetch_one(&mut *conn)
         .await?;
         usage.pinned_tracks = u64::try_from(pinned).unwrap_or(0);
+        usage.filesystems = self.filesystem_spaces(&mut conn).await?;
         Ok(usage)
+    }
+
+    /// Reads the space of every distinct filesystem the server touches.
+    ///
+    /// The storage root and each scanned folder are asked once per device, so
+    /// two folders on one disk count as one filesystem. A path that no longer
+    /// exists is skipped; a filesystem whose space cannot be read is left out.
+    ///
+    /// # Parameters
+    ///
+    /// - `conn`: the reader connection to list the folders on.
+    ///
+    /// # Returns
+    ///
+    /// The space of each distinct filesystem, in path order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError::Database`] when the folder query fails.
+    async fn filesystem_spaces(
+        &self,
+        conn: &mut sqlx::SqliteConnection,
+    ) -> Result<Vec<FilesystemSpace>, LibraryError> {
+        let folders: Vec<String> = sqlx::query_scalar!("SELECT path FROM library_folders")
+            .fetch_all(&mut *conn)
+            .await?;
+        let mut spaces = Vec::new();
+        let mut seen: Vec<u64> = Vec::new();
+        for path in std::iter::once(&self.roots.cache)
+            .map(std::path::PathBuf::as_path)
+            .chain(folders.iter().map(std::path::Path::new))
+        {
+            let Some(device) = device_of(path) else {
+                continue;
+            };
+            if seen.contains(&device) {
+                continue;
+            }
+            seen.push(device);
+            if let Some(space) = self.space.space(path) {
+                spaces.push(space);
+            }
+        }
+        Ok(spaces)
     }
 
     /// Reads the file count and bytes of one storage class.
