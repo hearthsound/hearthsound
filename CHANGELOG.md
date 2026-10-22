@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `hearthsound plugins approve` now only apply an upgrade that requests new
   permissions, and answer a conflict when none is staged.
 
+- The installed plugin view no longer carries the `approved` flag: every
+  installed plugin is granted its permissions, so the flag no longer told an
+  administrator anything they could act on.
+
 ## [0.1.5] - 2026-10-22
 
 ### Added

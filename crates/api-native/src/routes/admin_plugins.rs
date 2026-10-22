@@ -128,8 +128,6 @@ pub struct PluginView {
     pub repository_id: Option<String>,
     /// The permissions the plugin's manifest requests, with their risk labels.
     pub requested_permissions: Vec<PermissionView>,
-    /// Whether an administrator approved the plugin's permissions.
-    pub approved: bool,
     /// The newer version the last update check found, or `null`.
     pub update: Option<UpdateView>,
     /// When the plugin was installed, in unix milliseconds.
@@ -784,7 +782,6 @@ async fn plugin_view(
             .iter()
             .map(PermissionView::from)
             .collect(),
-        approved: row.approved_permissions.is_some(),
         update: update_view(
             update.as_ref(),
             staged.as_ref().map(|upgrade| upgrade.version.as_str()),

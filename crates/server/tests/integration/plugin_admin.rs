@@ -515,7 +515,6 @@ async fn an_index_url_installs_over_the_api_and_is_enabled() {
     assert_eq!(view["source"], "repository");
     assert_eq!(view["state"], "enabled");
     assert_eq!(view["enabled"], true);
-    assert_eq!(view["approved"], true);
     let repository = view["repositoryId"].as_str().unwrap().to_owned();
 
     // The index URL was registered on the way in, unsigned and so unverified.
@@ -648,7 +647,6 @@ async fn an_index_url_installs_over_the_command_line_and_is_enabled() {
     .await;
     assert_eq!(installed["state"], "enabled");
     assert_eq!(installed["enabled"], true);
-    assert_eq!(installed["approved"], true);
     assert_eq!(installed["source"], "repository");
 
     configure_metadata(&fixture, "meta").await;
@@ -735,7 +733,6 @@ async fn an_upload_installs_and_the_sideload_gate_refuses_it() {
     assert_eq!(view["source"], "sideload");
     assert_eq!(view["state"], "enabled");
     assert_eq!(view["enabled"], true);
-    assert_eq!(view["approved"], true);
     assert!(view["repositoryId"].is_null(), "{view}");
 
     configure_metadata(&fixture, "meta").await;

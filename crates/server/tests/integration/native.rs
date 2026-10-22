@@ -1865,7 +1865,6 @@ mod plugin_admin {
         assert_eq!(plugin["source"], "repository");
         assert_eq!(plugin["state"], "enabled");
         assert_eq!(plugin["enabled"], true);
-        assert_eq!(plugin["approved"], true);
         assert!(plugin["update"].is_null());
         assert!(plugin["installedAt"].is_i64());
         let repository = plugin["repositoryId"].as_str().unwrap().to_owned();
@@ -1933,7 +1932,6 @@ mod plugin_admin {
         // Installing grants the manifest's permissions and enables the plugin,
         // with no upgrade staged.
         assert_eq!(installed["state"], "enabled");
-        assert_eq!(installed["approved"], true);
         assert_eq!(installed["enabled"], true);
         let declined = bearer(
             &fixture,

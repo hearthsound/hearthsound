@@ -4186,17 +4186,12 @@
           "state",
           "enabled",
           "requestedPermissions",
-          "approved",
           "installedAt"
         ],
         "properties": {
           "api": {
             "type": "string",
             "description": "The plugin API version the component targets."
-          },
-          "approved": {
-            "type": "boolean",
-            "description": "Whether an administrator approved the plugin's permissions."
           },
           "config": {
             "oneOf": [
