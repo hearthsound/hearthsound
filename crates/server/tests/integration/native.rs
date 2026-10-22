@@ -1024,6 +1024,11 @@ async fn server_settings_are_listed_and_changed_unless_pinned() {
     assert_eq!(browse["source"], "default");
     assert_eq!(browse["value"], "permanent_only");
     assert_eq!(browse["kind"], "string");
+    // A byte-valued setting reports its unit; every other setting reports null.
+    let cache = setting(&listing, "storage.cache.max_bytes");
+    assert_eq!(cache["value"], 20 * 1024 * 1024 * 1024_i64);
+    assert_eq!(cache["unit"], "bytes");
+    assert_eq!(browse["unit"], serde_json::Value::Null);
 
     // A pinned key refuses the whole batch and is named in the problem.
     let refused = bearer(

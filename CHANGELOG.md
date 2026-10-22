@@ -65,6 +65,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A test fails when the committed document no longer matches the routes the
   crate describes.
 
+- The admin settings listing reports a setting's unit. `unit` is `bytes` on
+  `storage.cache.max_bytes`, `storage.cache.min_free_bytes` and
+  `uploads.max_file_bytes`, and null on every setting whose value carries no
+  unit.
+
+### Changed
+
+- The descriptions of `storage.cache.max_bytes`,
+  `storage.cache.min_free_bytes` and `uploads.max_file_bytes` no longer end in
+  `in bytes`; the unit travels in the listing's `unit` member instead.
+
 ### Fixed
 
 - A watched library folder no longer rescans itself forever. The watcher acted

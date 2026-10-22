@@ -219,6 +219,9 @@ pub struct SettingDef {
     pub default: SettingValue,
     /// A one-line human readable description.
     pub description: &'static str,
+    /// The unit of the value when it is a size, for example `bytes`; `None`
+    /// when the value carries no unit of its own.
+    pub unit: Option<&'static str>,
     /// Whether a user may override this setting for themselves.
     ///
     /// A user override lives in the `user_settings` table, shadows the server
@@ -573,6 +576,9 @@ const DEFAULT_NAMING_TEMPLATE: &str =
 /// Bytes in a gibibyte, used to spell out size defaults.
 const GIB: i64 = 1024 * 1024 * 1024;
 
+/// The unit of the byte-valued settings.
+const BYTES_UNIT: &str = "bytes";
+
 /// The quality profiles an operator can select.
 const QUALITY_PROFILES: &[&str] = &["lossless-preferred", "compact"];
 
@@ -617,7 +623,30 @@ fn def<T>(
         kind,
         default,
         description,
+        unit: None,
         user_overridable: false,
+    }
+}
+
+/// Builds a definition for a setting whose value is a size.
+///
+/// # Parameters
+///
+/// Same as [`def`], plus `unit`, the unit the value is expressed in.
+///
+/// # Returns
+///
+/// The definition, carrying the unit and not user overridable.
+fn unit_def<T>(
+    key: SettingKey<T>,
+    kind: SettingKind,
+    default: SettingValue,
+    unit: &'static str,
+    description: &'static str,
+) -> SettingDef {
+    SettingDef {
+        unit: Some(unit),
+        ..def(key, kind, default, description)
     }
 }
 
@@ -730,23 +759,25 @@ impl SettingsRegistry {
                     SettingValue::Integer(2_000),
                     "Quiet period after a filesystem change before a watched folder is rescanned",
                 ),
-                def(
+                unit_def(
                     keys::STORAGE_CACHE_MAX_BYTES,
                     SettingKind::Integer {
                         min: 0,
                         max: i64::MAX,
                     },
                     SettingValue::Integer(20 * GIB),
-                    "Upper bound on the total size of the cache directory, in bytes",
+                    BYTES_UNIT,
+                    "Upper bound on the total size of the cache directory",
                 ),
-                def(
+                unit_def(
                     keys::STORAGE_CACHE_MIN_FREE_BYTES,
                     SettingKind::Integer {
                         min: 0,
                         max: i64::MAX,
                     },
                     SettingValue::Integer(5 * GIB),
-                    "Free-space floor below which cache eviction runs, in bytes",
+                    BYTES_UNIT,
+                    "Free-space floor below which cache eviction runs",
                 ),
                 def(
                     keys::STORAGE_CACHE_EVICTION,
@@ -1042,14 +1073,15 @@ impl SettingsRegistry {
                     SettingValue::Bool(true),
                     "Whether user uploads are allowed",
                 ),
-                def(
+                unit_def(
                     keys::UPLOADS_MAX_FILE_BYTES,
                     SettingKind::Integer {
                         min: 0,
                         max: i64::MAX,
                     },
                     SettingValue::Integer(2 * GIB),
-                    "Maximum size in bytes of a single uploaded file",
+                    BYTES_UNIT,
+                    "Maximum size of a single uploaded file",
                 ),
                 def(
                     keys::USERS_DEFAULT_PERMISSIONS,

@@ -44,6 +44,9 @@ pub struct ServerSetting {
     /// The values a `string` or `stringList` setting accepts, in the registry's
     /// order; empty when the setting accepts any text.
     pub allowed: Vec<String>,
+    /// The unit of the value when it is a size, for example `bytes`; null when
+    /// the value carries no unit.
+    pub unit: Option<String>,
     /// Whether users may override the setting for themselves.
     pub user_overridable: bool,
     /// What the setting does.
@@ -192,10 +195,8 @@ fn server_setting(
     entry: &SettingEntry,
     registry: &SettingsRegistry,
 ) -> ServerSetting {
-    let kind = registry
-        .def(entry.key)
-        .map(|def| kind_name(&def.kind))
-        .unwrap_or("unknown");
+    let def = registry.def(entry.key);
+    let kind = def.map(|def| kind_name(&def.kind)).unwrap_or("unknown");
     ServerSetting {
         key: entry.key.to_owned(),
         value: setting_json(&entry.value),
@@ -205,6 +206,7 @@ fn server_setting(
         environment_pinned: state.settings().is_environment_override(entry.key),
         kind: kind.to_owned(),
         allowed: allowed_values(registry, entry.key),
+        unit: def.and_then(|def| def.unit).map(str::to_owned),
         user_overridable: entry.user_overridable,
         description: entry.description.to_owned(),
     }

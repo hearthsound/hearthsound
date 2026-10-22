@@ -4778,6 +4778,13 @@
             "type": "string",
             "description": "The layer that supplied the value: `environment`, `file`, `database`,\nor `default`."
           },
+          "unit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The unit of the value when it is a size, for example `bytes`; null when\nthe value carries no unit."
+          },
           "userOverridable": {
             "type": "boolean",
             "description": "Whether users may override the setting for themselves."
