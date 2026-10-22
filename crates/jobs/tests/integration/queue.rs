@@ -184,7 +184,9 @@ async fn extend_lock_holds_a_claim_past_its_original_deadline() {
     let queue = JobQueue::new(
         &database,
         QueueOptions {
-            lock_duration: Duration::from_millis(60),
+            // Wide enough that a slow CI runner's database writes between the
+            // sleeps cannot eat the margin; a 60 ms lock failed there.
+            lock_duration: Duration::from_millis(1_200),
             ..QueueOptions::default()
         },
     );
@@ -200,12 +202,12 @@ async fn extend_lock_holds_a_claim_past_its_original_deadline() {
         "the heartbeat does not move the deadline backwards"
     );
 
-    tokio::time::sleep(Duration::from_millis(45)).await;
+    tokio::time::sleep(Duration::from_millis(900)).await;
     assert!(queue.extend_lock(enqueued.id).await.unwrap());
-    tokio::time::sleep(Duration::from_millis(45)).await;
+    tokio::time::sleep(Duration::from_millis(900)).await;
     assert!(
         queue.claim().await.unwrap().is_none(),
-        "eighty milliseconds into a sixty millisecond lock the heartbeat still holds the claim"
+        "1.8 s into a 1.2 s lock the heartbeat still holds the claim"
     );
 
     assert!(queue.complete(enqueued.id).await.unwrap());
