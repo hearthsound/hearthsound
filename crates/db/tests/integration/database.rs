@@ -120,3 +120,125 @@ async fn backs_up_before_upgrading_a_populated_database() {
 
     db.close().await;
 }
+
+/// Copies the migrations a database that predates the plugin grant has applied.
+///
+/// The shipped migrations are immutable, so the versions that precede the grant are
+/// selected by their numeric prefix and copied byte for byte into `dir`. A migrator
+/// built over `dir` therefore sees exactly the schema such a database carried.
+fn copy_pre_grant_migrations(dir: &Path) {
+    let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations"));
+    let prefixes = ["0001_", "0002_", "0003_", "0004_"];
+    let mut copied = 0;
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if prefixes.iter().any(|prefix| name.starts_with(prefix)) {
+            std::fs::copy(entry.path(), dir.join(&name)).unwrap();
+            copied += 1;
+        }
+    }
+    assert_eq!(
+        copied,
+        prefixes.len(),
+        "the migrations directory must hold the four migrations that precede the grant"
+    );
+}
+
+#[tokio::test]
+async fn a_pending_plugin_is_granted_its_manifest_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let migrations = tempfile::tempdir().unwrap();
+    copy_pre_grant_migrations(migrations.path());
+
+    let db = open_temp(dir.path()).await;
+    let backups = dir.path().join("backups");
+    let earlier = Migrator::new(migrations.path()).await.unwrap();
+    let outcome = db.migrate(&earlier, &backups).await.unwrap();
+    assert_eq!(outcome.from, 0);
+    assert_eq!(outcome.to, 4);
+
+    // Every row but the control is what an install recorded before this release: the
+    // manifest is stored, no grant is recorded, and the plugin is disabled. A manifest
+    // always carries a `permissions` object, so an install that requests nothing spells
+    // it as `"permissions": {}` rather than omitting the key.
+    //
+    // The control's grant is written with a space the migration's `json_extract` would
+    // not produce, so any rewrite of a row that already holds a grant shows up.
+    let rows: [(&str, &str, Option<&str>, i64); 3] = [
+        (
+            "com.example.granted",
+            r#"{"permissions":{"kv":{"maxBytes":1024}}}"#,
+            Some(r#"{"kv": {"maxBytes": 1024}}"#),
+            1,
+        ),
+        (
+            "com.example.pending-empty",
+            r#"{"permissions":{}}"#,
+            None,
+            0,
+        ),
+        (
+            "com.example.pending-hosts",
+            r#"{"permissions":{"http":{"hosts":["api.example.com"]}}}"#,
+            None,
+            0,
+        ),
+    ];
+    for (index, (id, manifest, grant, enabled)) in rows.into_iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO plugins \
+             (id, version, api, manifest, sha256, source, approved_permissions, enabled, installed_at) \
+             VALUES (?, '1.0.0', 'hearthsound:plugin@0.2.0', ?, ?, 'sideload', ?, ?, 1)",
+        )
+        .bind(id)
+        .bind(manifest)
+        .bind(vec![index as u8 + 1; 32])
+        .bind(grant)
+        .bind(enabled)
+        .execute(db.writer())
+        .await
+        .unwrap();
+    }
+
+    let outcome = db
+        .migrate(&hearthsound_db::MIGRATOR, &backups)
+        .await
+        .unwrap();
+    assert_eq!(outcome.from, 4);
+    assert!(
+        outcome.to >= 5,
+        "the full migrator must apply the grant over the earlier schema"
+    );
+
+    let granted: Vec<(String, Option<String>, i64)> =
+        sqlx::query_as("SELECT id, approved_permissions, enabled FROM plugins ORDER BY id")
+            .fetch_all(db.writer())
+            .await
+            .unwrap();
+
+    assert_eq!(
+        granted,
+        vec![
+            (
+                "com.example.granted".to_owned(),
+                Some(r#"{"kv": {"maxBytes": 1024}}"#.to_owned()),
+                1,
+            ),
+            (
+                "com.example.pending-empty".to_owned(),
+                Some("{}".to_owned()),
+                1,
+            ),
+            (
+                "com.example.pending-hosts".to_owned(),
+                Some(r#"{"http":{"hosts":["api.example.com"]}}"#.to_owned()),
+                1,
+            ),
+        ],
+        "a pending row is granted its stored manifest's permissions and enabled, and an \
+         existing grant is left alone"
+    );
+
+    db.close().await;
+}

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A plugin that an earlier release left waiting for approval is granted the
+  permissions its stored manifest requests and enabled when the database
+  upgrades.
+
 ## [0.1.5] - 2026-10-22
 
 ### Added
