@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An installed plugin's view carries `upgrade`: the version staged for review
   with everything it asks for and the permissions it adds.
 
+- The provider registry is rebuilt after an automatic plugin update installs
+  something, so the running server serves the updated plugin without a
+  restart.
+
 ## [0.1.5] - 2026-10-22
 
 ### Added

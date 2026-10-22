@@ -13,7 +13,9 @@
 //! `plugins.update_check_hours`; zero switches the checks off. When
 //! `plugins.auto_update` is on, every update the check finds is installed - and
 //! an upgrade that widens the installed permission set still waits for review,
-//! because the install path stages it instead of switching it in.
+//! because the install path stages it instead of switching it in. An update
+//! that does switch a plugin over rebuilds the provider registry, so the
+//! instances built from the old version serve the new one without a restart.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -27,6 +29,7 @@ use uuid::Uuid;
 
 use crate::index::Index;
 use crate::installer::{PluginInstaller, RepositoryRef};
+use crate::registry::ProviderRegistry;
 use crate::repo::{PluginRepository, PluginRow, PluginSource, now_millis};
 
 /// The job kind of the plugin update check.
@@ -323,6 +326,8 @@ pub struct UpdateCheckJobHandler {
     checker: Arc<UpdateChecker>,
     /// What the last completed check found, `None` before the first one.
     last: Mutex<Option<UpdateCheckReport>>,
+    /// The registry rebuilt after an automatic update switched a plugin over.
+    registry: Option<Arc<ProviderRegistry>>,
 }
 
 impl UpdateCheckJobHandler {
@@ -335,7 +340,23 @@ impl UpdateCheckJobHandler {
         UpdateCheckJobHandler {
             checker,
             last: Mutex::new(None),
+            registry: None,
         }
+    }
+
+    /// Rebuilds `registry` after an automatic update switches a plugin over.
+    ///
+    /// The registry holds the provider instances built from each plugin's
+    /// installed version, and an in-process update changes that version without
+    /// waking anything else. A composition root hands its own registry here so
+    /// the check leaves the server serving the version it installed.
+    ///
+    /// # Parameters
+    ///
+    /// - `registry`: the registry the server resolves providers from.
+    pub fn with_registry(mut self, registry: Arc<ProviderRegistry>) -> UpdateCheckJobHandler {
+        self.registry = Some(registry);
+        self
     }
 
     /// Returns what the last completed check found.
@@ -394,7 +415,23 @@ impl UpdateCheckJobHandler {
     /// What the check found.
     async fn run(&self, checked_at: i64) -> UpdateCheckReport {
         let updates = self.checker.check().await;
-        self.checker.apply_auto_updates(&updates).await;
+        let applied = self.checker.apply_auto_updates(&updates).await;
+        if !applied.is_empty()
+            && let Some(registry) = &self.registry
+        {
+            // A rebuild that fails leaves the previous entries in place, which
+            // is what the server keeps serving; it never fails the check.
+            match registry.rebuild().await {
+                Ok(report) => tracing::info!(
+                    instances = report.instances,
+                    "rebuilt the provider registry after plugin updates"
+                ),
+                Err(error) => tracing::error!(
+                    %error,
+                    "could not rebuild the provider registry after plugin updates"
+                ),
+            }
+        }
         let report = UpdateCheckReport {
             checked_at,
             updates,

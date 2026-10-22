@@ -13,15 +13,16 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use hearthsound_config::secret::{SecretBox, SecretKey};
 use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore};
-use hearthsound_core::{Priority, new_uuid_v7};
+use hearthsound_core::{Layer, Priority, new_uuid_v7};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_jobs::{Job, JobHandler, JobKind, JobState};
 use hearthsound_plugin_host::manifest::SUPPORTED_API;
 use hearthsound_plugin_host::{
-    IndexClient, InstallError, PluginAdmin, PluginHost, PluginInstaller, PluginRepository,
-    PluginSource, PluginState, RepositoryRef, UPDATE_CHECK_JOB_KIND, Unavailable,
-    UpdateCheckJobHandler, UpdateChecker,
+    IndexClient, InstallError, InstanceService, InstanceSpec, PluginAdmin, PluginHost,
+    PluginInstaller, PluginRepository, PluginSource, PluginState, ProviderRegistry, RepositoryRef,
+    UPDATE_CHECK_JOB_KIND, Unavailable, UpdateCheckJobHandler, UpdateChecker,
 };
 use hearthsound_test_support::{METADATA_FIXTURE, fixture_plugin};
 use minisign::KeyPair;
@@ -93,6 +94,10 @@ struct Env {
     server: MockServer,
     /// The key the official index is signed with.
     signer: Signer,
+    /// The plugin host the instances are built through.
+    host: Arc<PluginHost>,
+    /// The key material instance secrets are encrypted with.
+    secrets: SecretBox,
     /// The repository rows.
     repository: PluginRepository,
     /// The admin write path every install goes through.
@@ -126,6 +131,7 @@ impl Env {
             PluginHost::new(dir.path().join("plugins"), settings, Arc::clone(&database)).unwrap(),
         );
         let repository = PluginRepository::new(&database);
+        let secrets = SecretKey::generate().secret_box();
         let admin = Arc::new(PluginAdmin::new(
             Arc::clone(&host),
             repository.clone(),
@@ -143,6 +149,8 @@ impl Env {
             dir,
             server,
             signer,
+            host,
+            secrets,
             repository,
             admin,
             installer,
@@ -175,6 +183,24 @@ impl Env {
             Arc::clone(&self.installer),
             self.repository.clone(),
         ))
+    }
+
+    /// The instance service over this environment.
+    fn service(&self) -> InstanceService {
+        InstanceService::new(
+            Arc::clone(&self.host),
+            self.repository.clone(),
+            self.secrets.clone(),
+        )
+    }
+
+    /// An empty provider registry over this environment.
+    fn registry(&self) -> ProviderRegistry {
+        ProviderRegistry::new(
+            Arc::clone(&self.host),
+            self.repository.clone(),
+            self.secrets.clone(),
+        )
     }
 
     /// Serves the official index and its signature.
@@ -1029,6 +1055,47 @@ async fn an_upgrade_that_asks_for_more_waits_for_review() {
     let applied = env.admin.apply_upgrade(METADATA_ID).await.unwrap();
     assert_eq!(applied.version, "0.2.0");
     assert!(!env.plugins_dir().join(METADATA_ID).join("0.1.0").exists());
+}
+
+#[tokio::test]
+async fn an_automatic_update_is_served_without_a_restart() {
+    let env = Env::with_settings(&[("HEARTHSOUND__PLUGINS__AUTO_UPDATE", "true")]).await;
+    serve_two_versions(&env, json!({})).await;
+    install_v1(&env).await;
+
+    let service = env.service();
+    service
+        .create(&InstanceSpec {
+            slug: "meta1".to_owned(),
+            plugin_id: METADATA_ID.to_owned(),
+            display_name: "meta1 display".to_owned(),
+            server_config: json!({}),
+            host_config: Value::Null,
+        })
+        .await
+        .unwrap();
+    service
+        .set_layer(Layer::Metadata, &["meta1".to_owned()])
+        .await
+        .unwrap();
+
+    let registry = Arc::new(env.registry());
+    registry.rebuild().await.unwrap();
+    assert_eq!(
+        registry.instance("meta1").unwrap().plugin_version(),
+        "0.1.0"
+    );
+
+    UpdateCheckJobHandler::new(env.checker())
+        .with_registry(Arc::clone(&registry))
+        .check_if_due()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        registry.instance("meta1").unwrap().plugin_version(),
+        "0.2.0"
+    );
 }
 
 #[tokio::test]

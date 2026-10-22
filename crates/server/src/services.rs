@@ -289,7 +289,10 @@ impl Services {
             Arc::clone(&installer),
             repository.clone(),
         ));
-        let update_job = Arc::new(UpdateCheckJobHandler::new(Arc::clone(&update_checker)));
+        let update_job = Arc::new(
+            UpdateCheckJobHandler::new(Arc::clone(&update_checker))
+                .with_registry(Arc::clone(&registry)),
+        );
 
         let catalog = Arc::new(CatalogService::new(
             Arc::clone(&registry),
