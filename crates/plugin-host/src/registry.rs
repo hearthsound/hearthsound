@@ -623,11 +623,11 @@ fn assigned_layers(order: &BTreeMap<Layer, Vec<uuid::Uuid>>, id: uuid::Uuid) -> 
     layers
 }
 
-/// Reads the permissions an administrator approved for a plugin.
+/// Reads the permissions granted to a plugin.
 ///
-/// The approved set is what the instance's imports check against, so it is the
-/// row's value and not the manifest's: a plugin that was installed before the
-/// administrator reviewed its permissions keeps the approved set.
+/// The granted set is what the instance's imports check against, so it is the
+/// row's value and not the manifest's. A row without a grant, which only a
+/// hand-edited database can hold, reaches nothing.
 fn approved_permissions(plugin: &PluginRow) -> Result<Permissions, String> {
     match plugin.approved_permissions.as_deref() {
         Some(json) => serde_json::from_str(json)

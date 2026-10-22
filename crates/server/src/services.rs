@@ -118,7 +118,8 @@ pub struct Services {
     instances: InstanceService,
     /// The plugin tables the admin views and the repository routes read.
     plugin_repository: PluginRepository,
-    /// The administrative plugin write path: install, approve, switch, remove.
+    /// The administrative plugin write path: install, apply a staged upgrade,
+    /// switch, remove.
     admin: Arc<PluginAdmin>,
     /// The installer the admin routes install from indexes and repository URLs
     /// with.
@@ -520,8 +521,9 @@ impl Services {
 
     /// Returns the administrative plugin write path.
     ///
-    /// The native admin routes install through the installer and approve,
-    /// switch and remove through this service, which is why both are exposed.
+    /// The native admin routes install through the installer and apply a staged
+    /// upgrade, switch and remove through this service, which is why both are
+    /// exposed.
     pub fn admin(&self) -> &Arc<PluginAdmin> {
         &self.admin
     }
@@ -529,7 +531,8 @@ impl Services {
     /// Returns the plugin installer.
     ///
     /// An install resolves an index or a repository URL, verifies the download
-    /// and records the plugin as pending approval.
+    /// and records the plugin with the permissions its manifest requests,
+    /// enabled.
     pub fn installer(&self) -> &Arc<PluginInstaller> {
         &self.installer
     }

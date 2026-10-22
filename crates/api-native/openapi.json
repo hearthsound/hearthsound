@@ -829,7 +829,7 @@
           "admin"
         ],
         "summary": "Lists the installed plugins.",
-        "description": "Each plugin reports its state, the permissions its manifest requests with\ntheir risk labels, whether an administrator approved them, and the newer\nversion the last completed update check found.\n\n# Errors\n\nAnswers `internal` when the plugin rows or a stored manifest cannot be read.",
+        "description": "Each plugin reports its state, the permissions its manifest requests with\ntheir risk labels, and the newer version the last completed update check\nfound.\n\n# Errors\n\nAnswers `internal` when the plugin rows or a stored manifest cannot be read.",
         "operationId": "list_plugins",
         "responses": {
           "200": {
@@ -857,7 +857,7 @@
           "admin"
         ],
         "summary": "Installs a plugin from an index or a repository URL.",
-        "description": "The plugin is recorded as pending approval, so an administrator still grants\nthe permissions it requests. An install with `source` `index` reads the\nofficial index, or the repository `repositoryId` names; an install with\n`source` `url` registers the repository at `url` when it is new, which\n`plugins.allow_third_party_repositories` gates.\n\n# Errors\n\nAnswers `invalid-request` for a malformed body, `not-found` for an unknown\nrepository or plugin id, `conflict` when the version is already installed or\nolder than the installed one, `repositories-disabled` when a new third-party\nrepository may not be added, `signature-invalid` when an index's signature\ndoes not verify, `integrity-failed` when an archive is not what the index\ndeclares, `index-unavailable` when an index or archive cannot be\ndownloaded, `invalid-plugin` when an archive is not a plugin this server can\nhost, and `internal` when the tables cannot be read or written.",
+        "description": "The plugin is installed with the permissions its manifest requests and\nenabled; a newer version of an installed plugin replaces it unless it\nrequests permissions the installed version does not hold, in which case it\nis staged for review. An install with `source` `index` reads the\nofficial index, or the repository `repositoryId` names; an install with\n`source` `url` registers the repository at `url` when it is new, which\n`plugins.allow_third_party_repositories` gates.\n\n# Errors\n\nAnswers `invalid-request` for a malformed body, `not-found` for an unknown\nrepository or plugin id, `conflict` when the version is already installed or\nolder than the installed one, `repositories-disabled` when a new third-party\nrepository may not be added, `signature-invalid` when an index's signature\ndoes not verify, `integrity-failed` when an archive is not what the index\ndeclares, `index-unavailable` when an index or archive cannot be\ndownloaded, `invalid-plugin` when an archive is not a plugin this server can\nhost, and `internal` when the tables cannot be read or written.",
         "operationId": "install_plugin",
         "requestBody": {
           "content": {
@@ -871,7 +871,7 @@
         },
         "responses": {
           "201": {
-            "description": "The plugin was installed and waits for approval",
+            "description": "The plugin was installed, or its upgrade was staged for review",
             "content": {
               "application/json": {
                 "schema": {
@@ -1008,7 +1008,7 @@
           "admin"
         ],
         "summary": "Installs a plugin from an uploaded `.hsplugin` file.",
-        "description": "The request is `multipart/form-data` with one `file` part. The file is staged\nin the plugins directory, installed as a sideloaded plugin and recorded as\npending approval, and the staged file is removed whichever way the install\nends. `plugins.allow_sideload` gates the whole route.\n\n# Errors\n\nAnswers `sideload-disabled` when uploading a plugin is switched off,\n`invalid-request` when the body is not multipart, has no `file` part or is\nmalformed, `conflict` when the version is already installed or older,\n`invalid-plugin` when the file is not a plugin this server can host, and\n`internal` when the file cannot be staged or the tables cannot be written.",
+        "description": "The request is `multipart/form-data` with one `file` part. The file is staged\nin the plugins directory, installed as a sideloaded plugin with the\npermissions its manifest requests and enabled, and the staged file is\nremoved whichever way the install ends. A newer version of an installed\nplugin replaces it unless it requests permissions the installed version does\nnot hold, in which case it is staged for review. `plugins.allow_sideload`\ngates the whole route.\n\n# Errors\n\nAnswers `sideload-disabled` when uploading a plugin is switched off,\n`invalid-request` when the body is not multipart, has no `file` part or is\nmalformed, `conflict` when the version is already installed or older,\n`invalid-plugin` when the file is not a plugin this server can host, and\n`internal` when the file cannot be staged or the tables cannot be written.",
         "operationId": "upload_plugin",
         "requestBody": {
           "description": "One `file` part holding a `.hsplugin` archive",
@@ -1018,7 +1018,7 @@
         },
         "responses": {
           "201": {
-            "description": "The plugin was installed and waits for approval",
+            "description": "The plugin was installed, or its upgrade was staged for review",
             "content": {
               "application/json": {
                 "schema": {
@@ -1176,8 +1176,8 @@
         "tags": [
           "admin"
         ],
-        "summary": "Approves a plugin's requested permissions, or applies its staged upgrade.",
-        "description": "A plugin waiting for its first approval is enabled once approved; a plugin\nwith a staged upgrade switches to the new version and the files of the old\none are removed.\n\n# Errors\n\nAnswers `not-found` for an unknown plugin and `conflict` when the plugin has\nneither an approval pending nor a staged upgrade.",
+        "summary": "Applies a plugin's staged upgrade.",
+        "description": "The plugin switches to the new version, which replaces the permissions the\ninstalled version holds, and the files of the old version are removed.\n\n# Errors\n\nAnswers `not-found` for an unknown plugin and `conflict` when the plugin has\nno staged upgrade.",
         "operationId": "approve_plugin",
         "parameters": [
           {
@@ -1192,7 +1192,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The plugin was approved or its upgrade applied",
+            "description": "The staged upgrade was applied",
             "content": {
               "application/json": {
                 "schema": {
@@ -1212,7 +1212,7 @@
             }
           },
           "409": {
-            "description": "The plugin has nothing to approve",
+            "description": "No upgrade is staged",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1298,8 +1298,8 @@
         "tags": [
           "admin"
         ],
-        "summary": "Switches an approved plugin off.",
-        "description": "# Errors\n\nAnswers `not-found` for an unknown plugin and `conflict` while the plugin\nawaits approval.",
+        "summary": "Switches a plugin off.",
+        "description": "# Errors\n\nAnswers `not-found` for an unknown plugin.",
         "operationId": "disable_plugin",
         "parameters": [
           {
@@ -1332,16 +1332,6 @@
                 }
               }
             }
-          },
-          "409": {
-            "description": "The plugin is pending approval",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
           }
         },
         "security": [
@@ -1359,8 +1349,8 @@
         "tags": [
           "admin"
         ],
-        "summary": "Switches an approved plugin on.",
-        "description": "# Errors\n\nAnswers `not-found` for an unknown plugin and `conflict` while the plugin\nawaits approval, which gates enabling.",
+        "summary": "Switches a plugin on.",
+        "description": "# Errors\n\nAnswers `not-found` for an unknown plugin.",
         "operationId": "enable_plugin",
         "parameters": [
           {
@@ -1386,16 +1376,6 @@
           },
           "404": {
             "description": "No such plugin is installed",
-            "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The plugin is pending approval",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -4231,7 +4211,7 @@
           },
           "enabled": {
             "type": "boolean",
-            "description": "Whether the plugin is active. A plugin pending approval is never active."
+            "description": "Whether the plugin is active."
           },
           "id": {
             "type": "string",
@@ -4277,7 +4257,7 @@
           },
           "state": {
             "type": "string",
-            "description": "The lifecycle state: `pending-approval`, `disabled`, `enabled` or\n`upgrade-pending-approval`."
+            "description": "The lifecycle state: `disabled`, `enabled` or\n`upgrade-pending-approval`."
           },
           "update": {
             "oneOf": [

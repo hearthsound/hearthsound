@@ -73,7 +73,8 @@ pub struct NativeServices {
     pub plugins: Arc<PluginHost>,
     /// The write side of the plugin instance and layer tables.
     pub instances: InstanceService,
-    /// The administrative plugin lifecycle: install, approve, switch, remove.
+    /// The administrative plugin lifecycle: install, apply a staged upgrade,
+    /// switch, remove.
     pub admin: Arc<PluginAdmin>,
     /// The installer that resolves plugin indexes and repository URLs.
     pub installer: Arc<PluginInstaller>,

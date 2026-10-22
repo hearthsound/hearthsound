@@ -601,8 +601,6 @@ fn plugins_providers_and_layers_configure_the_hello_fixture() {
     );
     assert!(installed.contains("provides: catalog"), "{installed}");
 
-    succeeded(&sandbox.run(&["plugins", "approve", "com.example.hello-catalog"]));
-
     let listed = succeeded(&sandbox.run(&["plugins", "list"]));
     assert!(
         listed.contains("com.example.hello-catalog 0.1.0"),
@@ -662,12 +660,12 @@ fn plugins_install_can_record_a_bundled_plugin() {
     assert!(installed.contains("(bundled)"), "{installed}");
 
     let listed = succeeded(&sandbox.run(&["plugins", "list"]));
-    assert!(listed.contains("(bundled, pending-approval)"), "{listed}");
+    assert!(listed.contains("(bundled, enabled)"), "{listed}");
 }
 
-/// `plugins install` prints the requested permissions and waits for approval.
+/// `plugins install` grants the requested permissions and prints them.
 #[test]
-fn plugins_install_waits_for_approval_and_reports_the_requested_permissions() {
+fn plugins_install_grants_and_reports_the_requested_permissions() {
     let sandbox = Sandbox::new("");
     let archive = hearthsound_test_support::fixture_plugin(hearthsound_test_support::HELLO_CATALOG);
     let id = "com.example.hello-catalog";
@@ -682,30 +680,15 @@ fn plugins_install_waits_for_approval_and_reports_the_requested_permissions() {
         installed.contains("medium") && installed.contains("$config:coverUrl (http.hosts)"),
         "{installed}"
     );
-    assert!(
-        installed
-            .contains("approve it with: hearthsound plugins approve com.example.hello-catalog"),
-        "{installed}"
-    );
-
-    let listed = succeeded(&sandbox.run(&["plugins", "list"]));
-    assert!(
-        listed.contains("com.example.hello-catalog 0.1.0 (sideload, pending-approval)"),
-        "{listed}"
-    );
-    assert!(listed.contains("$config:coverUrl (http.hosts)"), "{listed}");
-
-    let approved = succeeded(&sandbox.run(&["plugins", "approve", id]));
-    assert!(
-        approved.contains("approved com.example.hello-catalog 0.1.0 and enabled it"),
-        "{approved}"
-    );
+    assert!(installed.contains("state: enabled"), "{installed}");
+    assert!(!installed.contains("approve it with"), "{installed}");
 
     let listed = succeeded(&sandbox.run(&["plugins", "list"]));
     assert!(
         listed.contains("com.example.hello-catalog 0.1.0 (sideload, enabled)"),
         "{listed}"
     );
+    assert!(listed.contains("$config:coverUrl (http.hosts)"), "{listed}");
 
     succeeded(&sandbox.run(&["plugins", "enable", id]));
     let disabled = succeeded(&sandbox.run(&["plugins", "disable", id]));
@@ -721,12 +704,11 @@ fn plugins_install_waits_for_approval_and_reports_the_requested_permissions() {
     );
 }
 
-/// A plugin that requests no permissions still waits for approval.
+/// A plugin that requests no permissions is installed and enabled anyway.
 #[test]
 fn plugins_install_reports_a_plugin_that_requests_no_permissions() {
     let sandbox = Sandbox::new("");
     let archive = hearthsound_test_support::fixture_plugin(hearthsound_test_support::ALBUM_CATALOG);
-    let id = "com.example.album-catalog";
 
     let installed = succeeded(&sandbox.run(&["plugins", "install", archive.to_str().unwrap()]));
     assert!(
@@ -734,25 +716,14 @@ fn plugins_install_reports_a_plugin_that_requests_no_permissions() {
         "{installed}"
     );
     assert!(installed.contains("requests no permissions"), "{installed}");
-    assert!(
-        installed
-            .contains("approve it with: hearthsound plugins approve com.example.album-catalog"),
-        "{installed}"
-    );
+    assert!(installed.contains("state: enabled"), "{installed}");
 
-    let listed = succeeded(&sandbox.run(&["plugins", "list"]));
-    assert!(
-        listed.contains("com.example.album-catalog 0.1.0 (sideload, pending-approval)"),
-        "{listed}"
-    );
-    assert!(listed.contains("  requests no permissions"), "{listed}");
-
-    succeeded(&sandbox.run(&["plugins", "approve", id]));
     let listed = succeeded(&sandbox.run(&["plugins", "list"]));
     assert!(
         listed.contains("com.example.album-catalog 0.1.0 (sideload, enabled)"),
         "{listed}"
     );
+    assert!(listed.contains("  requests no permissions"), "{listed}");
 }
 
 /// A newer version that asks for more waits, and declining it clears the wait.
@@ -763,7 +734,6 @@ fn plugins_decline_upgrade_discards_the_parked_version() {
     let archive = hearthsound_test_support::fixture_plugin(hearthsound_test_support::HELLO_CATALOG);
 
     succeeded(&sandbox.run(&["plugins", "install", archive.to_str().unwrap()]));
-    succeeded(&sandbox.run(&["plugins", "approve", id]));
 
     let upgraded = repacked_hello_catalog(
         &sandbox.data(),
@@ -785,7 +755,10 @@ fn plugins_decline_upgrade_discards_the_parked_version() {
         listed.contains("com.example.hello-catalog 0.1.0 (sideload, upgrade-pending-approval)"),
         "{listed}"
     );
-    assert!(listed.contains("waiting for approval: 0.2.0"), "{listed}");
+    assert!(
+        listed.contains("upgrade waiting for review: 0.2.0"),
+        "{listed}"
+    );
 
     let declined = succeeded(&sandbox.run(&["plugins", "decline-upgrade", id]));
     assert!(
@@ -802,7 +775,7 @@ fn plugins_decline_upgrade_discards_the_parked_version() {
         listed.contains("com.example.hello-catalog 0.1.0 (sideload, enabled)"),
         "{listed}"
     );
-    assert!(!listed.contains("waiting for approval"), "{listed}");
+    assert!(!listed.contains("upgrade waiting for review"), "{listed}");
     assert!(
         !sandbox
             .data()
@@ -824,7 +797,6 @@ fn plugins_remove_deletes_the_plugin_and_its_files() {
     std::fs::create_dir_all(&downloads).unwrap();
 
     succeeded(&sandbox.run(&["plugins", "install", archive.to_str().unwrap()]));
-    succeeded(&sandbox.run(&["plugins", "approve", id]));
     succeeded(&sandbox.run(&[
         "providers",
         "add",
@@ -881,15 +853,13 @@ fn plugin_lifecycle_commands_refuse_forbidden_operations() {
 
     succeeded(&sandbox.run(&["plugins", "install", archive.to_str().unwrap()]));
 
-    for command in ["enable", "disable"] {
-        let refused = sandbox.run(&["plugins", command, id]);
-        assert_eq!(refused.status.code(), Some(1));
-        assert!(
-            stderr(&refused).contains("is pending approval"),
-            "{}",
-            stderr(&refused)
-        );
-    }
+    let nothing_to_approve = sandbox.run(&["plugins", "approve", id]);
+    assert_eq!(nothing_to_approve.status.code(), Some(1));
+    assert!(
+        stderr(&nothing_to_approve).contains("has no staged upgrade"),
+        "{}",
+        stderr(&nothing_to_approve)
+    );
 
     let nothing_to_decline = sandbox.run(&["plugins", "decline-upgrade", id]);
     assert_eq!(nothing_to_decline.status.code(), Some(1));
@@ -897,15 +867,6 @@ fn plugin_lifecycle_commands_refuse_forbidden_operations() {
         stderr(&nothing_to_decline).contains("has no staged upgrade"),
         "{}",
         stderr(&nothing_to_decline)
-    );
-
-    succeeded(&sandbox.run(&["plugins", "approve", id]));
-    let nothing_to_approve = sandbox.run(&["plugins", "approve", id]);
-    assert_eq!(nothing_to_approve.status.code(), Some(1));
-    assert!(
-        stderr(&nothing_to_approve).contains("has nothing to approve"),
-        "{}",
-        stderr(&nothing_to_approve)
     );
 
     let unknown_remove = sandbox.run(&["plugins", "remove", "com.example.absent"]);

@@ -1,15 +1,14 @@
 //! `hearthsound plugins`: install plugins, manage their lifecycle, and list
 //! them.
 //!
-//! Installing records the plugin as pending approval: the manifest's requested
-//! permissions are what the administrator is being asked for, not what they
-//! have granted. A plugin comes from an archive, from an index, or from the URL
-//! of an index document a repository publishes. `approve` grants the requested
-//! permissions, `enable` and `disable` switch an approved plugin,
-//! `decline-upgrade` discards a newer version that asks for more than the
-//! installed one, and `remove` deletes the plugin's rows and files. The host
-//! still checks the approved set inside every import, so a plugin cannot use a
-//! permission the administrator did not approve.
+//! Installing records the permissions the plugin's manifest requests as the
+//! grant and enables it. A plugin comes from an archive, from an index, or from
+//! the URL of an index document a repository publishes. Only an upgrade that
+//! asks for a permission the installed version does not hold is staged for
+//! review: `approve` applies that upgrade, `decline-upgrade` discards it,
+//! `enable` and `disable` switch a plugin, and `remove` deletes the plugin's
+//! rows and files. The host still checks the granted set inside every import,
+//! so a plugin cannot use a permission its manifest did not request.
 //!
 //! The index-backed commands are also how a repository is administered:
 //! `repositories add`, `list`, and `remove` are the command line's half of the
@@ -79,10 +78,9 @@ fn repository(context: &Context) -> PluginRepository {
 
 /// Installs a plugin from an archive, from an index, or from an index URL.
 ///
-/// Every path ends in the same notice: the plugin is installed, it waits for
-/// approval, and the permissions its manifest requests are printed with their
-/// risk labels, followed by the approval command, so the operator sees what
-/// they would be granting.
+/// Every path ends in the same notice: the plugin is installed, the permissions
+/// its manifest requests are printed with their risk labels, and its lifecycle
+/// state is reported.
 ///
 /// # Parameters
 ///
@@ -107,7 +105,7 @@ async fn install(context: &Context, args: InstallPluginArgs) -> anyhow::Result<(
             let file = PathBuf::from(&args.target);
             context
                 .plugin_admin()?
-                .install_archive(&file, None, source, None, false)
+                .install_archive(&file, None, source, None)
                 .await
                 .with_context(|| format!("could not install {}", file.display()))?
         }
@@ -131,7 +129,22 @@ async fn install(context: &Context, args: InstallPluginArgs) -> anyhow::Result<(
                 .with_context(|| format!("could not install `{}` from {url}", args.target))?
         }
     };
-    print_registration(&registration);
+    let repository = repository(context);
+    let Some(row) = repository
+        .plugin(&registration.id)
+        .await
+        .with_context(|| format!("could not read `{}` after installing it", registration.id))?
+    else {
+        bail!(
+            "`{}` was not recorded after it was installed",
+            registration.id
+        );
+    };
+    let upgrade = repository
+        .upgrade(&registration.id)
+        .await
+        .with_context(|| format!("could not read the staged upgrade of `{}`", registration.id))?;
+    print_registration(&registration, row.state(upgrade.is_some()).as_str());
     Ok(())
 }
 
@@ -238,7 +251,8 @@ fn another_index_may_offer(error: &InstallError) -> bool {
 /// # Parameters
 ///
 /// - `registration`: what the install recorded.
-fn print_registration(registration: &PluginRegistration) {
+/// - `state`: the lifecycle state the install left the plugin in.
+fn print_registration(registration: &PluginRegistration, state: &str) {
     println!(
         "installed {} {} ({})",
         registration.id, registration.version, registration.source
@@ -255,10 +269,7 @@ fn print_registration(registration: &PluginRegistration) {
         println!("provides: {}", provides.join(", "));
     }
     print_permissions("", &registration.requested);
-    println!(
-        "approve it with: hearthsound plugins approve {}",
-        registration.id
-    );
+    println!("state: {state}");
 }
 
 /// Lists the plugins the reachable indexes offer.
@@ -599,43 +610,29 @@ async fn remove_repository(context: &Context, args: RemoveRepositoryArgs) -> any
     Ok(())
 }
 
-/// Approves a plugin's requested permissions, or applies its staged upgrade.
+/// Applies a plugin's staged upgrade.
 ///
 /// # Parameters
 ///
 /// - `context`: the open database and plugin tree.
-/// - `args`: the id of the plugin to approve.
+/// - `args`: the id of the plugin to apply the upgrade for.
 ///
 /// # Errors
 ///
-/// Returns an error when the plugin is unknown, is not waiting for approval, or
-/// a row cannot be written.
+/// Returns an error when the plugin is unknown, has no staged upgrade, or a row
+/// cannot be written.
 async fn approve(context: &Context, args: &PluginIdArgs) -> anyhow::Result<()> {
-    let upgrade = repository(context)
-        .upgrade(&args.id)
-        .await
-        .with_context(|| format!("could not read the staged upgrade of `{}`", args.id))?;
-    let approved = context
+    let applied = context
         .plugin_admin()?
-        .approve(&args.id)
+        .apply_upgrade(&args.id)
         .await
-        .with_context(|| format!("could not approve `{}`", args.id))?;
+        .with_context(|| format!("could not apply the upgrade to `{}`", args.id))?;
 
-    if upgrade.is_some() {
-        println!(
-            "approved the upgrade to {} {}",
-            approved.id, approved.version
-        );
-    } else {
-        println!(
-            "approved {} {} and enabled it",
-            approved.id, approved.version
-        );
-    }
+    println!("applied the upgrade to {} {}", applied.id, applied.version);
     Ok(())
 }
 
-/// Switches an approved plugin on or off.
+/// Switches a plugin on or off.
 ///
 /// # Parameters
 ///
@@ -645,8 +642,7 @@ async fn approve(context: &Context, args: &PluginIdArgs) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error when the plugin is unknown, is waiting for approval, or the
-/// row cannot be written.
+/// Returns an error when the plugin is unknown or the row cannot be written.
 async fn set_enabled(context: &Context, args: &PluginIdArgs, enabled: bool) -> anyhow::Result<()> {
     let (verb, done) = if enabled {
         ("enable", "enabled")
@@ -663,7 +659,7 @@ async fn set_enabled(context: &Context, args: &PluginIdArgs, enabled: bool) -> a
     Ok(())
 }
 
-/// Discards the newer version waiting for approval, keeping the installed one.
+/// Discards the staged upgrade, keeping the installed version in service.
 ///
 /// # Parameters
 ///
@@ -748,7 +744,7 @@ async fn remove(context: &Context, args: &PluginIdArgs) -> anyhow::Result<()> {
 ///
 /// Each plugin is reported with its source and lifecycle state, its API version,
 /// the permissions its manifest requests, and, when one is parked, the version
-/// waiting for approval.
+/// waiting for review.
 ///
 /// # Parameters
 ///
@@ -786,7 +782,7 @@ async fn list(context: &Context) -> anyhow::Result<()> {
             .with_context(|| format!("the stored manifest of `{}` cannot be read", plugin.id))?;
         print_permissions("  ", &requested_permissions(&manifest));
         if let Some(upgrade) = &upgrade {
-            println!("  waiting for approval: {}", upgrade.version);
+            println!("  upgrade waiting for review: {}", upgrade.version);
         }
     }
     Ok(())

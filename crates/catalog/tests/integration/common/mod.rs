@@ -153,7 +153,7 @@ impl Env {
         match self.host.install(&fixture_plugin(archive)).await {
             Ok(installed) => {
                 self.repository
-                    .register_approved(&installed, PluginSource::Sideload)
+                    .register(&installed, PluginSource::Sideload)
                     .await
                     .unwrap()
                     .id

@@ -91,7 +91,8 @@ pub struct PluginRow {
     pub source: String,
     /// The repository the plugin was installed from, when it came from one.
     pub repository_id: Option<Uuid>,
-    /// The permissions the administrator approved, as JSON text.
+    /// The permissions granted at install or by an applied upgrade, as JSON
+    /// text.
     pub approved_permissions: Option<String>,
     /// Whether the plugin is active.
     pub enabled: bool,
@@ -102,15 +103,12 @@ pub struct PluginRow {
 /// The lifecycle state of an installed plugin, as administrators see it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginState {
-    /// Installed but not yet approved: its permissions are not granted and it
-    /// does not load.
-    PendingApproval,
-    /// Approved and switched off.
+    /// Switched off.
     Disabled,
-    /// Approved and active.
+    /// Active.
     Enabled,
     /// Active, with a newer version staged until its new permissions are
-    /// approved.
+    /// reviewed.
     UpgradePendingApproval,
 }
 
@@ -118,7 +116,6 @@ impl PluginState {
     /// The wire literal for this state.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::PendingApproval => "pending-approval",
             Self::Disabled => "disabled",
             Self::Enabled => "enabled",
             Self::UpgradePendingApproval => "upgrade-pending-approval",
@@ -133,9 +130,7 @@ impl PluginRow {
     /// caller loads it, because the plugins table does not join the upgrade
     /// table.
     pub fn state(&self, upgrade_pending: bool) -> PluginState {
-        if self.approved_permissions.is_none() {
-            PluginState::PendingApproval
-        } else if upgrade_pending {
+        if upgrade_pending {
             PluginState::UpgradePendingApproval
         } else if self.enabled {
             PluginState::Enabled
@@ -146,7 +141,7 @@ impl PluginRow {
 }
 
 /// One staged upgrade of an installed plugin, held until an administrator
-/// approves it.
+/// reviews it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginUpgrade {
     /// The plugin id, shared with the installed row.
@@ -397,39 +392,6 @@ impl PluginRepository {
             .execute(&self.writer)
             .await?;
         Ok(())
-    }
-
-    /// Approves a pending plugin.
-    ///
-    /// The approved permissions become the ones the stored manifest requests,
-    /// and the plugin is enabled.
-    ///
-    /// # Parameters
-    ///
-    /// - `id`: the plugin id.
-    ///
-    /// # Returns
-    ///
-    /// The updated row, or `None` when no such plugin is installed.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RepoError`] when the stored manifest cannot be parsed or the
-    /// write fails.
-    pub async fn approve(&self, id: &str) -> Result<Option<PluginRow>, RepoError> {
-        let Some(row) = self.plugin(id).await? else {
-            return Ok(None);
-        };
-        let stored: StoredPermissions = serde_json::from_str(&row.manifest)?;
-        let approved = serde_json::to_string(&stored.permissions)?;
-        sqlx::query!(
-            "UPDATE plugins SET approved_permissions = ?, enabled = 1 WHERE id = ?",
-            approved,
-            id,
-        )
-        .execute(&self.writer)
-        .await?;
-        self.plugin(id).await
     }
 
     /// Deletes one plugin row.
@@ -1271,7 +1233,7 @@ where
     .transpose()
 }
 
-/// The part of a stored manifest that approval reads.
+/// The part of a stored manifest that an applied upgrade grants.
 #[derive(serde::Deserialize)]
 struct StoredPermissions {
     /// The permissions the manifest requests.

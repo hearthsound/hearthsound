@@ -35,7 +35,8 @@
 //! | `GET /api/v1/admin/acquisitions`, `POST /api/v1/admin/acquisitions/{id}/cancel`, `POST /api/v1/admin/acquisitions/{id}/retry` | administrators |
 //! | `GET /api/v1/admin/storage`, `POST /api/v1/admin/storage/evict` | administrators |
 //! | `GET`/`POST /api/v1/admin/plugins`, `POST /api/v1/admin/plugins/upload`, `GET /api/v1/admin/plugins/available` | administrators |
-//! | `GET`/`DELETE /api/v1/admin/plugins/{id}`, `POST /api/v1/admin/plugins/{id}/{approve,enable,disable,decline-upgrade}` | administrators |
+//! | `GET`/`DELETE /api/v1/admin/plugins/{id}`, `POST /api/v1/admin/plugins/{id}/{enable,disable,decline-upgrade}` | administrators |
+//! | `POST /api/v1/admin/plugins/{id}/approve`, which applies a staged upgrade | administrators |
 //! | `GET`/`POST /api/v1/admin/plugin-repositories`, `PATCH`/`DELETE /api/v1/admin/plugin-repositories/{id}` | administrators |
 //! | `GET`/`POST /api/v1/admin/providers`, `GET`/`PATCH`/`DELETE /api/v1/admin/providers/{slug}`, `GET /api/v1/admin/providers/{slug}/health` | administrators |
 //! | `GET /api/v1/admin/layers`, `PUT /api/v1/admin/layers/{layer}` | administrators |

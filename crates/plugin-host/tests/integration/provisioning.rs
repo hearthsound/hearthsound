@@ -100,7 +100,7 @@ impl Env {
         let installed = self.host.install(&fixture_plugin(archive)).await.unwrap();
         let registration = self
             .repository
-            .register_approved(&installed, PluginSource::Sideload)
+            .register(&installed, PluginSource::Sideload)
             .await
             .unwrap();
         registration.id
@@ -148,7 +148,7 @@ async fn registering_an_installed_plugin_records_its_manifest_and_permissions() 
 
     let registration = env
         .repository
-        .register_approved(&installed, PluginSource::Sideload)
+        .register(&installed, PluginSource::Sideload)
         .await
         .unwrap();
 

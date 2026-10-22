@@ -16,7 +16,7 @@
 //! plugin's schema, seals its secrets, and asks the plugin whether the
 //! configuration works before anything is stored.
 //!
-//! Every host import enforces the instance's approved permissions itself.
+//! Every host import enforces the instance's granted permissions itself.
 //! [`http`] is the outbound HTTP import: it applies the instance's host
 //! allowlist, address policy, timeout, redirect, body-cap and rate-limit rules
 //! before any request leaves the process.

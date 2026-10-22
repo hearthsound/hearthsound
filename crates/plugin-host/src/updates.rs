@@ -13,8 +13,8 @@
 //! `plugins.update_check_hours`; zero switches the checks off. When
 //! `plugins.auto_update` is on, every update the check finds is installed - and
 //! an upgrade that asks for a permission the installed version does not hold
-//! still waits for an administrator's approval, because the install path stages
-//! it instead of switching it in.
+//! still waits for review, because the install path stages it instead of
+//! switching it in.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -181,9 +181,9 @@ impl UpdateChecker {
     /// Installs the updates a check found, when automatic updates are on.
     ///
     /// An upgrade that requests a permission the installed version does not hold
-    /// is staged for approval instead of being switched in, which is what the
+    /// is staged for review instead of being switched in, which is what the
     /// install path does for every new version; the plugin keeps serving the
-    /// version it runs until an administrator approves the staged one.
+    /// version it runs until an administrator applies the staged one.
     ///
     /// # Parameters
     ///
@@ -193,7 +193,7 @@ impl UpdateChecker {
     /// # Returns
     ///
     /// The updates the install path took: the ones now in service and the ones
-    /// waiting for approval. Empty when `plugins.auto_update` is off, and an
+    /// waiting for review. Empty when `plugins.auto_update` is off, and an
     /// update that is already staged is not attempted again. An update that
     /// cannot be installed is logged and left for an administrator, and the
     /// remaining updates are still installed.
@@ -229,7 +229,7 @@ impl UpdateChecker {
                         tracing::info!(
                             plugin = %update.plugin_id,
                             version = %update.version,
-                            "staged a plugin update for approval"
+                            "staged a plugin update for review"
                         );
                     } else {
                         tracing::info!(
@@ -253,7 +253,7 @@ impl UpdateChecker {
         applied
     }
 
-    /// Reports whether the update is already waiting for approval.
+    /// Reports whether the update is already waiting for review.
     ///
     /// # Returns
     ///

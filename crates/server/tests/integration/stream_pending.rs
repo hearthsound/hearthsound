@@ -43,7 +43,7 @@ async fn install_catalog(services: &Arc<hearthsound_server::Services>) {
         .await
         .unwrap();
     let registration = PluginRepository::new(services.database())
-        .register_approved(&installed, PluginSource::Sideload)
+        .register(&installed, PluginSource::Sideload)
         .await
         .unwrap();
     assert_eq!(registration.id, HELLO_ID);
@@ -76,7 +76,7 @@ async fn install_acquisition(services: &Arc<hearthsound_server::Services>, downl
         .await
         .unwrap();
     let registration = PluginRepository::new(services.database())
-        .register_approved(&installed, PluginSource::Sideload)
+        .register(&installed, PluginSource::Sideload)
         .await
         .unwrap();
     assert_eq!(registration.id, ACQ_ID);

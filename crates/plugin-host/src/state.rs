@@ -5,11 +5,11 @@
 //! instance's memory limit, its log sink, its server-scoped configuration and
 //! its outbound HTTP client.
 //!
-//! The host imports check the instance's approved permissions themselves, never
+//! The host imports check the instance's granted permissions themselves, never
 //! the call site: `host-http` consults the instance's HTTP client, `host-kv`
 //! the instance's store, and `host-files` the roots the instance grants. Denying
 //! inside the import is what makes a plugin's declared permissions meaningful
-//! even before the approval UI exists.
+//! even when the call site has not been checked.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

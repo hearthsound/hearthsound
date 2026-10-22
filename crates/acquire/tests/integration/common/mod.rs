@@ -222,7 +222,7 @@ impl Env {
             .unwrap();
         environment
             .repository
-            .register_approved(&installed, PluginSource::Sideload)
+            .register(&installed, PluginSource::Sideload)
             .await
             .unwrap();
 
@@ -439,7 +439,7 @@ impl Env {
             .await
             .unwrap();
         self.repository
-            .register_approved(&installed, PluginSource::Sideload)
+            .register(&installed, PluginSource::Sideload)
             .await
             .unwrap();
         let service = InstanceService::new(
@@ -563,7 +563,7 @@ impl Env {
             .await
             .unwrap();
         self.repository
-            .register_approved(&installed, PluginSource::Sideload)
+            .register(&installed, PluginSource::Sideload)
             .await
             .unwrap();
         let service = InstanceService::new(

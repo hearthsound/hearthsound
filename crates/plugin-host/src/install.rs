@@ -1,17 +1,19 @@
 //! Registering an installed plugin in the database, with its requested
 //! permissions labelled by risk.
 //!
-//! Installing an archive only puts files on disk. Recording the install, and
-//! deciding what the administrator has approved, is this module's job: the
-//! plugin's manifest is unpacked into a `plugins` row, and the permissions the
-//! manifest asks for are described with the risk labels of
-//! `03-plugin-system.md` section 10 so an approver can see what they are
-//! granting before the plugin is enabled.
+//! Installing an archive puts files on disk and then records the plugin in a
+//! `plugins` row: the manifest's permission set becomes the grant, and the
+//! plugin is enabled. The permissions the manifest asks for are described with
+//! the risk labels of `03-plugin-system.md` section 10 so an administrator can
+//! see what the install grants.
 //!
-//! The installed plugin's own files are the source of truth for the manifest:
-//! [`registration`](PluginRepository::register_installed) stores the
-//! `manifest.json` text the install wrote, so the row can never describe a
-//! different manifest than the component beside it.
+//! An upgrade is compared against the installed grant. A version that adds a
+//! permission the installed version does not hold is staged for review; any
+//! other version switches in at once. The installed plugin's own files are the
+//! source of truth for the manifest:
+//! [`registration`](PluginRepository::register) stores the `manifest.json` text
+//! the install wrote, so the row can never describe a different manifest than
+//! the component beside it.
 
 use hearthsound_core::Layer;
 use uuid::Uuid;
@@ -203,40 +205,12 @@ fn join<'a>(values: impl IntoIterator<Item = &'a String>) -> String {
 }
 
 impl PluginRepository {
-    /// Records an installed plugin as pending approval.
-    ///
-    /// The row's `approved_permissions` stays unset and `enabled` is `0`, so the
-    /// plugin grants nothing and the registry skips it until an administrator
-    /// approves it. A second registration of the same plugin id replaces the
-    /// row.
-    ///
-    /// # Parameters
-    ///
-    /// - `plugin`: the plugin an install produced.
-    /// - `source`: where the archive came from.
-    ///
-    /// # Returns
-    ///
-    /// The registration, including the requested permissions with their risk
-    /// labels, for display.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`RepoError::Database`] when the write fails.
-    pub async fn register_installed(
-        &self,
-        plugin: &InstalledPlugin,
-        source: PluginSource,
-    ) -> Result<PluginRegistration, RepoError> {
-        self.record_install(plugin, source, None, false).await
-    }
-
-    /// Records an installed plugin and approves it in the same write.
+    /// Records an installed plugin, granting what its manifest requests.
     ///
     /// The row's `approved_permissions` is the manifest's requested permission
-    /// set and `enabled` is `1`: the caller is the consenting party, and the host
-    /// still checks the approved set inside every import. A second registration
-    /// of the same plugin id replaces the row.
+    /// set and `enabled` is `1`: the caller is the consenting party, and the
+    /// host still checks the granted set inside every import. A second
+    /// registration of the same plugin id replaces the row.
     ///
     /// # Parameters
     ///
@@ -253,23 +227,23 @@ impl PluginRepository {
     /// Returns [`RepoError::Database`] when the write fails and
     /// [`RepoError::Serialize`] when the manifest's permissions cannot be
     /// serialized.
-    pub async fn register_approved(
+    pub async fn register(
         &self,
         plugin: &InstalledPlugin,
         source: PluginSource,
     ) -> Result<PluginRegistration, RepoError> {
-        self.record_install(plugin, source, None, true).await
+        self.record_install(plugin, source, None).await
     }
 
     /// Writes the row for an installed plugin.
+    ///
+    /// The row grants the manifest's permission set and is enabled.
     ///
     /// # Parameters
     ///
     /// - `plugin`: the plugin an install produced.
     /// - `source`: where the archive came from.
     /// - `repository_id`: the repository the archive was fetched from, if any.
-    /// - `approved`: whether the requested permissions are approved and the
-    ///   plugin enabled.
     ///
     /// # Returns
     ///
@@ -284,14 +258,8 @@ impl PluginRepository {
         plugin: &InstalledPlugin,
         source: PluginSource,
         repository_id: Option<Uuid>,
-        approved: bool,
     ) -> Result<PluginRegistration, RepoError> {
         let manifest = plugin.manifest();
-        let approved_permissions = if approved {
-            Some(serde_json::to_string(&manifest.permissions)?)
-        } else {
-            None
-        };
 
         let row = PluginRow {
             id: manifest.id.clone(),
@@ -301,8 +269,8 @@ impl PluginRepository {
             sha256: plugin.sha256().to_vec(),
             source: source.as_str().to_owned(),
             repository_id,
-            approved_permissions,
-            enabled: approved,
+            approved_permissions: Some(serde_json::to_string(&manifest.permissions)?),
+            enabled: true,
             installed_at: now_millis(),
         };
         self.upsert_plugin(&row).await?;
@@ -312,10 +280,9 @@ impl PluginRepository {
 
     /// Switches the installed row to a new version without staging it.
     ///
-    /// Used when the new version asks for no permissions the installed one
-    /// lacks. The enabled flag and approval state carry over: an approved
-    /// plugin's approved set becomes the new manifest's permissions, and a
-    /// pending plugin stays pending.
+    /// Used when the new version adds no permission the installed grant does
+    /// not already hold. The grant becomes the new manifest's permissions and
+    /// the enabled flag carries over.
     ///
     /// # Parameters
     ///
@@ -340,10 +307,6 @@ impl PluginRepository {
         repository_id: Option<Uuid>,
     ) -> Result<PluginRow, RepoError> {
         let manifest = plugin.manifest();
-        let approved_permissions = match existing.approved_permissions {
-            Some(_) => Some(serde_json::to_string(&manifest.permissions)?),
-            None => None,
-        };
         let row = PluginRow {
             id: manifest.id.clone(),
             version: manifest.version.clone(),
@@ -352,7 +315,7 @@ impl PluginRepository {
             sha256: plugin.sha256().to_vec(),
             source: source.as_str().to_owned(),
             repository_id,
-            approved_permissions,
+            approved_permissions: Some(serde_json::to_string(&manifest.permissions)?),
             enabled: existing.enabled,
             installed_at: now_millis(),
         };
@@ -360,10 +323,10 @@ impl PluginRepository {
         Ok(row)
     }
 
-    /// Stages a new version of an installed plugin for approval.
+    /// Stages a new version of an installed plugin for review.
     ///
     /// The installed row is untouched; the staged version waits in
-    /// `plugin_upgrades` until it is approved or declined.
+    /// `plugin_upgrades` until it is applied or declined.
     ///
     /// # Parameters
     ///

@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   permissions its stored manifest requests and enabled when the database
   upgrades.
 
+- Installing a plugin grants the permissions its manifest requests and enables
+  it: `POST /api/v1/admin/plugins`, `POST /api/v1/admin/plugins/upload` and
+  `hearthsound plugins install` no longer leave it pending approval, and the
+  plugin list reports `disabled`, `enabled` or `upgrade-pending-approval` as
+  its state. `POST /api/v1/admin/plugins/{id}/approve` and
+  `hearthsound plugins approve` now only apply an upgrade that requests new
+  permissions, and answer a conflict when none is staged.
+
 ## [0.1.5] - 2026-10-22
 
 ### Added

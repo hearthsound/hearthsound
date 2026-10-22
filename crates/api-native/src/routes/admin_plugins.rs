@@ -3,9 +3,13 @@
 //! An administrator lists the installed plugins, installs one from the official
 //! index, from a repository an administrator registered or from a repository URL
 //! that is registered on the way in, uploads a `.hsplugin` file when sideloading
-//! is allowed, and steers the lifecycle: approve the permissions a fresh plugin
-//! requests or apply its staged upgrade, switch an approved plugin on or off,
-//! discard a staged upgrade, and remove a plugin with its rows and files.
+//! is allowed, and steers the lifecycle: install a plugin, apply a staged
+//! upgrade that requests new permissions, switch a plugin on or off, discard a
+//! staged upgrade, and remove a plugin with its rows and files.
+//!
+//! Installing records the permissions the manifest requests as the grant and
+//! enables the plugin. Only an upgrade that asks for a permission the installed
+//! version does not hold is staged for review.
 //!
 //! Every write goes through [`PluginAdmin`] or [`PluginInstaller`], which record
 //! the change and publish a `plugin.status` event; the handler then rebuilds the
@@ -114,10 +118,10 @@ pub struct PluginView {
     /// Where the plugin came from: `official`, `repository`, `sideload` or
     /// `bundled`.
     pub source: String,
-    /// The lifecycle state: `pending-approval`, `disabled`, `enabled` or
+    /// The lifecycle state: `disabled`, `enabled` or
     /// `upgrade-pending-approval`.
     pub state: String,
-    /// Whether the plugin is active. A plugin pending approval is never active.
+    /// Whether the plugin is active.
     pub enabled: bool,
     /// The repository the plugin came from, `pr_...`, when it came from one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -237,8 +241,8 @@ pub struct AvailableQuery {
 /// Lists the installed plugins.
 ///
 /// Each plugin reports its state, the permissions its manifest requests with
-/// their risk labels, whether an administrator approved them, and the newer
-/// version the last completed update check found.
+/// their risk labels, and the newer version the last completed update check
+/// found.
 ///
 /// # Errors
 ///
@@ -270,8 +274,10 @@ pub async fn list_plugins(
 
 /// Installs a plugin from an index or a repository URL.
 ///
-/// The plugin is recorded as pending approval, so an administrator still grants
-/// the permissions it requests. An install with `source` `index` reads the
+/// The plugin is installed with the permissions its manifest requests and
+/// enabled; a newer version of an installed plugin replaces it unless it
+/// requests permissions the installed version does not hold, in which case it
+/// is staged for review. An install with `source` `index` reads the
 /// official index, or the repository `repositoryId` names; an install with
 /// `source` `url` registers the repository at `url` when it is new, which
 /// `plugins.allow_third_party_repositories` gates.
@@ -292,7 +298,7 @@ pub async fn list_plugins(
     tag = "admin",
     request_body = InstallRequest,
     responses(
-        (status = 201, description = "The plugin was installed and waits for approval", body = PluginView),
+        (status = 201, description = "The plugin was installed, or its upgrade was staged for review", body = PluginView),
         (status = 400, description = "The request body is malformed", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Third-party repositories are switched off", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such repository or plugin", body = Problem, content_type = "application/problem+json"),
@@ -344,9 +350,12 @@ pub async fn install_plugin(
 /// Installs a plugin from an uploaded `.hsplugin` file.
 ///
 /// The request is `multipart/form-data` with one `file` part. The file is staged
-/// in the plugins directory, installed as a sideloaded plugin and recorded as
-/// pending approval, and the staged file is removed whichever way the install
-/// ends. `plugins.allow_sideload` gates the whole route.
+/// in the plugins directory, installed as a sideloaded plugin with the
+/// permissions its manifest requests and enabled, and the staged file is
+/// removed whichever way the install ends. A newer version of an installed
+/// plugin replaces it unless it requests permissions the installed version does
+/// not hold, in which case it is staged for review. `plugins.allow_sideload`
+/// gates the whole route.
 ///
 /// # Errors
 ///
@@ -361,7 +370,7 @@ pub async fn install_plugin(
     tag = "admin",
     request_body(content_type = "multipart/form-data", description = "One `file` part holding a `.hsplugin` archive"),
     responses(
-        (status = 201, description = "The plugin was installed and waits for approval", body = PluginView),
+        (status = 201, description = "The plugin was installed, or its upgrade was staged for review", body = PluginView),
         (status = 400, description = "The body is not multipart, has no `file` part, or is malformed", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Sideloading is switched off", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The version is already installed or older", body = Problem, content_type = "application/problem+json"),
@@ -408,7 +417,7 @@ pub async fn upload_plugin(
     let outcome = state
         .services()
         .admin
-        .install_archive(&path, None, PluginSource::Sideload, None, false)
+        .install_archive(&path, None, PluginSource::Sideload, None)
         .await
         .map_err(|error| install_problem(&error));
     remove_staged(&path).await;
@@ -443,25 +452,24 @@ pub async fn get_plugin(
     plugin_view_by_id(&state, &id).await
 }
 
-/// Approves a plugin's requested permissions, or applies its staged upgrade.
+/// Applies a plugin's staged upgrade.
 ///
-/// A plugin waiting for its first approval is enabled once approved; a plugin
-/// with a staged upgrade switches to the new version and the files of the old
-/// one are removed.
+/// The plugin switches to the new version, which replaces the permissions the
+/// installed version holds, and the files of the old version are removed.
 ///
 /// # Errors
 ///
 /// Answers `not-found` for an unknown plugin and `conflict` when the plugin has
-/// neither an approval pending nor a staged upgrade.
+/// no staged upgrade.
 #[utoipa::path(
     post,
     path = "/api/v1/admin/plugins/{id}/approve",
     tag = "admin",
     params(("id" = String, Path, description = "The plugin id from its manifest")),
     responses(
-        (status = 200, description = "The plugin was approved or its upgrade applied", body = PluginView),
+        (status = 200, description = "The staged upgrade was applied", body = PluginView),
         (status = 404, description = "No such plugin is installed", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The plugin has nothing to approve", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "No upgrade is staged", body = Problem, content_type = "application/problem+json"),
     ),
     security(("bearer" = []), ("session" = []))
 )]
@@ -473,7 +481,7 @@ pub async fn approve_plugin(
     let row = state
         .services()
         .admin
-        .approve(&id)
+        .apply_upgrade(&id)
         .await
         .map_err(|error| admin_problem(&error))?;
     rebuild(&state).await?;
@@ -481,12 +489,11 @@ pub async fn approve_plugin(
     Ok(Json(plugin_view(&state, &row, &repository).await?))
 }
 
-/// Switches an approved plugin on.
+/// Switches a plugin on.
 ///
 /// # Errors
 ///
-/// Answers `not-found` for an unknown plugin and `conflict` while the plugin
-/// awaits approval, which gates enabling.
+/// Answers `not-found` for an unknown plugin.
 #[utoipa::path(
     post,
     path = "/api/v1/admin/plugins/{id}/enable",
@@ -495,7 +502,6 @@ pub async fn approve_plugin(
     responses(
         (status = 200, description = "The plugin is enabled", body = PluginView),
         (status = 404, description = "No such plugin is installed", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The plugin is pending approval", body = Problem, content_type = "application/problem+json"),
     ),
     security(("bearer" = []), ("session" = []))
 )]
@@ -507,12 +513,11 @@ pub async fn enable_plugin(
     set_enabled(&state, &id, true).await
 }
 
-/// Switches an approved plugin off.
+/// Switches a plugin off.
 ///
 /// # Errors
 ///
-/// Answers `not-found` for an unknown plugin and `conflict` while the plugin
-/// awaits approval.
+/// Answers `not-found` for an unknown plugin.
 #[utoipa::path(
     post,
     path = "/api/v1/admin/plugins/{id}/disable",
@@ -521,7 +526,6 @@ pub async fn enable_plugin(
     responses(
         (status = 200, description = "The plugin is disabled", body = PluginView),
         (status = 404, description = "No such plugin is installed", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The plugin is pending approval", body = Problem, content_type = "application/problem+json"),
     ),
     security(("bearer" = []), ("session" = []))
 )]
@@ -1002,16 +1006,13 @@ fn install_problem(error: &InstallError) -> Problem {
 ///
 /// # Returns
 ///
-/// `not-found` for an unknown plugin, `conflict` when there is nothing to
-/// approve or decline or the plugin is pending approval, the installer's own
-/// mapping for an install failure, and `internal` when the tables cannot be
-/// read or written.
+/// `not-found` for an unknown plugin, `conflict` when no upgrade is staged, the
+/// installer's own mapping for an install failure, and `internal` when the
+/// tables cannot be read or written.
 fn admin_problem(error: &AdminError) -> Problem {
     match error {
         AdminError::NotFound(_) => Problem::not_found(error.to_string()),
-        AdminError::PendingApproval(_)
-        | AdminError::NothingToApprove { .. }
-        | AdminError::NoUpgradeStaged(_) => Problem::conflict(error.to_string()),
+        AdminError::NoUpgradeStaged(_) => Problem::conflict(error.to_string()),
         AdminError::Install(error) => install_problem(error),
         AdminError::Repo(_) => problem::internal("the plugin admin path", error),
     }

@@ -4,9 +4,9 @@
 //! index and the archive it publishes from a mock HTTP server, and installs the
 //! plugin the way a client does: through `POST /api/v1/admin/plugins`, through
 //! the command line's `plugins` command, or through the multipart upload route.
-//! Each install is then approved through the administrative API, so the whole
-//! path from an index to a plugin the provider registry serves is walked once
-//! from the API and once from the command line. The suite makes no network
+//! Installing records the permissions the manifest requests and enables the
+//! plugin, so the whole path from an index to a plugin the provider registry
+//! serves is walked once from the API and once from the command line. The suite makes no network
 //! request: every index document and every archive download points at the mock.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -266,26 +266,6 @@ async fn install(fixture: &Fixture, repository: &str) -> reqwest::Response {
     .await
 }
 
-/// Approves one plugin through the API and returns its view.
-///
-/// # Parameters
-///
-/// - `fixture`: the running server.
-/// - `id`: the plugin id.
-async fn approve(fixture: &Fixture, id: &str) -> Value {
-    let response = admin(
-        fixture,
-        reqwest::Method::POST,
-        &format!("/api/v1/admin/plugins/{id}/approve"),
-        None,
-    )
-    .await;
-    let status = response.status();
-    let view = json(response).await;
-    assert_eq!(status, StatusCode::OK, "{view}");
-    view
-}
-
 /// Returns the slugs the registry serves for one layer, in order.
 ///
 /// # Parameters
@@ -500,13 +480,13 @@ fn run_cli(fixture: &Fixture, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-/// An index URL installs a plugin over the API, which approval enables.
+/// An index URL installs a plugin over the API, which enables it.
 ///
-/// The plugin stays pending approval until the API approves it, it is refused an
-/// enable before that, and it is only after approval that an instance can be
-/// configured from it and served by the registry.
+/// The plugin is installed with the permissions its manifest requests and
+/// enabled, so an instance can be configured from it and the registry serves it
+/// at once. Applying an upgrade when none is staged is refused.
 #[tokio::test]
-async fn an_index_url_installs_over_the_api_and_approval_enables_it() {
+async fn an_index_url_installs_over_the_api_and_is_enabled() {
     let fixture = Fixture::new().await;
     let server = MockServer::start().await;
     let (archive, bytes) = serve_archive(&server).await;
@@ -533,9 +513,9 @@ async fn an_index_url_installs_over_the_api_and_approval_enables_it() {
     assert_eq!(view["config"]["uiSchema"]["type"], "VerticalLayout");
     assert_eq!(view["version"], VERSION);
     assert_eq!(view["source"], "repository");
-    assert_eq!(view["state"], "pending-approval");
-    assert_eq!(view["enabled"], false);
-    assert_eq!(view["approved"], false);
+    assert_eq!(view["state"], "enabled");
+    assert_eq!(view["enabled"], true);
+    assert_eq!(view["approved"], true);
     let repository = view["repositoryId"].as_str().unwrap().to_owned();
 
     // The index URL was registered on the way in, unsigned and so unverified.
@@ -560,12 +540,11 @@ async fn an_index_url_installs_over_the_api_and_approval_enables_it() {
     assert_eq!(row["verified"], false);
     assert!(row["lastFetchedAt"].is_i64(), "{row}");
 
-    // A plugin that waits for approval cannot be switched on, and no instance
-    // can be configured from it.
+    // Nothing is staged, so there is no upgrade to apply.
     let refused = admin(
         &fixture,
         reqwest::Method::POST,
-        &format!("/api/v1/admin/plugins/{PLUGIN_ID}/enable"),
+        &format!("/api/v1/admin/plugins/{PLUGIN_ID}/approve"),
         None,
     )
     .await;
@@ -574,48 +553,22 @@ async fn an_index_url_installs_over_the_api_and_approval_enables_it() {
         refused["detail"]
             .as_str()
             .unwrap()
-            .contains("pending approval"),
+            .contains("has no staged upgrade"),
         "{refused}"
     );
-    let unserviceable = admin(
-        &fixture,
-        reqwest::Method::POST,
-        "/api/v1/admin/providers",
-        Some(json!({ "slug": "meta", "pluginId": PLUGIN_ID })),
-    )
-    .await;
-    let unserviceable = assert_problem(
-        unserviceable,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "invalid-provider",
-    )
-    .await;
-    assert!(
-        unserviceable["detail"]
-            .as_str()
-            .unwrap()
-            .contains("is disabled"),
-        "{unserviceable}"
-    );
     assert!(served(&fixture, Layer::Metadata).is_empty());
-
-    let approved = approve(&fixture, PLUGIN_ID).await;
-    assert_eq!(approved["state"], "enabled");
-    assert_eq!(approved["enabled"], true);
-    assert_eq!(approved["approved"], true);
 
     configure_metadata(&fixture, "meta").await;
     assert_eq!(served(&fixture, Layer::Metadata), vec!["meta".to_owned()]);
 }
 
-/// The command line installs a plugin from an index URL, and approval enables
-/// it.
+/// The command line installs a plugin from an index URL, and it is enabled.
 ///
 /// The command writes the rows and the files of the running server's data
 /// directory directly, which is the other side of the platform the API's own
 /// install walks.
 #[tokio::test]
-async fn an_index_url_installs_over_the_command_line_and_approval_enables_it() {
+async fn an_index_url_installs_over_the_command_line_and_is_enabled() {
     let fixture = Fixture::new().await;
     let server = MockServer::start().await;
     let (archive, bytes) = serve_archive(&server).await;
@@ -666,12 +619,8 @@ async fn an_index_url_installs_over_the_command_line_and_approval_enables_it() {
     );
     assert!(installed.contains("api: "), "{installed}");
     assert!(installed.contains("provides: metadata"), "{installed}");
-    assert!(
-        installed.contains(&format!(
-            "approve it with: hearthsound plugins approve {PLUGIN_ID}"
-        )),
-        "{installed}"
-    );
+    assert!(installed.contains("state: enabled"), "{installed}");
+    assert!(!installed.contains("approve it with"), "{installed}");
 
     let listed = run_cli(
         &fixture,
@@ -686,9 +635,8 @@ async fn an_index_url_installs_over_the_command_line_and_approval_enables_it() {
     );
     assert!(listed.contains("  installed"), "{listed}");
 
-    // The running server reads the row the command wrote, and refuses to switch
-    // the plugin on before it is approved.
-    let pending = json(
+    // The running server reads the row the command wrote.
+    let installed = json(
         admin(
             &fixture,
             reqwest::Method::GET,
@@ -698,22 +646,10 @@ async fn an_index_url_installs_over_the_command_line_and_approval_enables_it() {
         .await,
     )
     .await;
-    assert_eq!(pending["state"], "pending-approval");
-    assert_eq!(pending["enabled"], false);
-    assert_eq!(pending["source"], "repository");
-
-    let refused = admin(
-        &fixture,
-        reqwest::Method::POST,
-        &format!("/api/v1/admin/plugins/{PLUGIN_ID}/enable"),
-        None,
-    )
-    .await;
-    assert_problem(refused, StatusCode::CONFLICT, "conflict").await;
-
-    let approved = approve(&fixture, PLUGIN_ID).await;
-    assert_eq!(approved["state"], "enabled");
-    assert_eq!(approved["enabled"], true);
+    assert_eq!(installed["state"], "enabled");
+    assert_eq!(installed["enabled"], true);
+    assert_eq!(installed["approved"], true);
+    assert_eq!(installed["source"], "repository");
 
     configure_metadata(&fixture, "meta").await;
     assert_eq!(served(&fixture, Layer::Metadata), vec!["meta".to_owned()]);
@@ -797,13 +733,11 @@ async fn an_upload_installs_and_the_sideload_gate_refuses_it() {
     assert_eq!(status, StatusCode::CREATED, "{view}");
     assert_eq!(view["id"], PLUGIN_ID);
     assert_eq!(view["source"], "sideload");
-    assert_eq!(view["state"], "pending-approval");
-    assert_eq!(view["enabled"], false);
+    assert_eq!(view["state"], "enabled");
+    assert_eq!(view["enabled"], true);
+    assert_eq!(view["approved"], true);
     assert!(view["repositoryId"].is_null(), "{view}");
 
-    // The approved plugin is the one the registry serves.
-    let approved = approve(&fixture, PLUGIN_ID).await;
-    assert_eq!(approved["state"], "enabled");
     configure_metadata(&fixture, "meta").await;
     assert_eq!(served(&fixture, Layer::Metadata), vec!["meta".to_owned()]);
 

@@ -1,11 +1,11 @@
 //! The administrative lifecycle of installed plugins.
 //!
 //! [`PluginAdmin`] is the one place where an installed plugin changes state:
-//! an archive is installed and recorded as pending approval, an approver
-//! grants its requested permissions, an administrator switches it on or off,
-//! and removal deletes its row and its files. Every change publishes a
-//! `plugin.status` event to administrator connections. Repository writes do
-//! not publish, so the event always describes a change that was made.
+//! an archive is installed, which grants its manifest's permissions and enables
+//! it, a staged upgrade is applied or declined, an administrator switches the
+//! plugin on or off, and removal deletes its row and its files. Every change
+//! publishes a `plugin.status` event to administrator connections. Repository
+//! writes do not publish, so the event always describes a change that was made.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -27,17 +27,6 @@ pub enum AdminError {
     /// No installed plugin has this id.
     #[error("no plugin `{0}` is installed")]
     NotFound(String),
-    /// The plugin is waiting for approval, so it cannot be switched.
-    #[error("plugin `{0}` is pending approval")]
-    PendingApproval(String),
-    /// The plugin is not waiting for approval, so there is nothing to approve.
-    #[error("plugin `{id}` is {state} and has nothing to approve")]
-    NothingToApprove {
-        /// The plugin id.
-        id: String,
-        /// The state the plugin is in.
-        state: &'static str,
-    },
     /// The plugin has no staged upgrade to decline.
     #[error("plugin `{0}` has no staged upgrade")]
     NoUpgradeStaged(String),
@@ -49,7 +38,7 @@ pub enum AdminError {
     Repo(#[from] RepoError),
 }
 
-/// Installs, approves, switches and removes plugins, publishing their state.
+/// Installs, reviews, switches and removes plugins, publishing their state.
 pub struct PluginAdmin {
     host: Arc<PluginHost>,
     repository: PluginRepository,
@@ -81,13 +70,14 @@ impl PluginAdmin {
     ///
     /// The archive is checked against `expected_sha256` first, when given, then
     /// installed, then recorded. A plugin that is not recorded yet is recorded
-    /// as pending approval unless `approved` is set. A newer version of a
-    /// recorded plugin is switched in at once when it requests no permission
-    /// the installed version lacks; the old files are then removed. A newer
-    /// version that requests more is staged as an upgrade instead: the
-    /// installed version keeps serving until [`PluginAdmin::approve`] applies
-    /// it or [`PluginAdmin::decline_upgrade`] discards it. Installing the
-    /// recorded version again is refused, and so is an older version.
+    /// with the permissions its manifest requests as its grant, and enabled. A
+    /// newer version of a recorded plugin is switched in at once when it adds
+    /// no permission the installed grant does not already hold; the old files
+    /// are then removed. A newer version that adds a permission is staged as an
+    /// upgrade instead: the installed version keeps serving until
+    /// [`PluginAdmin::apply_upgrade`] applies it or
+    /// [`PluginAdmin::decline_upgrade`] discards it. Installing the recorded
+    /// version again is refused, and so is an older version.
     ///
     /// # Parameters
     ///
@@ -95,8 +85,6 @@ impl PluginAdmin {
     /// - `expected_sha256`: the digest the archive must have, when it is known.
     /// - `source`: where the archive came from.
     /// - `repository_id`: the repository the archive was fetched from, if any.
-    /// - `approved`: whether a plugin that is not recorded yet is approved on
-    ///   install. Upgrades never grant approval.
     ///
     /// # Errors
     ///
@@ -110,7 +98,6 @@ impl PluginAdmin {
         expected_sha256: Option<[u8; 32]>,
         source: PluginSource,
         repository_id: Option<Uuid>,
-        approved: bool,
     ) -> Result<PluginRegistration, InstallError> {
         if let Some(expected) = expected_sha256 {
             let bytes = tokio::fs::read(archive)
@@ -133,14 +120,9 @@ impl PluginAdmin {
         let Some(existing) = self.repository.plugin(&manifest.id).await? else {
             let registration = self
                 .repository
-                .record_install(&installed, source, repository_id, approved)
+                .record_install(&installed, source, repository_id)
                 .await?;
-            let state = if approved {
-                PluginState::Enabled
-            } else {
-                PluginState::PendingApproval
-            };
-            self.publish(&registration.id, state.as_str());
+            self.publish(&registration.id, PluginState::Enabled.as_str());
             return Ok(registration);
         };
 
@@ -204,47 +186,29 @@ impl PluginAdmin {
         Ok(registration(&installed, source))
     }
 
-    /// Approves a plugin's requested permissions, or applies its staged upgrade.
+    /// Applies the staged upgrade that was held for review.
     ///
-    /// A plugin waiting for its first approval is enabled once approved. A
-    /// plugin with a staged upgrade has the upgrade applied: its row switches to
-    /// the new version and the files of the old version are removed.
+    /// The row switches to the new version, the new grant, and the files of the
+    /// old version are removed. The installed version keeps its enabled flag.
     ///
     /// # Errors
     ///
     /// Returns [`AdminError::NotFound`] for an unknown id and
-    /// [`AdminError::NothingToApprove`] when the plugin has neither a first
-    /// approval pending nor a staged upgrade.
-    pub async fn approve(&self, id: &str) -> Result<PluginRow, AdminError> {
+    /// [`AdminError::NoUpgradeStaged`] when the plugin has no staged upgrade.
+    pub async fn apply_upgrade(&self, id: &str) -> Result<PluginRow, AdminError> {
         let row = self.require(id).await?;
-        let upgrade_staged = self.repository.upgrade(id).await?.is_some();
-        let state = row.state(upgrade_staged);
-        match state {
-            PluginState::PendingApproval => {
-                let approved = self
-                    .repository
-                    .approve(id)
-                    .await?
-                    .ok_or_else(|| AdminError::NotFound(id.to_owned()))?;
-                self.publish(id, PluginState::Enabled.as_str());
-                Ok(approved)
-            }
-            PluginState::UpgradePendingApproval => {
-                let old_version = row.version;
-                let applied = self
-                    .repository
-                    .apply_upgrade(id)
-                    .await?
-                    .ok_or_else(|| AdminError::NotFound(id.to_owned()))?;
-                self.host.remove_version(id, &old_version).await?;
-                self.publish(id, applied.state(false).as_str());
-                Ok(applied)
-            }
-            PluginState::Enabled | PluginState::Disabled => Err(AdminError::NothingToApprove {
-                id: id.to_owned(),
-                state: state.as_str(),
-            }),
+        if self.repository.upgrade(id).await?.is_none() {
+            return Err(AdminError::NoUpgradeStaged(id.to_owned()));
         }
+        let old_version = row.version;
+        let applied = self
+            .repository
+            .apply_upgrade(id)
+            .await?
+            .ok_or_else(|| AdminError::NoUpgradeStaged(id.to_owned()))?;
+        self.host.remove_version(id, &old_version).await?;
+        self.publish(id, applied.state(false).as_str());
+        Ok(applied)
     }
 
     /// Discards a staged upgrade and keeps the installed version in service.
@@ -270,18 +234,13 @@ impl PluginAdmin {
         Ok(row)
     }
 
-    /// Switches an approved plugin on or off.
+    /// Switches a plugin on or off.
     ///
     /// # Errors
     ///
-    /// Returns [`AdminError::NotFound`] for an unknown id and
-    /// [`AdminError::PendingApproval`] while the plugin awaits approval, in
-    /// either direction.
+    /// Returns [`AdminError::NotFound`] for an unknown id.
     pub async fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), AdminError> {
-        let row = self.require(id).await?;
-        if row.state(false) == PluginState::PendingApproval {
-            return Err(AdminError::PendingApproval(id.to_owned()));
-        }
+        self.require(id).await?;
         self.repository.set_plugin_enabled(id, enabled).await?;
         let state = if enabled {
             PluginState::Enabled

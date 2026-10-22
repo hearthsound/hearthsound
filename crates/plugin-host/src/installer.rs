@@ -5,8 +5,8 @@
 //! official index, a repository an administrator registered, or a repository URL
 //! that is registered on demand - reads the index, picks the version to install,
 //! downloads it, and checks the download against the digest and size the index
-//! declares before [`PluginAdmin::install_archive`] records it as pending
-//! approval. An index can therefore distribute a plugin without being trusted
+//! declares before [`PluginAdmin::install_archive`] grants its permissions and
+//! enables it. An index can therefore distribute a plugin without being trusted
 //! with anything but the bytes it publishes.
 //!
 //! # What a download leaves behind
@@ -126,8 +126,9 @@ impl PluginInstaller {
     /// The index is read first, the version picked from it, the archive
     /// downloaded to a temporary file inside the plugins directory, and the
     /// download's size and SHA-256 checked against the index entry before the
-    /// archive is installed. The plugin is recorded as pending approval, so an
-    /// administrator still approves the permissions it requests.
+    /// archive is installed. The plugin is granted the permissions its
+    /// manifest requests and enabled; an upgrade that adds a permission is
+    /// staged for review instead.
     ///
     /// # Parameters
     ///
@@ -203,7 +204,6 @@ impl PluginInstaller {
                 Some(digest),
                 source.source(),
                 source.repository_id(),
-                false,
             )
             .await
     }

@@ -251,7 +251,7 @@ impl Fixture {
             .unwrap();
         let plugin_id = self
             .repository
-            .register_approved(&installed, PluginSource::Sideload)
+            .register(&installed, PluginSource::Sideload)
             .await
             .unwrap()
             .id;
@@ -309,7 +309,7 @@ impl Fixture {
             .unwrap();
         let plugin_id = self
             .repository
-            .register_approved(&installed, PluginSource::Sideload)
+            .register(&installed, PluginSource::Sideload)
             .await
             .unwrap()
             .id;

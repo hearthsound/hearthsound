@@ -238,15 +238,16 @@ pub struct PluginsArgs {
 #[derive(Debug, Subcommand)]
 pub enum PluginsCommand {
     /// Install a plugin: from a `.hsplugin` archive, from an index, or from an
-    /// index URL. It then waits for approval.
+    /// index URL. It is installed with the permissions its manifest requests and
+    /// enabled.
     Install(InstallPluginArgs),
-    /// Approve a plugin's requested permissions.
+    /// Apply a staged upgrade that requests new permissions.
     Approve(PluginIdArgs),
-    /// Switch an approved plugin on.
+    /// Switch a plugin on.
     Enable(PluginIdArgs),
-    /// Switch an approved plugin off.
+    /// Switch a plugin off.
     Disable(PluginIdArgs),
-    /// Discard the newer version waiting for approval.
+    /// Discard the staged upgrade waiting for review.
     DeclineUpgrade(PluginIdArgs),
     /// Remove a plugin, its rows, and its files.
     Remove(PluginIdArgs),

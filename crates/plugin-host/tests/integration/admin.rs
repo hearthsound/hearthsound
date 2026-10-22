@@ -1,5 +1,5 @@
-//! Integration tests for the administrative plugin lifecycle: pending install,
-//! approval, the enable gate, upgrade parking, and removal.
+//! Integration tests for the administrative plugin lifecycle: install, the
+//! enable switch, upgrade review, and removal.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -76,10 +76,10 @@ impl Env {
         self.dir.path().join("plugins")
     }
 
-    /// Installs a fixture as a sideload, pending approval, returning its id.
-    async fn install_pending(&self, archive: &Path) -> String {
+    /// Installs a fixture as a sideload, returning its id.
+    async fn install(&self, archive: &Path) -> String {
         self.admin
-            .install_archive(archive, None, PluginSource::Sideload, None, false)
+            .install_archive(archive, None, PluginSource::Sideload, None)
             .await
             .unwrap()
             .id
@@ -150,7 +150,7 @@ fn archive_sha256(archive: &Path) -> Vec<u8> {
     Sha256::digest(std::fs::read(archive).unwrap()).to_vec()
 }
 
-/// The permission set an approved row holds.
+/// The permission set an installed row grants.
 fn approved_permissions(row: &PluginRow) -> Value {
     serde_json::from_str(row.approved_permissions.as_deref().unwrap()).unwrap()
 }
@@ -161,80 +161,39 @@ fn one_host(host: &str) -> Value {
 }
 
 #[tokio::test]
-async fn a_fresh_install_waits_for_approval() {
+async fn a_fresh_install_is_granted_its_permissions_and_enabled() {
     let env = Env::new().await;
-    let id = env.install_pending(&metadata_archive()).await;
+    let archive = metadata_archive();
+    let id = env.install(&archive).await;
 
     let row = env.repository.plugin(&id).await.unwrap().unwrap();
-    assert_eq!(row.state(false), PluginState::PendingApproval);
-    assert!(!row.enabled);
-    assert!(row.approved_permissions.is_none());
+    assert_eq!(row.state(false), PluginState::Enabled);
+    assert!(row.enabled);
+    let requested: hearthsound_plugin_host::manifest::Permissions =
+        serde_json::from_value(archive_manifest(&archive)["permissions"].clone()).unwrap();
+    assert_eq!(
+        approved_permissions(&row),
+        serde_json::to_value(requested).unwrap()
+    );
     assert!(env.plugins_dir().join(&id).join(&row.version).is_dir());
 }
 
 #[tokio::test]
-async fn a_pending_install_is_kept_out_of_the_enabled_set() {
+async fn applying_without_a_staged_upgrade_is_refused() {
     let env = Env::new().await;
-    env.install_pending(&metadata_archive()).await;
+    let id = env.install(&metadata_archive()).await;
 
-    let enabled: Vec<_> = env
-        .repository
-        .plugins()
-        .await
-        .unwrap()
-        .into_iter()
-        .filter(|row| row.enabled)
-        .collect();
-    assert!(enabled.is_empty(), "pending plugins must not be enabled");
-}
-
-#[tokio::test]
-async fn approval_records_the_requested_permissions_and_enables() {
-    let env = Env::new().await;
-    let id = env.install_pending(&metadata_archive()).await;
-
-    let approved = env.admin.approve(&id).await.unwrap();
-    assert_eq!(approved.state(false), PluginState::Enabled);
-    assert!(approved.enabled);
-    assert!(approved.approved_permissions.is_some());
-}
-
-#[tokio::test]
-async fn enabling_a_pending_plugin_is_refused_in_both_directions() {
-    let env = Env::new().await;
-    let id = env.install_pending(&metadata_archive()).await;
-
-    let enable = env.admin.set_enabled(&id, true).await.unwrap_err();
-    assert!(matches!(enable, AdminError::PendingApproval(_)), "{enable}");
-    let disable = env.admin.set_enabled(&id, false).await.unwrap_err();
+    let refused = env.admin.apply_upgrade(&id).await.unwrap_err();
     assert!(
-        matches!(disable, AdminError::PendingApproval(_)),
-        "{disable}"
-    );
-
-    let row = env.repository.plugin(&id).await.unwrap().unwrap();
-    assert_eq!(row.state(false), PluginState::PendingApproval);
-    assert!(!row.enabled);
-}
-
-#[tokio::test]
-async fn approving_twice_is_refused_as_nothing_to_approve() {
-    let env = Env::new().await;
-    let id = env.install_pending(&metadata_archive()).await;
-    env.admin.approve(&id).await.unwrap();
-
-    let again = env.admin.approve(&id).await.unwrap_err();
-    assert!(
-        matches!(again, AdminError::NothingToApprove { .. }),
-        "{again}"
+        matches!(refused, AdminError::NoUpgradeStaged(_)),
+        "{refused}"
     );
 }
 
 #[tokio::test]
-async fn an_approved_plugin_can_be_disabled_and_enabled_again() {
+async fn an_installed_plugin_can_be_disabled_and_enabled_again() {
     let env = Env::new().await;
-    let id = env.install_pending(&metadata_archive()).await;
-    env.admin.approve(&id).await.unwrap();
+    let id = env.install(&metadata_archive()).await;
 
     env.admin.set_enabled(&id, false).await.unwrap();
     let disabled = env.repository.plugin(&id).await.unwrap().unwrap();
@@ -248,8 +207,7 @@ async fn an_approved_plugin_can_be_disabled_and_enabled_again() {
 #[tokio::test]
 async fn removal_cascades_rows_and_deletes_the_files() {
     let env = Env::new().await;
-    let id = env.install_pending(&metadata_archive()).await;
-    env.admin.approve(&id).await.unwrap();
+    let id = env.install(&metadata_archive()).await;
 
     let service = InstanceService::new(
         Arc::clone(&env.host),
@@ -292,8 +250,7 @@ async fn lifecycle_writes_publish_plugin_status_events() {
     let env = Env::new().await;
     let mut events = env.bus.subscribe();
 
-    let id = env.install_pending(&metadata_archive()).await;
-    env.admin.approve(&id).await.unwrap();
+    let id = env.install(&metadata_archive()).await;
     env.admin.remove(&id).await.unwrap();
 
     let mut states = Vec::new();
@@ -303,7 +260,7 @@ async fn lifecycle_writes_publish_plugin_status_events() {
             states.push(status.state);
         }
     }
-    assert_eq!(states, ["pending-approval", "enabled", "removed"]);
+    assert_eq!(states, ["enabled", "removed"]);
 }
 
 #[tokio::test]
@@ -311,13 +268,7 @@ async fn an_install_without_a_bus_still_records_the_plugin() {
     let env = Env::new().await;
     let admin = PluginAdmin::new(Arc::clone(&env.host), env.repository.clone(), None);
     let registration = admin
-        .install_archive(
-            &metadata_archive(),
-            None,
-            PluginSource::Sideload,
-            None,
-            false,
-        )
+        .install_archive(&metadata_archive(), None, PluginSource::Sideload, None)
         .await
         .unwrap();
     assert!(
@@ -329,18 +280,16 @@ async fn an_install_without_a_bus_still_records_the_plugin() {
     );
 }
 
-/// Installs an approved metadata plugin at `0.1.0` requesting `permissions`.
-async fn approved_metadata(env: &Env, permissions: Value) -> String {
+/// Installs a metadata plugin at `0.1.0` requesting `permissions`.
+async fn installed_metadata(env: &Env, permissions: Value) -> String {
     let archive = metadata_version(env.dir.path(), "0.1.0", permissions);
-    let id = env.install_pending(&archive).await;
-    env.admin.approve(&id).await.unwrap();
-    id
+    env.install(&archive).await
 }
 
 #[tokio::test]
 async fn an_upgrade_covered_by_the_installed_permissions_switches_immediately() {
     let env = Env::new().await;
-    let id = approved_metadata(&env, one_host("api.example.com")).await;
+    let id = installed_metadata(&env, one_host("api.example.com")).await;
     let before = env.repository.plugin(&id).await.unwrap().unwrap();
 
     let archive = metadata_version(
@@ -352,7 +301,7 @@ async fn an_upgrade_covered_by_the_installed_permissions_switches_immediately() 
         }),
     );
     env.admin
-        .install_archive(&archive, None, PluginSource::Repository, None, false)
+        .install_archive(&archive, None, PluginSource::Repository, None)
         .await
         .unwrap();
 
@@ -390,13 +339,13 @@ async fn an_upgrade_covered_by_the_installed_permissions_switches_immediately() 
 #[tokio::test]
 async fn an_upgrade_requesting_a_new_permission_waits_for_approval() {
     let env = Env::new().await;
-    let id = approved_metadata(&env, json!({})).await;
+    let id = installed_metadata(&env, json!({})).await;
     let before = env.repository.plugin(&id).await.unwrap().unwrap();
 
     let archive = metadata_version(env.dir.path(), "0.2.0", one_host("api.example.com"));
     let registration = env
         .admin
-        .install_archive(&archive, None, PluginSource::Sideload, None, false)
+        .install_archive(&archive, None, PluginSource::Sideload, None)
         .await
         .unwrap();
     assert_eq!(registration.version, "0.2.0");
@@ -429,11 +378,11 @@ async fn an_upgrade_requesting_a_new_permission_waits_for_approval() {
 #[tokio::test]
 async fn an_equal_version_is_already_installed_and_an_older_one_is_a_downgrade() {
     let env = Env::new().await;
-    let id = approved_metadata(&env, json!({})).await;
+    let id = installed_metadata(&env, json!({})).await;
 
     let archive = metadata_version(env.dir.path(), "0.2.0", json!({}));
     env.admin
-        .install_archive(&archive, None, PluginSource::Sideload, None, false)
+        .install_archive(&archive, None, PluginSource::Sideload, None)
         .await
         .unwrap();
     assert_eq!(
@@ -443,7 +392,7 @@ async fn an_equal_version_is_already_installed_and_an_older_one_is_a_downgrade()
 
     let same = env
         .admin
-        .install_archive(&archive, None, PluginSource::Sideload, None, false)
+        .install_archive(&archive, None, PluginSource::Sideload, None)
         .await
         .unwrap_err();
     assert!(
@@ -454,7 +403,7 @@ async fn an_equal_version_is_already_installed_and_an_older_one_is_a_downgrade()
     let older = metadata_version(env.dir.path(), "0.1.0", json!({}));
     let rejected = env
         .admin
-        .install_archive(&older, None, PluginSource::Sideload, None, false)
+        .install_archive(&older, None, PluginSource::Sideload, None)
         .await
         .unwrap_err();
     match rejected {
@@ -476,17 +425,17 @@ async fn an_equal_version_is_already_installed_and_an_older_one_is_a_downgrade()
 }
 
 #[tokio::test]
-async fn approving_a_staged_upgrade_switches_the_version_and_prunes_the_old_one() {
+async fn applying_a_staged_upgrade_switches_the_version_and_prunes_the_old_one() {
     let env = Env::new().await;
-    let id = approved_metadata(&env, json!({})).await;
+    let id = installed_metadata(&env, json!({})).await;
 
     let archive = metadata_version(env.dir.path(), "0.2.0", one_host("api.example.com"));
     env.admin
-        .install_archive(&archive, None, PluginSource::Sideload, None, false)
+        .install_archive(&archive, None, PluginSource::Sideload, None)
         .await
         .unwrap();
 
-    let applied = env.admin.approve(&id).await.unwrap();
+    let applied = env.admin.apply_upgrade(&id).await.unwrap();
     assert_eq!(applied.version, "0.2.0");
     assert_eq!(applied.source, "sideload");
     assert_eq!(applied.sha256, archive_sha256(&archive));
@@ -514,7 +463,7 @@ async fn approving_a_staged_upgrade_switches_the_version_and_prunes_the_old_one(
 #[tokio::test]
 async fn declining_a_staged_upgrade_keeps_the_installed_version() {
     let env = Env::new().await;
-    let id = approved_metadata(&env, one_host("api.example.com")).await;
+    let id = installed_metadata(&env, one_host("api.example.com")).await;
     let before = env.repository.plugin(&id).await.unwrap().unwrap();
 
     let refused = env.admin.decline_upgrade(&id).await.unwrap_err();
@@ -525,7 +474,7 @@ async fn declining_a_staged_upgrade_keeps_the_installed_version() {
 
     let archive = metadata_version(env.dir.path(), "0.2.0", one_host("cdn.example.com"));
     env.admin
-        .install_archive(&archive, None, PluginSource::Sideload, None, false)
+        .install_archive(&archive, None, PluginSource::Sideload, None)
         .await
         .unwrap();
     assert!(env.plugins_dir().join(&id).join("0.2.0").is_dir());
@@ -546,18 +495,18 @@ async fn declining_a_staged_upgrade_keeps_the_installed_version() {
 #[tokio::test]
 async fn a_second_staged_upgrade_replaces_the_first() {
     let env = Env::new().await;
-    let id = approved_metadata(&env, json!({})).await;
+    let id = installed_metadata(&env, json!({})).await;
 
     let first = metadata_version(env.dir.path(), "0.2.0", one_host("api.example.com"));
     env.admin
-        .install_archive(&first, None, PluginSource::Sideload, None, false)
+        .install_archive(&first, None, PluginSource::Sideload, None)
         .await
         .unwrap();
     assert!(env.plugins_dir().join(&id).join("0.2.0").is_dir());
 
     let second = metadata_version(env.dir.path(), "0.3.0", one_host("cdn.example.com"));
     env.admin
-        .install_archive(&second, None, PluginSource::Sideload, None, false)
+        .install_archive(&second, None, PluginSource::Sideload, None)
         .await
         .unwrap();
 

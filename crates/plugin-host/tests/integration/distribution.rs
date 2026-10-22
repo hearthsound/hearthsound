@@ -350,7 +350,7 @@ async fn assert_untouched(env: &Env) {
 }
 
 #[tokio::test]
-async fn an_install_from_a_signed_index_lands_pending_approval() {
+async fn an_install_from_a_signed_index_is_enabled() {
     let env = Env::new().await;
     let bytes = metadata_bytes();
     serve_bytes(&env.server, ARCHIVE_PATH, bytes.clone()).await;
@@ -379,7 +379,7 @@ async fn an_install_from_a_signed_index_lands_pending_approval() {
     assert_eq!(registration.source, PluginSource::Official);
 
     let row = env.repository.plugin(METADATA_ID).await.unwrap().unwrap();
-    assert_eq!(row.state(false), PluginState::PendingApproval);
+    assert_eq!(row.state(false), PluginState::Enabled);
     assert_eq!(row.source, "official");
     assert_eq!(row.repository_id, None);
     assert_eq!(row.sha256, Sha256::digest(&bytes).to_vec());
@@ -719,7 +719,7 @@ async fn a_url_install_registers_the_repository_once() {
     let row = env.repository.plugin(METADATA_ID).await.unwrap().unwrap();
     assert_eq!(row.source, "repository");
     assert_eq!(row.repository_id, Some(rows[0].id));
-    assert_eq!(row.state(false), PluginState::PendingApproval);
+    assert_eq!(row.state(false), PluginState::Enabled);
     assert_no_downloads(&env);
 
     // A second install of the same version uses the registered repository
@@ -836,14 +836,12 @@ async fn serve_two_versions(env: &Env, permissions: Value) -> Vec<u8> {
     new
 }
 
-/// Installs the metadata fixture at 0.1.0 from the official index and approves
-/// it.
-async fn install_approved_v1(env: &Env) {
+/// Installs the metadata fixture at 0.1.0 from the official index.
+async fn install_v1(env: &Env) {
     env.installer
         .install_from_index(METADATA_ID, Some("0.1.0"), Some(RepositoryRef::Official))
         .await
         .unwrap();
-    env.admin.approve(METADATA_ID).await.unwrap();
 }
 
 /// Builds the job the update-check handler is registered under.
@@ -893,7 +891,6 @@ async fn a_bundled_plugin_is_checked_against_the_official_index() {
             None,
             PluginSource::Bundled,
             None,
-            true,
         )
         .await
         .unwrap();
@@ -916,7 +913,6 @@ async fn a_sideloaded_plugin_is_never_updated() {
             None,
             PluginSource::Sideload,
             None,
-            false,
         )
         .await
         .unwrap();
@@ -982,7 +978,7 @@ async fn a_repository_plugin_is_checked_against_its_repository() {
 async fn auto_update_applies_an_upgrade_that_asks_for_nothing_new() {
     let env = Env::with_settings(&[("HEARTHSOUND__PLUGINS__AUTO_UPDATE", "true")]).await;
     serve_two_versions(&env, json!({})).await;
-    install_approved_v1(&env).await;
+    install_v1(&env).await;
 
     let checker = env.checker();
     let updates = checker.check().await;
@@ -1005,11 +1001,11 @@ async fn auto_update_applies_an_upgrade_that_asks_for_nothing_new() {
 }
 
 #[tokio::test]
-async fn an_upgrade_that_asks_for_more_waits_for_approval() {
+async fn an_upgrade_that_asks_for_more_waits_for_review() {
     let env = Env::with_settings(&[("HEARTHSOUND__PLUGINS__AUTO_UPDATE", "true")]).await;
     let permissions = json!({"http": {"hosts": ["api.example.com"]}});
     serve_two_versions(&env, permissions).await;
-    install_approved_v1(&env).await;
+    install_v1(&env).await;
 
     let checker = env.checker();
     let updates = checker.check().await;
@@ -1029,9 +1025,9 @@ async fn an_upgrade_that_asks_for_more_waits_for_approval() {
     // The staged version is not installed a second time.
     assert!(checker.apply_auto_updates(&updates).await.is_empty());
 
-    // Approving it switches the plugin over and prunes the version it replaced.
-    let approved = env.admin.approve(METADATA_ID).await.unwrap();
-    assert_eq!(approved.version, "0.2.0");
+    // Applying it switches the plugin over and prunes the version it replaced.
+    let applied = env.admin.apply_upgrade(METADATA_ID).await.unwrap();
+    assert_eq!(applied.version, "0.2.0");
     assert!(!env.plugins_dir().join(METADATA_ID).join("0.1.0").exists());
 }
 

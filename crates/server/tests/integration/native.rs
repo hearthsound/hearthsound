@@ -1863,9 +1863,9 @@ mod plugin_admin {
         assert_eq!(plugin["api"], API);
         assert_eq!(plugin["provides"], json!(["metadata"]));
         assert_eq!(plugin["source"], "repository");
-        assert_eq!(plugin["state"], "pending-approval");
-        assert_eq!(plugin["enabled"], false);
-        assert_eq!(plugin["approved"], false);
+        assert_eq!(plugin["state"], "enabled");
+        assert_eq!(plugin["enabled"], true);
+        assert_eq!(plugin["approved"], true);
         assert!(plugin["update"].is_null());
         assert!(plugin["installedAt"].is_i64());
         let repository = plugin["repositoryId"].as_str().unwrap().to_owned();
@@ -1916,7 +1916,7 @@ mod plugin_admin {
     }
 
     #[tokio::test]
-    async fn approval_gates_enabling_and_the_lifecycle_steers_the_plugin() {
+    async fn the_lifecycle_steers_an_installed_plugin() {
         let fixture = Fixture::new().await;
         let server = MockServer::start().await;
         let signer = Signer::new();
@@ -1928,18 +1928,13 @@ mod plugin_admin {
             true,
             &[version("0.1.0", API, &archive, &bytes, json!({}))],
         )]);
-        install_from_index(&fixture, &server, &signer, &index, None).await;
+        let installed = install_from_index(&fixture, &server, &signer, &index, None).await;
 
-        // A pending plugin cannot be switched on, and has nothing to approve
-        // twice.
-        let refused = bearer(
-            &fixture,
-            reqwest::Method::POST,
-            &format!("/api/v1/admin/plugins/{PLUGIN_ID}/enable"),
-            None,
-        )
-        .await;
-        assert_problem(refused, StatusCode::CONFLICT, "conflict").await;
+        // Installing grants the manifest's permissions and enables the plugin,
+        // with no upgrade staged.
+        assert_eq!(installed["state"], "enabled");
+        assert_eq!(installed["approved"], true);
+        assert_eq!(installed["enabled"], true);
         let declined = bearer(
             &fixture,
             reqwest::Method::POST,
@@ -1948,31 +1943,23 @@ mod plugin_admin {
         )
         .await;
         assert_problem(declined, StatusCode::CONFLICT, "conflict").await;
-
-        // Approval records the permissions and enables the plugin.
-        let approved = bearer(
+        let refused = bearer(
             &fixture,
             reqwest::Method::POST,
             &format!("/api/v1/admin/plugins/{PLUGIN_ID}/approve"),
             None,
         )
         .await;
-        assert_eq!(approved.status(), StatusCode::OK);
-        let approved = json(approved).await;
-        assert_eq!(approved["state"], "enabled");
-        assert_eq!(approved["approved"], true);
-        assert_eq!(approved["enabled"], true);
+        let refused = assert_problem(refused, StatusCode::CONFLICT, "conflict").await;
+        assert!(
+            refused["detail"]
+                .as_str()
+                .unwrap()
+                .contains("has no staged upgrade"),
+            "{refused}"
+        );
 
-        let again = bearer(
-            &fixture,
-            reqwest::Method::POST,
-            &format!("/api/v1/admin/plugins/{PLUGIN_ID}/approve"),
-            None,
-        )
-        .await;
-        assert_problem(again, StatusCode::CONFLICT, "conflict").await;
-
-        // Disabling and enabling an approved plugin.
+        // Disabling and enabling an installed plugin.
         let disabled = bearer(
             &fixture,
             reqwest::Method::POST,
@@ -2039,13 +2026,6 @@ mod plugin_admin {
             &[version("0.1.0", API, &archive, &bytes, json!({}))],
         )]);
         install_from_index(&fixture, &server, &signer, &index, None).await;
-        bearer(
-            &fixture,
-            reqwest::Method::POST,
-            &format!("/api/v1/admin/plugins/{PLUGIN_ID}/approve"),
-            None,
-        )
-        .await;
 
         // A newer version asking for a permission the installed one does not
         // hold is staged, and the installed version keeps serving.
@@ -2250,7 +2230,8 @@ mod plugin_admin {
         assert_eq!(plugin["id"], PLUGIN_ID);
         assert_eq!(plugin["version"], "0.1.0");
         assert_eq!(plugin["source"], "sideload");
-        assert_eq!(plugin["state"], "pending-approval");
+        assert_eq!(plugin["state"], "enabled");
+        assert_eq!(plugin["enabled"], true);
         assert!(plugin.get("repositoryId").is_none());
         assert!(plugins_dir(&fixture).join(PLUGIN_ID).join("0.1.0").is_dir());
         let leftovers = std::fs::read_dir(plugins_dir(&fixture))
@@ -2546,13 +2527,6 @@ mod plugin_admin {
             &[version("0.1.0", API, &archive, &bytes, json!({}))],
         )]);
         install_from_index(&fixture, &server, &signer, &index, None).await;
-        bearer(
-            &fixture,
-            reqwest::Method::POST,
-            &format!("/api/v1/admin/plugins/{PLUGIN_ID}/approve"),
-            None,
-        )
-        .await;
         let plugins = json(
             bearer(
                 &fixture,
@@ -2909,7 +2883,7 @@ mod provider_admin {
     /// The id of the metadata fixture.
     const METADATA_ID: &str = "com.example.metadata-fixture";
 
-    /// Installs a fixture plugin as approved and enabled.
+    /// Installs a fixture plugin, granted and enabled.
     ///
     /// The provider resources are about configuring instances, so the plugins
     /// they are configured from are installed directly rather than through the
@@ -2922,7 +2896,7 @@ mod provider_admin {
             .await
             .unwrap();
         let registration = PluginRepository::new(fixture.services.database())
-            .register_approved(&installed, PluginSource::Sideload)
+            .register(&installed, PluginSource::Sideload)
             .await
             .unwrap();
         assert_eq!(registration.id, id);
