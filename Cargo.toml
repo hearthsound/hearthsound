@@ -97,8 +97,8 @@ utoipa-axum = "0.3.0"
 uuid = { version = "1.28.0", features = ["v7"] }
 # Only the features the plugin host uses: the defaults add a WAT parser, a
 # compile cache with zstd, GC, threads, profiling and debugging support.
-wasmtime = { version = "49.0.3", default-features = false, features = ["anyhow", "async", "backtrace", "component-model", "cranelift", "parallel-compilation", "runtime", "std"] }
-wasmtime-wasi = { version = "49.0.3", default-features = false, features = ["p2"] }
+wasmtime = { version = "49.0.4", default-features = false, features = ["anyhow", "async", "backtrace", "component-model", "cranelift", "parallel-compilation", "runtime", "std"] }
+wasmtime-wasi = { version = "49.0.4", default-features = false, features = ["p2"] }
 wiremock = "0.6"
 zip = { version = "9.0.3", default-features = false, features = ["deflate"] }
 

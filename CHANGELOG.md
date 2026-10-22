@@ -86,6 +86,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decides whether an `X-Forwarded-For` header names the client. Previously
   every request looked like it came from an unknown address.
 
+### Security
+
+- Updated wasmtime, wasmtime-wasi and wasmtime-wasi-io to 49.0.4,
+  rustls-webpki to 0.103.16, and webpki-root-certs and webpki-roots to 1.0.10,
+  fixing RUSTSEC-2026-0378, RUSTSEC-2026-0379, RUSTSEC-2026-0381,
+  RUSTSEC-2026-0382 and RUSTSEC-2026-0383.
+
 ## [0.1.4] - 2026-10-18
 
 ### Added
