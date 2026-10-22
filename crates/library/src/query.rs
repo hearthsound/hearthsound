@@ -1148,6 +1148,12 @@ async fn track_views(
 /// # Errors
 ///
 /// Returns [`LibraryError`] when a query fails.
+///
+/// # Stub
+///
+/// The server's own play counts are the only popularity signal here: they are a
+/// stub for a real popularity source, such as catalog popularity and/or play
+/// counts, that proper `getTopSongs` conformance requires.
 pub async fn top_tracks_for_artist(
     conn: &mut SqliteConnection,
     scope: Scope,

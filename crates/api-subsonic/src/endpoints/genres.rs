@@ -189,6 +189,15 @@ pub async fn get_random_songs(call: Call) -> Encoded {
 /// when `count` is not a number, error 70 when `id` is not an artist id, and a
 /// generic error when a catalog artist cannot be reached or a read fails. A
 /// name no artist has answers an empty listing.
+///
+/// # Stub
+///
+/// No popularity source exists yet, so this endpoint does not yet conform to
+/// the Subsonic meaning of `getTopSongs`. A stored artist's songs come from
+/// `top_tracks_for_artist`, ordered by the server's own play counts and then by
+/// the oldest album, disc, and track; a catalog artist's songs keep the order
+/// the provider returned. A real popularity source - play counts and/or catalog
+/// popularity - must replace both orderings.
 pub async fn get_top_songs(call: Call) -> Encoded {
     let count = match number(&call, "count", DEFAULT_TOP_SONGS) {
         Ok(count) => count.clamp(0, MAX_SONGS),
