@@ -2011,7 +2011,7 @@ mod plugin_admin {
     }
 
     #[tokio::test]
-    async fn an_upgrade_that_requests_new_permissions_waits_for_approval() {
+    async fn an_upgrade_that_requests_a_new_host_waits_for_approval() {
         let fixture = Fixture::new().await;
         let server = MockServer::start().await;
         let signer = Signer::new();
@@ -2040,6 +2040,19 @@ mod plugin_admin {
         assert_eq!(staged["version"], "0.1.0");
         assert_eq!(staged["enabled"], true);
         assert!(plugins_dir(&fixture).join(PLUGIN_ID).join("0.2.0").is_dir());
+        let upgrade = &staged["upgrade"];
+        assert_eq!(upgrade["version"], "0.2.0");
+        let added = upgrade["newPermissions"].as_array().unwrap();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0]["scope"], "http.hosts");
+        assert_eq!(added[0]["detail"], "api.example.com");
+        let requested = upgrade["requestedPermissions"].as_array().unwrap();
+        assert!(!requested.is_empty());
+        assert!(
+            requested
+                .iter()
+                .any(|permission| permission["scope"] == "http.hosts")
+        );
 
         // Approving applies the upgrade and prunes the old version's files.
         let applied = bearer(
@@ -2053,6 +2066,7 @@ mod plugin_admin {
         let applied = json(applied).await;
         assert_eq!(applied["state"], "enabled");
         assert_eq!(applied["version"], "0.2.0");
+        assert!(applied["upgrade"].is_null());
         assert_eq!(
             applied["requestedPermissions"][0]["detail"],
             "api.example.com"
@@ -2080,6 +2094,7 @@ mod plugin_admin {
         let declined = json(declined).await;
         assert_eq!(declined["state"], "enabled");
         assert_eq!(declined["version"], "0.2.0");
+        assert!(declined["upgrade"].is_null());
         assert!(!plugins_dir(&fixture).join(PLUGIN_ID).join("0.3.0").exists());
         fixture.stop().await;
     }

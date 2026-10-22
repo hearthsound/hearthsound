@@ -29,7 +29,7 @@ use hearthsound_core::{IdPrefix, new_uuid_v7};
 use hearthsound_plugin_host::{
     AdminError, AvailablePlugin, AvailableReport, IndexError, InstallError, Manifest,
     PluginRepository, PluginRow, PluginSource, PluginUpdate, RepositoryRef, RequestedPermission,
-    Unavailable, default_plugin_ids, requested_permissions,
+    Unavailable, default_plugin_ids, new_permissions, requested_permissions,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -44,7 +44,7 @@ use crate::views::{client_id, parse_id};
 /// The prefix of the temporary files an uploaded plugin is staged in.
 const UPLOAD_PREFIX: &str = ".upload-";
 
-/// One permission a plugin asks for, as shown to the approving administrator.
+/// One permission a plugin asks for, as shown to the reviewing administrator.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionView {
@@ -95,6 +95,19 @@ pub struct ConfigSectionView {
     pub ui_schema: serde_json::Value,
 }
 
+/// The newer version a plugin has staged for review.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StagedUpgradeView {
+    /// The version waiting to be applied.
+    pub version: String,
+    /// Everything the staged version asks for, with risk labels, as the
+    /// installed version's `requestedPermissions` reports it.
+    pub requested_permissions: Vec<PermissionView>,
+    /// Only the permissions the staged version adds to the installed grant.
+    pub new_permissions: Vec<PermissionView>,
+}
+
 /// One installed plugin, as an administrator sees it.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -130,6 +143,8 @@ pub struct PluginView {
     pub requested_permissions: Vec<PermissionView>,
     /// The newer version the last update check found, or `null`.
     pub update: Option<UpdateView>,
+    /// The staged upgrade waiting for review, or `null`.
+    pub upgrade: Option<StagedUpgradeView>,
     /// When the plugin was installed, in unix milliseconds.
     pub installed_at: i64,
 }
@@ -753,6 +768,26 @@ async fn plugin_view(
             .into_iter()
             .find(|update| update.plugin_id == row.id)
     });
+    let upgrade = match staged.as_ref() {
+        Some(staged) => {
+            let staged_manifest =
+                Manifest::parse(staged.manifest.as_bytes(), &settings).map_err(|error| {
+                    problem::internal("parsing a staged plugin upgrade's manifest", &error)
+                })?;
+            Some(StagedUpgradeView {
+                version: staged.version.clone(),
+                requested_permissions: requested_permissions(&staged_manifest)
+                    .iter()
+                    .map(PermissionView::from)
+                    .collect(),
+                new_permissions: new_permissions(&staged_manifest, &manifest)
+                    .iter()
+                    .map(PermissionView::from)
+                    .collect(),
+            })
+        }
+        None => None,
+    };
     Ok(PluginView {
         id: row.id.clone(),
         name: manifest.name.clone(),
@@ -786,6 +821,7 @@ async fn plugin_view(
             update.as_ref(),
             staged.as_ref().map(|upgrade| upgrade.version.as_str()),
         ),
+        upgrade,
         installed_at: row.installed_at,
     })
 }

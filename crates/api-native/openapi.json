@@ -4050,7 +4050,7 @@
       },
       "PermissionView": {
         "type": "object",
-        "description": "One permission a plugin asks for, as shown to the approving administrator.",
+        "description": "One permission a plugin asks for, as shown to the reviewing administrator.",
         "required": [
           "scope",
           "detail",
@@ -4259,6 +4259,17 @@
               {
                 "$ref": "#/components/schemas/UpdateView",
                 "description": "The newer version the last update check found, or `null`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "upgrade": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StagedUpgradeView",
+                "description": "The staged upgrade waiting for review, or `null`."
               },
               {
                 "type": "null"
@@ -4872,6 +4883,35 @@
           "required": {
             "type": "boolean",
             "description": "`true` while the users table is empty."
+          }
+        }
+      },
+      "StagedUpgradeView": {
+        "type": "object",
+        "description": "The newer version a plugin has staged for review.",
+        "required": [
+          "version",
+          "requestedPermissions",
+          "newPermissions"
+        ],
+        "properties": {
+          "newPermissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermissionView"
+            },
+            "description": "Only the permissions the staged version adds to the installed grant."
+          },
+          "requestedPermissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermissionView"
+            },
+            "description": "Everything the staged version asks for, with risk labels, as the\ninstalled version's `requestedPermissions` reports it."
+          },
+          "version": {
+            "type": "string",
+            "description": "The version waiting to be applied."
           }
         }
       },

@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says whether the client asks an administrator to confirm a plugin install
   with its permissions first.
 
+- An installed plugin's view carries `upgrade`: the version staged for review
+  with everything it asks for and the permissions it adds.
+
 ## [0.1.5] - 2026-10-22
 
 ### Added
