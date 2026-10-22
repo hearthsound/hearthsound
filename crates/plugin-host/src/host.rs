@@ -201,6 +201,43 @@ impl PluginHost {
         })?
     }
 
+    /// Reads an archive's manifest without installing it.
+    ///
+    /// The archive is opened and its manifest parsed exactly as
+    /// [`PluginHost::install`] does, including the API version check and the
+    /// SemVer check on the version. The component is neither compiled nor
+    /// validated, and nothing is written.
+    ///
+    /// # Parameters
+    ///
+    /// - `archive`: the `.hsplugin` file to read.
+    ///
+    /// # Returns
+    ///
+    /// The manifest the archive carries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InstallError::Io`] when the archive cannot be read,
+    /// [`InstallError::Archive`] when it is not a readable zip,
+    /// [`InstallError::MissingEntry`] when the manifest entry is absent,
+    /// [`InstallError::EntryTooLarge`] when an entry exceeds the host's limits,
+    /// [`InstallError::Manifest`] when the manifest is invalid,
+    /// [`InstallError::UnsupportedApi`] when the plugin targets another API
+    /// version, and [`InstallError::Settings`] when a setting cannot be read.
+    pub async fn inspect(&self, archive: &Path) -> Result<Manifest, InstallError> {
+        let archive = archive.to_path_buf();
+        let settings = Arc::clone(&self.settings);
+        let failure_path = archive.clone();
+
+        tokio::task::spawn_blocking(move || inspect_blocking(&settings, &archive))
+            .await
+            .map_err(|error| InstallError::Io {
+                path: failure_path,
+                source: std::io::Error::other(error),
+            })?
+    }
+
     /// Removes an installed plugin's directory, with every installed version.
     ///
     /// # Parameters
@@ -569,6 +606,27 @@ fn install_blocking(
         sha256: archive.sha256(),
         component,
     })
+}
+
+/// Reads an archive's manifest without touching the async runtime.
+///
+/// This is the part of [`install_blocking`] that decides whether an archive is
+/// a plugin this host can host; the component is never compiled or validated.
+fn inspect_blocking(
+    settings: &SettingsStore,
+    archive_path: &Path,
+) -> Result<Manifest, InstallError> {
+    let archive = PluginArchive::read(archive_path)?;
+    let manifest = Manifest::parse(archive.manifest(), settings)?;
+
+    if manifest.api != SUPPORTED_API {
+        return Err(InstallError::UnsupportedApi {
+            api: manifest.api.clone(),
+        });
+    }
+    parse_version(&manifest.version)?;
+
+    Ok(manifest)
 }
 
 /// Writes the plugin's files into the staging directory.

@@ -1002,6 +1002,72 @@
         ]
       }
     },
+    "/api/v1/admin/plugins/inspect": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Reads an uploaded `.hsplugin` file and reports what it holds.",
+        "description": "The file is staged in the plugins directory, read, and removed again; the\nplugin is not installed and nothing is recorded. `provides` lists the layers\nthe manifest declares and `requestedPermissions` lists what it asks for with\nthe risk label of each entry, so an administrator can see the permissions\nbefore installing the archive. `plugins.allow_sideload` gates the route.\n\n# Errors\n\nAnswers `sideload-disabled` when uploading a plugin is switched off,\n`invalid-request` when the body is not multipart, has no `file` part or is\nmalformed, `invalid-plugin` when the file is not a plugin this server can\nhost, and `internal` when the file cannot be staged.",
+        "operationId": "inspect_plugin",
+        "requestBody": {
+          "description": "One `file` part holding a `.hsplugin` archive",
+          "content": {
+            "multipart/form-data": {}
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The archive's manifest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is not multipart, has no `file` part, or is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Sideloading is switched off",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The file is not a plugin this server hosts",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/admin/plugins/upload": {
       "post": {
         "tags": [
@@ -3287,6 +3353,50 @@
           "name": {
             "type": "string",
             "description": "What the app password is for."
+          }
+        }
+      },
+      "ArchiveView": {
+        "type": "object",
+        "description": "What an archive holds, read without installing it.",
+        "required": [
+          "id",
+          "name",
+          "version",
+          "api",
+          "provides",
+          "requestedPermissions"
+        ],
+        "properties": {
+          "api": {
+            "type": "string",
+            "description": "The plugin API version the component targets."
+          },
+          "id": {
+            "type": "string",
+            "description": "The plugin id from the manifest."
+          },
+          "name": {
+            "type": "string",
+            "description": "The plugin's own name."
+          },
+          "provides": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The layers the plugin provides."
+          },
+          "requestedPermissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PermissionView"
+            },
+            "description": "The permissions the manifest requests, with their risk labels."
+          },
+          "version": {
+            "type": "string",
+            "description": "The version the archive carries."
           }
         }
       },

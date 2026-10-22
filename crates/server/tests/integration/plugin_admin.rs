@@ -16,7 +16,7 @@ use std::process::Command;
 use std::sync::LazyLock;
 
 use hearthsound_core::Layer;
-use hearthsound_test_support::{HELLO_CATALOG, METADATA_FIXTURE, fixture_plugin};
+use hearthsound_test_support::{HELLO_CATALOG, HTTP_CATALOG, METADATA_FIXTURE, fixture_plugin};
 use minisign::KeyPair;
 use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -345,13 +345,14 @@ async fn assert_untouched(fixture: &Fixture, id: &str) {
     );
 }
 
-/// Sends a multipart upload of one `.hsplugin` file.
+/// Sends a multipart upload to one plugin route.
 ///
 /// # Parameters
 ///
 /// - `fixture`: the running server.
+/// - `endpoint`: the route to post to, after `/api/v1/admin/plugins`.
 /// - `bytes`: the archive.
-async fn upload(fixture: &Fixture, bytes: &[u8]) -> reqwest::Response {
+async fn multipart_upload(fixture: &Fixture, endpoint: &str, bytes: &[u8]) -> reqwest::Response {
     let mut body = Vec::new();
     body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
     body.extend_from_slice(
@@ -363,7 +364,7 @@ async fn upload(fixture: &Fixture, bytes: &[u8]) -> reqwest::Response {
     fixture
         .client
         .post(format!(
-            "{}/api/v1/admin/plugins/upload",
+            "{}/api/v1/admin/plugins/{endpoint}",
             fixture.base_url()
         ))
         .header(AUTHORIZATION, format!("Bearer {}", fixture.api_key))
@@ -375,6 +376,26 @@ async fn upload(fixture: &Fixture, bytes: &[u8]) -> reqwest::Response {
         .send()
         .await
         .unwrap()
+}
+
+/// Sends a multipart upload of one `.hsplugin` file.
+///
+/// # Parameters
+///
+/// - `fixture`: the running server.
+/// - `bytes`: the archive.
+async fn upload(fixture: &Fixture, bytes: &[u8]) -> reqwest::Response {
+    multipart_upload(fixture, "upload", bytes).await
+}
+
+/// Sends a multipart file to the inspection route.
+///
+/// # Parameters
+///
+/// - `fixture`: the running server.
+/// - `bytes`: the file to read.
+async fn inspect(fixture: &Fixture, bytes: &[u8]) -> reqwest::Response {
+    multipart_upload(fixture, "inspect", bytes).await
 }
 
 /// Returns the cargo arguments that build the command line binary.
@@ -759,4 +780,57 @@ async fn an_upload_installs_and_the_sideload_gate_refuses_it() {
     );
     assert_untouched(&fixture, "com.example.hello-catalog").await;
     assert!(plugins_dir(&fixture).join(PLUGIN_ID).exists());
+}
+
+/// The inspection route reports an archive and installs nothing.
+///
+/// The manifest's `provides` and its requested permissions are read from the
+/// file alone, no row or plugin directory appears, and the sideload gate refuses
+/// the route when it is switched off.
+#[tokio::test]
+async fn an_inspection_reports_an_archive_without_installing_it() {
+    let fixture = Fixture::new().await;
+    let bytes = std::fs::read(fixture_plugin(HTTP_CATALOG)).unwrap();
+
+    let response = inspect(&fixture, &bytes).await;
+    let status = response.status();
+    let view = json(response).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["id"], "com.example.http-catalog");
+    assert_eq!(view["name"], "HTTP catalog");
+    assert_eq!(view["version"], VERSION);
+    assert_eq!(view["api"], API);
+    assert_eq!(view["provides"], json!(["catalog"]));
+    let permissions = view["requestedPermissions"].as_array().unwrap();
+    assert!(
+        permissions
+            .iter()
+            .any(|permission| permission["scope"] == "http.hosts"),
+        "{view}"
+    );
+
+    assert_untouched(&fixture, "com.example.http-catalog").await;
+
+    // With sideloading off the route refuses to read the file at all.
+    let changed = admin(
+        &fixture,
+        reqwest::Method::PATCH,
+        "/api/v1/admin/settings",
+        Some(json!({ "settings": { "plugins.allow_sideload": false } })),
+    )
+    .await;
+    assert_eq!(changed.status(), StatusCode::OK);
+    let refused = inspect(&fixture, &bytes).await;
+    assert_problem(refused, StatusCode::FORBIDDEN, "sideload-disabled").await;
+}
+
+/// A file that is not a plugin archive is refused by the inspection route.
+#[tokio::test]
+async fn an_inspection_refuses_a_file_that_is_not_an_archive() {
+    let fixture = Fixture::new().await;
+
+    let refused = inspect(&fixture, b"not a plugin archive").await;
+    let problem = assert_problem(refused, StatusCode::UNPROCESSABLE_ENTITY, "invalid-plugin").await;
+    assert!(problem["detail"].is_string(), "{problem}");
+    assert_untouched(&fixture, "com.example.http-catalog").await;
 }

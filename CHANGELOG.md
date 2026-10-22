@@ -46,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The available-plugin listing carries `permissions`: what the offered version
   asks for, with risk labels, so an administrator can see it before installing.
 
+- `POST /api/v1/admin/plugins/inspect` reads an uploaded `.hsplugin` and
+  answers its id, name, version, API, layers and requested permissions without
+  installing it, so a client can show what an archive asks for before an
+  administrator commits to it. It is gated by `plugins.allow_sideload` like the
+  upload route.
+
 ## [0.1.5] - 2026-10-22
 
 ### Added

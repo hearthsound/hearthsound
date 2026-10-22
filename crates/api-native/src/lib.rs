@@ -34,7 +34,7 @@
 //! | `GET`/`PATCH /api/v1/admin/settings` | administrators |
 //! | `GET /api/v1/admin/acquisitions`, `POST /api/v1/admin/acquisitions/{id}/cancel`, `POST /api/v1/admin/acquisitions/{id}/retry` | administrators |
 //! | `GET /api/v1/admin/storage`, `POST /api/v1/admin/storage/evict` | administrators |
-//! | `GET`/`POST /api/v1/admin/plugins`, `POST /api/v1/admin/plugins/upload`, `GET /api/v1/admin/plugins/available` | administrators |
+//! | `GET`/`POST /api/v1/admin/plugins`, `POST /api/v1/admin/plugins/upload`, `POST /api/v1/admin/plugins/inspect`, `GET /api/v1/admin/plugins/available` | administrators |
 //! | `GET`/`DELETE /api/v1/admin/plugins/{id}`, `POST /api/v1/admin/plugins/{id}/{enable,disable,decline-upgrade}` | administrators |
 //! | `POST /api/v1/admin/plugins/{id}/approve`, which applies a staged upgrade | administrators |
 //! | `GET`/`POST /api/v1/admin/plugin-repositories`, `PATCH`/`DELETE /api/v1/admin/plugin-repositories/{id}` | administrators |
@@ -204,6 +204,7 @@ fn api_router() -> OpenApiRouter<NativeState> {
                 .routes(routes!(routes::uploads::upload))
                 .routes(routes!(routes::uploads::list_uploads))
                 .routes(routes!(routes::admin_plugins::upload_plugin))
+                .routes(routes!(routes::admin_plugins::inspect_plugin))
                 .layer(DefaultBodyLimit::disable()),
         )
 }

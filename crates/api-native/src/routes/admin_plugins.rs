@@ -67,6 +67,24 @@ impl From<&RequestedPermission> for PermissionView {
     }
 }
 
+/// What an archive holds, read without installing it.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveView {
+    /// The plugin id from the manifest.
+    pub id: String,
+    /// The plugin's own name.
+    pub name: String,
+    /// The version the archive carries.
+    pub version: String,
+    /// The plugin API version the component targets.
+    pub api: String,
+    /// The layers the plugin provides.
+    pub provides: Vec<String>,
+    /// The permissions the manifest requests, with their risk labels.
+    pub requested_permissions: Vec<PermissionView>,
+}
+
 /// The newer version a plugin has waiting, when a check found one.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -399,37 +417,7 @@ pub async fn upload_plugin(
     State(state): State<NativeState>,
     request: Request,
 ) -> Result<(StatusCode, Json<PluginView>), Problem> {
-    let allowed = state
-        .settings()
-        .current()
-        .get(keys::PLUGINS_ALLOW_SIDELOAD)
-        .map_err(|error| problem::internal("reading plugins.allow_sideload", &error))?;
-    if !allowed {
-        return Err(Problem::sideload_disabled(
-            "Uploading a plugin is turned off on this server.",
-        ));
-    }
-
-    let mut multipart = Multipart::from_request(request, &state)
-        .await
-        .map_err(|rejection| Problem::invalid_request(rejection.body_text()))?;
-    let mut staged = None;
-    while let Some(mut field) = multipart
-        .next_field()
-        .await
-        .map_err(|error| Problem::invalid_request(error.body_text()))?
-    {
-        if field.name() != Some("file") {
-            continue;
-        }
-        staged = Some(stage_upload(&state, &mut field).await?);
-        break;
-    }
-    let Some(path) = staged else {
-        return Err(Problem::invalid_request(
-            "Send the plugin as a multipart `file` part.",
-        ));
-    };
+    let path = receive_archive(&state, request).await?;
     let outcome = state
         .services()
         .admin
@@ -441,6 +429,65 @@ pub async fn upload_plugin(
     rebuild(&state).await?;
     let Json(view) = plugin_view_by_id(&state, &registration.id).await?;
     Ok((StatusCode::CREATED, Json(view)))
+}
+
+/// Reads an uploaded `.hsplugin` file and reports what it holds.
+///
+/// The file is staged in the plugins directory, read, and removed again; the
+/// plugin is not installed and nothing is recorded. `provides` lists the layers
+/// the manifest declares and `requestedPermissions` lists what it asks for with
+/// the risk label of each entry, so an administrator can see the permissions
+/// before installing the archive. `plugins.allow_sideload` gates the route.
+///
+/// # Errors
+///
+/// Answers `sideload-disabled` when uploading a plugin is switched off,
+/// `invalid-request` when the body is not multipart, has no `file` part or is
+/// malformed, `invalid-plugin` when the file is not a plugin this server can
+/// host, and `internal` when the file cannot be staged.
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/plugins/inspect",
+    tag = "admin",
+    request_body(content_type = "multipart/form-data", description = "One `file` part holding a `.hsplugin` archive"),
+    responses(
+        (status = 200, description = "The archive's manifest", body = ArchiveView),
+        (status = 400, description = "The body is not multipart, has no `file` part, or is malformed", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Sideloading is switched off", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "The file is not a plugin this server hosts", body = Problem, content_type = "application/problem+json"),
+    ),
+    security(("bearer" = []), ("session" = []))
+)]
+pub async fn inspect_plugin(
+    _admin: AdminAuthed,
+    State(state): State<NativeState>,
+    request: Request,
+) -> Result<Json<ArchiveView>, Problem> {
+    let path = receive_archive(&state, request).await?;
+    let outcome = state
+        .services()
+        .plugins
+        .inspect(&path)
+        .await
+        .map_err(|error| install_problem(&error));
+    remove_staged(&path).await;
+    let manifest = outcome?;
+    let requested_permissions = requested_permissions(&manifest)
+        .iter()
+        .map(PermissionView::from)
+        .collect();
+    Ok(Json(ArchiveView {
+        id: manifest.id.clone(),
+        name: manifest.name.clone(),
+        version: manifest.version.clone(),
+        api: manifest.api.clone(),
+        provides: manifest
+            .provides()
+            .iter()
+            .map(|layer| layer.as_str().to_owned())
+            .collect(),
+        requested_permissions,
+    }))
 }
 
 /// Reports one installed plugin.
@@ -925,6 +972,56 @@ fn unavailable_code(reason: &Unavailable) -> &'static str {
         Unavailable::NoCompatibleVersion { .. } => "no-compatible-version",
         Unavailable::NoSuchVersion { .. } => "no-such-version",
     }
+}
+
+/// Stages one uploaded `.hsplugin` file inside the plugins directory.
+///
+/// The `plugins.allow_sideload` switch gates every upload. The request must be
+/// `multipart/form-data` with one `file` part.
+///
+/// # Parameters
+///
+/// - `state`: the shared services, for the setting and the plugins directory.
+/// - `request`: the multipart request.
+///
+/// # Returns
+///
+/// The staged file's path, which the caller removes.
+///
+/// # Errors
+///
+/// Answers `sideload-disabled` when uploading a plugin is switched off,
+/// `invalid-request` when the body is not multipart, has no `file` part or is
+/// malformed, and `internal` when the file cannot be written.
+async fn receive_archive(state: &NativeState, request: Request) -> Result<PathBuf, Problem> {
+    let allowed = state
+        .settings()
+        .current()
+        .get(keys::PLUGINS_ALLOW_SIDELOAD)
+        .map_err(|error| problem::internal("reading plugins.allow_sideload", &error))?;
+    if !allowed {
+        return Err(Problem::sideload_disabled(
+            "Uploading a plugin is turned off on this server.",
+        ));
+    }
+
+    let mut multipart = Multipart::from_request(request, state)
+        .await
+        .map_err(|rejection| Problem::invalid_request(rejection.body_text()))?;
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| Problem::invalid_request(error.body_text()))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        return stage_upload(state, &mut field).await;
+    }
+
+    Err(Problem::invalid_request(
+        "Send the plugin as a multipart `file` part.",
+    ))
 }
 
 /// Stages one uploaded part as a temporary file inside the plugins directory.
