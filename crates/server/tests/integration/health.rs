@@ -7,7 +7,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use hearthsound_auth::{ApiKeys, NewUser, Users};
-use hearthsound_server::Services;
+use hearthsound_server::{Services, WebAssets};
 
 /// The health probe answers once the process is serving.
 #[tokio::test]
@@ -146,15 +146,20 @@ async fn a_restart_keeps_the_secret_key() {
 /// The server root answers the JSON body a client probes it with.
 ///
 /// The root serves the web client's entry document only when a client is
-/// available and the request asks for HTML. A deployment without a client
-/// directory has nothing to serve, so a client that probes the root to learn
-/// whether it is talking to a Hearthsound server - with no `Accept` header, with
-/// `*/*`, or asking for HTML - gets the status object.
+/// available and the request asks for HTML, so a client that probes the root
+/// to learn whether it is talking to a Hearthsound server - with no `Accept`
+/// header or with `*/*` - gets the status object. A build without an embedded
+/// client and without `web.root` has nothing to serve, so there even a request
+/// asking for HTML gets it.
 #[tokio::test]
 async fn the_server_root_answers_json() {
     let fixture = crate::common::Fixture::new().await;
+    let mut accepts = vec![None, Some("*/*")];
+    if *fixture.services.web() == WebAssets::Absent {
+        accepts.push(Some("text/html,application/xhtml+xml"));
+    }
 
-    for accept in [None, Some("*/*"), Some("text/html,application/xhtml+xml")] {
+    for accept in accepts {
         let mut request = fixture.client.get(format!("{}/", fixture.base_url()));
         if let Some(accept) = accept {
             request = request.header("accept", accept);

@@ -7,10 +7,14 @@
 //! asks for HTML (see [`crate::http`]).
 //!
 //! The files come from `web.root` when it is set, which is what a development
-//! deployment points at a `build/` directory. With no `web.root` there is no
-//! client, and every request for one gets the JSON status object or an empty
-//! 404. [`WebAssets`] is the one place the source is chosen, so a deployment
-//! that serves the client from somewhere else only adds a variant there.
+//! deployment points at a `build/` directory. Without a `web.root`, a client
+//! fetched by `cargo xtask fetch-web-client` is embedded at build time: the
+//! release pinned in `web-client.lock` is compiled into the binary, and its
+//! files carry an `ETag` that answers a matching `If-None-Match` with 304. With
+//! neither source there is no client, and every request for one gets the JSON
+//! status object or an empty 404. [`WebAssets`] is the one place the source is
+//! chosen, so a deployment that serves the client from somewhere else only
+//! adds a variant there.
 //!
 //! Every path is normalized before it is looked up ([`normalize_path`]): it is
 //! percent-decoded, split into segments, and rejected when any segment is `.`
@@ -22,7 +26,7 @@
 use std::path::{Path, PathBuf};
 
 use axum::body::Body;
-use axum::http::{HeaderValue, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::Response;
 
 use crate::error::ServerError;
@@ -51,6 +55,13 @@ pub enum WebAssets {
     /// The path is canonical: it was resolved when the services were built, so
     /// a lookup only canonicalizes the file below it.
     Directory(PathBuf),
+    /// The pinned client embedded at build time.
+    ///
+    /// [`EmbeddedClient`] holds the files `cargo xtask fetch-web-client`
+    /// extracted into `target/web-client/` from the release pinned in
+    /// `web-client.lock`. An embedded file carries its digest as an `ETag`
+    /// and answers a matching `If-None-Match` with 304.
+    Embedded,
     /// No client is available.
     ///
     /// The server root answers its JSON status object and a path no other
@@ -68,8 +79,9 @@ impl WebAssets {
     ///
     /// # Returns
     ///
-    /// [`WebAssets::Directory`] over the canonical root when `root` is set, and
-    /// [`WebAssets::Absent`] when it is not.
+    /// [`WebAssets::Directory`] over the canonical root when `root` is set;
+    /// otherwise [`WebAssets::Embedded`] when a client was fetched at build
+    /// time, and [`WebAssets::Absent`] when neither is available.
     ///
     /// # Errors
     ///
@@ -79,6 +91,10 @@ impl WebAssets {
     /// load fail.
     pub fn resolve(root: Option<&Path>) -> Result<WebAssets, ServerError> {
         let Some(path) = root else {
+            if EmbeddedClient::get(INDEX).is_some() {
+                tracing::info!("serving the embedded web client");
+                return Ok(WebAssets::Embedded);
+            }
             return Ok(WebAssets::Absent);
         };
         let canonical = std::fs::canonicalize(path).map_err(|source| ServerError::WebRoot {
@@ -104,28 +120,47 @@ impl WebAssets {
     ///
     /// - `path`: an asset path, as [`normalize_path`] returns it: relative, with
     ///   no leading slash.
+    /// - `headers`: the request headers; an embedded file whose `ETag` one of
+    ///   the `If-None-Match` values names is answered with 304.
     ///
     /// # Returns
     ///
     /// The response, carrying the file's content type and its cache header, or
     /// `None` when this source holds no such file.
-    pub async fn serve(&self, path: &str) -> Option<Response> {
+    pub async fn serve(&self, path: &str, headers: &HeaderMap) -> Option<Response> {
         match self {
             WebAssets::Directory(root) => serve_file(root, path).await,
+            WebAssets::Embedded => serve_embedded(path, headers),
             WebAssets::Absent => None,
         }
     }
 
     /// Serves the client's entry document.
     ///
+    /// # Parameters
+    ///
+    /// - `headers`: the request headers, as [`WebAssets::serve`] reads them.
+    ///
     /// # Returns
     ///
     /// The response for `index.html`, or `None` when this source has no entry
     /// document.
-    pub async fn index(&self) -> Option<Response> {
-        self.serve(INDEX).await
+    pub async fn index(&self, headers: &HeaderMap) -> Option<Response> {
+        self.serve(INDEX, headers).await
     }
 }
+
+/// The web client release embedded at build time.
+///
+/// `cargo xtask fetch-web-client` extracts the release pinned in
+/// `web-client.lock` into `target/web-client/`; a build without that directory
+/// embeds nothing and the server answers as [`WebAssets::Absent`]. The
+/// `.version` marker the fetch writes is not part of the client.
+#[derive(rust_embed::Embed)]
+#[folder = "../../target/web-client/"]
+#[allow_missing = true]
+#[exclude = ".version"]
+struct EmbeddedClient;
 
 /// Reads one file below a root and builds its response.
 ///
@@ -151,24 +186,84 @@ async fn serve_file(root: &Path, path: &str) -> Option<Response> {
         return None;
     }
     let body = tokio::fs::read(&resolved).await.ok()?;
-    Some(asset_response(path, body))
+    Some(asset_response(path, Body::from(body)))
 }
 
-/// Builds the response for one asset's bytes.
+/// Serves one file of the embedded client.
+///
+/// The file's `ETag` is its SHA-256 in lowercase hex, quoted; a request whose
+/// `If-None-Match` names it (or is `*`) gets an empty 304 with the same
+/// validators, so a browser revalidating the entry document after a reload
+/// costs no body.
+///
+/// # Parameters
+///
+/// - `path`: the normalized asset path.
+/// - `headers`: the request headers holding `If-None-Match`.
+///
+/// # Returns
+///
+/// The response, or `None` when the embedded client has no such file.
+fn serve_embedded(path: &str, headers: &HeaderMap) -> Option<Response> {
+    let file = EmbeddedClient::get(path)?;
+    let etag = format!(
+        "\"{}\"",
+        data_encoding::HEXLOWER.encode(&file.metadata.sha256_hash())
+    );
+    let etag_value = HeaderValue::from_str(&etag).ok()?;
+    let mut response = if if_none_match(headers, &etag) {
+        let mut response = asset_response(path, Body::empty());
+        *response.status_mut() = StatusCode::NOT_MODIFIED;
+        response.headers_mut().remove(header::CONTENT_TYPE);
+        response
+    } else {
+        asset_response(path, Body::from(file.data))
+    };
+    response.headers_mut().insert(header::ETAG, etag_value);
+    Some(response)
+}
+
+/// Reports whether a request's `If-None-Match` matches an entity tag.
+///
+/// Each header holds a comma-separated list of entity tags or `*`; a weak tag
+/// (`W/"..."`) matches its strong form, as the weak comparison RFC 9110
+/// prescribes for `If-None-Match`.
+///
+/// # Parameters
+///
+/// - `headers`: the request headers.
+/// - `etag`: the quoted entity tag of the file.
+///
+/// # Returns
+///
+/// `true` when any listed tag matches `etag` or the list is `*`.
+fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .any(|candidate| {
+            candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == etag
+        })
+}
+
+/// Builds the response for one asset's body.
 ///
 /// # Parameters
 ///
 /// - `path`: the asset path, which names the content type and decides whether
 ///   the file may be cached for a year.
 /// - `body`: the file's bytes.
-fn asset_response(path: &str, body: Vec<u8>) -> Response {
+fn asset_response(path: &str, body: Body) -> Response {
     let content_type = mime_guess::from_path(path).first_or_octet_stream();
     let cache = if path.starts_with(IMMUTABLE_PREFIX) {
         IMMUTABLE_CACHE
     } else {
         NO_CACHE
     };
-    let mut response = Response::new(Body::from(body));
+    let mut response = Response::new(body);
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,

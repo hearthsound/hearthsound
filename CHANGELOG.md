@@ -26,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   below `_app/immutable/` is served with its content type and a one-year cache
   life. A `web.root` that does not name a directory is a startup error.
 
+- Release builds embed the first-party web client. `web-client.lock` pins the
+  client release (version, download URL and SHA-256), and
+  `cargo xtask fetch-web-client` downloads it, verifies the digest, refuses an
+  archive entry that is absolute or climbs out with `..`, and extracts it into
+  `target/web-client/`, which the server crate embeds at compile time. Without
+  `web.root` the server serves the embedded client; its files carry an `ETag`
+  and a matching `If-None-Match` is answered with 304. A build without a
+  fetched client serves none, as before. The container image fetches the
+  pinned client before it builds.
+
 - Playlist objects carry a `hearthsound` member when `hearthsound=1` is sent:
   whether the playlist is temporary and, for a temporary one, when it expires.
   The member is on the playlist objects of `getPlaylists`, `getPlaylist` and

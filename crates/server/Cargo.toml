@@ -26,8 +26,10 @@ hearthsound-jobs = { path = "../jobs" }
 hearthsound-library = { path = "../library" }
 hearthsound-media = { path = "../media" }
 hearthsound-plugin-host = { path = "../plugin-host" }
+data-encoding.workspace = true
 mime_guess.workspace = true
 reqwest.workspace = true
+rust-embed = { workspace = true, features = ["include-exclude"] }
 rustls.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

@@ -1,0 +1,22 @@
+# Embedded web client.
+#
+# The release of the first-party web client that release builds of the server
+# embed. The pin is consumed by `cargo xtask fetch-web-client`, which downloads
+# the archive, verifies its `sha256` before extracting it, and unpacks it into
+# `target/web-client/`, where the server crate embeds it at compile time. A
+# fetch is skipped when `target/web-client/.version` already records this
+# version and digest.
+#
+# Format: one `[web_client]` table, with
+#
+#   version released web client version; the release tag is `v<version>`
+#   url     direct download URL of the `.zip` release asset
+#   sha256  lowercase hex SHA-256 of that asset, checked on every download
+#
+# Update the pin only together with a release whose digest was computed from
+# the published asset.
+
+[web_client]
+version = "0.1.0"
+url = "https://github.com/hearthsound/hearthsound-web/releases/download/v0.1.0/hearthsound-web-0.1.0.zip"
+sha256 = "7bdfecdc175c6da3bef6b00b13d43c75c1f28661f646d8d25e19feedb255627f"

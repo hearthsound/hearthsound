@@ -6,7 +6,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
-use std::io::Write;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -30,6 +30,18 @@ const MAX_PLUGIN_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 /// How long one plugin download may take in total.
 const PLUGIN_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// The lock file that pins the embedded web client.
+const WEB_CLIENT_LOCK: &str = "web-client.lock";
+
+/// Where `fetch-web-client` extracts the client the server crate embeds.
+const WEB_CLIENT_DIR: &str = "target/web-client";
+
+/// The marker inside [`WEB_CLIENT_DIR`] recording the extracted release.
+const WEB_CLIENT_MARKER: &str = ".version";
+
+/// The entry document a web client archive must hold at its root.
+const WEB_CLIENT_INDEX: &str = "index.html";
+
 #[derive(Debug, Parser)]
 #[command(name = "xtask", about = "Repository maintenance tasks")]
 struct Cli {
@@ -47,6 +59,8 @@ enum Task {
     FetchPlugins(FetchPluginsArgs),
     /// Regenerate the committed OpenAPI document of the native API.
     Openapi,
+    /// Download and extract the web client pinned in `web-client.lock`.
+    FetchWebClient,
 }
 
 /// Arguments of the `fetch-plugins` task.
@@ -79,6 +93,7 @@ fn main() -> Result<()> {
         Task::Fixtures => fixtures(),
         Task::FetchPlugins(args) => fetch_plugins(args),
         Task::Openapi => openapi(),
+        Task::FetchWebClient => fetch_web_client(),
     }
 }
 
@@ -425,16 +440,7 @@ fn fetch_plugins(args: FetchPluginsArgs) -> Result<()> {
 /// other than the pinned digest. A present archive whose digest differs is
 /// refetched and replaced.
 fn fetch_plugin(agent: &ureq::Agent, plugin: &BundledPlugin, out_dir: &Path) -> Result<()> {
-    let expected = data_encoding::HEXLOWER
-        .decode(plugin.sha256.as_bytes())
-        .with_context(|| format!("{}: `sha256` is not lowercase hex", plugin.id))?;
-    if expected.len() != 32 {
-        bail!(
-            "{}: `sha256` decodes to {} bytes, expected 32",
-            plugin.id,
-            expected.len()
-        );
-    }
+    let expected = pinned_digest(&plugin.id, &plugin.sha256)?;
 
     let target = out_dir.join(format!("{}-{}.hsplugin", plugin.id, plugin.version));
     if target.is_file() {
@@ -481,4 +487,302 @@ fn download(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>> {
         .limit(MAX_PLUGIN_ARCHIVE_BYTES)
         .read_to_vec()
         .with_context(|| format!("reading the body of {url}"))
+}
+
+/// The contents of `web-client.lock`.
+#[derive(Debug, serde::Deserialize)]
+struct WebClientLock {
+    /// The one pinned web client release.
+    web_client: WebClientPin,
+}
+
+/// The web client release pinned in `web-client.lock`.
+#[derive(Debug, serde::Deserialize)]
+struct WebClientPin {
+    /// The released web client version; the release tag is `v<version>`.
+    version: String,
+    /// Direct download URL of the `.zip` release asset.
+    url: String,
+    /// Lowercase hex SHA-256 of the archive.
+    sha256: String,
+}
+
+/// Downloads and extracts the web client pinned in `web-client.lock`.
+///
+/// The archive is verified against the pinned digest before anything is
+/// written, extracted into a staging directory under `target/`, and swapped
+/// into `target/web-client/` only once every entry is in place, so the server
+/// crate never embeds a half-extracted client. The staged tree records
+/// `<version> <sha256>` in `.version`; a tree that already records the pin is
+/// left untouched.
+///
+/// Fails when the lock file cannot be read or parsed, when the download fails
+/// or exceeds [`MAX_PLUGIN_ARCHIVE_BYTES`], when the digest does not match, or
+/// when the archive is not a client: an entry whose name is absolute or climbs
+/// out with `..`, or no `index.html` at its root.
+fn fetch_web_client() -> Result<()> {
+    let root = repo_root()?;
+    let lock_path = root.join(WEB_CLIENT_LOCK);
+    let raw = fs::read_to_string(&lock_path)
+        .with_context(|| format!("reading {}", lock_path.display()))?;
+    let lock: WebClientLock =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", lock_path.display()))?;
+    let pin = lock.web_client;
+    let expected = pinned_digest(&pin.version, &pin.sha256)?;
+
+    let out_dir = root.join(WEB_CLIENT_DIR);
+    let marker = format!("{} {}", pin.version, pin.sha256);
+    if extracted_release(&out_dir).as_deref() == Some(marker.as_str()) {
+        println!("{} (up to date at {})", out_dir.display(), pin.version);
+        return Ok(());
+    }
+
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .user_agent(concat!("hearthsound-xtask/", env!("CARGO_PKG_VERSION")))
+            .timeout_global(Some(PLUGIN_DOWNLOAD_TIMEOUT))
+            .build(),
+    );
+    let bytes = download(&agent, &pin.url)?;
+    let found = Sha256::digest(&bytes);
+    if found.as_slice() != expected.as_slice() {
+        bail!(
+            "{}: sha256 mismatch: the lock file pins {}, the download is {}",
+            pin.url,
+            pin.sha256,
+            data_encoding::HEXLOWER.encode(found.as_slice())
+        );
+    }
+
+    let staging_parent = root.join("target");
+    fs::create_dir_all(&staging_parent)
+        .with_context(|| format!("creating {}", staging_parent.display()))?;
+    extract_web_client(&bytes, &staging_parent, &out_dir, &marker)?;
+    println!("{} ({})", out_dir.display(), pin.version);
+    Ok(())
+}
+
+/// Decodes a pinned SHA-256 digest.
+///
+/// # Parameters
+///
+/// - `label`: what the digest belongs to, for the error message.
+/// - `sha256`: the digest as the lock file holds it.
+///
+/// # Errors
+///
+/// Fails when the digest is not lowercase hex or does not decode to 32 bytes.
+fn pinned_digest(label: &str, sha256: &str) -> Result<Vec<u8>> {
+    let expected = data_encoding::HEXLOWER
+        .decode(sha256.as_bytes())
+        .with_context(|| format!("{label}: `sha256` is not lowercase hex"))?;
+    if expected.len() != 32 {
+        bail!(
+            "{label}: `sha256` decodes to {} bytes, expected 32",
+            expected.len()
+        );
+    }
+    Ok(expected)
+}
+
+/// Reads the release an extracted web client records.
+///
+/// # Parameters
+///
+/// - `out_dir`: the extracted client directory.
+///
+/// # Returns
+///
+/// The trimmed contents of its `.version` marker, or `None` when there is no
+/// extracted client or no marker.
+fn extracted_release(out_dir: &Path) -> Option<String> {
+    fs::read_to_string(out_dir.join(WEB_CLIENT_MARKER))
+        .ok()
+        .map(|marker| marker.trim().to_owned())
+}
+
+/// Extracts a web client archive and swaps it into place.
+///
+/// # Parameters
+///
+/// - `bytes`: the verified archive.
+/// - `staging_parent`: where the staging directory is created; it must be on
+///   the same filesystem as `out_dir` so the swap is a rename.
+/// - `out_dir`: the directory the client ends up in, replaced as a whole.
+/// - `marker`: the `<version> <sha256>` line written to `.version`.
+///
+/// # Errors
+///
+/// Fails when the archive cannot be read, when an entry name is absolute or
+/// climbs out of the directory, when there is no `index.html` at the archive
+/// root, or when the files cannot be written or moved.
+fn extract_web_client(
+    bytes: &[u8],
+    staging_parent: &Path,
+    out_dir: &Path,
+    marker: &str,
+) -> Result<()> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).context("reading the archive")?;
+    let staging = tempfile::tempdir_in(staging_parent).with_context(|| {
+        format!(
+            "creating a staging directory in {}",
+            staging_parent.display()
+        )
+    })?;
+
+    let mut has_index = false;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .with_context(|| format!("reading archive entry {index}"))?;
+        let name = entry
+            .name()
+            .with_context(|| format!("reading the name of archive entry {index}"))?
+            .into_owned();
+        let Some(relative) = safe_entry_path(&name) else {
+            bail!("archive entry `{name}` is absolute or leaves the client directory");
+        };
+        let target = staging.path().join(&relative);
+        if entry.is_dir() {
+            fs::create_dir_all(&target)
+                .with_context(|| format!("creating {}", target.display()))?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        let mut file =
+            fs::File::create(&target).with_context(|| format!("creating {}", target.display()))?;
+        std::io::copy(&mut entry, &mut file).with_context(|| format!("extracting `{name}`"))?;
+        has_index |= relative == Path::new(WEB_CLIENT_INDEX);
+    }
+    if !has_index {
+        bail!("the archive has no `{WEB_CLIENT_INDEX}` at its root");
+    }
+    fs::write(
+        staging.path().join(WEB_CLIENT_MARKER),
+        format!("{marker}\n"),
+    )
+    .context("writing the version marker")?;
+
+    if out_dir.exists() {
+        fs::remove_dir_all(out_dir).with_context(|| format!("removing {}", out_dir.display()))?;
+    }
+    let staged = staging.keep();
+    fs::rename(&staged, out_dir)
+        .with_context(|| format!("moving the client to {}", out_dir.display()))?;
+    Ok(())
+}
+
+/// Turns an archive entry name into a relative path below the client
+/// directory.
+///
+/// # Parameters
+///
+/// - `name`: the entry name as the archive stores it.
+///
+/// # Returns
+///
+/// The relative path, or `None` when the name is empty, absolute, holds a
+/// backslash, or has any component other than a plain name (`..`, `.`, a root
+/// or a drive prefix).
+fn safe_entry_path(name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.contains('\\') {
+        return None;
+    }
+    let path = Path::new(name);
+    let plain = path
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)));
+    if !plain || path.components().next().is_none() {
+        return None;
+    }
+    Some(path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    /// Builds a zip archive holding the given files.
+    fn archive(files: &[(&str, &str)]) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, body) in files {
+            writer
+                .start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(body.as_bytes()).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn entry_names_that_leave_the_directory_are_refused() {
+        assert_eq!(
+            safe_entry_path("index.html"),
+            Some(PathBuf::from("index.html"))
+        );
+        assert_eq!(
+            safe_entry_path("_app/immutable/app.js"),
+            Some(PathBuf::from("_app/immutable/app.js"))
+        );
+        assert_eq!(safe_entry_path("_app/"), Some(PathBuf::from("_app")));
+        for refused in [
+            "",
+            "/etc/passwd",
+            "../outside",
+            "_app/../../x",
+            "./index.html",
+            "a\\b",
+        ] {
+            assert_eq!(
+                safe_entry_path(refused),
+                None,
+                "{refused:?} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn an_archive_with_an_escaping_entry_writes_nothing() {
+        let parent = tempfile::tempdir().unwrap();
+        let out = parent.path().join("web-client");
+        let bytes = archive(&[("index.html", "<html>"), ("../escape.txt", "x")]);
+        let error = extract_web_client(&bytes, parent.path(), &out, "0.1.0 abc").unwrap_err();
+        assert!(error.to_string().contains("../escape.txt"), "{error}");
+        assert!(!out.exists());
+        assert!(!parent.path().join("escape.txt").exists());
+    }
+
+    #[test]
+    fn an_archive_without_an_index_is_refused() {
+        let parent = tempfile::tempdir().unwrap();
+        let out = parent.path().join("web-client");
+        let bytes = archive(&[("app/index.html", "<html>")]);
+        assert!(extract_web_client(&bytes, parent.path(), &out, "0.1.0 abc").is_err());
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn an_extracted_client_records_its_release_and_replaces_the_old_one() {
+        let parent = tempfile::tempdir().unwrap();
+        let out = parent.path().join("web-client");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(out.join("stale.js"), "old").unwrap();
+
+        let bytes = archive(&[("index.html", "<html>"), ("_app/immutable/app.js", "app")]);
+        extract_web_client(&bytes, parent.path(), &out, "0.1.0 abc").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(out.join("index.html")).unwrap(),
+            "<html>"
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("_app/immutable/app.js")).unwrap(),
+            "app"
+        );
+        assert!(!out.join("stale.js").exists());
+        assert_eq!(extracted_release(&out).as_deref(), Some("0.1.0 abc"));
+    }
 }

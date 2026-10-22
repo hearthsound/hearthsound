@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 
-# The Hearthsound server image: the `hearthsound` binary, its bundled
-# first-party plugins, and the media tools it shells out to, running as a
-# non-root user.
+# The Hearthsound server image: the `hearthsound` binary with its embedded web
+# client, its bundled first-party plugins, and the media tools it shells out
+# to, running as a non-root user.
 #
 # Bootstrap keys are not baked in. Point the image at the container paths with
 # environment variables (`HEARTHSOUND__PATHS__DATA=/data`,
@@ -27,7 +27,11 @@ COPY crates crates
 COPY xtask xtask
 COPY wit wit
 COPY .sqlx .sqlx
-COPY bundled-plugins.lock ./
+COPY bundled-plugins.lock web-client.lock ./
+
+# Downloads the web client pinned in `web-client.lock` and verifies its digest
+# before extracting it into `target/web-client/`, which the server crate embeds.
+RUN cargo xtask fetch-web-client
 
 RUN cargo build --release --locked -p hearthsound
 

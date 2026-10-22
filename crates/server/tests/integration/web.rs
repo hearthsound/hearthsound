@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use hearthsound_server::{ServerError, Services};
+use hearthsound_server::{ServerError, Services, WebAssets};
 use reqwest::StatusCode;
 use tempfile::TempDir;
 
@@ -198,4 +198,59 @@ async fn a_web_root_that_is_not_a_directory_fails_startup() {
         ServerError::WebRoot { path, .. } => assert_eq!(path, file),
         other => panic!("expected a web root error, got {other}"),
     }
+}
+
+/// A build that embeds the pinned client serves it with a validator, and a
+/// browser revalidating with that validator gets an empty 304.
+///
+/// The client is only embedded after `cargo xtask fetch-web-client`, so a
+/// build without it has nothing to assert here; the absent case is covered by
+/// `health::the_server_root_answers_json`.
+#[tokio::test]
+async fn the_embedded_client_answers_a_revalidation_with_not_modified() {
+    let fixture = Fixture::new().await;
+    if *fixture.services.web() != WebAssets::Embedded {
+        return;
+    }
+
+    let response = fixture
+        .client
+        .get(format!("{}/library/albums", fixture.base_url()))
+        .header("accept", "text/html")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        header(&response, "content-type").as_deref(),
+        Some("text/html")
+    );
+    assert_eq!(
+        header(&response, "cache-control").as_deref(),
+        Some("no-cache")
+    );
+    let etag = header(&response, "etag").expect("an embedded file carries an ETag");
+    assert!(response.text().await.unwrap().contains("<html"));
+
+    let revalidated = fixture
+        .client
+        .get(format!("{}/", fixture.base_url()))
+        .header("accept", "text/html")
+        .header("if-none-match", format!("W/\"0\", {etag}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revalidated.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(header(&revalidated, "etag").as_deref(), Some(etag.as_str()));
+    assert!(revalidated.bytes().await.unwrap().is_empty());
+
+    let changed = fixture
+        .client
+        .get(format!("{}/", fixture.base_url()))
+        .header("accept", "text/html")
+        .header("if-none-match", "\"0\"")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(changed.status(), StatusCode::OK);
 }

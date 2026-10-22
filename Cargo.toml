@@ -69,6 +69,8 @@ rand = "0.10.3"
 # cold compile. `rustls-no-provider` leaves the provider to the caller.
 reqwest = { version = "0.13.5", default-features = false, features = ["charset", "http2", "rustls-no-provider", "stream", "system-proxy"] }
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+# The pinned web client embedded into release builds of the server.
+rust-embed = "8.13.0"
 rpassword = "7.5.4"
 # `statvfs` reports the free space of the filesystem the cache lives on.
 rustix = { version = "1.1.5", default-features = false, features = ["fs", "std"] }

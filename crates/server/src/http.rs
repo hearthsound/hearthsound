@@ -128,7 +128,7 @@ async fn readyz(State(services): State<Arc<Services>>) -> Response {
 /// a client is available, and HTTP 200 with `{"status":"ok"}` otherwise.
 async fn root(State(services): State<Arc<Services>>, headers: HeaderMap) -> Response {
     if accepts_html(&headers)
-        && let Some(response) = services.web().index().await
+        && let Some(response) = services.web().index(&headers).await
     {
         return response;
     }
@@ -154,12 +154,12 @@ async fn fallback(State(services): State<Arc<Services>>, request: Request) -> Re
         return StatusCode::NOT_FOUND.into_response();
     }
     if let Some(path) = normalize_path(request.uri().path())
-        && let Some(response) = services.web().serve(&path).await
+        && let Some(response) = services.web().serve(&path, request.headers()).await
     {
         return response;
     }
     if accepts_html(request.headers())
-        && let Some(response) = services.web().index().await
+        && let Some(response) = services.web().index(request.headers()).await
     {
         return response;
     }
