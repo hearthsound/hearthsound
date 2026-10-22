@@ -4738,10 +4738,18 @@
           "pinned",
           "environmentPinned",
           "kind",
+          "allowed",
           "userOverridable",
           "description"
         ],
         "properties": {
+          "allowed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The values a `string` or `stringList` setting accepts, in the registry's\norder; empty when the setting accepts any text."
+          },
           "default": {
             "type": "object",
             "description": "The built-in default."

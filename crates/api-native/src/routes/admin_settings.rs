@@ -41,6 +41,9 @@ pub struct ServerSetting {
     /// The value's shape: `bool`, `integer`, `float`, `string`, or
     /// `stringList`.
     pub kind: String,
+    /// The values a `string` or `stringList` setting accepts, in the registry's
+    /// order; empty when the setting accepts any text.
+    pub allowed: Vec<String>,
     /// Whether users may override the setting for themselves.
     pub user_overridable: bool,
     /// What the setting does.
@@ -201,8 +204,29 @@ fn server_setting(
         pinned: entry.pinned,
         environment_pinned: state.settings().is_environment_override(entry.key),
         kind: kind.to_owned(),
+        allowed: allowed_values(registry, entry.key),
         user_overridable: entry.user_overridable,
         description: entry.description.to_owned(),
+    }
+}
+
+/// Reads the values a setting accepts.
+///
+/// # Parameters
+///
+/// - `registry`: the registry, which holds each definition.
+/// - `key`: the dotted setting key.
+///
+/// # Returns
+///
+/// The accepted values for a `string` or `stringList` setting, and an empty
+/// list when the setting accepts any text or is not a string kind.
+fn allowed_values(registry: &SettingsRegistry, key: &str) -> Vec<String> {
+    match registry.def(key).map(|def| &def.kind) {
+        Some(SettingKind::String { allowed } | SettingKind::StringList { allowed }) => {
+            allowed.iter().map(|value| (*value).to_owned()).collect()
+        }
+        _ => Vec::new(),
     }
 }
 
