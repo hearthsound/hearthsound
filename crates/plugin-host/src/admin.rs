@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::error::InstallError;
 use crate::host::{PluginHost, parse_version};
-use crate::install::{PluginRegistration, registration, requests_new_permissions};
+use crate::install::{PluginRegistration, new_permissions, registration};
 use crate::manifest::{Manifest, ManifestError};
 use crate::repo::{PluginRepository, PluginRow, PluginSource, PluginState, RepoError};
 
@@ -71,9 +71,10 @@ impl PluginAdmin {
     /// The archive is checked against `expected_sha256` first, when given, then
     /// installed, then recorded. A plugin that is not recorded yet is recorded
     /// with the permissions its manifest requests as its grant, and enabled. A
-    /// newer version of a recorded plugin is switched in at once when it adds
-    /// no permission the installed grant does not already hold; the old files
-    /// are then removed. A newer version that adds a permission is staged as an
+    /// newer version of a recorded plugin is switched in at once when it asks
+    /// for nothing the installed version does not already hold; the old files
+    /// are then removed. A newer version that widens the grant, by adding a
+    /// host, tool, import root, quota or resource limit, is staged as an
     /// upgrade instead: the installed version keeps serving until
     /// [`PluginAdmin::apply_upgrade`] applies it or
     /// [`PluginAdmin::decline_upgrade`] discards it. Installing the recorded
@@ -148,8 +149,8 @@ impl PluginAdmin {
 
         let installed_manifest: Manifest = serde_json::from_str(&existing.manifest)
             .map_err(|error| InstallError::Manifest(ManifestError::Parse(error)))?;
-        let serving = existing.approved_permissions.is_some();
-        if serving && requests_new_permissions(manifest, &installed_manifest) {
+        let added = new_permissions(manifest, &installed_manifest);
+        if !added.is_empty() {
             let replaced = self
                 .repository
                 .stage_upgrade(&installed, source, repository_id)
@@ -159,7 +160,8 @@ impl PluginAdmin {
                     .remove_version(&manifest.id, &replaced.version)
                     .await?;
             }
-            let staged = registration(&installed, source);
+            let mut staged = registration(&installed, source);
+            staged.new_permissions = added;
             self.publish(&staged.id, PluginState::UpgradePendingApproval.as_str());
             return Ok(staged);
         }

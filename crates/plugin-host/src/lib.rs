@@ -62,7 +62,10 @@ pub use error::{HostError, InstallError};
 pub use files::{FileAccess, FileStat, FilesError};
 pub use host::{InstalledPlugin, PluginHost};
 pub use index::{Index, IndexClient, IndexError, IndexPlugin, IndexVersion, Unavailable};
-pub use install::{PluginRegistration, RequestedPermission, Risk, requested_permissions};
+pub use install::{
+    PluginRegistration, RequestedPermission, Risk, new_permissions, requested_permissions,
+    requested_permissions_of,
+};
 pub use installer::{
     AvailableError, AvailablePlugin, AvailableReport, PluginInstaller, RepositoryRef,
 };

@@ -337,7 +337,7 @@ async fn an_upgrade_covered_by_the_installed_permissions_switches_immediately() 
 }
 
 #[tokio::test]
-async fn an_upgrade_requesting_a_new_permission_waits_for_approval() {
+async fn an_upgrade_that_requests_a_new_host_waits_for_review() {
     let env = Env::new().await;
     let id = installed_metadata(&env, json!({})).await;
     let before = env.repository.plugin(&id).await.unwrap().unwrap();
@@ -351,6 +351,9 @@ async fn an_upgrade_requesting_a_new_permission_waits_for_approval() {
     assert_eq!(registration.version, "0.2.0");
     assert_eq!(registration.requested.len(), 1);
     assert_eq!(registration.requested[0].detail, "api.example.com");
+    assert_eq!(registration.new_permissions.len(), 1);
+    assert_eq!(registration.new_permissions[0].scope, "http.hosts");
+    assert_eq!(registration.new_permissions[0].detail, "api.example.com");
 
     let upgrade = env.repository.upgrade(&id).await.unwrap().unwrap();
     assert_eq!(upgrade.plugin_id, id);
@@ -373,6 +376,44 @@ async fn an_upgrade_requesting_a_new_permission_waits_for_approval() {
 
     assert!(env.plugins_dir().join(&id).join("0.2.0").is_dir());
     assert!(env.plugins_dir().join(&id).join("0.1.0").is_dir());
+}
+
+#[tokio::test]
+async fn an_upgrade_that_drops_a_host_switches_immediately() {
+    let env = Env::new().await;
+    let id = installed_metadata(
+        &env,
+        json!({"http": {"hosts": ["a.example.com", "b.example.com"]}}),
+    )
+    .await;
+
+    let archive = metadata_version(
+        env.dir.path(),
+        "0.2.0",
+        json!({"http": {"hosts": ["a.example.com"]}}),
+    );
+    let registration = env
+        .admin
+        .install_archive(&archive, None, PluginSource::Sideload, None)
+        .await
+        .unwrap();
+    assert!(registration.new_permissions.is_empty());
+
+    let after = env.repository.plugin(&id).await.unwrap().unwrap();
+    assert_eq!(after.version, "0.2.0");
+    assert!(after.enabled);
+    assert_eq!(after.state(false), PluginState::Enabled);
+    assert!(env.repository.upgrade(&id).await.unwrap().is_none());
+    assert_eq!(
+        approved_permissions(&after),
+        json!({
+            "http": {"hosts": ["a.example.com"], "rateLimit": null, "maxBodyBytes": null},
+            "kv": null,
+            "files": null,
+            "process": null
+        })
+    );
+    assert!(!env.plugins_dir().join(&id).join("0.1.0").exists());
 }
 
 #[tokio::test]

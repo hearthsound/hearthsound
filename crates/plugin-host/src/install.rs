@@ -7,10 +7,10 @@
 //! the risk labels of `03-plugin-system.md` section 10 so an administrator can
 //! see what the install grants.
 //!
-//! An upgrade is compared against the installed grant. A version that adds a
-//! permission the installed version does not hold is staged for review; any
-//! other version switches in at once. The installed plugin's own files are the
-//! source of truth for the manifest:
+//! An upgrade is compared with the installed grant item by item. A version that
+//! widens it, by adding a host, tool, import root, quota or resource limit, is
+//! staged for review; any other version switches in at once. The installed
+//! plugin's own files are the source of truth for the manifest:
 //! [`registration`](PluginRepository::register) stores the `manifest.json` text
 //! the install wrote, so the row can never describe a different manifest than
 //! the component beside it.
@@ -19,7 +19,7 @@ use hearthsound_core::Layer;
 use uuid::Uuid;
 
 use crate::host::InstalledPlugin;
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, Permissions};
 use crate::repo::{PluginRepository, PluginRow, PluginSource, PluginUpgrade};
 use crate::repo::{RepoError, now_millis};
 
@@ -92,26 +92,30 @@ pub struct PluginRegistration {
     /// The permissions the manifest requests, with their risk labels, in the
     /// order they should be displayed.
     pub requested: Vec<RequestedPermission>,
+    /// The permissions a staged upgrade adds; empty unless the install was
+    /// staged for review.
+    pub new_permissions: Vec<RequestedPermission>,
     /// The layers the plugin provides.
     pub provides: Vec<Layer>,
 }
 
-/// Describes the permissions a manifest requests, with risk labels.
+/// Describes a permission set as an administrator would read it.
 ///
 /// Hosts are grouped by risk: every public host of the allowlist becomes one
 /// entry and every `$config:` host another, so a display can render the
 /// distinction between "reaches a fixed host" and "reaches whatever host the
-/// administrator configured".
+/// administrator configured". Resource limits live on the manifest rather than
+/// in its permission set, so they are not described here; use
+/// [`requested_permissions`] to describe a whole manifest.
 ///
 /// # Parameters
 ///
-/// - `manifest`: the manifest whose `permissions` are described.
+/// - `permissions`: the manifest's `permissions` object.
 ///
 /// # Returns
 ///
 /// The requested permissions, in display order.
-pub fn requested_permissions(manifest: &Manifest) -> Vec<RequestedPermission> {
-    let permissions = &manifest.permissions;
+pub fn requested_permissions_of(permissions: &Permissions) -> Vec<RequestedPermission> {
     let mut requested = Vec::new();
 
     if let Some(http) = &permissions.http {
@@ -176,6 +180,24 @@ pub fn requested_permissions(manifest: &Manifest) -> Vec<RequestedPermission> {
             risk: Risk::High,
         });
     }
+
+    requested
+}
+
+/// Describes the permissions a manifest requests, with risk labels.
+///
+/// This is [`requested_permissions_of`] over `manifest.permissions`, followed
+/// by the manifest's resource limits when any of them exceeds its default.
+///
+/// # Parameters
+///
+/// - `manifest`: the manifest whose permissions are described.
+///
+/// # Returns
+///
+/// The requested permissions, in display order.
+pub fn requested_permissions(manifest: &Manifest) -> Vec<RequestedPermission> {
+    let mut requested = requested_permissions_of(&manifest.permissions);
 
     let resources = &manifest.resources;
     let raised = resources.memory_mb > DEFAULT_MEMORY_MB
@@ -380,40 +402,168 @@ pub(crate) fn registration(plugin: &InstalledPlugin, source: PluginSource) -> Pl
         api: manifest.api.clone(),
         source,
         requested: requested_permissions(manifest),
+        new_permissions: Vec::new(),
         provides: manifest.provides().to_vec(),
     }
 }
 
-/// Reports whether `new` requests a permission that `installed` does not.
+/// Describes what a version adds to the permissions already granted.
 ///
-/// Permissions are compared by scope and detail; the risk label is derived
-/// from them and does not change what is granted.
+/// Each permission is compared item by item, so a version that merely reorders
+/// hosts or lowers a quota adds nothing. The rule is:
+///
+/// - hosts in `new` that `installed` does not list, public and `$config:`
+///   groups separately;
+/// - a `http.maxBodyBytes` or `kv.maxBytes` above the installed value, where an
+///   absent value counts as its default;
+/// - `files.importRoots` newly turned on;
+/// - process tools that `installed` does not list;
+/// - a resource limit above both the installed value and its default.
+///
+/// Only widening counts. Dropping a host, reordering hosts, lowering a quota,
+/// turning an import root off or removing a tool never stages a review.
+/// `http.rateLimit` is not compared, because it is not a labelled permission.
 ///
 /// # Parameters
 ///
-/// - `new`: the manifest of a staged upgrade.
+/// - `new`: the manifest of a version that would replace the installed one.
 /// - `installed`: the manifest of the version in service.
 ///
 /// # Returns
 ///
-/// `true` when `new` asks for anything `installed` does not.
-pub(crate) fn requests_new_permissions(new: &Manifest, installed: &Manifest) -> bool {
-    let held = requested_permissions(installed);
-    requested_permissions(new).iter().any(|wanted| {
-        !held
+/// The widened permissions, in display order; empty when `installed` already
+/// covers everything `new` asks for.
+pub fn new_permissions(new: &Manifest, installed: &Manifest) -> Vec<RequestedPermission> {
+    let wanted = &new.permissions;
+    let held = &installed.permissions;
+    let mut added = Vec::new();
+
+    if let Some(http) = &wanted.http {
+        let held_hosts: &[String] = held
+            .http
+            .as_ref()
+            .map(|held| held.hosts.as_slice())
+            .unwrap_or_default();
+        let added_hosts: Vec<&String> = http
+            .hosts
             .iter()
-            .any(|have| have.scope == wanted.scope && have.detail == wanted.detail)
-    })
+            .filter(|host| !held_hosts.contains(*host))
+            .collect();
+        let (configured, public): (Vec<&String>, Vec<&String>) = added_hosts
+            .into_iter()
+            .partition(|host| host.starts_with("$config:"));
+        if !public.is_empty() {
+            added.push(RequestedPermission {
+                scope: "http.hosts",
+                detail: join(public),
+                risk: Risk::Low,
+            });
+        }
+        if !configured.is_empty() {
+            added.push(RequestedPermission {
+                scope: "http.hosts",
+                detail: join(configured),
+                risk: Risk::Medium,
+            });
+        }
+    }
+
+    let wanted_body = wanted
+        .http
+        .as_ref()
+        .and_then(|http| http.max_body_bytes)
+        .unwrap_or(DEFAULT_BODY_BYTES);
+    let held_body = held
+        .http
+        .as_ref()
+        .and_then(|http| http.max_body_bytes)
+        .unwrap_or(DEFAULT_BODY_BYTES);
+    if wanted_body > held_body {
+        added.push(RequestedPermission {
+            scope: "http.maxBodyBytes",
+            detail: format!("{wanted_body} bytes"),
+            risk: Risk::Low,
+        });
+    }
+
+    let wanted_kv = wanted
+        .kv
+        .as_ref()
+        .and_then(|kv| kv.max_bytes)
+        .unwrap_or(DEFAULT_KV_BYTES);
+    let held_kv = held
+        .kv
+        .as_ref()
+        .and_then(|kv| kv.max_bytes)
+        .unwrap_or(DEFAULT_KV_BYTES);
+    if wanted_kv > held_kv {
+        added.push(RequestedPermission {
+            scope: "kv.maxBytes",
+            detail: format!("{wanted_kv} bytes"),
+            risk: Risk::Low,
+        });
+    }
+
+    let granted_import_roots =
+        wanted.files.as_ref().and_then(|files| files.import_roots) == Some(true);
+    let held_import_roots = held.files.as_ref().and_then(|files| files.import_roots) == Some(true);
+    if granted_import_roots && !held_import_roots {
+        added.push(RequestedPermission {
+            scope: "files.importRoots",
+            detail: "import roots granted on this instance".to_owned(),
+            risk: Risk::Medium,
+        });
+    }
+
+    if let Some(process) = &wanted.process {
+        let held_tools: &[String] = held
+            .process
+            .as_ref()
+            .map(|held| held.tools.as_slice())
+            .unwrap_or_default();
+        let added_tools: Vec<&String> = process
+            .tools
+            .iter()
+            .filter(|tool| !held_tools.contains(*tool))
+            .collect();
+        if !added_tools.is_empty() {
+            added.push(RequestedPermission {
+                scope: "process.tools",
+                detail: join(added_tools),
+                risk: Risk::High,
+            });
+        }
+    }
+
+    let resources = &new.resources;
+    let raised = resources.memory_mb > installed.resources.memory_mb.max(DEFAULT_MEMORY_MB)
+        || resources.call_timeout_ms
+            > installed
+                .resources
+                .call_timeout_ms
+                .max(DEFAULT_CALL_TIMEOUT_MS)
+        || resources.max_instances > installed.resources.max_instances.max(DEFAULT_MAX_INSTANCES);
+    if raised {
+        added.push(RequestedPermission {
+            scope: "resources",
+            detail: format!(
+                "{} MiB, {} ms per call, {} instances",
+                resources.memory_mb, resources.call_timeout_ms, resources.max_instances
+            ),
+            risk: Risk::Low,
+        });
+    }
+
+    added
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::Permissions;
 
-    /// Builds a manifest from a permissions object.
-    fn manifest(permissions: &str) -> Manifest {
-        let json = format!(
+    /// Builds the manifest document for a permissions and resources object.
+    fn manifest_json(permissions: &str, resources: &str) -> String {
+        format!(
             r#"{{
               "manifestVersion": 1,
               "id": "com.example.plugin",
@@ -426,9 +576,14 @@ mod tests {
               "provides": ["catalog"],
               "permissions": {permissions},
               "config": {{"server": null, "user": null}},
-              "resources": {{"memoryMb": 128, "callTimeoutMs": 30000, "maxInstances": 2}}
+              "resources": {resources}
             }}"#
-        );
+        )
+    }
+
+    /// Parses a manifest from a permissions object and a resources object.
+    fn manifest_with(permissions: &str, resources: &str) -> Manifest {
+        let json = manifest_json(permissions, resources);
         let settings = std::sync::Arc::new(
             hearthsound_config::SettingsStore::resolve(
                 &hearthsound_config::SettingsRegistry::builtin(),
@@ -437,6 +592,27 @@ mod tests {
             .unwrap(),
         );
         Manifest::parse(json.as_bytes(), &settings).unwrap()
+    }
+
+    /// Builds a manifest from a permissions object, with the default resources.
+    fn manifest(permissions: &str) -> Manifest {
+        manifest_with(
+            permissions,
+            r#"{"memoryMb": 128, "callTimeoutMs": 30000, "maxInstances": 2}"#,
+        )
+    }
+
+    /// Builds a manifest without validating it.
+    ///
+    /// Lets a test reach a permission the current API version refuses to grant,
+    /// such as a process tool, which the widening check still describes for a
+    /// later version.
+    fn unchecked_manifest(permissions: &str) -> Manifest {
+        let json = manifest_json(
+            permissions,
+            r#"{"memoryMb": 128, "callTimeoutMs": 30000, "maxInstances": 2}"#,
+        );
+        serde_json::from_str(&json).unwrap()
     }
 
     #[test]
@@ -473,5 +649,157 @@ mod tests {
         let manifest = manifest("{}");
         assert_eq!(manifest.permissions, Permissions::default());
         assert!(requested_permissions(&manifest).is_empty());
+    }
+
+    #[test]
+    fn an_identical_manifest_widens_nothing() {
+        let permissions = r#"{
+          "http": {"hosts": ["api.example.com", "$config:url"], "maxBodyBytes": 20971520},
+          "kv": {"maxBytes": 2097152},
+          "files": {"importRoots": true},
+          "process": {"tools": ["ffmpeg"]}
+        }"#;
+        let installed = unchecked_manifest(permissions);
+        let upgrade = unchecked_manifest(permissions);
+        assert!(new_permissions(&upgrade, &installed).is_empty());
+    }
+
+    #[test]
+    fn dropping_or_reordering_hosts_widens_nothing() {
+        let installed =
+            manifest(r#"{"http": {"hosts": ["a.example.com", "b.example.com", "$config:url"]}}"#);
+        let upgrade = manifest(r#"{"http": {"hosts": ["$config:url", "a.example.com"]}}"#);
+        assert!(new_permissions(&upgrade, &installed).is_empty());
+    }
+
+    #[test]
+    fn an_added_public_host_is_reported_alone() {
+        let installed = manifest(r#"{"http": {"hosts": ["a.example.com"]}}"#);
+        let upgrade = manifest(r#"{"http": {"hosts": ["b.example.com", "a.example.com"]}}"#);
+        assert_eq!(
+            new_permissions(&upgrade, &installed),
+            [RequestedPermission {
+                scope: "http.hosts",
+                detail: "b.example.com".to_owned(),
+                risk: Risk::Low,
+            }]
+        );
+    }
+
+    #[test]
+    fn an_added_configured_host_is_medium() {
+        let installed = manifest(r#"{"http": {"hosts": ["a.example.com"]}}"#);
+        let upgrade = manifest(r#"{"http": {"hosts": ["a.example.com", "$config:other"]}}"#);
+        assert_eq!(
+            new_permissions(&upgrade, &installed),
+            [RequestedPermission {
+                scope: "http.hosts",
+                detail: "$config:other".to_owned(),
+                risk: Risk::Medium,
+            }]
+        );
+    }
+
+    #[test]
+    fn raising_the_kv_quota_is_reported_and_lowering_it_is_not() {
+        let installed = manifest(r#"{"kv": {"maxBytes": 2097152}}"#);
+        let upgrade = manifest(r#"{"kv": {"maxBytes": 4194304}}"#);
+        assert_eq!(
+            new_permissions(&upgrade, &installed),
+            [RequestedPermission {
+                scope: "kv.maxBytes",
+                detail: "4194304 bytes".to_owned(),
+                risk: Risk::Low,
+            }]
+        );
+
+        let installed = manifest(r#"{"kv": {"maxBytes": 4194304}}"#);
+        let upgrade = manifest(r#"{"kv": {"maxBytes": 2097152}}"#);
+        assert!(new_permissions(&upgrade, &installed).is_empty());
+    }
+
+    #[test]
+    fn raising_the_body_quota_past_the_default_is_reported() {
+        let installed = manifest(r#"{"http": {"hosts": ["api.example.com"]}}"#);
+        let upgrade =
+            manifest(r#"{"http": {"hosts": ["api.example.com"], "maxBodyBytes": 20971520}}"#);
+        assert_eq!(
+            new_permissions(&upgrade, &installed),
+            [RequestedPermission {
+                scope: "http.maxBodyBytes",
+                detail: "20971520 bytes".to_owned(),
+                risk: Risk::Low,
+            }]
+        );
+
+        let installed =
+            manifest(r#"{"http": {"hosts": ["api.example.com"], "maxBodyBytes": 1048576}}"#);
+        let upgrade = manifest(r#"{"http": {"hosts": ["api.example.com"]}}"#);
+        assert_eq!(
+            new_permissions(&upgrade, &installed),
+            [RequestedPermission {
+                scope: "http.maxBodyBytes",
+                detail: "10485760 bytes".to_owned(),
+                risk: Risk::Low,
+            }]
+        );
+    }
+
+    #[test]
+    fn granting_import_roots_is_medium_and_revoking_them_widens_nothing() {
+        let installed = manifest("{}");
+        let upgrade = manifest(r#"{"files": {"importRoots": true}}"#);
+        assert_eq!(
+            new_permissions(&upgrade, &installed),
+            [RequestedPermission {
+                scope: "files.importRoots",
+                detail: "import roots granted on this instance".to_owned(),
+                risk: Risk::Medium,
+            }]
+        );
+
+        let installed = manifest(r#"{"files": {"importRoots": true}}"#);
+        let upgrade = manifest(r#"{"files": {"importRoots": false}}"#);
+        assert!(new_permissions(&upgrade, &installed).is_empty());
+    }
+
+    #[test]
+    fn an_added_process_tool_is_high() {
+        let installed = unchecked_manifest(r#"{"process": {"tools": ["git"]}}"#);
+        let upgrade = unchecked_manifest(r#"{"process": {"tools": ["git", "ffmpeg"]}}"#);
+        assert_eq!(
+            new_permissions(&upgrade, &installed),
+            [RequestedPermission {
+                scope: "process.tools",
+                detail: "ffmpeg".to_owned(),
+                risk: Risk::High,
+            }]
+        );
+    }
+
+    #[test]
+    fn raising_resources_above_the_installed_value_and_the_default_is_reported() {
+        let installed = manifest_with(
+            "{}",
+            r#"{"memoryMb": 64, "callTimeoutMs": 30000, "maxInstances": 2}"#,
+        );
+        let upgrade = manifest_with(
+            "{}",
+            r#"{"memoryMb": 512, "callTimeoutMs": 30000, "maxInstances": 2}"#,
+        );
+        assert_eq!(
+            new_permissions(&upgrade, &installed),
+            [RequestedPermission {
+                scope: "resources",
+                detail: "512 MiB, 30000 ms per call, 2 instances".to_owned(),
+                risk: Risk::Low,
+            }]
+        );
+
+        let upgrade = manifest_with(
+            "{}",
+            r#"{"memoryMb": 128, "callTimeoutMs": 30000, "maxInstances": 2}"#,
+        );
+        assert!(new_permissions(&upgrade, &installed).is_empty());
     }
 }

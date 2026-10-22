@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installed plugin is granted its permissions, so the flag no longer told an
   administrator anything they could act on.
 
+- An upgrade of an installed plugin is held for review only when it widens
+  what the installed version may do: a new host, a higher body or key-value
+  quota, import roots it did not have, a new process tool, or a raised
+  resource limit. A version that drops or reorders hosts, lowers a quota or
+  removes a tool switches in immediately, and the CLI prints the permissions
+  that need review.
+
 ## [0.1.5] - 2026-10-22
 
 ### Added

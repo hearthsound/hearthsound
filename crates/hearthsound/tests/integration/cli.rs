@@ -746,9 +746,25 @@ fn plugins_decline_upgrade_discards_the_parked_version() {
     );
     let staged = succeeded(&sandbox.run(&["plugins", "install", upgraded.to_str().unwrap()]));
     assert!(
-        staged.contains("installed com.example.hello-catalog 0.2.0 (sideload)"),
+        staged.contains("staged com.example.hello-catalog 0.2.0 (sideload) for review"),
         "{staged}"
     );
+    assert!(staged.contains("new permissions:"), "{staged}");
+    assert!(
+        staged.contains("low        api.example.com (http.hosts)"),
+        "{staged}"
+    );
+    assert!(
+        staged.contains("apply it with: hearthsound plugins approve com.example.hello-catalog"),
+        "{staged}"
+    );
+    assert!(
+        staged.contains(
+            "or discard it with: hearthsound plugins decline-upgrade com.example.hello-catalog"
+        ),
+        "{staged}"
+    );
+    assert!(!staged.contains("state:"), "{staged}");
 
     let listed = succeeded(&sandbox.run(&["plugins", "list"]));
     assert!(

@@ -80,7 +80,9 @@ fn repository(context: &Context) -> PluginRepository {
 ///
 /// Every path ends in the same notice: the plugin is installed, the permissions
 /// its manifest requests are printed with their risk labels, and its lifecycle
-/// state is reported.
+/// state is reported. A version that widens the installed permission set is
+/// staged for review instead; the notice then lists the new permissions and how
+/// to apply or discard the staged version.
 ///
 /// # Parameters
 ///
@@ -248,15 +250,29 @@ fn another_index_may_offer(error: &InstallError) -> bool {
 
 /// Prints the notice every install path ends with.
 ///
+/// A version that switched in is reported as installed, with the lifecycle
+/// state it left behind. A version staged for review is reported as staged
+/// instead: the review's new permissions are listed, then how to apply or
+/// discard it. No state line is printed for a staged version, because the
+/// installed version keeps its own.
+///
 /// # Parameters
 ///
 /// - `registration`: what the install recorded.
 /// - `state`: the lifecycle state the install left the plugin in.
 fn print_registration(registration: &PluginRegistration, state: &str) {
-    println!(
-        "installed {} {} ({})",
-        registration.id, registration.version, registration.source
-    );
+    let staged = !registration.new_permissions.is_empty();
+    if staged {
+        println!(
+            "staged {} {} ({}) for review",
+            registration.id, registration.version, registration.source
+        );
+    } else {
+        println!(
+            "installed {} {} ({})",
+            registration.id, registration.version, registration.source
+        );
+    }
     println!("api: {}", registration.api);
     if registration.provides.is_empty() {
         println!("provides: nothing this server can drive");
@@ -269,7 +285,20 @@ fn print_registration(registration: &PluginRegistration, state: &str) {
         println!("provides: {}", provides.join(", "));
     }
     print_permissions("", &registration.requested);
-    println!("state: {state}");
+    if staged {
+        println!("new permissions:");
+        print_permission_rows("", &registration.new_permissions);
+        println!(
+            "apply it with: hearthsound plugins approve {}",
+            registration.id
+        );
+        println!(
+            "or discard it with: hearthsound plugins decline-upgrade {}",
+            registration.id
+        );
+    } else {
+        println!("state: {state}");
+    }
 }
 
 /// Lists the plugins the reachable indexes offer.
@@ -800,7 +829,17 @@ fn print_permissions(prefix: &str, requested: &[RequestedPermission]) {
         return;
     }
     println!("{prefix}requested permissions:");
-    for permission in requested {
+    print_permission_rows(prefix, requested);
+}
+
+/// Prints one line per permission, in the shared row format.
+///
+/// # Parameters
+///
+/// - `prefix`: what each line starts with, so a listing can nest the block.
+/// - `permissions`: the permissions to print.
+fn print_permission_rows(prefix: &str, permissions: &[RequestedPermission]) {
+    for permission in permissions {
         println!(
             "{prefix}  {:<10} {} ({})",
             permission.risk.as_str(),
