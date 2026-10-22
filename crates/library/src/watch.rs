@@ -11,6 +11,11 @@
 //! changes it can see, so a change made on the remote side of a network mount is
 //! not reported; run a scan for those.
 //!
+//! Only events that create, modify or remove an entry turn into a scan. Engines
+//! also report the reads a scan performs - inotify subscribes to `IN_OPEN`, so
+//! walking a folder and probing its files arrives as an access event - and a
+//! scan that acted on those would request the next scan for as long as it runs.
+//!
 //! Watchers are reconciled rather than restarted: [`LibraryWatcher::reconcile`]
 //! starts a watcher for a folder that gained one, drops the watcher of a folder
 //! that lost one, disappeared, or whose path is gone, and rebuilds the watchers
@@ -26,6 +31,7 @@ use hearthsound_config::settings::Settings;
 use hearthsound_db::Database;
 use hearthsound_jobs::JobQueue;
 use notify::RecursiveMode;
+use notify::event::{AccessKind, AccessMode, EventKind};
 use notify_debouncer_full::{
     DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
 };
@@ -323,18 +329,46 @@ impl Drain {
 
 /// Collects the paths of a debounced batch.
 ///
+/// Only events that can have changed the folder's content are collected. See
+/// [`changes_the_library`].
+///
 /// # Parameters
 ///
 /// - `events`: the events of the batch.
 ///
 /// # Returns
 ///
-/// The event paths, in the order they were reported.
+/// The event paths of the changes, in the order they were reported.
 fn paths_of(events: &[DebouncedEvent]) -> Vec<PathBuf> {
     events
         .iter()
-        .flat_map(|event| event.paths.iter().cloned())
+        .filter(|event| changes_the_library(&event.event.kind))
+        .flat_map(|event| event.event.paths.iter().cloned())
         .collect()
+}
+
+/// Reports whether an event can have changed what a scan reads.
+///
+/// `Create`, `Modify` and `Remove` are the changes the watcher exists for. A
+/// write close is accepted as well, in case an engine reports a write that way
+/// and not as a modify. Opens, reads and read closes are not changes: a scan
+/// opens every directory it walks and every file it probes, so acting on them
+/// would make each scan request the next one. Events of no particular kind have
+/// nothing to act on that a scan could find.
+///
+/// # Parameters
+///
+/// - `kind`: the kind of the event.
+///
+/// # Returns
+///
+/// `true` when the event says an entry appeared, changed or went away.
+fn changes_the_library(kind: &EventKind) -> bool {
+    match kind {
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => true,
+        EventKind::Access(access) => matches!(access, AccessKind::Close(AccessMode::Write)),
+        EventKind::Any | EventKind::Other => false,
+    }
 }
 
 /// Maps reported paths onto the directories a scan should walk.
@@ -455,5 +489,61 @@ mod tests {
         let root = Path::new("/music");
         let paths = vec![PathBuf::from("/elsewhere/01.flac")];
         assert_eq!(relative_subtrees(root, &paths), Vec::<String>::new());
+    }
+
+    /// Builds one debounced event for a path.
+    fn debounced(kind: EventKind, path: &str) -> DebouncedEvent {
+        DebouncedEvent::new(
+            notify::Event::new(kind).add_path(PathBuf::from(path)),
+            std::time::Instant::now(),
+        )
+    }
+
+    #[test]
+    fn the_reads_a_scan_performs_are_not_collected() {
+        let events = vec![
+            debounced(
+                EventKind::Access(AccessKind::Open(AccessMode::Any)),
+                "/music/Album",
+            ),
+            debounced(
+                EventKind::Access(AccessKind::Open(AccessMode::Any)),
+                "/music/Album/01 - Song.flac",
+            ),
+            debounced(
+                EventKind::Access(AccessKind::Close(AccessMode::Read)),
+                "/music/Album/01 - Song.flac",
+            ),
+        ];
+        assert_eq!(paths_of(&events), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn created_modified_and_removed_paths_are_collected() {
+        use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind};
+
+        let events = vec![
+            debounced(EventKind::Create(CreateKind::File), "/music/A/01.flac"),
+            debounced(
+                EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+                "/music/A/02.flac",
+            ),
+            debounced(
+                EventKind::Access(AccessKind::Close(AccessMode::Write)),
+                "/music/A/03.flac",
+            ),
+            debounced(EventKind::Remove(RemoveKind::File), "/music/A/04.flac"),
+            debounced(EventKind::Other, "/music/A/05.flac"),
+        ];
+        assert_eq!(
+            paths_of(&events),
+            [
+                "/music/A/01.flac",
+                "/music/A/02.flac",
+                "/music/A/03.flac",
+                "/music/A/04.flac"
+            ]
+            .map(PathBuf::from)
+        );
     }
 }

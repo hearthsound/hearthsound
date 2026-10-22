@@ -12,7 +12,7 @@ use hearthsound_core::events::EventBus;
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_jobs::{JobQueue, JobRunner, JobRunnerOptions, QueueOptions, Shutdown};
 use hearthsound_library::LibraryRepository;
-use hearthsound_library::scan::{LibraryScanner, SCAN_JOB_KIND, ScanJobHandler};
+use hearthsound_library::scan::{LibraryScanner, SCAN_JOB_KIND, ScanJobHandler, ScanRequest};
 use hearthsound_library::watch::LibraryWatcher;
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
 
@@ -157,4 +157,61 @@ async fn a_new_album_is_indexed_when_it_appears() {
     watcher.stop();
     shutdown.trigger();
     running.await.unwrap();
+}
+
+/// A scan of a watched folder does not ask for another scan of it.
+///
+/// A scan opens every directory it walks and every file it probes. An engine
+/// that reports opens - inotify does - must not turn the scan's own reads into
+/// a new scan request, otherwise the folder is scanned forever and its
+/// `last_scan_at` never settles.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scan_does_not_request_another_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let settings = settings(&db).await;
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    library.add_library_folder(&music, None).await.unwrap();
+    write_album(&music.join("Watched Album")).await;
+
+    let queue = Arc::new(JobQueue::new(&db, QueueOptions::default()));
+    let scanner = Arc::new(LibraryScanner::new(
+        &db,
+        Arc::new(EventBus::new()),
+        settings.clone(),
+    ));
+    let watcher = LibraryWatcher::new(
+        &db,
+        Arc::clone(&scanner),
+        Arc::clone(&queue),
+        settings.clone(),
+    );
+    watcher.reconcile().await.unwrap();
+    assert_eq!(watcher.watched_folders(), 1);
+
+    let report = scanner.scan(&ScanRequest::all()).await.unwrap();
+    assert_eq!(report[0].files_seen, 3);
+    let scanned_at = library.list_library_folders().await.unwrap()[0].last_scan_at;
+
+    // The debouncer reports whatever the scan's opens produced once the quiet
+    // period has passed; that batch must not schedule anything.
+    let debounce = settings
+        .current()
+        .get(hearthsound_config::keys::LIBRARY_WATCH_DEBOUNCE_MS)
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis((debounce * 2 + 500) as u64)).await;
+
+    assert!(
+        !scanner.status().scanning,
+        "the scan's own reads requested another scan"
+    );
+    assert_eq!(
+        library.list_library_folders().await.unwrap()[0].last_scan_at,
+        scanned_at,
+        "no second scan ran"
+    );
+
+    watcher.stop();
 }

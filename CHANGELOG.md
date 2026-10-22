@@ -67,6 +67,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A watched library folder no longer rescans itself forever. The watcher acted
+  on every event its engine reported, including the opens a scan produces:
+  inotify subscribes to `IN_OPEN`, so walking a folder and probing its files
+  looked like changes. Every finished scan requested the next one, so
+  `library_folders.last_scan_at` kept moving, a `library.scan` job was always
+  queued or running, and the admin folder row never settled on a finished
+  scan. The watcher now acts only on events that create, modify or remove an
+  entry.
+
 - Scanning a large watched folder no longer wedges the database writer. The job
   runner extended a running job's claim inside the same loop that drove the
   handler, so an extension that waited for the single write connection stopped
