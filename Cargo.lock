@@ -1552,7 +1552,7 @@ dependencies = [
 
 [[package]]
 name = "hearthsound"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -1580,7 +1580,7 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-acquire"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "governor",
  "hearthsound-auth",
@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-activity"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "hearthsound-core",
@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-api-native"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "axum",
  "data-encoding",
@@ -1654,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-api-subsonic"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "axum",
@@ -1692,7 +1692,7 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-auth"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "argon2",
  "data-encoding",
@@ -1715,7 +1715,7 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-catalog"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "hearthsound-config",
  "hearthsound-core",
@@ -1739,7 +1739,7 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-config"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "aes-gcm",
  "config",
@@ -1760,7 +1760,7 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "serde",
@@ -1773,7 +1773,7 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-db"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "sqlx",
  "tempfile",
@@ -1785,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-jobs"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1805,7 +1805,7 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-library"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1831,7 +1831,7 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-media"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1847,7 +1847,7 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-plugin-host"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "data-encoding",
@@ -1883,7 +1883,7 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-server"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "axum",
@@ -1925,7 +1925,7 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-test-support"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "lofty",
  "tempfile",
@@ -5754,7 +5754,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xtask"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",

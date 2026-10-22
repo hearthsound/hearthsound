@@ -2,4 +2,4 @@
 source: crates/api-subsonic/tests/integration/endpoints.rs
 expression: json.body
 ---
-{"subsonic-response":{"status":"ok","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.4","openSubsonic":true,"license":{"valid":true}}}
+{"subsonic-response":{"status":"ok","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.5","openSubsonic":true,"license":{"valid":true}}}

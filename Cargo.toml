@@ -22,7 +22,7 @@ members = [
 exclude = ["crates/test-support/fixtures"]
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 rust-version = "1.96"
 license = "AGPL-3.0-or-later"

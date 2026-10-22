@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-10-22
+
 ### Added
 
 - `GET /api/v1/library/queue` answers a whole collection for the player:
@@ -80,11 +82,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `uploads.max_file_bytes`, and null on every setting whose value carries no
   unit.
 
+- The admin settings listing reports the values a string or string-list
+  setting accepts in `allowed`, in the registry's order, and an empty list
+  when any text is accepted.
+
+- Administrators can delete accounts and music folders.
+  `DELETE /api/v1/admin/users/{id}` removes an account with its sessions, keys,
+  feedback, ratings, playlists and quota; a folder it owned becomes generic and
+  the files it uploaded keep their rows without an uploader. An administrator
+  cannot delete their own account. `DELETE /api/v1/admin/folders/{id}` removes
+  a folder's file records and the tracks only it held, exactly as a scan prunes
+  a file the folder lost, and stops its watcher; nothing inside the folder on
+  disk is touched.
+
+- New usernames follow one rule: 3 to 32 characters of ASCII letters, digits,
+  `.`, `_` and `-`, starting and ending with a letter or a digit. A refused
+  name is an `invalid-request` problem that names the broken rule.
+
 ### Changed
 
 - The descriptions of `storage.cache.max_bytes`,
   `storage.cache.min_free_bytes` and `uploads.max_file_bytes` no longer end in
   `in bytes`; the unit travels in the listing's `unit` member instead.
+
+- The storage report's `filesystem` member is replaced by `filesystems`: one
+  entry per distinct filesystem behind the storage root and each scanned
+  folder, so the space of a music library on its own disk is counted.
+
+- `getAlbumList2` with `highest`, `frequent`, `recent` or `starred` lists only
+  the albums that carry the activity: the ones the account rated, played or
+  liked.
 
 ### Fixed
 
