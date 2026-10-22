@@ -545,6 +545,10 @@ pub mod keys {
         SettingKey::new("plugins.update_check_hours");
     /// Whether plugin updates are installed automatically.
     pub const PLUGINS_AUTO_UPDATE: SettingKey<bool> = SettingKey::new("plugins.auto_update");
+    /// Whether the client asks for confirmation, with the plugin's permissions, before installing
+    /// a plugin from an index. The server never reads it.
+    pub const PLUGINS_CONFIRM_INSTALL: SettingKey<bool> =
+        SettingKey::new("plugins.confirm_install");
     /// Whether a plugin may be installed by uploading a `.hsplugin` file.
     pub const PLUGINS_ALLOW_SIDELOAD: SettingKey<bool> = SettingKey::new("plugins.allow_sideload");
     /// Whether third-party plugin repositories may be added.
@@ -1048,6 +1052,12 @@ impl SettingsRegistry {
                     SettingKind::Bool,
                     SettingValue::Bool(false),
                     "Whether plugin updates are installed automatically",
+                ),
+                def(
+                    keys::PLUGINS_CONFIRM_INSTALL,
+                    SettingKind::Bool,
+                    SettingValue::Bool(true),
+                    "Whether installing a plugin from an index asks for confirmation with its permissions first",
                 ),
                 def(
                     keys::PLUGINS_ALLOW_SIDELOAD,
@@ -1761,6 +1771,12 @@ mod tests {
             );
             kinds_seen.insert(format!("{:?}", std::mem::discriminant(&def.kind)));
         }
+        assert!(
+            SettingsStore::defaults(&registry)
+                .get(keys::PLUGINS_CONFIRM_INSTALL)
+                .unwrap(),
+            "installing a plugin from an index must ask for confirmation by default"
+        );
         assert_eq!(kinds_seen.len(), 5, "every setting kind must be exercised");
     }
 

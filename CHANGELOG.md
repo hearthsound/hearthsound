@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removes a tool switches in immediately, and the CLI prints the permissions
   that need review.
 
+- `plugins.confirm_install` is a new registered setting, on by default, that
+  says whether the client asks an administrator to confirm a plugin install
+  with its permissions first.
+
 ## [0.1.5] - 2026-10-22
 
 ### Added
