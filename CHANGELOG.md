@@ -100,6 +100,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   artist with twenty albums answers with a fraction of the reads it used to
   make.
 
+- The server-wide browse view belongs to administrators. `getMusicFolders`
+  lists folder 2, and `getUser` and `getUsers` report it, only for an
+  administrator; everyone else reads an empty server view from `getArtists`,
+  `getAlbumList2` and a search naming `musicFolderId=2`, and their search and
+  default scope stay on their personal library. An administrator's server view
+  holds every stored track, including evictable cache.
+
+- `GET /api/v1/system/info` reports `features.serverBrowse` as a boolean that
+  says whether the caller may browse the server view, instead of the name of
+  a setting's value.
+
+### Removed
+
+- `privacy.server_browse` is gone, because the view it decided is an
+  administrator's now. A configuration file that still pins the key fails to
+  start with `unknown setting`, and the upgrade deletes the stored value.
+
 ### Fixed
 
 - An artist whose portrait cannot be fetched is served the first cover image

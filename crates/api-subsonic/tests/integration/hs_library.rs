@@ -785,8 +785,8 @@ async fn the_counts_match_the_listings_they_size() {
         ],
         "the members are emitted in a fixed order"
     );
-    // The default server view is the permanent library, so the cache album and
-    // its artist are outside it while the other four albums are inside.
+    // The server view holds every stored track, so the cache album and its
+    // artist are inside it along with the other four albums.
     let counted = |name: &str| {
         counts
             .iter()
@@ -794,9 +794,9 @@ async fn the_counts_match_the_listings_they_size() {
             .map(|(_, value)| *value)
             .unwrap()
     };
-    assert_eq!(counted("albums"), 3, "{}", json.body);
-    assert_eq!(counted("songs"), 4, "{}", json.body);
-    assert_eq!(counted("artists"), 3, "{}", json.body);
+    assert_eq!(counted("albums"), 4, "{}", json.body);
+    assert_eq!(counted("songs"), 5, "{}", json.body);
+    assert_eq!(counted("artists"), 4, "{}", json.body);
     assert_eq!(counted("playlists"), 1);
     assert_eq!(counted("likedArtists"), 1);
     assert_eq!(counted("likedAlbums"), 1);
@@ -809,7 +809,7 @@ async fn the_counts_match_the_listings_they_size() {
         hearthsound_library::query::count_tracks(
             &mut conn,
             hearthsound_library::query::Scope::Server(
-                hearthsound_library::query::ServerBrowse::PermanentOnly
+                hearthsound_library::query::ServerBrowse::All
             )
         )
         .await

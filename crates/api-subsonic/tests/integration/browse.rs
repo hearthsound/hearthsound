@@ -45,8 +45,8 @@ async fn get_artists_answers_the_index_in_both_encodings() {
     assert!(json.body.contains(&seeded.cardinals.to_string()));
     assert!(json.body.contains(&seeded.mello.to_string()));
     assert!(
-        !json.body.contains(&seeded.charlotte.to_string()),
-        "the evictable cache is outside the default server view: {}",
+        json.body.contains(&seeded.charlotte.to_string()),
+        "the server view holds the evictable cache: {}",
         json.body
     );
     insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
@@ -224,8 +224,8 @@ async fn get_album_list_2_answers_newest_first() {
     .await;
     assert_ok(&json);
     assert!(
-        !json.body.contains(&seeded.cache_album.to_string()),
-        "an unpinned cache file is outside the default server view: {}",
+        json.body.contains(&seeded.cache_album.to_string()),
+        "the server view holds the evictable cache: {}",
         json.body
     );
     let delta = json.body.find(&seeded.delta.to_string()).unwrap();
@@ -689,11 +689,11 @@ async fn a_generic_folder_is_visible_only_in_the_server_scope() {
 }
 
 #[tokio::test]
-async fn a_cached_file_is_hidden_while_the_server_view_is_permanent_only() {
+async fn a_cached_file_is_visible_in_the_server_view() {
     let (fixture, seeded) = fixture().await;
     let app = fixture.app();
 
-    let permanent_only = get(
+    let artists = get(
         &app,
         &format!(
             "/rest/getArtists?musicFolderId=2&apiKey={}&f=json",
@@ -701,29 +701,12 @@ async fn a_cached_file_is_hidden_while_the_server_view_is_permanent_only() {
         ),
     )
     .await;
-    assert_ok(&permanent_only);
-    assert!(!permanent_only.body.contains(&seeded.charlotte.to_string()));
-
-    fixture
-        .settings
-        .set(
-            keys::PRIVACY_SERVER_BROWSE.name(),
-            SettingValue::String("all".to_owned()),
-            None,
-        )
-        .await
-        .unwrap();
-
-    let everything = get(
-        &app,
-        &format!(
-            "/rest/getArtists?musicFolderId=2&apiKey={}&f=json",
-            fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&everything);
-    assert!(everything.body.contains(&seeded.charlotte.to_string()));
+    assert_ok(&artists);
+    assert!(
+        artists.body.contains(&seeded.charlotte.to_string()),
+        "the server view holds every stored track: {}",
+        artists.body
+    );
 
     let albums = get(
         &app,
@@ -742,25 +725,14 @@ async fn a_cached_file_is_hidden_while_the_server_view_is_permanent_only() {
 }
 
 #[tokio::test]
-async fn a_disabled_server_view_answers_empty() {
+async fn the_server_view_answers_empty_for_a_non_administrator() {
     let (fixture, seeded) = fixture().await;
     let app = fixture.app();
-    fixture
-        .settings
-        .set(
-            keys::PRIVACY_SERVER_BROWSE.name(),
-            SettingValue::String("disabled".to_owned()),
-            None,
-        )
-        .await
-        .unwrap();
+    let (_, limited) = fixture.account(&[]).await;
 
     let artists = get(
         &app,
-        &format!(
-            "/rest/getArtists?musicFolderId=2&apiKey={}&f=json",
-            fixture.api_key
-        ),
+        &format!("/rest/getArtists?musicFolderId=2&apiKey={limited}&f=json"),
     )
     .await;
     assert_ok(&artists);
@@ -769,10 +741,7 @@ async fn a_disabled_server_view_answers_empty() {
 
     let albums = get(
         &app,
-        &format!(
-            "/rest/getAlbumList2?type=newest&musicFolderId=2&apiKey={}&f=json",
-            fixture.api_key
-        ),
+        &format!("/rest/getAlbumList2?type=newest&musicFolderId=2&apiKey={limited}&f=json"),
     )
     .await;
     assert_ok(&albums);
@@ -818,6 +787,27 @@ async fn the_default_scope_follows_the_user_setting() {
     .await;
     assert_ok(&server);
     assert!(server.body.contains(&seeded.mello.to_string()));
+
+    // A non-administrator's override reads their personal library anyway,
+    // because the server view is not offered to them.
+    let (limited_id, limited) = fixture.account(&[]).await;
+    fixture
+        .state
+        .user_settings()
+        .set(
+            limited_id.uuid(),
+            keys::SUBSONIC_DEFAULT_SCOPE.name(),
+            SettingValue::String("server".to_owned()),
+        )
+        .await
+        .unwrap();
+    let personal = get(&app, &format!("/rest/getArtists?apiKey={limited}&f=json")).await;
+    assert_ok(&personal);
+    assert!(
+        !personal.body.contains(&seeded.mello.to_string()),
+        "a non-administrator never reads the server view: {}",
+        personal.body
+    );
 }
 
 #[tokio::test]

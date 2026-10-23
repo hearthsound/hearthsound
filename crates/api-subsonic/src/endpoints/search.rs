@@ -328,9 +328,9 @@ pub async fn search2(call: Call) -> Encoded {
 /// Collects the matches of one search request, local first and then catalog.
 ///
 /// Without `musicFolderId` the local matches are the personal library's
-/// followed by the rest of the server's (as far as `privacy.server_browse`
-/// shows it), so content a user has not adopted is still found by searching;
-/// with `musicFolderId` only that folder's scope is searched.
+/// followed, for an administrator, by the rest of the server's, so content a
+/// user has not adopted is still found by searching; with `musicFolderId` only
+/// that folder's scope is searched.
 ///
 /// # Parameters
 ///

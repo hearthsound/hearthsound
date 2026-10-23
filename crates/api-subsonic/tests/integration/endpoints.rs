@@ -3,8 +3,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use hearthsound_config::{SettingValue, keys};
-
 use crate::common::{Fixture, assert_error, assert_ok, get};
 
 #[tokio::test]
@@ -121,33 +119,26 @@ async fn get_music_folders_answers_the_library_and_the_server() {
 }
 
 #[tokio::test]
-async fn get_music_folders_omits_the_server_while_server_browse_is_disabled() {
+async fn get_music_folders_omits_the_server_for_a_non_administrator() {
     let fixture = Fixture::new().await;
     let app = fixture.app();
-    fixture
-        .settings
-        .set(
-            keys::PRIVACY_SERVER_BROWSE.name(),
-            SettingValue::String("disabled".to_owned()),
-            None,
-        )
-        .await
-        .unwrap();
+    let (_, limited) = fixture.account(&[]).await;
 
     let json = get(
         &app,
-        &format!("/rest/getMusicFolders?apiKey={}&f=json", fixture.api_key),
+        &format!("/rest/getMusicFolders?apiKey={limited}&f=json"),
     )
     .await;
     assert_ok(&json);
-    insta::assert_snapshot!("music-folders-disabled-json", json.body);
+    insta::assert_snapshot!("music-folders-non-admin-json", json.body);
 
     let xml = get(
         &app,
-        &format!("/rest/getMusicFolders.view?apiKey={}", fixture.api_key),
+        &format!("/rest/getMusicFolders.view?apiKey={limited}"),
     )
     .await;
     assert_ok(&xml);
+    insta::assert_snapshot!("music-folders-non-admin-xml", xml.body);
     assert!(!xml.body.contains("Server"), "{}", xml.body);
 }
 

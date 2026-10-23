@@ -148,7 +148,7 @@ impl Fixture {
         let user = Users::new(&database)
             .create(
                 &settings.current(),
-                &NewUser::new(USERNAME, "Echo", ACCOUNT_PASSWORD, false),
+                &NewUser::new(USERNAME, "Echo", ACCOUNT_PASSWORD, true),
             )
             .await
             .unwrap();

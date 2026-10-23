@@ -9,9 +9,8 @@
 //!   artists follow by containment: an album is in the library when it is saved
 //!   or liked or when it holds at least one library track, and an artist when it
 //!   is saved or liked or is credited on one;
-//! - the **server** scope, whose content is set by `privacy.server_browse`:
-//!   everything stored, only the permanent (`local`) content, or nothing at all
-//!   when the view is disabled.
+//! - the **server** scope, which holds everything stored and is offered to
+//!   administrators only; everyone else reads nothing from it.
 //!
 //! Everything is read through one connection so a caller can run a whole browse
 //! inside a read transaction. The queries return rows that are ready for the
@@ -20,8 +19,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use hearthsound_config::SettingsStore;
-use hearthsound_config::keys;
 use hearthsound_core::{Availability, EntityId, EntityKind, IdPrefix, StorageClass};
 use sqlx::{QueryBuilder, Sqlite, SqliteConnection};
 use uuid::Uuid;
@@ -29,13 +26,6 @@ use uuid::Uuid;
 use crate::error::LibraryError;
 use crate::model::{Album, Artist, MediaFile, StorageRoots, Track, decode_entity, entity_key};
 use crate::{albums, artists, folders, media_files, tracks};
-
-/// The literal `privacy.server_browse` uses for the whole server view.
-const SERVER_BROWSE_ALL: &str = "all";
-/// The literal `privacy.server_browse` uses for the permanent-only view.
-const SERVER_BROWSE_PERMANENT: &str = "permanent_only";
-/// The literal `privacy.server_browse` uses for a disabled server view.
-const SERVER_BROWSE_DISABLED: &str = "disabled";
 
 /// Which slice of the library a browse or a search reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,22 +40,18 @@ pub enum Scope {
 }
 
 impl Scope {
-    /// Builds the server scope from the resolved settings.
+    /// Builds the server scope a principal may read.
     ///
     /// # Parameters
     ///
-    /// - `settings`: the resolved settings snapshot.
+    /// - `is_admin`: whether the principal administers the server.
     ///
     /// # Returns
     ///
-    /// The server scope the `privacy.server_browse` setting selects.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LibraryError::Setting`] when the setting cannot be read and
-    /// [`LibraryError::UnknownLiteral`] when it holds an unknown value.
-    pub fn server_from_settings(settings: &SettingsStore) -> Result<Scope, LibraryError> {
-        Ok(Scope::Server(ServerBrowse::from_settings(settings)?))
+    /// The server scope every stored track is in for an administrator, and one
+    /// whose queries answer empty for everyone else.
+    pub fn server_for_principal(is_admin: bool) -> Scope {
+        Scope::Server(ServerBrowse::for_principal(is_admin))
     }
 }
 
@@ -74,50 +60,30 @@ impl Scope {
 pub enum ServerBrowse {
     /// Everything stored, including evictable cache.
     All,
-    /// Permanent content only: tracks whose availability is `local`.
-    PermanentOnly,
     /// The server view is not offered.
     Disabled,
 }
 
 impl ServerBrowse {
-    /// Reads the view from `privacy.server_browse`.
+    /// Returns the view a principal may read.
     ///
-    /// The registry already rejects an unknown value when the settings are
-    /// resolved, so the unknown-value branch only guards a store that was built
-    /// outside the registry.
+    /// The server-wide view belongs to administrators: it holds every stored
+    /// track, including evictable cache. Everyone else has no server view, so
+    /// the queries that take it answer empty.
     ///
     /// # Parameters
     ///
-    /// - `settings`: the resolved settings snapshot.
+    /// - `is_admin`: whether the principal administers the server.
     ///
     /// # Returns
     ///
-    /// The configured view.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LibraryError::Setting`] when the setting cannot be read and
-    /// [`LibraryError::UnknownLiteral`] when it holds an unknown value.
-    pub fn from_settings(settings: &SettingsStore) -> Result<ServerBrowse, LibraryError> {
-        let value = settings.get(keys::PRIVACY_SERVER_BROWSE)?;
-        match value.as_str() {
-            SERVER_BROWSE_ALL => Ok(ServerBrowse::All),
-            SERVER_BROWSE_PERMANENT => Ok(ServerBrowse::PermanentOnly),
-            SERVER_BROWSE_DISABLED => Ok(ServerBrowse::Disabled),
-            _ => Err(LibraryError::UnknownLiteral {
-                kind: "server browse view",
-                value,
-            }),
-        }
-    }
-
-    /// Returns the literal the view is stored under.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            ServerBrowse::All => SERVER_BROWSE_ALL,
-            ServerBrowse::PermanentOnly => SERVER_BROWSE_PERMANENT,
-            ServerBrowse::Disabled => SERVER_BROWSE_DISABLED,
+    /// [`ServerBrowse::All`] for an administrator, [`ServerBrowse::Disabled`]
+    /// otherwise.
+    pub const fn for_principal(is_admin: bool) -> ServerBrowse {
+        if is_admin {
+            ServerBrowse::All
+        } else {
+            ServerBrowse::Disabled
         }
     }
 
@@ -126,14 +92,12 @@ impl ServerBrowse {
     /// # Returns
     ///
     /// `("local", "cached")` for [`ServerBrowse::All`] and `("local", "local")`
-    /// for the other two; the pair is bound to an `IN (?, ?)` predicate, so a
-    /// repeated literal is the permanent-only form.
+    /// for [`ServerBrowse::Disabled`], whose queries return before they read
+    /// this; the pair is bound to an `IN (?, ?)` predicate.
     fn availability_pair(self) -> (&'static str, &'static str) {
         match self {
             ServerBrowse::All => (Availability::Local.as_str(), Availability::Cached.as_str()),
-            ServerBrowse::PermanentOnly | ServerBrowse::Disabled => {
-                (Availability::Local.as_str(), Availability::Local.as_str())
-            }
+            ServerBrowse::Disabled => (Availability::Local.as_str(), Availability::Local.as_str()),
         }
     }
 }

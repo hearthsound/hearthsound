@@ -51,7 +51,7 @@ async fn a_bearer_key_reads_the_system_info() {
     assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(info["apiVersion"], 1);
     assert_eq!(info["features"]["uploads"], true);
-    assert_eq!(info["features"]["serverBrowse"], "permanent_only");
+    assert_eq!(info["features"]["serverBrowse"], true);
     let layers: Vec<&str> = info["layers"]
         .as_array()
         .unwrap()
@@ -59,6 +59,30 @@ async fn a_bearer_key_reads_the_system_info() {
         .map(|layer| layer["layer"].as_str().unwrap())
         .collect();
     assert!(layers.contains(&"catalog") && layers.contains(&"acquisition"));
+
+    // A non-administrator reads the same information with the server view off.
+    let created = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/users",
+        Some(serde_json::json!({ "username": "listener", "password": "correct horse" })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let (cookie, _csrf) = session_of(&fixture, "listener", "correct horse").await;
+    let info = fixture
+        .client
+        .get(format!("{}/api/v1/system/info", fixture.base_url()))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(info.status(), StatusCode::OK);
+    let info = json(info).await;
+    assert_eq!(
+        info["features"]["serverBrowse"], false,
+        "the server view is an administrator's: {info}"
+    );
     fixture.stop().await;
 }
 
@@ -1020,15 +1044,15 @@ async fn server_settings_are_listed_and_changed_unless_pinned() {
     assert_eq!(poll["source"], "file");
     assert_eq!(poll["pinned"], true);
     assert_eq!(poll["kind"], "integer");
-    let browse = setting(&listing, "privacy.server_browse");
-    assert_eq!(browse["source"], "default");
-    assert_eq!(browse["value"], "permanent_only");
-    assert_eq!(browse["kind"], "string");
+    let scope = setting(&listing, "subsonic.default_scope");
+    assert_eq!(scope["source"], "default");
+    assert_eq!(scope["value"], "library");
+    assert_eq!(scope["kind"], "string");
     // A byte-valued setting reports its unit; every other setting reports null.
     let cache = setting(&listing, "storage.cache.max_bytes");
     assert_eq!(cache["value"], 20 * 1024 * 1024 * 1024_i64);
     assert_eq!(cache["unit"], "bytes");
-    assert_eq!(browse["unit"], serde_json::Value::Null);
+    assert_eq!(scope["unit"], serde_json::Value::Null);
 
     // A pinned key refuses the whole batch and is named in the problem.
     let refused = bearer(
@@ -1036,7 +1060,7 @@ async fn server_settings_are_listed_and_changed_unless_pinned() {
         reqwest::Method::PATCH,
         "/api/v1/admin/settings",
         Some(serde_json::json!({ "settings": {
-            "privacy.server_browse": "all",
+            "subsonic.default_scope": "server",
             "acquisition.poll_interval_ms.interactive": 100,
         } })),
     )
@@ -1059,14 +1083,14 @@ async fn server_settings_are_listed_and_changed_unless_pinned() {
     )
     .await;
     assert_eq!(
-        setting(&after, "privacy.server_browse")["value"],
-        "permanent_only"
+        setting(&after, "subsonic.default_scope")["value"],
+        "library"
     );
 
     // An unknown key and a value that does not fit are both invalid requests.
     for refused in [
         serde_json::json!({ "settings": { "no.such.key": true } }),
-        serde_json::json!({ "settings": { "privacy.server_browse": "everything" } }),
+        serde_json::json!({ "settings": { "subsonic.default_scope": "everything" } }),
     ] {
         let response = bearer(
             &fixture,
@@ -1084,16 +1108,19 @@ async fn server_settings_are_listed_and_changed_unless_pinned() {
         reqwest::Method::PATCH,
         "/api/v1/admin/settings",
         Some(serde_json::json!({ "settings": {
-            "privacy.server_browse": "all",
+            "subsonic.default_scope": "server",
             "uploads.enabled": false,
         } })),
     )
     .await;
     assert_eq!(changed.status(), StatusCode::OK);
     let changed = json(changed).await;
-    assert_eq!(setting(&changed, "privacy.server_browse")["value"], "all");
     assert_eq!(
-        setting(&changed, "privacy.server_browse")["source"],
+        setting(&changed, "subsonic.default_scope")["value"],
+        "server"
+    );
+    assert_eq!(
+        setting(&changed, "subsonic.default_scope")["source"],
         "database"
     );
     assert_eq!(setting(&changed, "uploads.enabled")["value"], false);
@@ -1101,16 +1128,16 @@ async fn server_settings_are_listed_and_changed_unless_pinned() {
         &fixture,
         reqwest::Method::PATCH,
         "/api/v1/admin/settings",
-        Some(serde_json::json!({ "settings": { "privacy.server_browse": null } })),
+        Some(serde_json::json!({ "settings": { "subsonic.default_scope": null } })),
     )
     .await;
     let reset = json(reset).await;
     assert_eq!(
-        setting(&reset, "privacy.server_browse")["value"],
-        "permanent_only"
+        setting(&reset, "subsonic.default_scope")["value"],
+        "library"
     );
     assert_eq!(
-        setting(&reset, "privacy.server_browse")["source"],
+        setting(&reset, "subsonic.default_scope")["source"],
         "default"
     );
 

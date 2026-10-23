@@ -4,7 +4,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use hearthsound_config::{SettingValue, keys};
 use hearthsound_core::{CatalogId, EntityKind, Slug};
 
 use crate::common::seed::{Seeded, library};
@@ -231,15 +230,6 @@ async fn the_member_is_absent_without_the_vendor_flag() {
 async fn an_album_with_only_cached_files_aggregates_to_cached() {
     let (fixture, seeded) = fixture().await;
     let app = fixture.app();
-    fixture
-        .settings
-        .set(
-            keys::PRIVACY_SERVER_BROWSE.name(),
-            SettingValue::String("all".to_owned()),
-            None,
-        )
-        .await
-        .unwrap();
 
     let json = get(
         &app,

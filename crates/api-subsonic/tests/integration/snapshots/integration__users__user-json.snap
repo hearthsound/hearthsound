@@ -2,4 +2,4 @@
 source: crates/api-subsonic/tests/integration/users.rs
 expression: user.body.clone()
 ---
-{"subsonic-response":{"status":"ok","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.5","openSubsonic":true,"user":{"username":"echo","email":"","scrobblingEnabled":true,"adminRole":false,"settingsRole":true,"downloadRole":true,"uploadRole":true,"playlistRole":true,"coverArtRole":false,"commentRole":false,"podcastRole":false,"streamRole":true,"jukeboxRole":false,"shareRole":false,"videoConversionRole":false,"folder":[1,2]}}}
+{"subsonic-response":{"status":"ok","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.5","openSubsonic":true,"user":{"username":"echo","email":"","scrobblingEnabled":true,"adminRole":true,"settingsRole":true,"downloadRole":true,"uploadRole":true,"playlistRole":true,"coverArtRole":false,"commentRole":false,"podcastRole":false,"streamRole":true,"jukeboxRole":false,"shareRole":false,"videoConversionRole":false,"folder":[1,2]}}}

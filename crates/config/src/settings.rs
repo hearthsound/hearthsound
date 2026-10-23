@@ -633,7 +633,7 @@ mod tests {
         for (key, value) in [
             (keys::SEARCH_CATALOG_MAX_RESULTS.name(), "3"),
             (keys::STREAM_PENDING_MODE.name(), "\"hold\""),
-            ("privacy.server_browse", "\"all\""),
+            ("subsonic.default_scope", "\"server\""),
         ] {
             sqlx::query("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)")
                 .bind(key)
@@ -672,11 +672,14 @@ mod tests {
         );
         // Nothing above the database holds this key.
         assert_eq!(
-            settings.current().get(keys::PRIVACY_SERVER_BROWSE).unwrap(),
-            "all"
+            settings
+                .current()
+                .get(keys::SUBSONIC_DEFAULT_SCOPE)
+                .unwrap(),
+            "server"
         );
         assert_eq!(
-            source(keys::PRIVACY_SERVER_BROWSE.name()),
+            source(keys::SUBSONIC_DEFAULT_SCOPE.name()),
             Some(SettingSource::Database)
         );
         // A key no layer holds keeps its built-in default.
@@ -1005,8 +1008,8 @@ mod tests {
             .apply(
                 &[
                     (
-                        keys::PRIVACY_SERVER_BROWSE.name().to_owned(),
-                        Some(SettingValue::String("all".to_owned())),
+                        keys::SUBSONIC_DEFAULT_SCOPE.name().to_owned(),
+                        Some(SettingValue::String("server".to_owned())),
                     ),
                     (
                         keys::STREAM_PENDING_MODE.name().to_owned(),
@@ -1019,13 +1022,16 @@ mod tests {
             .unwrap_err();
         assert!(matches!(refused, SettingsError::Pinned { .. }), "{refused}");
         assert_eq!(
-            settings.current().get(keys::PRIVACY_SERVER_BROWSE).unwrap(),
-            "permanent_only"
+            settings
+                .current()
+                .get(keys::SUBSONIC_DEFAULT_SCOPE)
+                .unwrap(),
+            "library"
         );
         let invalid = settings
             .apply(
                 &[(
-                    keys::PRIVACY_SERVER_BROWSE.name().to_owned(),
+                    keys::SUBSONIC_DEFAULT_SCOPE.name().to_owned(),
                     Some(SettingValue::String("everything".to_owned())),
                 )],
                 None,
@@ -1038,8 +1044,8 @@ mod tests {
             .apply(
                 &[
                     (
-                        keys::PRIVACY_SERVER_BROWSE.name().to_owned(),
-                        Some(SettingValue::String("all".to_owned())),
+                        keys::SUBSONIC_DEFAULT_SCOPE.name().to_owned(),
+                        Some(SettingValue::String("server".to_owned())),
                     ),
                     (
                         keys::UPLOADS_ENABLED.name().to_owned(),
@@ -1051,8 +1057,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            settings.current().get(keys::PRIVACY_SERVER_BROWSE).unwrap(),
-            "all"
+            settings
+                .current()
+                .get(keys::SUBSONIC_DEFAULT_SCOPE)
+                .unwrap(),
+            "server"
         );
         assert!(!settings.current().get(keys::UPLOADS_ENABLED).unwrap());
 

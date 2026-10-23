@@ -30,14 +30,15 @@ pub struct SystemInfo {
     pub layers: Vec<LayerSummary>,
 }
 
-/// The features the server's settings turn on.
+/// The features this server offers.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Features {
     /// Whether users may upload files (`uploads.enabled`).
     pub uploads: bool,
-    /// What the Server view shows: `all`, `permanent_only` or `disabled`.
-    pub server_browse: String,
+    /// Whether the caller may browse the server-wide view, which is every
+    /// stored track. Only administrators may.
+    pub server_browse: bool,
     /// Whether saving or liking a remote item acquires it.
     pub acquire_on_save: bool,
     /// Whether adding a remote track to a playlist acquires it.
@@ -71,7 +72,7 @@ pub struct LayerSummary {
     security(("bearer" = []), ("session" = []))
 )]
 pub async fn system_info(
-    _authed: Authed,
+    authed: Authed,
     State(state): State<NativeState>,
 ) -> Result<Json<SystemInfo>, Problem> {
     let snapshot = state.settings().current();
@@ -79,7 +80,7 @@ pub async fn system_info(
         |error: hearthsound_config::ConfigError| problem::internal("reading a setting", &error);
     let features = Features {
         uploads: snapshot.get(keys::UPLOADS_ENABLED).map_err(read)?,
-        server_browse: snapshot.get(keys::PRIVACY_SERVER_BROWSE).map_err(read)?,
+        server_browse: authed.principal.is_admin,
         acquire_on_save: snapshot.get(keys::LIBRARY_ACQUIRE_ON_SAVE).map_err(read)?,
         acquire_on_playlist_add: snapshot
             .get(keys::LIBRARY_ACQUIRE_ON_PLAYLIST_ADD)

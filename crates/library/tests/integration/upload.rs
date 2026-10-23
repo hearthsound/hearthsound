@@ -148,7 +148,7 @@ async fn uploaded_files_join_the_uploaders_library_and_the_server() {
         let theirs = Scope::Personal {
             user_id: fixture.other,
         };
-        let server = Scope::Server(ServerBrowse::PermanentOnly);
+        let server = Scope::Server(ServerBrowse::All);
         let visible = async |conn: &mut sqlx::SqliteConnection, scope| {
             hearthsound_library::query::track(conn, scope, upload.track_id)
                 .await

@@ -7,7 +7,7 @@
 //! |---|---|---|---|
 //! | `Alpha` | `The Cardinals` | folder files in the account's own folder, with embedded art | the personal library and the server |
 //! | `Bright` | `2 Mello` | a folder file in a generic folder, without art | the server only |
-//! | `Cache` | `Charlotte` | a managed file in the evictable cache | the server, and only while `privacy.server_browse` includes cache |
+//! | `Cache` | `Charlotte` | a managed file in the evictable cache | the server view, for an administrator |
 //! | `Delta` | `El Mar` | a folder file in a generic folder, without art | the server only |
 //!
 //! The artists are chosen so the index covers an article (`The Cardinals` files

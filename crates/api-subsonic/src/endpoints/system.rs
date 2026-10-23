@@ -2,7 +2,6 @@
 //! the virtual music folders, and the jukebox this server does not have.
 
 use hearthsound_auth::Credential;
-use hearthsound_config::keys;
 
 use crate::auth::Call;
 use crate::params::Params;
@@ -14,9 +13,6 @@ const LIBRARY_FOLDER: (i64, &str) = (1, "My Library");
 
 /// The music folder holding everything stored on the server.
 const SERVER_FOLDER: (i64, &str) = (2, "Server");
-
-/// The value of `privacy.server_browse` that hides [`SERVER_FOLDER`].
-const SERVER_BROWSE_DISABLED: &str = "disabled";
 
 /// The OpenSubsonic extensions this server advertises.
 ///
@@ -115,9 +111,9 @@ pub async fn token_info(call: Call) -> Encoded {
 /// Answers `getMusicFolders`: the virtual folders a client may browse.
 ///
 /// The two folders are the requesting user's personal library and the whole
-/// server. The second one is omitted while `privacy.server_browse` is
-/// `disabled`, and a browse request naming it returns an empty result, so a
-/// client that caches the folder list never learns of content it may not see.
+/// server. The second one is listed for administrators only, and a browse
+/// request naming it is answered empty for everyone else, so a client never
+/// learns of content it may not see.
 ///
 /// # Parameters
 ///
@@ -125,23 +121,10 @@ pub async fn token_info(call: Call) -> Encoded {
 ///
 /// # Returns
 ///
-/// A successful envelope carrying `musicFolders`, or a generic error when the
-/// setting cannot be read.
+/// A successful envelope carrying `musicFolders`.
 pub async fn get_music_folders(call: Call) -> Encoded {
-    let server_browse = match call
-        .state()
-        .settings_snapshot()
-        .get(keys::PRIVACY_SERVER_BROWSE)
-    {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::error!(error = %error, "could not read privacy.server_browse");
-            return call.encode(Response::failed(SubsonicError::generic()));
-        }
-    };
-
     let mut folders = vec![folder(LIBRARY_FOLDER)];
-    if server_browse != SERVER_BROWSE_DISABLED {
+    if call.principal().is_admin {
         folders.push(folder(SERVER_FOLDER));
     }
 

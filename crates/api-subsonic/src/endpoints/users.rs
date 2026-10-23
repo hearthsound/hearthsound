@@ -15,7 +15,6 @@
 //! account.
 
 use hearthsound_auth::User;
-use hearthsound_config::keys;
 
 use crate::auth::Call;
 use crate::params::Params;
@@ -26,9 +25,6 @@ use crate::value::{Array, Object};
 const LIBRARY_FOLDER_ID: i64 = 1;
 /// The music folder id that selects the server-wide view.
 const SERVER_FOLDER_ID: i64 = 2;
-
-/// The value of `privacy.server_browse` that hides the server-wide view.
-const SERVER_BROWSE_DISABLED: &str = "disabled";
 
 /// Where a client that asked to manage accounts is sent.
 ///
@@ -50,7 +46,7 @@ pub const USERS_HELP_URL: &str = "https://hearthsound.app/docs/admin/users";
 ///
 /// Answers Subsonic error 10 when `username` is missing, error 50 when a
 /// non-administrator asks for another account, error 70 when the account does
-/// not exist, and a generic error when a setting or the account cannot be read.
+/// not exist, and a generic error when the account cannot be read.
 pub async fn get_user(call: Call) -> Encoded {
     let Some(username) = call.get("username").filter(|name| !name.is_empty()) else {
         return call.encode(Response::failed(SubsonicError::missing_parameter(
@@ -73,10 +69,7 @@ pub async fn get_user(call: Call) -> Encoded {
         }
     };
 
-    let folders = match browse_folders(&call) {
-        Ok(folders) => folders,
-        Err(error) => return call.encode(Response::failed(error)),
-    };
+    let folders = browse_folders(user.is_admin);
     call.encode(Response::ok().member("user", user_object(&user, folders)))
 }
 
@@ -95,7 +88,7 @@ pub async fn get_user(call: Call) -> Encoded {
 /// # Errors
 ///
 /// Answers Subsonic error 50 for a non-administrator and a generic error when
-/// the accounts or a setting cannot be read.
+/// the accounts cannot be read.
 pub async fn get_users(call: Call) -> Encoded {
     let principal = call.principal();
     if !principal.is_admin {
@@ -112,14 +105,9 @@ pub async fn get_users(call: Call) -> Encoded {
             return call.encode(Response::failed(crate::browse::failure("getUsers", &error)));
         }
     };
-    let folders = match browse_folders(&call) {
-        Ok(folders) => folders,
-        Err(error) => return call.encode(Response::failed(error)),
-    };
-
     let entries = users
         .iter()
-        .map(|user| user_object(user, folders.clone()))
+        .map(|user| user_object(user, browse_folders(user.is_admin)))
         .collect::<Vec<Object>>();
     call.encode(Response::ok().member("users", Object::new().set("user", Array::new(entries))))
 }
@@ -146,32 +134,22 @@ pub async fn unsupported_management(params: Params) -> Encoded {
 
 /// Returns the music folder ids an account may browse.
 ///
-/// The server-wide view is a music folder only while it is offered, and the
+/// The server-wide view is a music folder for administrators only, and the
 /// personal library always is.
 ///
 /// # Parameters
 ///
-/// - `call`: the call whose settings snapshot is read.
+/// - `is_admin`: whether the account administers the server.
 ///
 /// # Returns
 ///
 /// The folder ids, the personal library first.
-///
-/// # Errors
-///
-/// Returns the generic Subsonic error to answer with when the setting cannot be
-/// read.
-fn browse_folders(call: &Call) -> Result<Vec<i64>, SubsonicError> {
-    let server_browse = call
-        .state()
-        .settings_snapshot()
-        .get(keys::PRIVACY_SERVER_BROWSE)
-        .map_err(|error| crate::browse::failure("getUsers", &error))?;
-    Ok(if server_browse == SERVER_BROWSE_DISABLED {
-        vec![LIBRARY_FOLDER_ID]
-    } else {
+fn browse_folders(is_admin: bool) -> Vec<i64> {
+    if is_admin {
         vec![LIBRARY_FOLDER_ID, SERVER_FOLDER_ID]
-    })
+    } else {
+        vec![LIBRARY_FOLDER_ID]
+    }
 }
 
 /// Projects one account.

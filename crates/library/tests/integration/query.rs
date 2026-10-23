@@ -1,12 +1,11 @@
 //! Tests for the browse and search queries: personal library membership, the
-//! server scope and its privacy setting, album ordering, local full-text
-//! search, and the preferred file resolution.
+//! server scope, album ordering, local full-text search, and the preferred file
+//! resolution.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::Path;
 
-use hearthsound_config::{SettingValue, SettingsRegistry, SettingsStore};
 use hearthsound_core::{Availability, EntityId, EntityKind, StorageClass};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_library::query::{
@@ -536,10 +535,10 @@ async fn track_listings_follow_the_scope_and_page() {
     assert_eq!(page_one.len(), 2);
     assert!(page_two.iter().all(|view| !page_one.contains(view)));
 
-    // The permanent server scope adds the permanent library track, not the
-    // evictable cache one, and the disabled view offers nothing.
-    let permanent = Scope::Server(ServerBrowse::PermanentOnly);
-    let listed = query::list_tracks(&mut conn, permanent, -1, 0)
+    // The server scope adds the permanent library tracks and the evictable
+    // cache one, and the disabled view offers nothing.
+    let everything = Scope::Server(ServerBrowse::All);
+    let listed = query::list_tracks(&mut conn, everything, -1, 0)
         .await
         .unwrap();
     let titles: Vec<&str> = listed
@@ -547,7 +546,7 @@ async fn track_listings_follow_the_scope_and_page() {
         .map(|view| view.track.title.as_str())
         .collect();
     assert!(titles.contains(&"Library Song"));
-    assert!(!titles.contains(&"Cache Song"));
+    assert!(titles.contains(&"Cache Song"));
 
     let disabled = Scope::Server(ServerBrowse::Disabled);
     assert!(
@@ -559,35 +558,21 @@ async fn track_listings_follow_the_scope_and_page() {
 }
 
 #[tokio::test]
-async fn the_server_scope_follows_the_privacy_setting() {
+async fn the_server_scope_holds_every_stored_track() {
     let dir = tempfile::tempdir().unwrap();
     let seeded = seed(dir.path()).await;
     let mut conn = seeded.db.readers().acquire().await.unwrap();
 
-    // permanent_only hides the evictable cache track and its album and artist.
-    let permanent = Scope::Server(ServerBrowse::PermanentOnly);
+    // The view holds the library tracks and the evictable cache ones.
+    let everything = Scope::Server(ServerBrowse::All);
     assert!(
-        query::track(&mut conn, permanent, seeded.cache_track)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        query::track(&mut conn, permanent, seeded.library_track)
+        query::track(&mut conn, everything, seeded.cache_track)
             .await
             .unwrap()
             .is_some()
     );
-    let albums = query::list_albums(&mut conn, permanent, AlbumSort::Newest, -1, 0)
-        .await
-        .unwrap();
-    assert!(albums.iter().all(|album| album.title != "Cache Album"));
-    assert!(albums.iter().any(|album| album.title == "Library Album"));
-
-    // all includes it.
-    let everything = Scope::Server(ServerBrowse::All);
     assert!(
-        query::track(&mut conn, everything, seeded.cache_track)
+        query::track(&mut conn, everything, seeded.library_track)
             .await
             .unwrap()
             .is_some()
@@ -596,8 +581,9 @@ async fn the_server_scope_follows_the_privacy_setting() {
         .await
         .unwrap();
     assert!(albums.iter().any(|album| album.title == "Cache Album"));
+    assert!(albums.iter().any(|album| album.title == "Library Album"));
 
-    // disabled offers nothing at all.
+    // The disabled view offers nothing at all.
     let disabled = Scope::Server(ServerBrowse::Disabled);
     assert!(
         query::track(&mut conn, disabled, seeded.library_track)
@@ -618,27 +604,15 @@ async fn the_server_scope_follows_the_privacy_setting() {
             .is_empty()
     );
 
-    // The setting maps onto the view.
-    let settings = SettingsStore::defaults(&SettingsRegistry::builtin());
+    // A principal without the server view reads the disabled scope.
     assert_eq!(
-        Scope::server_from_settings(&settings).unwrap(),
-        Scope::Server(ServerBrowse::PermanentOnly)
-    );
-    let mut sources = hearthsound_config::SettingSources::default();
-    sources.database.insert(
-        "privacy.server_browse".to_owned(),
-        SettingValue::String("all".to_owned()),
-    );
-    let settings = SettingsStore::resolve(&SettingsRegistry::builtin(), &sources).unwrap();
-    assert_eq!(
-        Scope::server_from_settings(&settings).unwrap(),
+        Scope::server_for_principal(true),
         Scope::Server(ServerBrowse::All)
     );
-    assert_eq!(ServerBrowse::Disabled.as_str(), "disabled");
-    assert!(matches!(
-        settings.value("privacy.server_browse"),
-        Some(SettingValue::String(value)) if value == "all"
-    ));
+    assert_eq!(
+        Scope::server_for_principal(false),
+        Scope::Server(ServerBrowse::Disabled)
+    );
 }
 
 /// The counts a client sizes its placeholders with match the lists they stand
@@ -653,7 +627,7 @@ async fn the_counts_match_the_listings_they_size() {
         Scope::Personal {
             user_id: seeded.user,
         },
-        Scope::Server(ServerBrowse::PermanentOnly),
+        Scope::Server(ServerBrowse::All),
     ] {
         let artists = query::list_artists(&mut conn, scope, -1, 0)
             .await
@@ -1254,7 +1228,7 @@ async fn genres_are_counted_and_filtered() {
 
     // The server scope reads the same way: every stored track the view allows,
     // in every folder, which the scope expression has to spell out itself.
-    let server = Scope::Server(ServerBrowse::PermanentOnly);
+    let server = Scope::Server(ServerBrowse::All);
     let counted = query::list_genres(&mut conn, server).await.unwrap();
     let listed: Vec<(&str, i64, i64)> = counted
         .iter()
@@ -1371,14 +1345,9 @@ async fn top_songs_follow_the_play_counts() {
         2,
         "the count bounds the listing"
     );
-    let top = query::top_tracks_for_artist(
-        &mut conn,
-        Scope::Server(ServerBrowse::PermanentOnly),
-        artist,
-        10,
-    )
-    .await
-    .unwrap();
+    let top = query::top_tracks_for_artist(&mut conn, Scope::Server(ServerBrowse::All), artist, 10)
+        .await
+        .unwrap();
     let titles: Vec<&str> = top.iter().map(|view| view.track.title.as_str()).collect();
     assert_eq!(
         titles,

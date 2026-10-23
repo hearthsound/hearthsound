@@ -533,9 +533,6 @@ pub mod keys {
     pub const SUBSONIC_CATALOG_TITLE_SUFFIX: SettingKey<String> =
         SettingKey::new("subsonic.catalog_title_suffix");
 
-    /// Content of the server browse view: `all`, `permanent_only`, or
-    /// `disabled`.
-    pub const PRIVACY_SERVER_BROWSE: SettingKey<String> = SettingKey::new("privacy.server_browse");
     /// Whether a user's now-playing activity is visible to others.
     pub const PRIVACY_NOW_PLAYING_VISIBLE: SettingKey<bool> =
         SettingKey::new("privacy.now_playing_visible");
@@ -604,9 +601,6 @@ const PENDING_MODES: &[&str] = &["hold", "fail"];
 
 /// The browse scopes a user can select.
 const BROWSE_SCOPES: &[&str] = &["library", "server"];
-
-/// The contents of the server browse view.
-const SERVER_BROWSE_VIEWS: &[&str] = &["all", "permanent_only", "disabled"];
 
 /// The permission names a user can hold.
 const PERMISSION_NAMES: &[&str] = &["acquire", "upload", "download"];
@@ -1050,14 +1044,6 @@ impl SettingsRegistry {
                     SettingKind::String { allowed: &[] },
                     SettingValue::String(String::new()),
                     "Suffix appended to catalog entity titles",
-                ),
-                def(
-                    keys::PRIVACY_SERVER_BROWSE,
-                    SettingKind::String {
-                        allowed: SERVER_BROWSE_VIEWS,
-                    },
-                    SettingValue::String("permanent_only".to_owned()),
-                    "Content of the server browse view",
                 ),
                 user_def(
                     keys::PRIVACY_NOW_PLAYING_VISIBLE,

@@ -307,7 +307,7 @@ async fn search2_reports_stars_and_lists_the_library_for_an_empty_query() {
 
 /// Without a music folder a search finds stored content outside the personal
 /// library after the library's own matches; folder 1 keeps to the library,
-/// folder 2 to the server, and a disabled server view leaves only the library.
+/// folder 2 to the server, and a non-administrator reaches the library only.
 #[tokio::test]
 async fn a_search_without_a_folder_reaches_beyond_the_personal_library() {
     let (fixture, seeded) = fixture().await;
@@ -332,16 +332,16 @@ async fn a_search_without_a_folder_reaches_beyond_the_personal_library() {
     assert_ok(&server_only);
     assert!(server_only.body.contains(&mello), "{}", server_only.body);
 
-    fixture
-        .settings
-        .set(
-            keys::PRIVACY_SERVER_BROWSE.name(),
-            SettingValue::String("disabled".to_owned()),
-            None,
+    // A non-administrator's search reads their personal library only, with or
+    // without a folder.
+    let (_, limited) = fixture.account(&[]).await;
+    for folder in ["", "&musicFolderId=2"] {
+        let searched = get(
+            &app,
+            &format!("/rest/search3?query=mello{folder}&apiKey={limited}&f=json"),
         )
-        .await
-        .unwrap();
-    let disabled = get(&app, &search("")).await;
-    assert_ok(&disabled);
-    assert!(!disabled.body.contains(&mello), "{}", disabled.body);
+        .await;
+        assert_ok(&searched);
+        assert!(!searched.body.contains(&mello), "{}", searched.body);
+    }
 }

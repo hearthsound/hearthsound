@@ -76,7 +76,7 @@
 //! | `getLicense` | always valid, because Hearthsound has no license tiers |
 //! | `getOpenSubsonicExtensions` | public, no credentials; advertises `apiKeyAuthentication` 1 and `formPost` 1 |
 //! | `tokenInfo` | the user an API key belongs to |
-//! | `getMusicFolders` | the personal library, and the server unless `privacy.server_browse` is disabled |
+//! | `getMusicFolders` | the personal library, and the server view for administrators |
 //! | `jukeboxControl` | error 0: this server has no jukebox |
 //! | `createBookmark` | saves where the user left off in a track |
 //! | `deleteBookmark` | removes the user's bookmark of a track |

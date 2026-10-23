@@ -60,7 +60,7 @@ async fn an_account_reads_its_own_roles() {
     assert_ok(&user);
     assert!(user.body.contains("\"username\":\"echo\""), "{}", user.body);
     assert!(user.body.contains("\"email\":\"\""), "{}", user.body);
-    assert!(user.body.contains("\"adminRole\":false"), "{}", user.body);
+    assert!(user.body.contains("\"adminRole\":true"), "{}", user.body);
     assert!(user.body.contains("\"settingsRole\":true"), "{}", user.body);
     assert!(user.body.contains("\"streamRole\":true"), "{}", user.body);
     assert!(user.body.contains("\"podcastRole\":false"), "{}", user.body);
@@ -88,24 +88,22 @@ async fn an_account_reads_its_own_roles() {
     assert_ok(&user);
     assert!(user.body.contains("\"downloadRole\":true"), "{}", user.body);
     assert!(user.body.contains("\"uploadRole\":true"), "{}", user.body);
+    assert!(user.body.contains("\"adminRole\":false"), "{}", user.body);
+    assert!(
+        user.body.contains("\"folder\":[1]"),
+        "a non-administrator browses the personal library only: {}",
+        user.body
+    );
 }
 
-/// The server-wide view is a folder only while it is offered.
+/// The server-wide view is a folder for administrators only.
 #[tokio::test]
-async fn the_server_folder_follows_the_privacy_setting() {
+async fn the_server_folder_is_listed_for_administrators_only() {
     let fixture = fixture().await;
     let app = fixture.app();
+    let limited = account(&fixture, "limited", false).await;
 
-    fixture
-        .settings
-        .set(
-            keys::PRIVACY_SERVER_BROWSE.name(),
-            SettingValue::String("disabled".to_owned()),
-            None,
-        )
-        .await
-        .unwrap();
-    let user = get(
+    let admin = get(
         &app,
         &format!(
             "/rest/getUser.view?username=echo&apiKey={}",
@@ -113,12 +111,51 @@ async fn the_server_folder_follows_the_privacy_setting() {
         ),
     )
     .await;
+    assert_ok(&admin);
+    assert!(admin.body.contains("<folder>1</folder>"), "{}", admin.body);
+    assert!(
+        admin.body.contains("<folder>2</folder>"),
+        "an administrator browses the server view: {}",
+        admin.body
+    );
+
+    let user = get(
+        &app,
+        &format!("/rest/getUser.view?username=limited&apiKey={limited}"),
+    )
+    .await;
     assert_ok(&user);
     assert!(user.body.contains("<folder>1</folder>"), "{}", user.body);
     assert!(
         !user.body.contains("<folder>2</folder>"),
-        "the server view is not offered: {}",
+        "the server view is not offered to a non-administrator: {}",
         user.body
+    );
+
+    // The listing reports each account's own folders.
+    let listed = get(
+        &app,
+        &format!("/rest/getUsers.view?apiKey={}", fixture.api_key),
+    )
+    .await;
+    assert_ok(&listed);
+    let non_admin = listed
+        .body
+        .split("<user ")
+        .find(|entry| entry.contains("username=\"limited\""))
+        .expect("the non-administrator is listed");
+    assert!(
+        non_admin.contains("<folder>1</folder>") && !non_admin.contains("<folder>2</folder>"),
+        "the listing gives a non-administrator the personal library only: {non_admin}"
+    );
+    let administrator = listed
+        .body
+        .split("<user ")
+        .find(|entry| entry.contains("username=\"echo\""))
+        .expect("the administrator is listed");
+    assert!(
+        administrator.contains("<folder>2</folder>"),
+        "the listing gives an administrator the server view: {administrator}"
     );
 }
 

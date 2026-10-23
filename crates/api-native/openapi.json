@@ -3657,7 +3657,7 @@
       },
       "Features": {
         "type": "object",
-        "description": "The features the server's settings turn on.",
+        "description": "The features this server offers.",
         "required": [
           "uploads",
           "serverBrowse",
@@ -3674,8 +3674,8 @@
             "description": "Whether saving or liking a remote item acquires it."
           },
           "serverBrowse": {
-            "type": "string",
-            "description": "What the Server view shows: `all`, `permanent_only` or `disabled`."
+            "type": "boolean",
+            "description": "Whether the caller may browse the server-wide view, which is every\nstored track. Only administrators may."
           },
           "uploads": {
             "type": "boolean",

@@ -676,21 +676,18 @@ async fn acquisitions_hide_another_accounts_rows_but_not_from_an_admin() {
     assert_ok(&their);
     let own = get(
         &app,
-        &format!(
-            "/rest/hsGetAcquisitions?apiKey={}&hearthsound=1&f=json",
-            fixture.api_key
-        ),
+        &format!("/rest/hsGetAcquisitions?apiKey={other_key}&hearthsound=1&f=json"),
     )
     .await;
     assert_ok(&own);
     assert!(
-        own.body
+        !own.body
             .contains(&format!("\"targetId\":\"{}\"", tracks[0])),
-        "{}",
+        "another account's row is hidden: {}",
         own.body
     );
     assert!(
-        !own.body
+        own.body
             .contains(&format!("\"targetId\":\"{}\"", tracks[1])),
         "{}",
         own.body
