@@ -72,6 +72,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of one per visit. A network error or a timeout is not remembered:
   this server's own rate limiter produces those.
 
+- `getArtist`, `getAlbumList2` and `getAlbumList` read an album's tracks
+  without their preferred files, which none of those listings projected, and
+  read a few albums at a time instead of one after another. An album also reads
+  its own row once for its whole tracklist instead of once per track, so an
+  artist with twenty albums answers with a fraction of the reads it used to
+  make.
+
 ### Fixed
 
 - An artist whose portrait cannot be fetched is served the first cover image

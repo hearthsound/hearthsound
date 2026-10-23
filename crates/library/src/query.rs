@@ -423,7 +423,7 @@ pub async fn album_detail(
     let artists = artists::list_album_artists(conn, album_id).await?;
     let mut tracks = Vec::new();
     for track in tracks::list_tracks_for_album(conn, album_id).await? {
-        tracks.push(track_view(conn, track).await?);
+        tracks.push(track_view_in_album(conn, track, Some(album.clone())).await?);
     }
     Ok(Some(AlbumDetail {
         album,
@@ -2101,6 +2101,33 @@ async fn track_view(conn: &mut SqliteConnection, track: Track) -> Result<TrackVi
         Some(album_id) => albums::get_album(conn, album_id).await?,
         None => None,
     };
+    track_view_in_album(conn, track, album).await
+}
+
+/// Builds the view of one track whose album is already known.
+///
+/// A caller that reads an album with all its tracks has the album row in hand,
+/// so passing it down saves one row read per track: an album of twenty tracks
+/// reads its own row once instead of twenty-one times.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `track`: the track row.
+/// - `album`: the track's album, or `None` when it has none.
+///
+/// # Returns
+///
+/// The track with its album, artists, genres, and preferred file.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+async fn track_view_in_album(
+    conn: &mut SqliteConnection,
+    track: Track,
+    album: Option<Album>,
+) -> Result<TrackView, LibraryError> {
     let credited = artists::list_track_artists(conn, track.id).await?;
     let genres = tracks::list_track_genres(conn, track.id)
         .await?

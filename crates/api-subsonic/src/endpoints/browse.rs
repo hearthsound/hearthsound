@@ -6,9 +6,10 @@
 //! [`crate::projection`], so the five responses share one scope rule and one
 //! set of members.
 
+use futures_util::stream::{self, StreamExt, TryStreamExt};
 use hearthsound_activity::Annotation;
 use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, IdPrefix};
-use hearthsound_library::query::{AlbumSort, Scope};
+use hearthsound_library::query::{AlbumDetail, AlbumSort, Scope};
 use uuid::Uuid;
 
 use crate::auth::Call;
@@ -26,6 +27,13 @@ const MAX_ALBUM_SIZE: i64 = 500;
 
 /// The largest number of albums a catalog artist lookup lists.
 const MAX_CATALOG_ALBUMS: u32 = 500;
+
+/// How many albums a listing reads at once.
+///
+/// Four, which is the number of reader connections the database pool holds: a
+/// listing then never waits for a connection it is itself holding, and the
+/// reads of one album still run in parallel with the reads of the next.
+const READ_PARALLELISM: usize = 4;
 
 /// The message an unsupported album list type is answered with.
 const UNSUPPORTED_LIST_TYPE: &str = "Unsupported album list type.";
@@ -148,23 +156,38 @@ pub async fn get_artist(call: Call) -> Encoded {
         }
     };
 
-    let mut albums = Vec::new();
-    for album in &detail.albums {
-        match browse::album(database, scope, album.id).await {
-            Ok(Some(loaded)) => albums.push(projection::album_id3(
-                &loaded.detail.album,
-                &loaded.detail.artists,
-                &loaded.detail.tracks,
-                annotations
-                    .get(&loaded.detail.album.id.uuid())
-                    .unwrap_or(&Annotation::default()),
-            )),
-            Ok(None) => {}
-            Err(error) => {
-                return call.encode(Response::failed(browse::failure("getArtist", &error)));
-            }
+    // Each album is read on its own connection, a few at a time: the reads are
+    // independent, and an artist with twenty albums should cost one round of
+    // reads rather than twenty.
+    let ids: Vec<EntityId> = detail.albums.iter().map(|album| album.id).collect();
+    let reads: Vec<_> = ids
+        .into_iter()
+        .map(|album_id| browse::album_summary(database, scope, album_id))
+        .collect();
+    let summaries = match stream::iter(reads)
+        .buffered(READ_PARALLELISM)
+        .try_collect::<Vec<_>>()
+        .await
+    {
+        Ok(summaries) => summaries,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure("getArtist", &error)));
         }
-    }
+    };
+    let albums: Vec<Object> = summaries
+        .iter()
+        .flatten()
+        .map(|loaded| {
+            projection::album_id3(
+                &loaded.album,
+                &loaded.artists,
+                &loaded.tracks,
+                annotations
+                    .get(&loaded.album.id.uuid())
+                    .unwrap_or(&Annotation::default()),
+            )
+        })
+        .collect();
 
     let artist = projection::artist_id3(&detail.artist, albums.len() as i64, &artist_annotation)
         .set("album", Array::new(albums));
@@ -360,13 +383,8 @@ pub async fn get_album_list_2(call: Call) -> Encoded {
 
     let albums: Vec<Object> = listed
         .iter()
-        .map(|(loaded, annotation)| {
-            projection::album_id3(
-                &loaded.detail.album,
-                &loaded.detail.artists,
-                &loaded.detail.tracks,
-                annotation,
-            )
+        .map(|(detail, annotation)| {
+            projection::album_id3(&detail.album, &detail.artists, &detail.tracks, annotation)
         })
         .collect();
     call.respond(
@@ -406,13 +424,8 @@ pub async fn get_album_list(call: Call) -> Encoded {
 
     let albums: Vec<Object> = listed
         .iter()
-        .map(|(loaded, annotation)| {
-            projection::album_dir(
-                &loaded.detail.album,
-                &loaded.detail.artists,
-                &loaded.detail.tracks,
-                annotation,
-            )
+        .map(|(detail, annotation)| {
+            projection::album_dir(&detail.album, &detail.artists, &detail.tracks, annotation)
         })
         .collect();
     call.respond(Response::ok().member("albumList", Object::new().set("album", Array::new(albums))))
@@ -846,7 +859,7 @@ async fn listed_albums(
     call: &Call,
     scope: Scope,
     operation: &'static str,
-) -> Result<Vec<(browse::LoadedAlbum, Annotation)>, SubsonicError> {
+) -> Result<Vec<(AlbumDetail, Annotation)>, SubsonicError> {
     let Some(list_type) = call.get("type") else {
         return Err(SubsonicError::missing_parameter("type"));
     };
@@ -865,19 +878,24 @@ async fn listed_albums(
         .await
         .map_err(|error| browse::failure(operation, &error))?;
 
+    let ids: Vec<EntityId> = listed.iter().map(|album| album.id).collect();
+    let reads: Vec<_> = ids
+        .into_iter()
+        .map(|album_id| browse::album_summary(database, scope, album_id))
+        .collect();
+    let details = stream::iter(reads)
+        .buffered(READ_PARALLELISM)
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|error| browse::failure(operation, &error))?;
+
     let mut albums = Vec::with_capacity(listed.len());
-    for album in listed {
-        match browse::album(database, scope, album.id).await {
-            Ok(Some(loaded)) => {
-                let annotation = annotations
-                    .get(&loaded.detail.album.id.uuid())
-                    .copied()
-                    .unwrap_or_default();
-                albums.push((loaded, annotation));
-            }
-            Ok(None) => {}
-            Err(error) => return Err(browse::failure(operation, &error)),
-        }
+    for detail in details.into_iter().flatten() {
+        let annotation = annotations
+            .get(&detail.album.id.uuid())
+            .copied()
+            .unwrap_or_default();
+        albums.push((detail, annotation));
     }
     Ok(albums)
 }

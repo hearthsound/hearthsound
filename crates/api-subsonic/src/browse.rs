@@ -118,6 +118,38 @@ pub(crate) async fn album(
     Ok(Some(LoadedAlbum { detail, files }))
 }
 
+/// Reads one album for a listing that does not project its files.
+///
+/// A listing that reports an album - the artist detail, the album list - builds
+/// each album's payload from its row, its artists and its track titles, and
+/// never asks for the track's files: an album names its own cover art, and the
+/// endpoint that serves the image resolves whether there is one. Reading each
+/// track's preferred file here would double the reads of a listing and change
+/// nothing in the response.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `scope`: the scope to filter by.
+/// - `album_id`: the album to read.
+///
+/// # Returns
+///
+/// The album with its artists and tracks, or `None` when the album does not
+/// exist or is outside the scope.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub(crate) async fn album_summary(
+    database: &Database,
+    scope: Scope,
+    album_id: EntityId,
+) -> Result<Option<AlbumDetail>, LibraryError> {
+    let mut conn = database.readers().acquire().await?;
+    query::album_detail(&mut conn, scope, album_id).await
+}
+
 /// Reads one album without an availability filter.
 ///
 /// A starred listing reports the entities a user liked however they are stored,
