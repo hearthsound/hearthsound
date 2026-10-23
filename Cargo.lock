@@ -1808,6 +1808,7 @@ name = "hearthsound-library"
 version = "0.1.5"
 dependencies = [
  "async-trait",
+ "data-encoding",
  "futures-util",
  "hearthsound-config",
  "hearthsound-core",
@@ -1820,6 +1821,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "sqlx",
  "tempfile",
  "thiserror",

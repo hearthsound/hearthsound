@@ -27,10 +27,13 @@
 //!   through and never written to the artwork cache, and the response tells the
 //!   client not to store it either.
 //!
-//! `size` is the requested size in pixels and is handed to the catalog layer,
-//! which picks the smallest image its provider describes as at least that large.
-//! Local images are served exactly as they are on disk: scaling is not
-//! implemented yet, so `size` has no effect on them.
+//! `size` is the requested size in pixels. For a catalog image it is handed to
+//! the catalog layer, which picks the smallest image its provider describes as
+//! at least that large. For a local image it selects one of
+//! [`THUMBNAIL_SIZES`](hearthsound_library::thumbnails::THUMBNAIL_SIZES): the
+//! smallest that covers the request, scaled by ffmpeg once and kept under
+//! `<data>/artwork/thumbs`. A request for nothing, or for more than the largest
+//! cached size, is served the original bytes.
 //!
 //! A served image carries its MIME type, its length, a strong `ETag` over the
 //! bytes, and a `Cache-Control`; a request whose `If-None-Match` already names
@@ -55,6 +58,7 @@ use hearthsound_catalog::{CatalogError, CoverArtRequest};
 use hearthsound_core::{ClientId, EntityId, IdPrefix, Slug};
 use hearthsound_library::LibraryRepository;
 use hearthsound_library::artwork::{CoverArt, track_cover};
+use hearthsound_library::thumbnails::thumbnail_size;
 use hearthsound_plugin_host::manifest::ImageCachePolicy;
 use sha2::{Digest, Sha256};
 
@@ -159,17 +163,17 @@ pub async fn get_cover_art(call: BinaryCall) -> HttpResponse {
 /// The image response, or one of the refusal codes of the module header.
 async fn stored(call: &BinaryCall, entity: EntityId, size: Option<u32>) -> HttpResponse {
     if entity.kind() == IdPrefix::Playlist {
-        return playlist(call, entity).await;
+        return playlist(call, entity, size).await;
     }
     // An artist has no image of its own, so the artwork layer is asked for a
     // portrait before the local fallback that walks its albums is tried.
     if entity.kind() == IdPrefix::Artist {
         return match artwork_layer(call, entity, size).await {
             LayerAnswer::Served(response) => response,
-            LayerAnswer::Missing => local_image(call, &entity, STORED_CACHE_CONTROL).await,
+            LayerAnswer::Missing => local_image(call, &entity, STORED_CACHE_CONTROL, size).await,
             LayerAnswer::Failed(response) => match local(call, entity).await {
                 Ok(Some(art)) => match load(art, FALLBACK_CACHE_CONTROL).await {
-                    Ok(served) => image(call.headers(), served),
+                    Ok(served) => local_scaled(call, served, size).await,
                     Err(error) => internal("reading a local cover image", &error),
                 },
                 Ok(None) => response,
@@ -179,7 +183,7 @@ async fn stored(call: &BinaryCall, entity: EntityId, size: Option<u32>) -> HttpR
     }
     match local(call, entity).await {
         Ok(Some(art)) => match load(art, STORED_CACHE_CONTROL).await {
-            Ok(served) => image(call.headers(), served),
+            Ok(served) => local_scaled(call, served, size).await,
             Err(error) => internal("reading a local cover image", &error),
         },
         Ok(None) => match artwork_layer(call, entity, size).await {
@@ -197,6 +201,7 @@ async fn stored(call: &BinaryCall, entity: EntityId, size: Option<u32>) -> HttpR
 /// - `call`: the authenticated call.
 /// - `entity`: the stored entity the request named.
 /// - `cache_control`: the `Cache-Control` the response carries.
+/// - `size`: the requested size in pixels.
 ///
 /// # Returns
 ///
@@ -206,10 +211,11 @@ async fn local_image(
     call: &BinaryCall,
     entity: &EntityId,
     cache_control: &'static str,
+    size: Option<u32>,
 ) -> HttpResponse {
     match local(call, *entity).await {
         Ok(Some(art)) => match load(art, cache_control).await {
-            Ok(served) => image(call.headers(), served),
+            Ok(served) => local_scaled(call, served, size).await,
             Err(error) => internal("reading a local cover image", &error),
         },
         Ok(None) => not_found(entity),
@@ -264,13 +270,14 @@ async fn artwork_layer(call: &BinaryCall, entity: EntityId, size: Option<u32>) -
 ///
 /// - `call`: the authenticated call.
 /// - `playlist_id`: the playlist the request named.
+/// - `size`: the requested size in pixels.
 ///
 /// # Returns
 ///
 /// The image response, HTTP 404 when the playlist does not exist, when the
 /// caller may not see it, or when none of its entries has an image, or another
 /// refusal code of the module header.
-async fn playlist(call: &BinaryCall, playlist_id: EntityId) -> HttpResponse {
+async fn playlist(call: &BinaryCall, playlist_id: EntityId, size: Option<u32>) -> HttpResponse {
     let viewer = call.principal().user_id.uuid();
     let playlist = match call
         .state()
@@ -289,7 +296,7 @@ async fn playlist(call: &BinaryCall, playlist_id: EntityId) -> HttpResponse {
     for entry in &playlist.entries {
         match track_cover(&library, &settings, roots, entry.track_id).await {
             Ok(Some(art)) => match load(art, STORED_CACHE_CONTROL).await {
-                Ok(served) => return image(call.headers(), served),
+                Ok(served) => return local_scaled(call, served, size).await,
                 Err(error) => return internal("reading a local cover image", &error),
             },
             Ok(None) => {}
@@ -457,6 +464,54 @@ async fn load(art: CoverArt, cache_control: &'static str) -> Result<Served, std:
                 bytes,
                 cache_control,
             })
+        }
+    }
+}
+
+/// Serves a local image at the size the client asked for.
+///
+/// A local cover is stored at whatever size the file carries, usually far
+/// larger than a card or a track row needs. The image is scaled to the smallest
+/// cached size that covers the request and read from the cache afterwards, so a
+/// cover is encoded once per size rather than once per request.
+///
+/// Scaling is an optimization: a cache that cannot encode the image, and a
+/// request for a size outside the cached set, are answered with the original
+/// bytes and the same policy, because an unscaled cover is still a cover.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, whose state holds the cache.
+/// - `served`: the local image as it is stored.
+/// - `size`: the requested size in pixels.
+///
+/// # Returns
+///
+/// The response for the image: the scaled JPEG when one was produced, the
+/// original otherwise.
+async fn local_scaled(call: &BinaryCall, served: Served, size: Option<u32>) -> HttpResponse {
+    let Some(target) = thumbnail_size(size) else {
+        return image(call.headers(), served);
+    };
+    let Some(cache) = call.state().thumbnails() else {
+        return image(call.headers(), served);
+    };
+    match cache.scaled(&served.bytes, target).await {
+        Ok(bytes) => image(
+            call.headers(),
+            Served {
+                mime_type: "image/jpeg".to_owned(),
+                bytes,
+                cache_control: served.cache_control,
+            },
+        ),
+        Err(error) => {
+            tracing::warn!(
+                size = target,
+                error = %error,
+                "a cover image could not be scaled; serving the original"
+            );
+            image(call.headers(), served)
         }
     }
 }

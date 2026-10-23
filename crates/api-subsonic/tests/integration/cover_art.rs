@@ -184,6 +184,101 @@ async fn a_sidecar_image_beside_the_file_is_served() {
     assert_eq!(probe.bytes, bytes);
 }
 
+/// A local cover is scaled to the requested size and cached on disk.
+#[tokio::test]
+async fn a_local_cover_is_scaled_to_the_requested_size() {
+    let fixture = Fixture::new().await;
+    let seeded = seed_album(
+        &fixture,
+        "Epsilon",
+        &[Art::Embedded {
+            size: 1000,
+            rgb: 0x00_ff00,
+        }],
+    )
+    .await;
+    let original = seeded.embedded.clone().unwrap();
+    let app = fixture.app();
+    let id = seeded.first_track().to_string();
+
+    let scaled = request(
+        &app,
+        &format!(
+            "/rest/getCoverArt?id={id}&size=96&apiKey={}",
+            fixture.api_key
+        ),
+        &[],
+    )
+    .await;
+    assert_eq!(scaled.status, StatusCode::OK);
+    assert_eq!(scaled.header(CONTENT_TYPE), Some("image/jpeg"));
+    let (width, height) = jpeg_dimensions(&scaled.bytes);
+    assert!(
+        width <= 96 && height <= 96,
+        "a 96-pixel request is served at most 96 pixels, got {width}x{height}"
+    );
+
+    let cached = request(
+        &app,
+        &format!(
+            "/rest/getCoverArt?id={id}&size=96&apiKey={}",
+            fixture.api_key
+        ),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        cached.bytes, scaled.bytes,
+        "a second request is served from the cache"
+    );
+    let files = files_in(&fixture.thumbs_dir());
+    assert_eq!(
+        files.len(),
+        1,
+        "the cache holds one scaled image and no scratch copy, got {files:?}"
+    );
+    assert!(
+        files[0].ends_with("-96.jpg"),
+        "the cached file is named for the size it holds, got {files:?}"
+    );
+
+    let full = request(&app, &url(&fixture, &id), &[]).await;
+    assert_eq!(
+        full.bytes, original,
+        "a request without a size is served the bytes on disk"
+    );
+}
+
+/// Returns the dimensions of a JPEG's frame header.
+///
+/// # Parameters
+///
+/// - `bytes`: the encoded JPEG.
+///
+/// # Returns
+///
+/// The width and height the first start-of-frame segment declares.
+///
+/// # Panics
+///
+/// Panics when the bytes carry no start-of-frame segment, which is a test's own
+/// arrangement mistake.
+fn jpeg_dimensions(bytes: &[u8]) -> (u32, u32) {
+    let mut index = 2;
+    while index + 9 < bytes.len() {
+        assert_eq!(bytes[index], 0xff, "a marker starts with 0xff");
+        let marker = bytes[index + 1];
+        let length = usize::from(u16::from_be_bytes([bytes[index + 2], bytes[index + 3]]));
+        if (0xc0..=0xcf).contains(&marker) && marker != 0xc4 && marker != 0xc8 && marker != 0xcc {
+            let height = u32::from(u16::from_be_bytes([bytes[index + 5], bytes[index + 6]]));
+            let width = u32::from(u16::from_be_bytes([bytes[index + 7], bytes[index + 8]]));
+            return (width, height);
+        }
+        index += 2 + length;
+    }
+    panic!("the image carries no start-of-frame segment");
+}
+
 #[tokio::test]
 async fn a_request_that_already_has_the_image_is_answered_with_304() {
     let fixture = Fixture::new().await;

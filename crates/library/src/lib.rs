@@ -72,6 +72,7 @@ pub mod placement;
 pub mod query;
 pub mod retention;
 pub mod scan;
+pub mod thumbnails;
 pub mod tracks;
 pub mod upload;
 pub mod watch;

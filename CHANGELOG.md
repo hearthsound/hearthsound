@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `getCoverArt` serves a local cover at the requested size. `size` selects the
+  smallest of 96, 300 and 600 pixels that covers it; ffmpeg scales the stored
+  image once and the result is kept under `<data>/artwork/thumbs`, so a track
+  row no longer downloads a thousand-pixel picture and the second client to ask
+  for a size reads a file. A request without a size, or above 600 pixels, still
+  receives the bytes on disk, and an image that cannot be scaled is served
+  unscaled.
+
 ### Changed
 
 - A plugin that an earlier release left waiting for approval is granted the

@@ -73,6 +73,7 @@ use hearthsound_library::maintenance::{
     StorageMaintainer,
 };
 use hearthsound_library::scan::{LibraryScanner, SCAN_JOB_KIND, ScanJobHandler};
+use hearthsound_library::thumbnails::ThumbnailCache;
 use hearthsound_library::upload::UploadIngest;
 use hearthsound_library::watch::LibraryWatcher;
 use hearthsound_media::FfmpegRunner;
@@ -130,6 +131,8 @@ pub struct Services {
     update_job: Arc<UpdateCheckJobHandler>,
     /// The ffmpeg process runner.
     ffmpeg: Arc<FfmpegRunner>,
+    /// The scaled local cover cache `getCoverArt` serves sizes from.
+    thumbnails: Arc<ThumbnailCache>,
     /// The acquisition orchestrator the pending stream and the admin views use.
     orchestrator: Arc<AcquisitionOrchestrator>,
     /// The prefetch scheduler the listing and stream endpoints feed.
@@ -305,6 +308,12 @@ impl Services {
             None,
             max_concurrent_transcodes(&snapshot)?,
         ));
+        // The thumbs directory sits inside the artwork directory the catalog
+        // layer writes its cached images to, so one storage policy covers both.
+        let thumbnails = Arc::new(ThumbnailCache::new(
+            config.paths.artwork.join("thumbs"),
+            Arc::clone(&ffmpeg),
+        ));
         let orchestrator = Arc::new(AcquisitionOrchestrator::new(
             Arc::clone(&database),
             settings.clone(),
@@ -435,6 +444,7 @@ impl Services {
             update_checker,
             update_job,
             ffmpeg,
+            thumbnails,
             orchestrator,
             prefetch,
             scanner,
@@ -556,6 +566,15 @@ impl Services {
     /// Returns the ffmpeg process runner.
     pub fn ffmpeg(&self) -> &Arc<FfmpegRunner> {
         &self.ffmpeg
+    }
+
+    /// Returns the scaled local cover cache.
+    ///
+    /// `getCoverArt` serves a local cover at the requested size through it; the
+    /// `/rest` state is built with it so the artwork path never reads the
+    /// settings to find it.
+    pub fn thumbnails(&self) -> &Arc<ThumbnailCache> {
+        &self.thumbnails
     }
 
     /// Returns the acquisition orchestrator.
@@ -683,6 +702,7 @@ impl Services {
         .with_registry(Arc::clone(&self.registry))
         .with_trusted_proxies(self.trusted_proxies.clone())
         .with_scanner(Arc::clone(&self.scanner), Arc::clone(&self.queue))
+        .with_thumbnails(Arc::clone(&self.thumbnails))
     }
 
     /// Returns the CORS layer, or `None` when cross-origin reads are denied.

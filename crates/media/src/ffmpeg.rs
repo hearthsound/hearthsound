@@ -173,6 +173,66 @@ impl FfmpegRunner {
         Ok(())
     }
 
+    /// Scales one image down to a bounding box and writes it as a JPEG.
+    ///
+    /// The child counts against the same concurrency budget as a transcode, so a
+    /// burst of cover requests cannot start more ffmpeg processes than
+    /// `stream.max_concurrent_transcodes` allows. An image smaller than the box
+    /// is written at its own size: the filter never enlarges.
+    ///
+    /// # Parameters
+    ///
+    /// - `input`: the image to read.
+    /// - `output`: the file to write; it is overwritten.
+    /// - `max_side`: the longest side of the result, in pixels.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` once the file is written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MediaError::Process`] when ffmpeg cannot be started, cannot read
+    /// the input, or exits with a failure, and when the runner's budget is
+    /// closed.
+    pub async fn scale_image(
+        &self,
+        input: &Path,
+        output: &Path,
+        max_side: u32,
+    ) -> Result<(), MediaError> {
+        // The commas inside `min(..)` are escaped because a bare comma would
+        // separate two filters of the chain instead of two arguments of `min`.
+        let filter = format!(
+            "scale=min({max_side}\\,iw):min({max_side}\\,ih):force_original_aspect_ratio=decrease"
+        );
+        let args = [
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-i",
+            &input.to_string_lossy(),
+            "-vf",
+            &filter,
+            "-frames:v",
+            "1",
+            "-update",
+            "1",
+            "-pix_fmt",
+            "yuvj420p",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "3",
+            "-f",
+            "image2",
+            &output.to_string_lossy(),
+        ];
+        self.run(args.into_iter().map(OsString::from)).await
+    }
+
     /// Spawns ffmpeg with piped standard output.
     ///
     /// Standard input is connected to nothing and standard output is piped, so a

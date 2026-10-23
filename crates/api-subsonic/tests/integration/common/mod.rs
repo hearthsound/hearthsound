@@ -28,6 +28,7 @@ use hearthsound_core::{Availability, EntityId, IdPrefix, Layer};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_jobs::{JobQueue, QueueOptions};
 use hearthsound_library::scan::LibraryScanner;
+use hearthsound_library::thumbnails::ThumbnailCache;
 use hearthsound_library::{
     AlbumInput, ArtistCredit, LibraryRepository, Origin, StorageRoots, TrackInput,
 };
@@ -89,6 +90,8 @@ pub struct Fixture {
     ffmpeg: Arc<FfmpegRunner>,
     /// The artwork cache directory catalog cover art is written to.
     artwork: PathBuf,
+    /// The scaled local cover cache `/rest/getCoverArt` serves sizes from.
+    thumbnails: Arc<ThumbnailCache>,
     /// The plugin host a fixture plugin is installed into.
     host: Arc<PluginHost>,
     /// The plugin tables an instance is configured in.
@@ -215,6 +218,14 @@ impl Fixture {
         ));
         let jobs = Arc::new(JobQueue::new(&database, QueueOptions::default()));
         let state = state.with_scanner(Arc::clone(&scanner), Arc::clone(&jobs));
+        // Local covers are scaled through the same runner, over the thumbs
+        // directory inside the artwork directory, exactly as the server wires
+        // them.
+        let thumbnails = Arc::new(ThumbnailCache::new(
+            artwork.join("thumbs"),
+            Arc::clone(&ffmpeg),
+        ));
+        let state = state.with_thumbnails(Arc::clone(&thumbnails));
 
         Fixture {
             _dir: dir,
@@ -229,6 +240,7 @@ impl Fixture {
             roots,
             ffmpeg,
             artwork,
+            thumbnails,
             host,
             repository,
             secrets: secret_box,
@@ -394,6 +406,11 @@ impl Fixture {
     /// [`Fixture::new`].
     pub fn artwork_dir(&self) -> PathBuf {
         self.artwork.clone()
+    }
+
+    /// Returns the directory scaled local covers are written to.
+    pub fn thumbs_dir(&self) -> PathBuf {
+        self.artwork.join("thumbs")
     }
 
     /// Returns the `/rest` router under test.

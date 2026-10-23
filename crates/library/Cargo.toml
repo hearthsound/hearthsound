@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
+data-encoding.workspace = true
 futures-util.workspace = true
 hearthsound-config = { path = "../config" }
 hearthsound-core = { path = "../core" }
@@ -23,6 +24,7 @@ notify-debouncer-full.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 time.workspace = true
