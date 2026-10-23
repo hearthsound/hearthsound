@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tools.yt-dlp.env_allowlist` the server variables it inherits. Every process an
   acquisition started is killed when the acquisition ends.
 
+- An image variant carries the tool: `docker build --target runtime-ytdlp .`
+  adds a pinned yt-dlp, with the Deno JavaScript runtime its extractors need, to
+  the runtime image and links the executable at `/usr/local/bin/yt-dlp` as well
+  as `/opt/yt-dlp/bin/yt-dlp`. A plain `docker build .` still builds the runtime
+  image without it, and an administrator points `tools.yt-dlp.path` at either
+  path to let a yt-dlp acquisition plugin run.
+
 - `getCoverArt` serves a local cover at the requested size. `size` selects the
   smallest of 96, 300 and 600 pixels that covers it; ffmpeg scales the stored
   image once and the result is kept under `<data>/artwork/thumbs`, so a track

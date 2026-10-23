@@ -77,3 +77,61 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 # commands an operator runs through the same entrypoint.
 ENTRYPOINT ["hearthsound"]
 CMD ["serve"]
+
+
+# An opt-in variant that also carries yt-dlp, for installations whose
+# acquisition plugins fetch tracks from it. Build it with
+# `docker build --target runtime-ytdlp .`; the plain `docker build .` below
+# still produces the runtime image without it.
+#
+# yt-dlp needs Deno for the JavaScript challenges of some sites and ffmpeg
+# (already in the runtime stage) for extraction. Python is only its launcher, so
+# it lives in a virtual environment outside the service account's home.
+#
+# Docker's `ENV` instruction drops environment names containing a hyphen without
+# an error, so `HEARTHSOUND__TOOLS__YT-DLP__PATH` cannot be baked into the image.
+# The executable is instead left at `/opt/yt-dlp/bin/yt-dlp` and at the
+# `/usr/local/bin/yt-dlp` symlink; an administrator sets `tools.yt-dlp.path` to
+# either path in the admin settings. Passing
+# `-e HEARTHSOUND__TOOLS__YT-DLP__PATH=/opt/yt-dlp/bin/yt-dlp` (or the same entry
+# under `environment:` in Compose) also works, because the runtime environment
+# accepts the name.
+FROM runtime AS runtime-ytdlp
+
+ARG TARGETARCH
+
+USER root
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends python3 python3-venv unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# The pinned yt-dlp release with its default dependencies, which include the EJS
+# challenge solver the current site extractors use.
+RUN python3 -m venv /opt/yt-dlp \
+    && /opt/yt-dlp/bin/pip install --no-cache-dir "yt-dlp[default]==2026.10.21"
+
+# Deno, the JavaScript runtime yt-dlp starts for those challenges, from the
+# pinned release built for the architecture being built.
+ARG DENO_VERSION=2.9.8
+
+RUN case "$TARGETARCH" in \
+        amd64) deno_arch=x86_64 ;; \
+        arm64) deno_arch=aarch64 ;; \
+        *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && curl --fail --silent --show-error --location --output /tmp/deno.zip \
+        "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-${deno_arch}-unknown-linux-gnu.zip" \
+    && unzip -q /tmp/deno.zip -d /usr/local/bin \
+    && rm /tmp/deno.zip \
+    && chmod 0755 /usr/local/bin/deno
+
+RUN ln --symbolic /opt/yt-dlp/bin/yt-dlp /usr/local/bin/yt-dlp
+
+USER hearthsound
+
+
+# Docker builds the last stage, so this final stage keeps `docker build .`
+# identical to the runtime image above: the yt-dlp variant is only built when it
+# is named with `--target runtime-ytdlp`.
+FROM runtime
