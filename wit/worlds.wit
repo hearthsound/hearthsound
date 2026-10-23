@@ -1,4 +1,4 @@
-package hearthsound:plugin@0.2.0;
+package hearthsound:plugin@0.3.0;
 
 world base {
   import host-log;
@@ -11,3 +11,8 @@ world catalog-provider { include base; export catalog; }
 world metadata-provider { include base; export metadata; }
 world artwork-provider { include base; export artwork; }
 world acquisition-provider { include base; import host-files; export acquisition; }
+world process-acquisition-provider { include acquisition-provider; import host-process; }
+world verification-provider { include base; export verification; }
+world scrobble-provider { include base; export scrobble; }
+world discovery-provider { include base; export discovery; }
+world account-link-provider { include base; export account-link; }

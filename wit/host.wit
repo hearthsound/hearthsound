@@ -1,4 +1,4 @@
-package hearthsound:plugin@0.2.0;
+package hearthsound:plugin@0.3.0;
 
 interface host-log {
   enum level { trace, debug, info, warn, error }
@@ -28,4 +28,46 @@ interface host-files {
   /// root: an import-root id granted to this instance, or "staging".
   stat: func(root: string, path: string) -> option<file-stat>;
   list-dir: func(root: string, path: string) -> result<list<string>, string>;
+}
+
+/// Runs an external tool the administrator configured, for acquisition plugins that need one.
+interface host-process {
+  /// An opaque handle to a process this instance started.
+  type process-handle = u64;
+  /// Where the process's standard output goes.
+  variant stdout-mode {
+    /// Kept in memory, at most 1 MiB unread; read it with read-stdout.
+    capture,
+    /// Written to this path, relative to the current staging directory.
+    file(string),
+  }
+  record spawn-options {
+    /// Working directory relative to the current staging directory; none is the staging directory itself.
+    cwd: option<string>,
+    /// Extra environment entries; every name must be listed in the tool's environment allowlist.
+    env: list<tuple<string, string>>,
+    stdout: stdout-mode,
+    /// Wall-clock limit after which the host kills the process; at most 3600000.
+    timeout-ms: u32,
+  }
+  variant process-state { running, exited(s32), killed, timed-out }
+  variant process-error {
+    /// The tool is not in the manifest's process tools, or an option broke a rule.
+    denied(string),
+    /// The administrator has not set a usable path for the tool.
+    not-configured(string),
+    /// The operating system refused to start the process.
+    spawn-failed(string),
+    /// The handle is unknown to this instance or already released.
+    unknown-handle,
+  }
+  /// Starts `tool` (a name from the manifest, never a path) with `args` as its argument vector; no shell is involved.
+  spawn: func(tool: string, args: list<string>, options: spawn-options) -> result<process-handle, process-error>;
+  poll: func(handle: process-handle) -> result<process-state, process-error>;
+  /// Returns and drains the captured standard output gathered since the last read.
+  read-stdout: func(handle: process-handle) -> result<list<u8>, process-error>;
+  /// Returns and drains the standard error gathered since the last read (always captured, at most 1 MiB unread).
+  read-stderr: func(handle: process-handle) -> result<list<u8>, process-error>;
+  /// Kills the process when it still runs and releases the handle.
+  kill: func(handle: process-handle);
 }

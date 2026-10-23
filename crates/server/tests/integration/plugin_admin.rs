@@ -34,7 +34,7 @@ const PLUGIN_ID: &str = "com.example.metadata-fixture";
 const VERSION: &str = "0.1.0";
 
 /// The plugin API version this server hosts.
-const API: &str = "hearthsound:plugin@0.2.0";
+const API: &str = "hearthsound:plugin@0.3.0";
 
 /// The path an index document is served at.
 const INDEX_PATH: &str = "/v1/index.json";

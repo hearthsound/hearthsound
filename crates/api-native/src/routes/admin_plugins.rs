@@ -1233,7 +1233,7 @@ mod tests {
     #[test]
     fn an_unavailable_reason_maps_to_a_stable_code() {
         let reason = Unavailable::NoCompatibleVersion {
-            supported: "hearthsound:plugin@0.2.0",
+            supported: "hearthsound:plugin@0.3.0",
             offered: vec!["hearthsound:plugin@0.3.0".to_owned()],
         };
         assert_eq!(unavailable_code(&reason), "no-compatible-version");

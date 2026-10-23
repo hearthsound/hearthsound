@@ -130,7 +130,7 @@ async fn a_manifest_promising_metadata_is_rejected() {
 
     match error {
         InstallError::MissingExport { interface } => {
-            assert_eq!(interface, "hearthsound:plugin/metadata@0.2.0");
+            assert_eq!(interface, "hearthsound:plugin/metadata@0.3.0");
         }
         other => panic!("unexpected error: {other}"),
     }
@@ -142,13 +142,13 @@ async fn an_unsupported_api_version_is_rejected() {
     let host = host(dir.path()).await;
     let archive = dir.path().join("api.hsplugin");
     archive_with_manifest(&archive, |manifest| {
-        manifest["api"] = serde_json::json!("hearthsound:plugin@0.1.0");
+        manifest["api"] = serde_json::json!("hearthsound:plugin@0.2.0");
     });
 
     let error = host.install(&archive).await.unwrap_err();
 
     assert!(
-        matches!(error, InstallError::UnsupportedApi { ref api } if api == "hearthsound:plugin@0.1.0"),
+        matches!(error, InstallError::UnsupportedApi { ref api } if api == "hearthsound:plugin@0.2.0"),
         "unexpected error: {error}"
     );
 }

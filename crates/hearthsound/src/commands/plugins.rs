@@ -951,7 +951,7 @@ mod tests {
         }));
         assert!(!another_index_may_offer(&InstallError::Unavailable(
             hearthsound_plugin_host::Unavailable::NoCompatibleVersion {
-                supported: "hearthsound:plugin@0.2.0",
+                supported: "hearthsound:plugin@0.3.0",
                 offered: vec!["hearthsound:plugin@0.1.0".to_owned()],
             },
         )));

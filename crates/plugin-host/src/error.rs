@@ -41,7 +41,7 @@ pub enum InstallError {
     #[error(transparent)]
     Manifest(#[from] ManifestError),
     /// The plugin was built against an API version this server does not host.
-    #[error("plugin API `{api}` is not supported; this server hosts hearthsound:plugin@0.2.0")]
+    #[error("plugin API `{api}` is not supported; this server hosts hearthsound:plugin@0.3.0")]
     UnsupportedApi {
         /// The API version the plugin declared.
         api: String,

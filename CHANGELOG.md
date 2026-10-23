@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Plugins build against `hearthsound:plugin@0.3.0`: the host loads that API
+  version and refuses a component built for an earlier one, and a manifest may
+  now name up to eight process tools under `permissions.process.tools`, each a
+  lowercase name resolved through a `tools.<name>.path` setting.
+
 - A plugin that an earlier release left waiting for approval is granted the
   permissions its stored manifest requests and enabled when the database
   upgrades.

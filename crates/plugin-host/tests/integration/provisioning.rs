@@ -154,7 +154,7 @@ async fn registering_an_installed_plugin_records_its_manifest_and_permissions() 
 
     assert_eq!(registration.id, HTTP_CATALOG_ID);
     assert_eq!(registration.version, "0.1.0");
-    assert_eq!(registration.api, "hearthsound:plugin@0.2.0");
+    assert_eq!(registration.api, "hearthsound:plugin@0.3.0");
     assert_eq!(registration.source, PluginSource::Sideload);
     assert_eq!(registration.provides, vec![Layer::Catalog]);
 

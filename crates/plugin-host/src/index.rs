@@ -639,7 +639,7 @@ mod tests {
                   "versions": [
                     {{
                       "version": "1.0.0",
-                      "api": "hearthsound:plugin@0.2.0",
+                      "api": "hearthsound:plugin@0.3.0",
                       "url": "https://example.com/com.example.hello-1.0.0.hsplugin",
                       "sha256": "{FIXTURE_SHA256}",
                       "size": 1452032,
@@ -1040,7 +1040,7 @@ mod tests {
     fn the_newest_compatible_version_is_selected() {
         let plugin = plugin(vec![
             version("0.1.0", SUPPORTED_API),
-            version("0.3.0", "hearthsound:plugin@0.3.0"),
+            version("0.4.0", "hearthsound:plugin@0.4.0"),
             version("0.2.0", SUPPORTED_API),
             version("not-a-version", SUPPORTED_API),
         ]);
@@ -1053,7 +1053,7 @@ mod tests {
     fn a_plugin_without_a_compatible_version_is_unavailable() {
         let plugin = plugin(vec![
             version("0.1.0", "hearthsound:plugin@0.1.0"),
-            version("0.2.0", "hearthsound:plugin@0.3.0"),
+            version("0.2.0", "hearthsound:plugin@0.4.0"),
         ]);
 
         assert!(plugin.newest_compatible().is_none());
@@ -1064,14 +1064,14 @@ mod tests {
                 supported: SUPPORTED_API,
                 offered: vec![
                     "hearthsound:plugin@0.1.0".to_owned(),
-                    "hearthsound:plugin@0.3.0".to_owned(),
+                    "hearthsound:plugin@0.4.0".to_owned(),
                 ],
             }
         );
         let message = unavailable.to_string();
         assert!(message.contains(SUPPORTED_API), "message was {message}");
         assert!(
-            message.contains("hearthsound:plugin@0.3.0"),
+            message.contains("hearthsound:plugin@0.4.0"),
             "message was {message}"
         );
     }

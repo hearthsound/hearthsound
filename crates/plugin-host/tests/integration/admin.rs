@@ -307,7 +307,7 @@ async fn an_upgrade_covered_by_the_installed_permissions_switches_immediately() 
 
     let after = env.repository.plugin(&id).await.unwrap().unwrap();
     assert_eq!(after.version, "0.2.0");
-    assert_eq!(after.api, "hearthsound:plugin@0.2.0");
+    assert_eq!(after.api, "hearthsound:plugin@0.3.0");
     assert_eq!(
         serde_json::from_str::<Value>(&after.manifest).unwrap(),
         archive_manifest(&archive)

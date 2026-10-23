@@ -13,7 +13,7 @@ use hearthsound_core::Layer;
 use serde::{Deserialize, Serialize};
 
 /// The API version this server hosts.
-pub const SUPPORTED_API: &str = "hearthsound:plugin@0.2.0";
+pub const SUPPORTED_API: &str = "hearthsound:plugin@0.3.0";
 
 /// The largest accepted `id` length.
 const MAX_ID_LENGTH: usize = 128;
@@ -26,6 +26,9 @@ const MAX_CALL_TIMEOUT_MS: u32 = 120_000;
 
 /// The largest accepted `resources.maxInstances`.
 const MAX_MAX_INSTANCES: u8 = 8;
+
+/// The largest accepted number of `permissions.process.tools` entries.
+const MAX_PROCESS_TOOLS: usize = 8;
 
 /// A parsed plugin manifest.
 #[derive(Debug, Clone, Deserialize)]
@@ -244,14 +247,31 @@ impl Manifest {
                 "must be between 1 and 67108864",
             ));
         }
-        if let Some(process) = &self.permissions.process
-            && !process.tools.is_empty()
-        {
-            return Err(self.invalid(
-                "permissions.process.tools",
-                format!("{:?}", process.tools),
-                "host-process does not exist in this API version, so tools must be empty",
-            ));
+        if let Some(process) = &self.permissions.process {
+            if process.tools.len() > MAX_PROCESS_TOOLS {
+                return Err(self.invalid(
+                    "permissions.process.tools",
+                    format!("{:?}", process.tools),
+                    format!("must list at most {MAX_PROCESS_TOOLS} tools"),
+                ));
+            }
+            let mut seen = std::collections::HashSet::with_capacity(process.tools.len());
+            for tool in &process.tools {
+                if !valid_tool_name(tool) {
+                    return Err(self.invalid(
+                        "permissions.process.tools",
+                        tool.clone(),
+                        "must match ^[a-z0-9][a-z0-9.-]{0,31}$",
+                    ));
+                }
+                if !seen.insert(tool.as_str()) {
+                    return Err(self.invalid(
+                        "permissions.process.tools",
+                        tool.clone(),
+                        "is listed more than once",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -394,7 +414,8 @@ pub struct FilesPermission {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProcessPermission {
-    /// The approved tools; must be empty in this API version.
+    /// Tools the plugin may run through host-process; each is resolved through
+    /// the `tools.<name>.path` setting.
     #[serde(default)]
     pub tools: Vec<String>,
 }
@@ -546,6 +567,24 @@ fn valid_hostname(name: &str) -> bool {
     !name.is_empty() && name.split('.').all(valid_label)
 }
 
+/// Returns whether `tool` is a process tool name.
+///
+/// A tool name starts with a lowercase letter or digit and continues with at
+/// most 31 lowercase letters, digits, dots or dashes.
+fn valid_tool_name(tool: &str) -> bool {
+    let mut bytes = tool.bytes();
+    match bytes.next() {
+        Some(byte) if byte.is_ascii_lowercase() || byte.is_ascii_digit() => {}
+        _ => return false,
+    }
+    if tool.len() > 32 {
+        return false;
+    }
+    bytes.all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'.' || byte == b'-'
+    })
+}
+
 /// Returns whether `field` is a configuration field name.
 fn valid_config_field(field: &str) -> bool {
     let mut bytes = field.bytes();
@@ -634,10 +673,50 @@ mod tests {
     }
 
     #[test]
-    fn rejects_process_tools() {
+    fn accepts_process_tools() {
         let settings = store(&SettingSources::default());
         let mut value = hello_value();
-        value["permissions"] = serde_json::json!({ "process": { "tools": ["yt-dlp"] } });
+        value["permissions"] =
+            serde_json::json!({ "process": { "tools": ["yt-dlp", "ffmpeg-7.1"] } });
+        let manifest = parse(&value, &settings).unwrap();
+        assert_eq!(
+            manifest.permissions.process.unwrap().tools,
+            ["yt-dlp", "ffmpeg-7.1"]
+        );
+    }
+
+    #[test]
+    fn rejects_a_malformed_process_tool() {
+        let settings = store(&SettingSources::default());
+        for tool in ["Yt-dlp", "-yt-dlp", "", "yt dlp"] {
+            let mut value = hello_value();
+            value["permissions"] = serde_json::json!({ "process": { "tools": [tool] } });
+            assert_eq!(
+                rejected_field(&value, &settings),
+                "permissions.process.tools",
+                "tool `{tool}` should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_duplicate_process_tool() {
+        let settings = store(&SettingSources::default());
+        let mut value = hello_value();
+        value["permissions"] = serde_json::json!({ "process": { "tools": ["yt-dlp", "yt-dlp"] } });
+        assert_eq!(
+            rejected_field(&value, &settings),
+            "permissions.process.tools"
+        );
+    }
+
+    #[test]
+    fn rejects_too_many_process_tools() {
+        let settings = store(&SettingSources::default());
+        let mut value = hello_value();
+        value["permissions"] = serde_json::json!({
+            "process": { "tools": ["a", "b", "c", "d", "e", "f", "g", "h", "i"] }
+        });
         assert_eq!(
             rejected_field(&value, &settings),
             "permissions.process.tools"

@@ -1,0 +1,37 @@
+package hearthsound:plugin@0.3.0;
+
+/// Listening history: now playing, finished listens and love/hate feedback.
+interface scrobble {
+  use types.{id-pair, provider-error, user-context};
+  /// One listen of one track.
+  record listen {
+    title: string,
+    /// Artist names in credit order; the first is the primary artist.
+    artists: list<string>,
+    album: option<string>,
+    album-artist: option<string>,
+    duration-ms: option<u32>,
+    track-number: option<u16>,
+    /// Canonical ids the server knows: ("mb-recording", ...), ("isrc", ...), ("mb-release", ...), ("mb-artist", ...).
+    ids: list<id-pair>,
+    /// When playback started, unix milliseconds UTC.
+    listened-at: u64,
+    /// The client application that played the track.
+    client: option<string>,
+  }
+  /// A listener's opinion of a track.
+  enum feedback-value { love, hate, clear }
+  /// How the host paces and batches deliveries to this service.
+  record scrobble-limits {
+    /// Most listens one submit-listens call may carry; at least 1.
+    max-batch: u32,
+    /// Least time between two calls to the service, in milliseconds.
+    min-interval-ms: u32,
+    /// Whether send-feedback is supported.
+    feedback: bool,
+  }
+  get-limits: func() -> scrobble-limits;
+  now-playing: func(user: user-context, track: listen) -> result<_, provider-error>;
+  submit-listens: func(user: user-context, listens: list<listen>) -> result<_, provider-error>;
+  send-feedback: func(user: user-context, track: listen, value: feedback-value) -> result<_, provider-error>;
+}

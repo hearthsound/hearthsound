@@ -13,7 +13,7 @@ use crate::error::InstallError;
 use crate::manifest::Manifest;
 
 /// The only API version the host provides.
-const API_VERSION: &str = "0.2.0";
+const API_VERSION: &str = "0.3.0";
 
 /// The `wasi` packages whose 0.2 interfaces the host provides.
 ///
@@ -28,7 +28,7 @@ const WASI_PACKAGES: [&str; 6] = [
 ];
 
 /// The interface a catalog plugin must export for the host to drive it.
-pub const LIFECYCLE_INTERFACE: &str = "hearthsound:plugin/lifecycle@0.2.0";
+pub const LIFECYCLE_INTERFACE: &str = "hearthsound:plugin/lifecycle@0.3.0";
 
 /// The layers the host can drive today.
 ///

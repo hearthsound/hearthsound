@@ -1,0 +1,28 @@
+package hearthsound:plugin@0.3.0;
+
+/// Suggestions: similar tracks and artists, popular tracks, recommendations and generated playlists.
+interface discovery {
+  use types.{id-pair, provider-error, user-context};
+  /// A track the service suggests, by name and any ids it knows.
+  record suggested-track { title: string, artists: list<string>, album: option<string>, duration-ms: option<u32>, ids: list<id-pair>, score: option<f32> }
+  /// An artist the service suggests.
+  record suggested-artist { name: string, ids: list<id-pair>, score: option<f32> }
+  record track-seed { title: string, artists: list<string>, ids: list<id-pair> }
+  record artist-seed { name: string, ids: list<id-pair> }
+  /// A playlist the service generated for the user.
+  record playlist-summary {
+    /// The service's stable reference for this playlist slot, so a refresh replaces it in place.
+    reference: string,
+    name: string,
+    description: option<string>,
+    /// When the service retires it, unix milliseconds UTC.
+    expires-at: option<u64>,
+  }
+  record generated-playlist { summary: playlist-summary, tracks: list<suggested-track> }
+  /// An empty list means the service has nothing; the host then asks the next instance.
+  similar-tracks: func(user: option<user-context>, seed: track-seed, limit: u32) -> result<list<suggested-track>, provider-error>;
+  similar-artists: func(user: option<user-context>, seed: artist-seed, limit: u32) -> result<list<suggested-artist>, provider-error>;
+  artist-top-tracks: func(user: option<user-context>, artist: artist-seed, limit: u32) -> result<list<suggested-track>, provider-error>;
+  recommended-tracks: func(user: user-context, limit: u32) -> result<list<suggested-track>, provider-error>;
+  playlists: func(user: user-context) -> result<list<generated-playlist>, provider-error>;
+}

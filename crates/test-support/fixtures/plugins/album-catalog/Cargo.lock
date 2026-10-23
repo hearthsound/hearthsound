@@ -25,9 +25,9 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
 name = "equivalent"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "foldhash"
@@ -46,8 +46,8 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-plugin"
-version = "0.2.0"
-source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.2.0#22cf4743e57e42799a1fc025d224683ea84a4d50"
+version = "0.3.0"
+source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.3.0#d8dd6f549c4f21964a8e2f5974601aae2646f68a"
 dependencies = [
  "hearthsound-plugin-acquisition",
  "hearthsound-plugin-artwork",
@@ -55,6 +55,9 @@ dependencies = [
  "hearthsound-plugin-catalog-artwork",
  "hearthsound-plugin-metadata",
  "hearthsound-plugin-metadata-artwork",
+ "hearthsound-plugin-process-acquisition",
+ "hearthsound-plugin-scrobble-discovery-account-link",
+ "hearthsound-plugin-verification",
  "serde",
  "serde_json",
  "wit-bindgen",
@@ -62,8 +65,8 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-plugin-acquisition"
-version = "0.2.0"
-source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.2.0#22cf4743e57e42799a1fc025d224683ea84a4d50"
+version = "0.3.0"
+source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.3.0#d8dd6f549c4f21964a8e2f5974601aae2646f68a"
 dependencies = [
  "hearthsound-plugin-bindings",
  "wit-bindgen",
@@ -71,8 +74,8 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-plugin-artwork"
-version = "0.2.0"
-source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.2.0#22cf4743e57e42799a1fc025d224683ea84a4d50"
+version = "0.3.0"
+source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.3.0#d8dd6f549c4f21964a8e2f5974601aae2646f68a"
 dependencies = [
  "hearthsound-plugin-bindings",
  "wit-bindgen",
@@ -80,16 +83,16 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-plugin-bindings"
-version = "0.2.0"
-source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.2.0#22cf4743e57e42799a1fc025d224683ea84a4d50"
+version = "0.3.0"
+source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.3.0#d8dd6f549c4f21964a8e2f5974601aae2646f68a"
 dependencies = [
  "wit-bindgen",
 ]
 
 [[package]]
 name = "hearthsound-plugin-catalog-artwork"
-version = "0.2.0"
-source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.2.0#22cf4743e57e42799a1fc025d224683ea84a4d50"
+version = "0.3.0"
+source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.3.0#d8dd6f549c4f21964a8e2f5974601aae2646f68a"
 dependencies = [
  "hearthsound-plugin-bindings",
  "wit-bindgen",
@@ -97,8 +100,8 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-plugin-metadata"
-version = "0.2.0"
-source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.2.0#22cf4743e57e42799a1fc025d224683ea84a4d50"
+version = "0.3.0"
+source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.3.0#d8dd6f549c4f21964a8e2f5974601aae2646f68a"
 dependencies = [
  "hearthsound-plugin-bindings",
  "wit-bindgen",
@@ -106,8 +109,35 @@ dependencies = [
 
 [[package]]
 name = "hearthsound-plugin-metadata-artwork"
-version = "0.2.0"
-source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.2.0#22cf4743e57e42799a1fc025d224683ea84a4d50"
+version = "0.3.0"
+source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.3.0#d8dd6f549c4f21964a8e2f5974601aae2646f68a"
+dependencies = [
+ "hearthsound-plugin-bindings",
+ "wit-bindgen",
+]
+
+[[package]]
+name = "hearthsound-plugin-process-acquisition"
+version = "0.3.0"
+source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.3.0#d8dd6f549c4f21964a8e2f5974601aae2646f68a"
+dependencies = [
+ "hearthsound-plugin-bindings",
+ "wit-bindgen",
+]
+
+[[package]]
+name = "hearthsound-plugin-scrobble-discovery-account-link"
+version = "0.3.0"
+source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.3.0#d8dd6f549c4f21964a8e2f5974601aae2646f68a"
+dependencies = [
+ "hearthsound-plugin-bindings",
+ "wit-bindgen",
+]
+
+[[package]]
+name = "hearthsound-plugin-verification"
+version = "0.3.0"
+source = "git+https://github.com/hearthsound/plugin-sdk?tag=v0.3.0#d8dd6f549c4f21964a8e2f5974601aae2646f68a"
 dependencies = [
  "hearthsound-plugin-bindings",
  "wit-bindgen",

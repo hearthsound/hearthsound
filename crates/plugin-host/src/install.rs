@@ -572,7 +572,7 @@ mod tests {
               "description": "An example plugin.",
               "license": "MIT",
               "homepage": "https://example.com",
-              "api": "hearthsound:plugin@0.2.0",
+              "api": "hearthsound:plugin@0.3.0",
               "provides": ["catalog"],
               "permissions": {permissions},
               "config": {{"server": null, "user": null}},
@@ -600,19 +600,6 @@ mod tests {
             permissions,
             r#"{"memoryMb": 128, "callTimeoutMs": 30000, "maxInstances": 2}"#,
         )
-    }
-
-    /// Builds a manifest without validating it.
-    ///
-    /// Lets a test reach a permission the current API version refuses to grant,
-    /// such as a process tool, which the widening check still describes for a
-    /// later version.
-    fn unchecked_manifest(permissions: &str) -> Manifest {
-        let json = manifest_json(
-            permissions,
-            r#"{"memoryMb": 128, "callTimeoutMs": 30000, "maxInstances": 2}"#,
-        );
-        serde_json::from_str(&json).unwrap()
     }
 
     #[test]
@@ -659,8 +646,8 @@ mod tests {
           "files": {"importRoots": true},
           "process": {"tools": ["ffmpeg"]}
         }"#;
-        let installed = unchecked_manifest(permissions);
-        let upgrade = unchecked_manifest(permissions);
+        let installed = manifest(permissions);
+        let upgrade = manifest(permissions);
         assert!(new_permissions(&upgrade, &installed).is_empty());
     }
 
@@ -765,8 +752,8 @@ mod tests {
 
     #[test]
     fn an_added_process_tool_is_high() {
-        let installed = unchecked_manifest(r#"{"process": {"tools": ["git"]}}"#);
-        let upgrade = unchecked_manifest(r#"{"process": {"tools": ["git", "ffmpeg"]}}"#);
+        let installed = manifest(r#"{"process": {"tools": ["git"]}}"#);
+        let upgrade = manifest(r#"{"process": {"tools": ["git", "ffmpeg"]}}"#);
         assert_eq!(
             new_permissions(&upgrade, &installed),
             [RequestedPermission {

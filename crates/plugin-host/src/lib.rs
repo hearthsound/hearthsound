@@ -1,7 +1,7 @@
 //! The WebAssembly plugin host.
 //!
 //! A Hearthsound plugin is a WebAssembly component that speaks the
-//! `hearthsound:plugin@0.2.0` package. This crate reads plugin archives,
+//! `hearthsound:plugin@0.3.0` package. This crate reads plugin archives,
 //! validates that a component only imports what the host offers and only
 //! exports the interfaces its manifest declares, installs it under the data
 //! directory, and runs it inside a pool of wasmtime stores with deadlines and
