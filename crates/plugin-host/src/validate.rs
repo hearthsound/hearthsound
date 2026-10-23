@@ -130,6 +130,9 @@ fn split_version(name: &str) -> (&str, &str) {
 }
 
 /// Returns whether the host provides `interface` at `version`.
+///
+/// `host-files` is only provided to acquisition plugins, and `host-process`
+/// only to acquisition plugins whose manifest lists a tool to run.
 fn allowed_import(interface: &str, version: &str, manifest: &Manifest) -> bool {
     if let Some(rest) = interface.strip_prefix("hearthsound:plugin/") {
         if version != API_VERSION {
@@ -138,6 +141,14 @@ fn allowed_import(interface: &str, version: &str, manifest: &Manifest) -> bool {
         return match rest {
             "types" | "host-log" | "host-http" | "host-kv" | "host-config" => true,
             "host-files" => manifest.provides().contains(&Layer::Acquisition),
+            "host-process" => {
+                manifest.provides().contains(&Layer::Acquisition)
+                    && manifest
+                        .permissions
+                        .process
+                        .as_ref()
+                        .is_some_and(|process| !process.tools.is_empty())
+            }
             _ => false,
         };
     }

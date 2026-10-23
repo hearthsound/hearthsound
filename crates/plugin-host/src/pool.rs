@@ -31,6 +31,7 @@ use crate::files::FileAccess;
 use crate::http::HttpClient;
 use crate::kv::KvStore;
 use crate::log::LogSink;
+use crate::process::ProcessTable;
 use crate::repo::InstanceDisabler;
 use crate::state::InstanceState;
 
@@ -179,6 +180,8 @@ pub(crate) struct PoolConfig {
     pub kv: Arc<KvStore>,
     /// The import roots the instance grants.
     pub files: Arc<FileAccess>,
+    /// The instance's process table, shared by every store it hands out.
+    pub process: Arc<ProcessTable>,
     /// The instance's memory ceiling in megabytes.
     pub memory_mb: u32,
     /// How many stores may exist at once.
@@ -209,6 +212,7 @@ struct PoolInner<W: World> {
     http: Arc<HttpClient>,
     kv: Arc<KvStore>,
     files: Arc<FileAccess>,
+    process: Arc<ProcessTable>,
     memory_mb: u32,
     auto_disable: InstanceDisabler,
 }
@@ -253,6 +257,7 @@ impl<W: World> StorePool<W> {
                 http: config.http,
                 kv: config.kv,
                 files: config.files,
+                process: config.process,
                 memory_mb: config.memory_mb,
                 auto_disable: config.auto_disable,
             }),
@@ -340,9 +345,12 @@ impl<W: World> StorePool<W> {
                 Arc::clone(&inner.server_config),
                 Arc::clone(&inner.log),
                 inner.memory_mb,
-                Arc::clone(&inner.http),
-                Arc::clone(&inner.kv),
-                Arc::clone(&inner.files),
+                crate::state::InstanceServices {
+                    http: Arc::clone(&inner.http),
+                    kv: Arc::clone(&inner.kv),
+                    files: Arc::clone(&inner.files),
+                    process: Arc::clone(&inner.process),
+                },
             ),
         );
         store.limiter(|state| state.limits());

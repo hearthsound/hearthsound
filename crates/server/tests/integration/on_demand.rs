@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::common::Fixture;
-use hearthsound_acquire::orchestrator::AcquisitionOrchestrator;
+use hearthsound_acquire::orchestrator::{AcquireRequest, AcquisitionOrchestrator};
 use hearthsound_acquire::repo::{AcquisitionRow, ListFilter};
 use hearthsound_catalog::CatalogService;
 use hearthsound_config::{SettingValue, keys};
@@ -28,7 +28,9 @@ use hearthsound_media::{Container, probe};
 use hearthsound_plugin_host::{InstanceSpec, PluginRepository, PluginSource};
 use hearthsound_server::Services;
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
-use hearthsound_test_support::{ACQUISITION_FIXTURE, ALBUM_CATALOG, fixture_plugin};
+use hearthsound_test_support::{
+    ACQUISITION_FIXTURE, ALBUM_CATALOG, FAKE_YT_DLP, PROCESS_FIXTURE, fixture_plugin, fixture_tool,
+};
 use reqwest::StatusCode;
 use reqwest::header::{ACCEPT_RANGES, CONTENT_RANGE, CONTENT_TYPE, RANGE, RETRY_AFTER};
 use serde_json::{Value, json};
@@ -1080,5 +1082,193 @@ async fn adding_a_catalog_track_to_a_playlist_acquires_it() {
         ledger_rows(services.orchestrator(), second)
             .await
             .is_empty()
+    );
+}
+
+/// The manifest id of the process fixture.
+const PROCESS_PLUGIN: &str = "com.example.process-fixture";
+
+/// Installs the process fixture and assigns it to the acquisition layer.
+///
+/// The plugin starts the `yt-dlp` tool for every download, so the test also
+/// points `tools.yt-dlp.path` at the stand-in before the registry is rebuilt.
+///
+/// # Parameters
+///
+/// - `services`: the running server's services.
+/// - `tool`: the executable to configure as `yt-dlp`, or `None` to leave the
+///   setting empty.
+async fn install_process_fixture(services: &Arc<Services>, tool: Option<&Path>) {
+    let installed = services
+        .plugins()
+        .install(&fixture_plugin(PROCESS_FIXTURE))
+        .await
+        .unwrap();
+    let registration = PluginRepository::new(services.database())
+        .register(&installed, PluginSource::Sideload)
+        .await
+        .unwrap();
+    assert_eq!(registration.id, PROCESS_PLUGIN);
+    services
+        .instances()
+        .create(&InstanceSpec {
+            slug: "tool".to_owned(),
+            plugin_id: PROCESS_PLUGIN.to_owned(),
+            display_name: "Process fixture".to_owned(),
+            server_config: json!({}),
+            host_config: Value::Null,
+        })
+        .await
+        .unwrap();
+    services
+        .instances()
+        .set_layer(Layer::Acquisition, &["tool".to_owned()])
+        .await
+        .unwrap();
+
+    let path = tool
+        .map(|tool| tool.display().to_string())
+        .unwrap_or_default();
+    services
+        .settings()
+        .set(
+            keys::TOOLS_YT_DLP_PATH.name(),
+            SettingValue::String(path),
+            None,
+        )
+        .await
+        .unwrap();
+    services.registry().rebuild().await.unwrap();
+}
+
+/// A catalog track is downloaded by the configured tool and imported.
+#[tokio::test]
+async fn a_track_is_acquired_through_a_configured_tool() {
+    let fixture = Fixture::new().await;
+    let services = Arc::clone(&fixture.services);
+    install_catalog(&services).await;
+    install_process_fixture(&services, Some(&fixture_tool(FAKE_YT_DLP))).await;
+
+    let track = materialize(services.catalog(), 1).await;
+    services
+        .orchestrator()
+        .request(
+            AcquireRequest::new(
+                track,
+                hearthsound_core::Priority::Play,
+                "the test plays the track".to_owned(),
+            )
+            .with_can_acquire(true),
+        )
+        .await
+        .unwrap();
+    let mut acquisition = None;
+    for _ in 0..1500 {
+        if let Some(found) = ledger_rows(services.orchestrator(), track)
+            .await
+            .into_iter()
+            .next()
+        {
+            acquisition = Some(found);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let acquisition = acquisition.expect("the request writes an acquisition");
+    let mut row = acquisition.clone();
+    for _ in 0..1500 {
+        row = services
+            .orchestrator()
+            .repository()
+            .get(acquisition.id)
+            .await
+            .unwrap()
+            .unwrap();
+        if row.state.is_terminal() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        row.state,
+        AcquisitionState::Completed,
+        "state {:?}, detail {:?}, log {:?}",
+        row.failure_reason,
+        row.error_detail,
+        services
+            .orchestrator()
+            .repository()
+            .log(acquisition.id)
+            .await
+            .unwrap()
+    );
+    assert_eq!(row.track_id, Some(track));
+    let response = fixture.get(&stream_path(&fixture, &catalog_id(1))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let (format, codec, tier): (Option<String>, Option<String>, Option<String>) =
+        sqlx::query_as("SELECT format, codec, quality_tier FROM media_files WHERE track_id = ?")
+            .bind(track.uuid().as_bytes().to_vec())
+            .fetch_one(services.database().writer())
+            .await
+            .unwrap();
+    assert_eq!(format.as_deref(), Some("ogg"));
+    assert_eq!(codec.as_deref(), Some("opus"));
+    assert_eq!(tier.as_deref(), Some("lossy-high"));
+}
+
+/// An acquisition whose tool has no configured path fails and names the reason.
+#[tokio::test]
+async fn an_unconfigured_tool_fails_the_acquisition() {
+    let fixture = Fixture::new().await;
+    let services = Arc::clone(&fixture.services);
+    install_catalog(&services).await;
+    install_process_fixture(&services, None).await;
+
+    let track = materialize(services.catalog(), 1).await;
+    services
+        .orchestrator()
+        .request(
+            AcquireRequest::new(
+                track,
+                hearthsound_core::Priority::Background,
+                "the test asks for the track".to_owned(),
+            )
+            .with_can_acquire(true),
+        )
+        .await
+        .unwrap();
+
+    let mut acquisition = None;
+    for _ in 0..1500 {
+        if let Some(found) = ledger_rows(services.orchestrator(), track)
+            .await
+            .into_iter()
+            .next()
+        {
+            acquisition = Some(found);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let acquisition = acquisition.expect("the request writes an acquisition");
+    let row = wait_for_state(
+        services.orchestrator(),
+        acquisition.id,
+        AcquisitionState::Failed,
+    )
+    .await;
+    let entries = services
+        .orchestrator()
+        .repository()
+        .log(row.id)
+        .await
+        .unwrap();
+    assert!(
+        entries.iter().any(|entry| entry
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("not-configured"))),
+        "the log should name the missing tool: {entries:?}"
     );
 }

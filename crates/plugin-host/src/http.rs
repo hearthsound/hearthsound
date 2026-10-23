@@ -788,7 +788,7 @@ mod enforcement {
     use crate::files::FileAccess;
     use crate::kv::KvStore;
     use crate::log::LogSink;
-    use crate::state::InstanceState;
+    use crate::state::{InstanceServices, InstanceState};
 
     /// Builds the state of one instance, as the pool would.
     fn state(server_config: &str, permission: Option<HttpPermission>) -> InstanceState {
@@ -804,7 +804,21 @@ mod enforcement {
             crate::kv::DEFAULT_QUOTA_BYTES,
         ));
         let files = Arc::new(FileAccess::default());
-        InstanceState::new(slug, Arc::from(server_config), log, 64, http, kv, files)
+        InstanceState::new(
+            slug.clone(),
+            Arc::from(server_config),
+            log,
+            64,
+            InstanceServices {
+                http,
+                kv,
+                files,
+                process: Arc::new(crate::process::ProcessTable::without_tools(
+                    "com.example.probe",
+                    &slug,
+                )),
+            },
+        )
     }
 
     /// The permission that reaches a local test server through `$config:baseUrl`.

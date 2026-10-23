@@ -12,7 +12,8 @@
 //! rewritten at the start of every call, and stores never move between layers, so
 //! a stale root is never visible.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use hearthsound_core::providers::{
@@ -27,11 +28,13 @@ use crate::bindings::acquisition::exports::hearthsound::plugin::acquisition;
 use crate::bindings::hearthsound::plugin::types::ProviderError as WitProviderError;
 use crate::error::map_provider_error;
 use crate::pool::StorePool;
+use crate::process::ProcessTable;
 use crate::state::InstanceState;
 
 /// An acquisition provider backed by one plugin instance.
 pub(crate) struct WasmAcquisitionProvider {
     pool: StorePool<bindings::AcquisitionProvider>,
+    process: Arc<ProcessTable>,
     plugin: String,
     slug: Slug,
 }
@@ -42,14 +45,22 @@ impl WasmAcquisitionProvider {
     /// # Parameters
     ///
     /// - `pool`: the instance's store pool.
+    /// - `process`: the instance's process table, shared with every store of
+    ///   the pool; the provider releases it when an acquisition ends.
     /// - `plugin`: the plugin id, used in log fields.
     /// - `slug`: the instance slug.
     pub(crate) fn new(
         pool: StorePool<bindings::AcquisitionProvider>,
+        process: Arc<ProcessTable>,
         plugin: String,
         slug: Slug,
     ) -> WasmAcquisitionProvider {
-        WasmAcquisitionProvider { pool, plugin, slug }
+        WasmAcquisitionProvider {
+            pool,
+            process,
+            plugin,
+            slug,
+        }
     }
 
     /// Maps a guest error to the core error, logging the guest's message.
@@ -288,6 +299,10 @@ impl AcquisitionProvider for WasmAcquisitionProvider {
                 "cancelling a download failed",
             );
         }
+    }
+
+    async fn release_staging(&self, staging_root: &Path) {
+        self.process.kill_staging(staging_root).await;
     }
 }
 

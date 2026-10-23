@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hearthsound_config::SettingsStore;
+use hearthsound_config::settings::Settings;
 use hearthsound_core::Layer;
 use hearthsound_core::events::EventBus;
 use hearthsound_core::providers::{
@@ -40,6 +41,7 @@ use crate::log::LogSink;
 use crate::manifest::{Manifest, ManifestError, SUPPORTED_API};
 use crate::metadata::WasmMetadataProvider;
 use crate::pool::{self, PoolConfig, StorePool};
+use crate::process::ProcessTable;
 use crate::repo::InstanceDisabler;
 use crate::state::InstanceState;
 use crate::validate;
@@ -91,6 +93,7 @@ pub struct PluginHost {
     linker: Linker<InstanceState>,
     plugins_dir: PathBuf,
     settings: Arc<SettingsStore>,
+    live_settings: Option<Settings>,
     database: Arc<Database>,
     events: Arc<EventBus>,
 }
@@ -130,6 +133,7 @@ impl PluginHost {
             linker,
             plugins_dir,
             settings,
+            live_settings: None,
             database,
             events: Arc::new(EventBus::new()),
         })
@@ -155,6 +159,20 @@ impl PluginHost {
     /// server's bus hands its own bus to [`PluginHost::with_event_bus`].
     pub fn events(&self) -> &Arc<EventBus> {
         &self.events
+    }
+
+    /// Reads process-tool settings from the server's live settings.
+    ///
+    /// The manifest-validation snapshot stays fixed, but a tool's path and
+    /// environment allowlist may change while the server runs, so the process
+    /// table resolves them from the newest snapshot at every spawn.
+    ///
+    /// # Parameters
+    ///
+    /// - `settings`: the server's runtime settings.
+    pub fn with_live_settings(mut self, settings: Settings) -> PluginHost {
+        self.live_settings = Some(settings);
+        self
     }
 
     /// Publishes plugin status events on `events` instead of a private bus.
@@ -352,7 +370,7 @@ impl PluginHost {
         plugin: &InstalledPlugin,
         instance: InstanceConfig,
     ) -> Result<Arc<dyn CatalogProvider>, HostError> {
-        let pool = self.store_pool::<bindings::CatalogProvider>(plugin, &instance)?;
+        let (pool, _process) = self.store_pool::<bindings::CatalogProvider>(plugin, &instance)?;
         Ok(Arc::new(WasmCatalogProvider::new(
             pool,
             plugin.manifest().id.clone(),
@@ -379,7 +397,7 @@ impl PluginHost {
         plugin: &InstalledPlugin,
         instance: InstanceConfig,
     ) -> Result<Arc<dyn MetadataProvider>, HostError> {
-        let pool = self.store_pool::<bindings::MetadataProvider>(plugin, &instance)?;
+        let (pool, _process) = self.store_pool::<bindings::MetadataProvider>(plugin, &instance)?;
         Ok(Arc::new(WasmMetadataProvider::new(
             pool,
             plugin.manifest().id.clone(),
@@ -406,7 +424,7 @@ impl PluginHost {
         plugin: &InstalledPlugin,
         instance: InstanceConfig,
     ) -> Result<Arc<dyn ArtworkProvider>, HostError> {
-        let pool = self.store_pool::<bindings::ArtworkProvider>(plugin, &instance)?;
+        let (pool, _process) = self.store_pool::<bindings::ArtworkProvider>(plugin, &instance)?;
         Ok(Arc::new(WasmArtworkProvider::new(
             pool,
             plugin.manifest().id.clone(),
@@ -433,9 +451,11 @@ impl PluginHost {
         plugin: &InstalledPlugin,
         instance: InstanceConfig,
     ) -> Result<Arc<dyn AcquisitionProvider>, HostError> {
-        let pool = self.store_pool::<bindings::AcquisitionProvider>(plugin, &instance)?;
+        let (pool, process) =
+            self.store_pool::<bindings::AcquisitionProvider>(plugin, &instance)?;
         Ok(Arc::new(WasmAcquisitionProvider::new(
             pool,
+            process,
             plugin.manifest().id.clone(),
             instance.slug,
         )))
@@ -461,7 +481,7 @@ impl PluginHost {
         &self,
         plugin: &InstalledPlugin,
         instance: &InstanceConfig,
-    ) -> Result<StorePool<W>, HostError> {
+    ) -> Result<(StorePool<W>, Arc<ProcessTable>), HostError> {
         let manifest = plugin.manifest();
         let log = Arc::new(LogSink::new(manifest.id.clone(), instance.slug.clone()));
 
@@ -477,7 +497,25 @@ impl PluginHost {
             instance.permissions.files.as_ref(),
         ));
 
-        StorePool::new(
+        let tools = manifest
+            .permissions
+            .process
+            .as_ref()
+            .map(|process| process.tools.clone())
+            .unwrap_or_default();
+        let process = Arc::new(match &self.live_settings {
+            Some(settings) => {
+                ProcessTable::live(&manifest.id, &instance.slug, &tools, settings.clone())
+            }
+            None => ProcessTable::new(
+                &manifest.id,
+                &instance.slug,
+                &tools,
+                Arc::clone(&self.settings),
+            ),
+        });
+
+        let pool = StorePool::new(
             self.engine.engine(),
             &self.linker,
             plugin.component(),
@@ -489,6 +527,7 @@ impl PluginHost {
                 http,
                 kv,
                 files,
+                process: Arc::clone(&process),
                 memory_mb: manifest.resources.memory_mb,
                 max_instances: manifest.resources.max_instances,
                 call_timeout_ms: manifest.resources.call_timeout_ms,
@@ -501,7 +540,8 @@ impl PluginHost {
                 ),
             },
         )
-        .map_err(|error| HostError::Incompatible(format!("{error:#}")))
+        .map_err(|error| HostError::Incompatible(format!("{error:#}")))?;
+        Ok((pool, process))
     }
 }
 

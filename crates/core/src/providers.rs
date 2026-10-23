@@ -886,6 +886,18 @@ pub trait AcquisitionProvider: ProviderLifecycle {
     /// - `download_token`: the token returned by
     ///   [`AcquisitionProvider::start_download`].
     async fn cancel_download(&self, context: &AcquisitionContext, download_token: &str);
+
+    /// Releases every tool process the provider started under `staging_root`.
+    ///
+    /// The orchestrator calls this when an acquisition reaches a terminal
+    /// state, so a process a plugin left running cannot outlive the directory
+    /// it writes into. A provider that runs no processes does nothing, which is
+    /// why the default implementation is empty.
+    ///
+    /// # Parameters
+    ///
+    /// - `staging_root`: the acquisition's staging directory.
+    async fn release_staging(&self, _staging_root: &Path) {}
 }
 
 #[cfg(test)]

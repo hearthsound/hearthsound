@@ -387,13 +387,19 @@ mod import_tests {
         ));
         let log = Arc::new(LogSink::new("com.example.probe".to_owned(), slug.clone()));
         let mut state = crate::state::InstanceState::new(
-            slug,
+            slug.clone(),
             Arc::from("{}"),
             log,
             64,
-            http,
-            kv,
-            Arc::new(files),
+            crate::state::InstanceServices {
+                http,
+                kv,
+                files: Arc::new(files),
+                process: Arc::new(crate::process::ProcessTable::without_tools(
+                    "com.example.probe",
+                    &slug,
+                )),
+            },
         );
         state.set_staging(staging);
         state

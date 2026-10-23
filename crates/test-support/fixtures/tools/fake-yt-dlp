@@ -1,0 +1,16 @@
+#!/bin/sh
+# A stand-in for yt-dlp: writes a sine tone to the output file it is given.
+#
+# Usage: fake-yt-dlp <output path> <seconds>
+#
+# It prints the progress line the real tool prints with --newline, then encodes
+# an Opus file with ffmpeg so an acquisition test can import a real audio file
+# without touching the network.
+set -eu
+
+out="$1"
+seconds="$2"
+
+mkdir -p "$(dirname "$out")"
+echo "progress 50"
+exec ffmpeg -v error -y -f lavfi -i "sine=frequency=500:duration=$seconds" -c:a libopus -b:a 160k "$out"

@@ -921,7 +921,7 @@ impl AcquisitionOrchestrator {
             );
 
             post_import(instance, &verified.file).await;
-            let _ = tokio::fs::remove_dir_all(self.staging_dir(acquisition_id)).await;
+            self.release_staging(acquisition_id).await;
             return Ok(());
         }
 

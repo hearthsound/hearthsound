@@ -30,6 +30,7 @@ pub(crate) mod imports {
                 import hearthsound:plugin/host-kv@0.3.0;
                 import hearthsound:plugin/host-config@0.3.0;
                 import hearthsound:plugin/host-files@0.3.0;
+                import hearthsound:plugin/host-process@0.3.0;
             }
         ",
         world: "hearthsound:host/host-imports",

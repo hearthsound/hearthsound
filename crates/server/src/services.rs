@@ -254,7 +254,8 @@ impl Services {
                 Arc::clone(&snapshot),
                 Arc::clone(&database),
             )?
-            .with_event_bus(Arc::clone(&events)),
+            .with_event_bus(Arc::clone(&events))
+            .with_live_settings(settings.clone()),
         );
 
         let repository = PluginRepository::new(&database);

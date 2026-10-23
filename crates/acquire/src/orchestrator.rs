@@ -1453,7 +1453,7 @@ impl AcquisitionOrchestrator {
         if let Some(track_id) = row.track_id {
             self.publish_availability(track_id, Availability::Unavailable, None);
         }
-        self.remove_staging(id).await;
+        self.release_staging(id).await;
         self.forget(id);
         tracing::info!(
             acquisition = %id,
@@ -1684,7 +1684,7 @@ impl AcquisitionOrchestrator {
         if restored && let Some(track_id) = row.track_id {
             self.publish_availability(track_id, Availability::Remote, None);
         }
-        self.remove_staging(id).await;
+        self.release_staging(id).await;
         self.forget(id);
         tracing::info!(
             acquisition = %id,
@@ -1786,6 +1786,32 @@ impl AcquisitionOrchestrator {
                 "an acquisition's staging directory could not be removed"
             );
         }
+    }
+
+    /// Stops an acquisition's tool processes and removes its staging directory.
+    ///
+    /// Every acquisition-layer instance is asked to release the directory,
+    /// because a process is addressed by the handle of the instance that started
+    /// it, and a search can fall through several instances before one download
+    /// starts. Asking all of them also covers the instance a ledger row does not
+    /// name. The directory removal is the same one
+    /// [`AcquisitionOrchestrator::remove_staging`] performs.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the acquisition that reached a terminal state.
+    pub(crate) async fn release_staging(&self, id: Uuid) {
+        let staging = self.staging_dir(id);
+        for instance in self
+            .inner
+            .registry
+            .layers(hearthsound_core::Layer::Acquisition)
+        {
+            if let Some(provider) = instance.acquisition() {
+                provider.release_staging(&staging).await;
+            }
+        }
+        self.remove_staging(id).await;
     }
 
     /// Returns the acquisition-layer instance with `id`.

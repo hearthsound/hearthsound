@@ -21,12 +21,29 @@ use wasmtime::{StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::bindings::hearthsound::plugin::{
-    host_config, host_files, host_http, host_kv, host_log, types,
+    host_config, host_files, host_http, host_kv, host_log, host_process, types,
 };
 use crate::files::{self, FileAccess, STAGING_ROOT};
 use crate::http::{HttpClient, HttpError, HttpRequest};
 use crate::kv::KvStore;
 use crate::log::{GuestOutput, LogSink};
+use crate::process::ProcessTable;
+
+/// The host services one instance's stores share.
+///
+/// The pool clones these handles into every store it instantiates, so a store
+/// always reaches the same HTTP client, key-value store, file grant and process
+/// table as the rest of its instance.
+pub(crate) struct InstanceServices {
+    /// The instance's outbound HTTP client.
+    pub http: Arc<HttpClient>,
+    /// The instance's persistent key-value store.
+    pub kv: Arc<KvStore>,
+    /// The import roots the instance grants.
+    pub files: Arc<FileAccess>,
+    /// The instance's process table.
+    pub process: Arc<ProcessTable>,
+}
 
 /// The state behind one plugin instance's store.
 pub struct InstanceState {
@@ -39,6 +56,7 @@ pub struct InstanceState {
     http: Arc<HttpClient>,
     kv: Arc<KvStore>,
     files: Arc<FileAccess>,
+    process: Arc<ProcessTable>,
     staging: Option<PathBuf>,
     deadline: Option<Instant>,
 }
@@ -55,16 +73,13 @@ impl InstanceState {
     /// - `memory_mb`: the instance's memory ceiling in megabytes.
     /// - `http`: the instance's outbound HTTP client. Every `host-http` call
     ///   goes through it, so its grant is the only host allowlist that applies.
-    /// - `kv`: the instance's persistent key-value store.
-    /// - `files`: the import roots the instance grants.
-    pub fn new(
+    /// - `services`: the host services every store of the instance shares.
+    pub(crate) fn new(
         slug: Slug,
         server_config: Arc<str>,
         log: Arc<LogSink>,
         memory_mb: u32,
-        http: Arc<HttpClient>,
-        kv: Arc<KvStore>,
-        files: Arc<FileAccess>,
+        services: InstanceServices,
     ) -> InstanceState {
         let mut builder = WasiCtxBuilder::new();
         builder.stdout(GuestOutput::new(Arc::clone(&log), host_log::Level::Info));
@@ -84,9 +99,10 @@ impl InstanceState {
             log,
             server_config,
             slug,
-            http,
-            kv,
-            files,
+            http: services.http,
+            kv: services.kv,
+            files: services.files,
+            process: services.process,
             staging: None,
             deadline: None,
         }
@@ -324,6 +340,46 @@ impl host_kv::Host for InstanceState {
                 "host-kv delete failed",
             );
         }
+        Ok(())
+    }
+}
+
+impl host_process::Host for InstanceState {
+    async fn spawn(
+        &mut self,
+        tool: String,
+        args: Vec<String>,
+        options: host_process::SpawnOptions,
+    ) -> wasmtime::Result<Result<host_process::ProcessHandle, host_process::ProcessError>> {
+        Ok(self
+            .process
+            .spawn(self.staging.as_deref(), &tool, args, options)
+            .await)
+    }
+
+    async fn poll(
+        &mut self,
+        handle: host_process::ProcessHandle,
+    ) -> wasmtime::Result<Result<host_process::ProcessState, host_process::ProcessError>> {
+        Ok(self.process.poll(handle).await)
+    }
+
+    async fn read_stdout(
+        &mut self,
+        handle: host_process::ProcessHandle,
+    ) -> wasmtime::Result<Result<Vec<u8>, host_process::ProcessError>> {
+        Ok(self.process.read_stdout(handle).await)
+    }
+
+    async fn read_stderr(
+        &mut self,
+        handle: host_process::ProcessHandle,
+    ) -> wasmtime::Result<Result<Vec<u8>, host_process::ProcessError>> {
+        Ok(self.process.read_stderr(handle).await)
+    }
+
+    async fn kill(&mut self, handle: host_process::ProcessHandle) -> wasmtime::Result<()> {
+        self.process.kill(handle).await;
         Ok(())
     }
 }

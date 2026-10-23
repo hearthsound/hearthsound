@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An acquisition plugin can run a tool the administrator configured: the
+  `host-process` import starts `yt-dlp` (or another tool the manifest lists
+  under `permissions.process.tools`) inside the job's staging directory, with a
+  cleared environment limited to the tool's allowlist, captured output capped at
+  one mebibyte per stream, at most four processes per instance and a wall-clock
+  limit of up to one hour. `tools.yt-dlp.path` names the executable and
+  `tools.yt-dlp.env_allowlist` the server variables it inherits. Every process an
+  acquisition started is killed when the acquisition ends.
+
 - `getCoverArt` serves a local cover at the requested size. `size` selects the
   smallest of 96, 300 and 600 pixels that covers it; ffmpeg scales the stored
   image once and the result is kept under `<data>/artwork/thumbs`, so a track

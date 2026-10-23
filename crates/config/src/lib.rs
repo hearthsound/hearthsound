@@ -557,6 +557,13 @@ pub mod keys {
     /// The ceiling an instance may request for `resources.memoryMb`.
     pub const PLUGINS_MAX_MEMORY_MB: SettingKey<u32> = SettingKey::new("plugins.max_memory_mb");
 
+    /// Absolute path of the yt-dlp executable; empty means not configured.
+    pub const TOOLS_YT_DLP_PATH: SettingKey<String> = SettingKey::new("tools.yt-dlp.path");
+    /// Server environment variables passed to yt-dlp; every other variable is
+    /// cleared.
+    pub const TOOLS_YT_DLP_ENV_ALLOWLIST: SettingKey<Vec<String>> =
+        SettingKey::new("tools.yt-dlp.env_allowlist");
+
     /// Whether user uploads are allowed.
     pub const UPLOADS_ENABLED: SettingKey<bool> = SettingKey::new("uploads.enabled");
     /// Maximum size in bytes of a single uploaded file.
@@ -686,8 +693,8 @@ impl SettingsRegistry {
     ///
     /// The registry carries the built-in defaults and the constraint of each
     /// setting. Keys of features that have not landed yet (fast start, scheduled
-    /// pre-acquisition, upgrades, radio) and the templated `tools.<name>.*` keys
-    /// are not registered.
+    /// pre-acquisition, upgrades, radio) and the `tools.<name>.*` keys of tools
+    /// no built-in feature runs are not registered.
     ///
     /// # Returns
     ///
@@ -923,6 +930,23 @@ impl SettingsRegistry {
                     SettingKind::Bool,
                     SettingValue::Bool(false),
                     "Whether acquired files are verified by fingerprint",
+                ),
+                def(
+                    keys::TOOLS_YT_DLP_PATH,
+                    SettingKind::String { allowed: &[] },
+                    SettingValue::String(String::new()),
+                    "Absolute path of the yt-dlp executable; empty means not configured",
+                ),
+                def(
+                    keys::TOOLS_YT_DLP_ENV_ALLOWLIST,
+                    SettingKind::StringList { allowed: &[] },
+                    SettingValue::StringList(
+                        ["PATH", "HOME"]
+                            .iter()
+                            .map(|name| (*name).to_owned())
+                            .collect(),
+                    ),
+                    "Server environment variables passed to yt-dlp; every other variable is cleared",
                 ),
                 def(
                     keys::PREFETCH_ENABLED,
@@ -1873,11 +1897,24 @@ mod tests {
             "preacquire.max_tracks_per_run",
             "upgrades.include_cached",
             "radio.remote_ratio",
-            "tools.yt-dlp.path",
-            "tools.yt-dlp.env_allowlist",
+            "tools.ffmpeg.path",
         ] {
             assert_eq!(registry.def(key), None, "`{key}` must not be registered");
         }
+    }
+
+    #[test]
+    fn the_yt_dlp_tool_is_registered() {
+        let registry = SettingsRegistry::builtin();
+        let path = registry.def(keys::TOOLS_YT_DLP_PATH.name()).unwrap();
+        assert_eq!(path.default, SettingValue::String(String::new()));
+        let allowlist = registry
+            .def(keys::TOOLS_YT_DLP_ENV_ALLOWLIST.name())
+            .unwrap();
+        assert_eq!(
+            allowlist.default,
+            SettingValue::StringList(vec!["PATH".to_owned(), "HOME".to_owned()])
+        );
     }
 
     #[test]

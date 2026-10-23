@@ -48,6 +48,7 @@ pub mod log;
 pub mod manifest;
 mod metadata;
 mod pool;
+mod process;
 pub mod registry;
 mod repo;
 mod state;

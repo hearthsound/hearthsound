@@ -71,3 +71,32 @@ pub const ARTWORK_FIXTURE: &str = "com.example.artwork-fixture-0.1.0.hsplugin";
 
 /// The archive file name of the acquisition fixture.
 pub const ACQUISITION_FIXTURE: &str = "com.example.acquisition-fixture-0.1.0.hsplugin";
+
+/// The archive file name of the process fixture.
+pub const PROCESS_FIXTURE: &str = "com.example.process-fixture-0.1.0.hsplugin";
+
+/// Returns the path of a fixture tool.
+///
+/// # Parameters
+///
+/// - `name`: the tool file name, for example [`FAKE_YT_DLP`].
+///
+/// # Returns
+///
+/// The absolute path of the executable under
+/// `crates/test-support/fixtures/tools/`.
+///
+/// # Panics
+///
+/// Panics when the tool does not exist, because that means the checkout is
+/// incomplete.
+pub fn fixture_tool(name: &str) -> PathBuf {
+    let path = workspace_root()
+        .join("crates/test-support/fixtures/tools")
+        .join(name);
+    assert!(path.is_file(), "fixture tool {} is missing", path.display());
+    path
+}
+
+/// The file name of the stand-in for yt-dlp.
+pub const FAKE_YT_DLP: &str = "fake-yt-dlp";
