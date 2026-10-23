@@ -269,6 +269,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A generated playlist the discovery service already retired is no longer
+  stored again. The sync ignored the service's `expires-at`, so a service that
+  keeps listing a retired playlist made every run recreate the playlist the
+  expiry job had just deleted; the sync now leaves such a slot to the expiry
+  job.
+
 - Adding a catalog album to a playlist appends its whole tracklist even when
   some of its tracks were already stored. Materializing an album now fetches
   the provider's tracklist for a stored album too and creates every track that

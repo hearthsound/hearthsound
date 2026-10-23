@@ -18,6 +18,11 @@
 //! - a track the catalog cannot name is dropped rather than stored as a
 //!   placeholder, and the rest of the playlist is still written.
 //!
+//! A playlist the service already retired is not written again: the service
+//! may keep listing it for a while, and writing it would recreate a playlist
+//! the expiry job deletes on its next pass. The sync skips it and leaves any
+//! copy an earlier sync stored to that job.
+//!
 //! The system schedule runs the job for every linked listener once a day; a
 //! listener who links a discovery instance gets the same job immediately
 //! through the account-linking route, which is what makes a freshly linked
@@ -179,8 +184,11 @@ impl DiscoverySyncJobHandler {
     ///
     /// Every playlist the listener's linked services generated is written to
     /// its slot; a playlist that already exists keeps its id and has its fields
-    /// and tracks replaced. A suggested track no catalog can name is dropped
-    /// with a debug log line, and the rest of the playlist is written.
+    /// and tracks replaced. A playlist whose service expiry has already passed
+    /// is skipped, so a service that keeps listing a retired playlist does not
+    /// recreate it after the expiry job removed it. A suggested track no
+    /// catalog can name is dropped with a debug log line, and the rest of the
+    /// playlist is written.
     ///
     /// # Parameters
     ///
@@ -200,6 +208,21 @@ impl DiscoverySyncJobHandler {
         let mut written = 0;
         for instance_playlist in generated {
             let summary = instance_playlist.playlist.summary;
+            // A service keeps listing a playlist for a while after it retires
+            // it. Writing such a slot would store a playlist the expiry job
+            // deletes again, and every sync would repeat that cycle, so a
+            // playlist whose service expiry has passed is left to the expiry
+            // job, which removes any copy an earlier sync stored.
+            if summary
+                .expires_at
+                .is_some_and(|expires_at| i64::try_from(expires_at).unwrap_or(i64::MAX) <= now)
+            {
+                tracing::debug!(
+                    reference = summary.reference.as_str(),
+                    "skipped a generated playlist the service already retired"
+                );
+                continue;
+            }
             let suggestions = instance_playlist.playlist.tracks;
             let limit = u32::try_from(suggestions.len()).unwrap_or(u32::MAX);
             let resolved = self.discovery.resolve_tracks(&suggestions, limit).await?;

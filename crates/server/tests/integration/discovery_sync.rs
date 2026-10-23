@@ -44,6 +44,28 @@ async fn install_plugin(fixture: &Fixture, archive: &str) -> String {
 /// The catalog maps the two suggestions the discovery fixture makes onto the
 /// two tracks of its album, so both resolve.
 async fn install_layers(fixture: &Fixture) {
+    install_layers_with_playlists(
+        fixture,
+        json!([{
+            "reference": "weekly-jams",
+            "name": "Weekly Jams",
+            "description": "A week of listening",
+            "tracks": [
+                { "title": "Fixture Song 1", "artists": ["Fixture Artist"] },
+                { "title": "Fixture Song 2", "artists": ["Fixture Artist"] }
+            ]
+        }]),
+    )
+    .await;
+}
+
+/// Installs both fixtures with the given discovery playlists.
+///
+/// # Parameters
+///
+/// - `fixture`: the running server.
+/// - `playlists`: the `playlists` table the discovery fixture answers with.
+async fn install_layers_with_playlists(fixture: &Fixture, playlists: Value) {
     let catalog_plugin = install_plugin(fixture, ALBUM_CATALOG).await;
     fixture
         .services
@@ -72,15 +94,7 @@ async fn install_layers(fixture: &Fixture) {
             display_name: "Weekly Jams Service".to_owned(),
             server_config: json!({
                 "endpoint": "http://127.0.0.1:9",
-                "playlists": [{
-                    "reference": "weekly-jams",
-                    "name": "Weekly Jams",
-                    "description": "A week of listening",
-                    "tracks": [
-                        { "title": "Fixture Song 1", "artists": ["Fixture Artist"] },
-                        { "title": "Fixture Song 2", "artists": ["Fixture Artist"] }
-                    ]
-                }]
+                "playlists": playlists
             }),
             host_config: Value::Null,
         })
@@ -215,6 +229,71 @@ async fn linking_a_discovery_service_syncs_its_playlists() {
         .expect("the playlist is still stored");
     assert_eq!(after.id, written.id, "the refresh keeps the playlist id");
     assert_eq!(after.tracks, 2, "the refresh rewrote the entries");
+}
+
+/// A generated playlist the service already retired is skipped, and the copy an
+/// earlier sync stored is left to the expiry job.
+///
+/// A service keeps listing a playlist it retired for a while. Writing it again
+/// would store a playlist the expiry job deletes on its next pass, so every
+/// sync would recreate and delete it.
+#[tokio::test]
+async fn an_expired_generated_playlist_is_not_stored() {
+    let fixture = Fixture::new().await;
+    install_layers_with_playlists(
+        &fixture,
+        json!([{
+            "reference": "weekly-jams",
+            "name": "Weekly Jams",
+            "expiresAt": 1,
+            "tracks": [
+                { "title": "Fixture Song 1", "artists": ["Fixture Artist"] }
+            ]
+        }]),
+    )
+    .await;
+    let instance = fixture.services.instances().get("discovery").await.unwrap();
+    let earlier = fixture
+        .services
+        .activity()
+        .playlists()
+        .upsert_generated(
+            &hearthsound_activity::SyncedPlaylist {
+                owner_user_id: fixture.user_id,
+                source_instance_id: instance.id,
+                source_ref: "weekly-jams",
+                name: "Earlier Sync",
+                comment: None,
+                expires_at: i64::MAX,
+                tracks: &[],
+            },
+            i64::MAX / 2,
+        )
+        .await
+        .unwrap();
+
+    link(&fixture).await;
+    let written = fixture
+        .services
+        .discovery_sync()
+        .sync_user(fixture.user_id)
+        .await
+        .unwrap();
+
+    assert_eq!(written, 0, "an expired playlist is not written");
+    let after = generated_playlist(&fixture, fixture.user_id)
+        .await
+        .expect("the copy an earlier sync stored is still there");
+    assert_eq!(
+        after.id,
+        earlier.id.uuid().as_bytes().to_vec(),
+        "the slot kept its id"
+    );
+    assert_eq!(
+        after.name, "Earlier Sync",
+        "the sync left the stored copy to the expiry job"
+    );
+    assert_eq!(after.tracks, 0, "the sync wrote no entries into the slot");
 }
 
 /// The daily sync covers every listener linked to a discovery instance and
