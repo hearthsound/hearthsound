@@ -6,9 +6,11 @@
 //! artists whose popular tracks are interleaved. Every resolved suggestion is
 //! rendered through the same local-then-catalog merge `search3` uses, so a
 //! suggested song the server already stores is served as the stored song and the
-//! rest are served as catalog songs. Without a discovery layer the suggestion
-//! endpoints answer empty, and `getTopSongs` falls back to the library's own
-//! play and like counts.
+//! rest are served as catalog songs, and a song the layer suggests twice is
+//! listed once. Without a discovery layer the suggestion endpoints answer empty,
+//! and `getTopSongs` falls back to the library's own play and like counts.
+
+use std::collections::HashSet;
 
 use hearthsound_catalog::{CatalogSearch, CatalogTrackResult, LocalTrackHit};
 use hearthsound_core::providers::{
@@ -203,9 +205,10 @@ pub async fn get_random_songs(call: Call) -> Encoded {
 ///
 /// The discovery layer answers first when one is configured: its
 /// `artist-top-tracks` result is the popularity source, and every suggestion is
-/// resolved and rendered like a similar song. A server with no discovery
-/// instance, or one whose instances have nothing to say, falls back to the
-/// library. A stored artist's songs come from `top_tracks_for_artist`, ordered
+/// resolved and rendered like a similar song, so a song the layer names twice is
+/// listed once. A server with no discovery instance, or one whose instances
+/// have nothing to say, falls back to the library. A stored artist's songs come
+/// from `top_tracks_for_artist`, ordered
 /// by the server's own play count, then by how many users like the song, then
 /// by the oldest album, disc and track. A catalog artist's songs keep the order
 /// the provider returned, which is the catalog's own popularity.
@@ -323,7 +326,8 @@ pub async fn get_top_songs(call: Call) -> Encoded {
 /// A track id seeds similar tracks. An album or artist id seeds five similar
 /// artists, asks each for its popular tracks, and interleaves the answers, which
 /// is what makes an artist's similar-songs panel a mix instead of one artist's
-/// discography. A server with no discovery instance answers an empty list rather
+/// discography; a song two of them name is listed once, at its first position.
+/// A server with no discovery instance answers an empty list rather
 /// than failing, so a client can call the endpoint unconditionally.
 ///
 /// # Parameters
@@ -862,7 +866,9 @@ async fn local_hits(
 /// stored song, with the caller's annotation; the rest are served as catalog
 /// songs. This is the same local-then-catalog merge `search3` applies, so a
 /// client never sees one recording twice and the songs it can play immediately
-/// carry the ids it already knows.
+/// carry the ids it already knows. When two results name the same stored track
+/// or the same catalog entity, the later one is dropped and the song keeps its
+/// first position.
 ///
 /// # Parameters
 ///
@@ -871,7 +877,7 @@ async fn local_hits(
 ///
 /// # Returns
 ///
-/// One `Child` per result, in the same order.
+/// One `Child` per distinct song, in the order of its first result.
 ///
 /// # Errors
 ///
@@ -910,6 +916,17 @@ async fn resolved_song_objects(
         }
         placements.push((result, stored));
     }
+    // Two suggestions can name the same recording: a service may list a
+    // playlist twice under different spellings, and two catalog entities can
+    // both be the stored track. The client sees one id per song, so a
+    // suggestion whose entity an earlier one already named is dropped and the
+    // first position wins.
+    let mut seen_stored = HashSet::new();
+    let mut seen_catalog = HashSet::new();
+    placements.retain(|(result, stored)| match stored {
+        Some(id) => seen_stored.insert(*id),
+        None => seen_catalog.insert(result.id.clone()),
+    });
     let annotations = match browse::annotations(
         call.state(),
         call.principal().user_id.uuid(),

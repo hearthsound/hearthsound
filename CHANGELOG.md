@@ -269,6 +269,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `getSimilarSongs`, `getSimilarSongs2` and `getTopSongs` list each song once.
+  A discovery service can name one recording twice, under two spellings or
+  through two similar artists, and two catalog entities can both be the stored
+  track; the later occurrence is dropped and the song keeps its first position.
+
 - A generated playlist the discovery service already retired is no longer
   stored again. The sync ignored the service's `expires-at`, so a service that
   keeps listing a retired playlist made every run recreate the playlist the

@@ -465,8 +465,73 @@ async fn similar_songs_mix_stored_and_catalog_songs() {
     });
 }
 
+/// A song the discovery layer names twice is served once, at its first
+/// position, in both suggestion listings.
+#[tokio::test]
+async fn similar_songs_list_each_song_once() {
+    let (fixture, seeded) = fixture().await;
+    let (stored, _album, _artist) = fixture
+        .seed_track("Fixture Album", "Fixture Artist", "Fixture Song 1", 180_000)
+        .await;
+    fixture
+        .install_album_catalog(serde_json::json!({
+            "searchResults": [{ "text": "Fixture Song 2", "track": 2 }],
+        }))
+        .await;
+    fixture
+        .install_discovery_layer(&[(
+            "scrobble",
+            serde_json::json!({
+                "similarTracks": [
+                    { "title": "Fixture Song 2", "artists": ["Fixture Artist"] },
+                    { "title": "Fixture Song 1", "artists": ["Fixture Artist"] },
+                    { "title": "Fixture Song 2", "artists": ["Fixture Artist"] },
+                    { "title": "Fixture Song 1", "artists": ["Fixture Artist"] },
+                ],
+                "topTracks": [
+                    { "title": "Fixture Song 2", "artists": ["Fixture Artist"] },
+                    { "title": "Fixture Song 2", "artists": ["Fixture Artist"] },
+                ],
+            }),
+        )])
+        .await;
+    let app = fixture.app();
+
+    let similar = get(
+        &app,
+        &format!(
+            "/rest/getSimilarSongs?id={}&apiKey={}&f=json",
+            seeded.alpha_tracks[0], fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&similar);
+    assert_eq!(
+        song_ids(&similar.body, "similarSongs"),
+        vec![catalog_track(2), stored.to_string()],
+        "each suggestion is listed once, at its first position: {}",
+        similar.body
+    );
+
+    let top = get(
+        &app,
+        &format!(
+            "/rest/getTopSongs?id={}&apiKey={}&f=json",
+            seeded.cardinals, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&top);
+    assert_eq!(
+        song_ids(&top.body, "topSongs"),
+        vec![catalog_track(2)],
+        "the duplicated top song is listed once: {}",
+        top.body
+    );
+}
+
 /// `getSimilarSongs2` seeds similar artists from an album or artist id and
-/// interleaves their popular tracks.
+/// interleaves their popular tracks, listing a song both artists name once.
 #[tokio::test]
 async fn similar_songs_from_an_artist_interleave_artist_tracks() {
     let (fixture, seeded) = fixture().await;
@@ -504,13 +569,8 @@ async fn similar_songs_from_an_artist_interleave_artist_tracks() {
     let ids = song_ids(&listed.body, "similarSongs2");
     assert_eq!(
         ids,
-        vec![
-            catalog_track(1),
-            catalog_track(1),
-            catalog_track(2),
-            catalog_track(2),
-        ],
-        "the artists' tracks are interleaved: {}",
+        vec![catalog_track(1), catalog_track(2)],
+        "the artists' tracks are interleaved once each: {}",
         listed.body
     );
 
@@ -525,7 +585,7 @@ async fn similar_songs_from_an_artist_interleave_artist_tracks() {
     assert_ok(&capped);
     assert_eq!(
         song_ids(&capped.body, "similarSongs2"),
-        vec![catalog_track(1), catalog_track(1), catalog_track(2),],
+        vec![catalog_track(1), catalog_track(2)],
         "the album seeds the same artists and the count caps the listing: {}",
         capped.body
     );
