@@ -156,6 +156,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Cache-Control: private, max-age=3600`. Without a cache header the browser
   asked again on every visit, for every card.
 
+### Security
+
+- Updated tokio to 1.54.1 and ctutils to 0.4.5, fixing RUSTSEC-2026-0386 and
+  RUSTSEC-2026-0385.
+
 ## [0.1.5] - 2026-10-22
 
 ### Added
