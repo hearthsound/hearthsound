@@ -81,6 +81,13 @@ const RESUME_SLOT_WAIT: Duration = Duration::from_millis(100);
 /// before a request are what the request is judged against.
 const QUOTA_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 
+/// How many missing tracks make an album request worth one album job.
+///
+/// An album job searches for the whole release and downloads one folder, which
+/// is only worth its cost when more than one track is missing; a single missing
+/// track is acquired by the track pipeline either way.
+const ALBUM_MIN_TRACKS: usize = 2;
+
 /// A request for a track that is not on disk.
 ///
 /// The request carries everything admission decides on: what to acquire, how
@@ -194,11 +201,11 @@ impl AcquireRequest {
 
 /// A request for a whole album.
 ///
-/// Album requests fan out into one track request per album track, all carrying
-/// the album request's priority and reason. A single album-granular job, which
-/// the design allows for an instance that advertises the `album` granularity,
-/// is not created yet: the fan-out is what every acquisition instance can
-/// serve.
+/// An album whose release an acquisition instance can download as one folder is
+/// acquired by one album-granular job, which searches for the whole release and
+/// downloads the folder in one transfer. An album no instance can serve that
+/// way, and one with a single missing track, fans out into one track request per
+/// album track instead, all carrying the album request's priority and reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlbumAcquireRequest {
     /// The materialized album to acquire.
@@ -901,6 +908,33 @@ impl AcquisitionOrchestrator {
             return Ok(AcquireOutcome::Joined(handle));
         }
 
+        // An album job acquires every track of its release, so a track request
+        // for one of them joins it instead of starting a second job.
+        if let Some(album_id) = track.album_id
+            && let Some(active) = repo::active_for_album(&mut tx, album_id).await?
+        {
+            let priority = active.priority.min(request.priority);
+            let raised = if priority != active.priority {
+                repo::set_priority(&mut tx, active.id, priority).await?
+            } else {
+                false
+            };
+            tx.commit().await?;
+            if raised {
+                self.announce(&self.progress_of_row(&active, priority));
+            }
+            let handle = self.attach(
+                active.id,
+                Some(track.id),
+                priority,
+                active.state,
+                active.failure_reason,
+                active.requested_by,
+            );
+            self.stop_signal(active.id);
+            return Ok(AcquireOutcome::Joined(handle));
+        }
+
         if let Some(reason) = self.quota_denial(&mut tx, &request).await? {
             tracing::debug!(
                 track = %track.id,
@@ -1051,7 +1085,15 @@ impl AcquisitionOrchestrator {
         Ok(None)
     }
 
-    /// Admits or joins one acquisition per track of an album.
+    /// Admits one acquisition per album, or per track when one album job cannot
+    /// serve the release.
+    ///
+    /// An album is acquired as one job when at least one enabled acquisition
+    /// instance advertises the `album` granularity and at least two of its
+    /// tracks have no file; otherwise every missing track gets its own job,
+    /// which is what an instance that only downloads single tracks can serve.
+    /// An album that already has an active album job is joined, with the
+    /// priority raised when the request is more urgent.
     ///
     /// # Parameters
     ///
@@ -1060,14 +1102,16 @@ impl AcquisitionOrchestrator {
     ///
     /// # Returns
     ///
-    /// One outcome per album track, in playing order.
+    /// One outcome per album track, in playing order. Every track of an album
+    /// job reports the same [`AcquireOutcome::Started`] handle: the job covers
+    /// all of them.
     ///
     /// # Errors
     ///
     /// Returns [`AcquireError::UnknownAlbum`] when the album has no tracks, and
-    /// the error that stopped admitting a track otherwise. Outcomes already
-    /// produced are kept: the album's tracks before the failure have their own
-    /// acquisitions.
+    /// the error that stopped admitting the job otherwise. In the per-track
+    /// case, outcomes already produced are kept: the album's tracks before the
+    /// failure have their own acquisitions.
     pub async fn request_album(
         &self,
         request: AlbumAcquireRequest,
@@ -1080,6 +1124,37 @@ impl AcquisitionOrchestrator {
         if tracks.is_empty() {
             return Err(AcquireError::UnknownAlbum(request.album_id));
         }
+        let stored: Vec<bool> = tracks
+            .iter()
+            .map(|track| {
+                matches!(
+                    track.availability,
+                    Availability::Local | Availability::Cached
+                )
+            })
+            .collect();
+        let missing = stored.iter().filter(|stored| !**stored).count();
+        if missing >= ALBUM_MIN_TRACKS && self.album_layer_available().await {
+            if !request.can_acquire {
+                return Ok(tracks
+                    .iter()
+                    .zip(&stored)
+                    .map(|(track, stored)| AlbumTrackOutcome {
+                        track_id: track.id,
+                        outcome: if *stored {
+                            AcquireOutcome::AlreadyAvailable { track_id: track.id }
+                        } else {
+                            AcquireOutcome::Denied {
+                                track_id: track.id,
+                                reason: FailureReason::PermissionDenied,
+                            }
+                        },
+                    })
+                    .collect());
+            }
+            return self.admit_album(&request, &tracks).await;
+        }
+
         let mut outcomes = Vec::with_capacity(tracks.len());
         for track in tracks {
             let outcome = self
@@ -1096,6 +1171,226 @@ impl AcquisitionOrchestrator {
             });
         }
         Ok(outcomes)
+    }
+
+    /// Reports whether an enabled acquisition instance can download an album.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the first instance that answers advertises the `album`
+    /// granularity. An instance that cannot report its capabilities counts as
+    /// unable, because a search it could not answer is a job it cannot serve.
+    async fn album_layer_available(&self) -> bool {
+        let context = AcquisitionContext::new(self.staging_root().to_path_buf());
+        for instance in self
+            .inner
+            .registry
+            .layers(hearthsound_core::Layer::Acquisition)
+        {
+            let Some(provider) = instance.acquisition().cloned() else {
+                continue;
+            };
+            match provider.get_capabilities(&context).await {
+                Ok(capabilities) if capabilities.granularities.contains(&Granularity::Album) => {
+                    return true;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        instance = instance.slug().as_str(),
+                        %error,
+                        "an acquisition instance could not report its capabilities"
+                    );
+                }
+            }
+        }
+        false
+    }
+
+    /// Admits one album-granular acquisition, or joins the album's active one.
+    ///
+    /// # Parameters
+    ///
+    /// - `request`: the album request every outcome inherits.
+    /// - `tracks`: the album's tracks, in playing order.
+    ///
+    /// # Returns
+    ///
+    /// One outcome per track, in playing order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database or filesystem error that stopped admission, and
+    /// [`AcquireError::UnknownAlbum`] when an active job vanished while the
+    /// transaction was open.
+    async fn admit_album(
+        &self,
+        request: &AlbumAcquireRequest,
+        tracks: &[hearthsound_library::Track],
+    ) -> Result<Vec<AlbumTrackOutcome>, AcquireError> {
+        let id = new_uuid_v7();
+        let mut tx = self.inner.database.writer().begin().await?;
+        if let Some(active) = repo::active_for_album(&mut tx, request.album_id).await? {
+            let priority = active.priority.min(request.priority);
+            let raised = if priority != active.priority {
+                repo::set_priority(&mut tx, active.id, priority).await?
+            } else {
+                false
+            };
+            tx.commit().await?;
+            if raised {
+                self.announce(&self.progress_of_row(&active, priority));
+            }
+            let handle = self.attach(
+                active.id,
+                None,
+                priority,
+                active.state,
+                active.failure_reason,
+                active.requested_by,
+            );
+            self.stop_signal(active.id);
+            return Ok(tracks
+                .iter()
+                .map(|track| AlbumTrackOutcome {
+                    track_id: track.id,
+                    outcome: if matches!(
+                        track.availability,
+                        Availability::Local | Availability::Cached
+                    ) {
+                        AcquireOutcome::AlreadyAvailable { track_id: track.id }
+                    } else {
+                        AcquireOutcome::Joined(handle.clone())
+                    },
+                })
+                .collect());
+        }
+
+        let first_missing = tracks.iter().find(|track| {
+            !matches!(
+                track.availability,
+                Availability::Local | Availability::Cached
+            )
+        });
+        let Some(first_missing) = first_missing else {
+            return Ok(tracks
+                .iter()
+                .map(|track| AlbumTrackOutcome {
+                    track_id: track.id,
+                    outcome: AcquireOutcome::AlreadyAvailable { track_id: track.id },
+                })
+                .collect());
+        };
+        let probe = AcquireRequest::new(first_missing.id, request.priority, request.reason.clone())
+            .with_requested_by(request.requested_by)
+            .with_can_acquire(request.can_acquire);
+        if let Some(reason) = self.quota_denial(&mut tx, &probe).await? {
+            tx.rollback().await?;
+            return Ok(tracks
+                .iter()
+                .map(|track| AlbumTrackOutcome {
+                    track_id: track.id,
+                    outcome: if matches!(
+                        track.availability,
+                        Availability::Local | Availability::Cached
+                    ) {
+                        AcquireOutcome::AlreadyAvailable { track_id: track.id }
+                    } else {
+                        AcquireOutcome::Denied {
+                            track_id: track.id,
+                            reason,
+                        }
+                    },
+                })
+                .collect());
+        }
+
+        let staging = self.staging_dir(id);
+        tokio::fs::create_dir_all(&staging)
+            .await
+            .map_err(|source| AcquireError::Io {
+                path: staging.clone(),
+                source,
+            })?;
+
+        let new = NewAcquisition {
+            id,
+            track_id: None,
+            album_id: Some(request.album_id),
+            granularity: Granularity::Album,
+            priority: request.priority,
+            reason: request.reason.clone(),
+            requested_by: request.requested_by,
+        };
+        repo::insert(&mut tx, &new).await?;
+        for track in tracks {
+            if matches!(
+                track.availability,
+                Availability::Local | Availability::Cached
+            ) {
+                continue;
+            }
+            tracks::set_track_availability(&mut tx, track.id, Availability::Acquiring, None)
+                .await?;
+        }
+        tx.commit().await?;
+
+        tracing::info!(
+            acquisition = %id,
+            album = %request.album_id,
+            tracks = tracks.len(),
+            priority = request.priority.as_str(),
+            reason = request.reason.as_str(),
+            user = ?request.requested_by,
+            "admitted an album acquisition"
+        );
+
+        let progress = AcquisitionProgress {
+            acquisition_id: id,
+            target_id: request.album_id.to_string(),
+            state: AcquisitionState::Queued,
+            priority: request.priority,
+            percent: None,
+            eta_secs: None,
+            instance: None,
+            failure_reason: None,
+            file: None,
+            requested_by: request.requested_by,
+        };
+        let handle = self.attach(
+            id,
+            None,
+            request.priority,
+            AcquisitionState::Queued,
+            None,
+            request.requested_by,
+        );
+        self.stop_signal(id);
+        self.announce(&progress);
+        for track in tracks {
+            if matches!(
+                track.availability,
+                Availability::Local | Availability::Cached
+            ) {
+                continue;
+            }
+            self.publish_availability(track.id, Availability::Acquiring, None);
+        }
+        self.notify_work();
+        Ok(tracks
+            .iter()
+            .map(|track| AlbumTrackOutcome {
+                track_id: track.id,
+                outcome: if matches!(
+                    track.availability,
+                    Availability::Local | Availability::Cached
+                ) {
+                    AcquireOutcome::AlreadyAvailable { track_id: track.id }
+                } else {
+                    AcquireOutcome::Started(handle.clone())
+                },
+            })
+            .collect())
     }
 
     /// Subscribes to an acquisition's progress.
@@ -1377,6 +1672,9 @@ impl AcquisitionOrchestrator {
         let Some(mut row) = self.inner.repository.get(id).await? else {
             return Err(AcquireError::UnknownAcquisition(id));
         };
+        if row.granularity == Granularity::Album {
+            return self.run_album_pipeline(&row).await;
+        }
         if row.state == AcquisitionState::Resolving {
             self.resolve_identity(&row).await;
             self.inner
@@ -1411,6 +1709,8 @@ impl AcquisitionOrchestrator {
                     // row already says so; the task ends and the cleanup
                     // happens in `finish_task`.
                     SearchOutcome::Cancelled => return Ok(()),
+                    // A track search never produces album candidates.
+                    SearchOutcome::AlbumPlanned { .. } => return Ok(()),
                     // The search selected the candidates to try and logged
                     // them. The best one names the instance and the ETA a client
                     // sees while the download starts.
@@ -1443,6 +1743,235 @@ impl AcquisitionOrchestrator {
             }
             return Ok(());
         }
+    }
+
+    /// Runs the stages of an album-granular acquisition.
+    ///
+    /// An album job has no track to resolve, so it goes straight to the album
+    /// search. A download a previous process left in flight is searched again,
+    /// because the candidate plan it selected did not survive the process; a
+    /// verifying or importing row finishes its import from the files and the
+    /// mapping the ledger holds.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the album acquisition's ledger row.
+    ///
+    /// # Errors
+    ///
+    /// Returns the library, settings, plugin or database error that stopped a
+    /// stage. A stage that decides the acquisition cannot succeed records the
+    /// outcome itself and returns `Ok`.
+    async fn run_album_pipeline(&self, row: &AcquisitionRow) -> Result<(), AcquireError> {
+        let mut row = row.clone();
+        if row.state == AcquisitionState::Resolving {
+            self.inner
+                .repository
+                .transition(
+                    row.id,
+                    AcquisitionState::Searching,
+                    Some("an album needs no identity resolution"),
+                )
+                .await?;
+            row.state = AcquisitionState::Searching;
+            self.announce(&self.progress_of_row(&row, row.priority));
+        }
+        match row.state {
+            AcquisitionState::Downloading => {
+                self.inner
+                    .repository
+                    .transition(
+                        row.id,
+                        AcquisitionState::Searching,
+                        Some("restarting an interrupted album download"),
+                    )
+                    .await?;
+                self.inner
+                    .repository
+                    .set_download(row.id, None, None, None)
+                    .await?;
+                row.state = AcquisitionState::Searching;
+            }
+            AcquisitionState::Verifying | AcquisitionState::Importing => {
+                return self.resume_album_import(&row).await;
+            }
+            _ => {}
+        }
+        if row.state != AcquisitionState::Searching {
+            return Ok(());
+        }
+
+        match self.search_album(&row).await? {
+            SearchOutcome::Cancelled | SearchOutcome::Planned { .. } => Ok(()),
+            SearchOutcome::Failed(reason) => {
+                self.fail_album_acquisition(
+                    &row,
+                    reason,
+                    Some("no album candidate came out of the acquisition layer"),
+                )
+                .await
+            }
+            SearchOutcome::AlbumPlanned {
+                instances,
+                plan,
+                tracks,
+            } => {
+                let mut progress = self.progress_of_row(&row, row.priority);
+                if let Some(best) = plan.attempts.first() {
+                    progress.instance = instances
+                        .get(best.instance_index)
+                        .map(|instance| instance.slug().as_str().to_owned());
+                    progress.eta_secs = best
+                        .eta
+                        .map(|eta| eta.as_secs().min(u64::from(u32::MAX)) as u32);
+                }
+                self.announce(&progress);
+                self.download_album(row.id, &instances, &plan, &tracks)
+                    .await?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Fails an album acquisition and hands its remaining tracks to the
+    /// per-track pipeline.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the album acquisition's ledger row.
+    /// - `reason`: why the album job ended without a file.
+    /// - `detail`: the backend's detail, when it gave one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger or settings error that stopped the failure.
+    pub(crate) async fn fail_album_acquisition(
+        &self,
+        row: &AcquisitionRow,
+        reason: FailureReason,
+        detail: Option<&str>,
+    ) -> Result<(), AcquireError> {
+        tracing::info!(
+            acquisition = %row.id,
+            album = ?row.album_id,
+            reason = reason.as_str(),
+            "an album acquisition ended without a file; acquiring its tracks one by one"
+        );
+        self.fail_acquisition(row.id, reason, detail).await?;
+        self.fan_out_album(row).await
+    }
+
+    /// Completes an album acquisition and hands its remaining tracks to the
+    /// per-track pipeline.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the album acquisition's ledger row.
+    /// - `imported`: how many of the album's tracks the import produced.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger error that stopped the completion.
+    pub(crate) async fn complete_album_acquisition(
+        &self,
+        row: &AcquisitionRow,
+        imported: usize,
+    ) -> Result<(), AcquireError> {
+        let mut tx = self.inner.database.writer().begin().await?;
+        repo::complete_album(
+            &mut tx,
+            row.id,
+            Some(&format!(
+                "imported {imported} track(s) from one album folder"
+            )),
+        )
+        .await?;
+        tx.commit().await?;
+
+        let mut progress = self.progress_of_row(row, row.priority);
+        progress.state = AcquisitionState::Completed;
+        progress.percent = None;
+        progress.eta_secs = None;
+        self.announce(&progress);
+        tracing::info!(
+            acquisition = %row.id,
+            album = ?row.album_id,
+            imported,
+            "completed an album acquisition"
+        );
+        self.release_staging(row.id).await;
+        self.forget(row.id);
+        self.fan_out_album(row).await
+    }
+
+    /// Requests one acquisition for every track of an album that has no file.
+    ///
+    /// The album job and the per-track jobs write to the same tracks, so a track
+    /// the album job left `acquiring` is returned to `remote` first, which is
+    /// what lets the per-track request be admitted. Tracks that already have a
+    /// file are left alone, and a failure to request one track does not stop the
+    /// others.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the album acquisition that ended.
+    ///
+    /// # Errors
+    ///
+    /// Returns the library or database error of the read that lists the album's
+    /// tracks.
+    async fn fan_out_album(&self, row: &AcquisitionRow) -> Result<(), AcquireError> {
+        let Some(album_id) = row.album_id else {
+            return Ok(());
+        };
+        let album_tracks = self.inner.library.list_tracks_for_album(album_id).await?;
+        let mut remaining = Vec::new();
+        let mut reset = Vec::new();
+        let mut tx = self.inner.database.writer().begin().await?;
+        for track in &album_tracks {
+            if matches!(
+                track.availability,
+                Availability::Local | Availability::Cached
+            ) {
+                continue;
+            }
+            if track.availability == Availability::Acquiring {
+                tracks::set_track_availability(&mut tx, track.id, Availability::Remote, None)
+                    .await?;
+                reset.push(track.id);
+            }
+            remaining.push(track.id);
+        }
+        tx.commit().await?;
+        for track_id in &reset {
+            self.publish_availability(*track_id, Availability::Remote, None);
+        }
+        if remaining.is_empty() {
+            return Ok(());
+        }
+        tracing::info!(
+            acquisition = %row.id,
+            album = %album_id,
+            tracks = remaining.len(),
+            "handing an album's remaining tracks to per-track acquisitions"
+        );
+        for track_id in remaining {
+            if let Err(error) = self
+                .request(
+                    AcquireRequest::new(track_id, row.priority, row.reason.clone())
+                        .with_requested_by(row.requested_by),
+                )
+                .await
+            {
+                tracing::warn!(
+                    acquisition = %row.id,
+                    track = %track_id,
+                    %error,
+                    "a track could not be requested after an album acquisition"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Fails an acquisition and puts its track into cooldown.
@@ -1738,13 +2267,23 @@ impl AcquisitionOrchestrator {
         self.cancel_backend(row).await;
         self.stop_signal(id).notify_one();
 
-        let mut restored = false;
+        let mut restored = Vec::new();
         let mut tx = self.inner.database.writer().begin().await?;
         if !row.state.is_terminal() {
             repo::cancel(&mut tx, id, message).await?;
         }
         if let Some(track_id) = row.track_id {
-            restored = self.restore_track(&mut tx, track_id).await?;
+            if self.restore_track(&mut tx, track_id).await? {
+                restored.push(track_id);
+            }
+        } else if row.granularity == Granularity::Album
+            && let Some(album_id) = row.album_id
+        {
+            for track in tracks::list_tracks_for_album(&mut tx, album_id).await? {
+                if self.restore_track(&mut tx, track.id).await? {
+                    restored.push(track.id);
+                }
+            }
         }
         tx.commit().await?;
 
@@ -1752,7 +2291,7 @@ impl AcquisitionOrchestrator {
         progress.state = AcquisitionState::Cancelled;
         progress.failure_reason = Some(FailureReason::Cancelled);
         self.announce(&progress);
-        if restored && let Some(track_id) = row.track_id {
+        for track_id in restored {
             self.publish_availability(track_id, Availability::Remote, None);
         }
         self.release_staging(id).await;

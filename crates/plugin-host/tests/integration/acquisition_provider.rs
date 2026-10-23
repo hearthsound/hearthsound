@@ -242,10 +242,7 @@ async fn searches_and_downloads_into_an_import_root() {
     let context = context(&staging);
 
     let capabilities = fixture.provider.get_capabilities(&context).await.unwrap();
-    assert_eq!(
-        capabilities.granularities,
-        [Granularity::Track, Granularity::Album]
-    );
+    assert_eq!(capabilities.granularities, [Granularity::Track]);
     assert!(!capabilities.progressive);
 
     let candidates = complete_search(&fixture, &context).await;

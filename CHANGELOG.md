@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finishes a browser flow; it is a capability rather than a layer, so it does
   not appear in `provides`. The provider registry serves every one of these
   instances with the accessor its layer uses.
+- An album request is acquired as one job when an acquisition instance can
+  download the whole release. The search asks the album layer for every track
+  of the release at once, carrying the MusicBrainz release group, the release
+  and the UPC the library knows; a candidate folder is judged by mapping its
+  files one-to-one onto the album's tracks, so a complete folder wins over a
+  partial one that claims a better tier. Every mapped file is verified and
+  imported against its own track, the job completes with the tracks it
+  imported, and the tracks it could not import - or none at all, when no folder
+  is accepted - are handed to one acquisition per track as before.
+
 - A verified download from an import root in `link` mode is hardlinked straight
   to its managed destination instead of being copied and re-tagged, so the
   source keeps its bytes, inode and modification time and the server stores no

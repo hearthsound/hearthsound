@@ -20,6 +20,7 @@
         "type": "object",
         "properties": {
           "candidates": { "type": "array", "title": "Candidates", "items": { "type": "object" } },
+          "albumCandidates": { "type": "array", "title": "Album folders", "items": { "type": "object" } },
           "searchPolls": { "type": "integer", "title": "Search polls", "default": 1 },
           "downloadQueuedPolls": { "type": "integer", "title": "Queued polls", "default": 1 },
           "downloadRunningPolls": { "type": "integer", "title": "Running polls", "default": 2 },
@@ -27,13 +28,14 @@
           "matchSuffix": { "type": "string", "title": "Output file suffix" },
           "scenario": { "type": "string", "title": "Scenario", "default": "normal" },
           "progressive": { "type": "boolean", "title": "Progressive", "default": false },
-          "granularities": { "type": "array", "items": { "type": "string" }, "default": ["track", "album"] }
+          "granularities": { "type": "array", "items": { "type": "string" }, "default": ["track"] }
         }
       },
       "uiSchema": {
         "type": "VerticalLayout",
         "elements": [
           { "type": "Control", "scope": "#/properties/candidates" },
+          { "type": "Control", "scope": "#/properties/albumCandidates" },
           { "type": "Control", "scope": "#/properties/searchPolls" },
           { "type": "Control", "scope": "#/properties/downloadQueuedPolls" },
           { "type": "Control", "scope": "#/properties/downloadRunningPolls" },

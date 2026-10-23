@@ -29,7 +29,7 @@
 use std::cmp::Ordering;
 use std::time::Duration;
 
-use hearthsound_core::providers::Candidate;
+use hearthsound_core::providers::{Candidate, WantedTrack};
 use hearthsound_core::{FailureReason, Priority, QualityTier};
 
 use crate::profile::{QualityProfile, quality_tier};
@@ -322,6 +322,387 @@ pub struct AttemptPlan {
     pub attempts: Vec<ScoredCandidate>,
     /// Why there is nothing to try, when [`AttemptPlan::attempts`] is empty.
     pub failure: Option<FailureReason>,
+}
+
+/// How much a mapped file's position in the candidate may differ from the
+/// wanted track's duration, in milliseconds, for the mapping to count.
+pub const ALBUM_DURATION_TOLERANCE_MS: u32 = 5_000;
+/// How many files an album candidate may offer beyond the album's track count.
+pub const ALBUM_FILE_SLACK: usize = 2;
+/// The share of an album's tracks an accepted candidate has to map.
+pub const ALBUM_MAPPING_SHARE: f64 = 0.9;
+/// The bonus a file's track number adds to its match score while mapping.
+pub const ALBUM_TRACK_AGREEMENT_BONUS: f64 = 0.1;
+
+/// One file of an album candidate and the album track it was matched to.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_acquire::select::AlbumFileMapping;
+///
+/// let mapping = AlbumFileMapping {
+///     file_index: 2,
+///     track_index: 2,
+///     score: 0.94,
+///     tier: hearthsound_core::QualityTier::Lossless,
+/// };
+/// assert_eq!(mapping.track_index + 1, 3);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AlbumFileMapping {
+    /// The position of the file in the candidate's file list.
+    pub file_index: u32,
+    /// The position of the track in the album's playing order.
+    pub track_index: usize,
+    /// The file's match score against that track, from 0 to 1.
+    pub score: f64,
+    /// The quality tier of the file.
+    pub tier: QualityTier,
+}
+
+/// One album candidate that can be downloaded as a folder.
+///
+/// Album candidates are whole folders rather than single tracks, so the plan
+/// carries the mapping from each file to a track of the album alongside the
+/// candidate itself.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlbumCandidate {
+    /// The position of the provider instance that produced the candidate.
+    pub instance_index: usize,
+    /// The position of the candidate in that instance's result list.
+    pub candidate_index: usize,
+    /// The candidate itself.
+    pub candidate: Candidate,
+    /// The lowest quality tier among the mapped files.
+    pub tier: QualityTier,
+    /// The position of that tier in the profile's preference order; lower is
+    /// preferred.
+    pub tier_preference: usize,
+    /// The estimated time to download the mapped files, `None` when their size
+    /// or the source's speed is unknown.
+    pub eta: Option<Duration>,
+    /// The mean match score of the mapped files.
+    pub mean_score: f64,
+    /// The files to download, each mapped to one track, in track order.
+    pub mappings: Vec<AlbumFileMapping>,
+}
+
+/// The album candidates one acquisition should try, in order.
+///
+/// [`AlbumAttemptPlan::attempts`] is empty when nothing can be tried, and
+/// [`AlbumAttemptPlan::failure`] then says why.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlbumAttemptPlan {
+    /// The candidates to try, best first, capped by the request.
+    pub attempts: Vec<AlbumCandidate>,
+    /// Why there is nothing to try, when [`AlbumAttemptPlan::attempts`] is empty.
+    pub failure: Option<FailureReason>,
+}
+
+impl AlbumAttemptPlan {
+    /// Returns whether the plan has no candidate to try.
+    ///
+    /// # Returns
+    ///
+    /// `true` when [`AlbumAttemptPlan::attempts`] is empty.
+    pub fn is_empty(&self) -> bool {
+        self.attempts.is_empty()
+    }
+}
+
+/// Everything one album selection run needs.
+///
+/// It mirrors [`SelectionRequest`]: the same request class, profile, threshold
+/// and cap, plus the album title the per-file scores are compared against.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlbumSelectionRequest {
+    /// Which selection rules apply.
+    pub class: RequestClass,
+    /// The server-wide quality profile.
+    pub profile: QualityProfile,
+    /// The acceptance threshold (`acquisition.min_match_score`).
+    pub min_match_score: f64,
+    /// The ETA ceiling of an interactive request
+    /// (`acquisition.interactive_eta_target_secs`).
+    pub interactive_eta_target: Duration,
+    /// How many candidates one acquisition attempts
+    /// (`acquisition.max_candidates`).
+    pub max_candidates: usize,
+    /// The album title, when the wanted tracks carry one.
+    pub album: Option<String>,
+}
+
+impl AlbumSelectionRequest {
+    /// Creates an album request with the default thresholds.
+    ///
+    /// # Parameters
+    ///
+    /// - `class`: which selection rules apply.
+    /// - `profile`: the server-wide quality profile.
+    /// - `album`: the album title, when known.
+    ///
+    /// # Returns
+    ///
+    /// A request with [`DEFAULT_MIN_MATCH_SCORE`] as its threshold,
+    /// [`DEFAULT_INTERACTIVE_ETA_TARGET`] as its ETA target and
+    /// [`DEFAULT_MAX_CANDIDATES`] as its cap.
+    pub fn new(
+        class: RequestClass,
+        profile: QualityProfile,
+        album: Option<String>,
+    ) -> AlbumSelectionRequest {
+        AlbumSelectionRequest {
+            class,
+            profile,
+            min_match_score: DEFAULT_MIN_MATCH_SCORE,
+            interactive_eta_target: DEFAULT_INTERACTIVE_ETA_TARGET,
+            max_candidates: DEFAULT_MAX_CANDIDATES,
+            album,
+        }
+    }
+}
+
+/// Scores, filters, maps and orders the album candidates of one acquisition.
+///
+/// A candidate is considered when it offers between `N` and `N + 2` files for
+/// an album of `N` tracks. Each file is matched against every track with the
+/// per-file match score plus a tenth of the track-number agreement, and the
+/// pairs are assigned one-to-one greedily, best first. A mapping counts when the
+/// file's score clears [`AlbumSelectionRequest::min_match_score`] and its
+/// duration is within [`ALBUM_DURATION_TOLERANCE_MS`] of the track's; a file
+/// without a duration counts. A candidate is rejected when fewer than
+/// `ceil(0.9 N)` tracks are mapped, or when the lowest mapped tier misses the
+/// profile minimum.
+///
+/// The survivors are ordered with every fully mapped candidate first, then by
+/// the lowest mapped tier's preference, then by the mean match score, then by
+/// the lower ETA - an unknown ETA last - and finally by instance and candidate
+/// position.
+///
+/// # Parameters
+///
+/// - `request`: the thresholds, the profile and the album title.
+/// - `tracks`: the album's wanted tracks in playing order.
+/// - `candidates`: every candidate the provider instances accumulated.
+///
+/// # Returns
+///
+/// The album attempt plan, capped by
+/// [`AlbumSelectionRequest::max_candidates`].
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_acquire::select::{
+///     AlbumSelectionRequest, RequestClass, select_album_candidates,
+/// };
+/// use hearthsound_acquire::profile::QualityProfile;
+/// use hearthsound_core::providers::WantedTrack;
+///
+/// let request = AlbumSelectionRequest::new(
+///     RequestClass::Background,
+///     QualityProfile::lossless_preferred(),
+///     Some("Grace".to_owned()),
+/// );
+/// let track = WantedTrack {
+///     title: "Mojo Pin".to_owned(),
+///     artists: vec!["Jeff Buckley".to_owned()],
+///     track_number: Some(1),
+///     disc_number: Some(1),
+///     duration_ms: Some(320_000),
+///     isrc: None,
+///     ids: Vec::new(),
+/// };
+/// let plan = select_album_candidates(&request, &[track], Vec::new());
+/// assert!(plan.is_empty());
+/// ```
+pub fn select_album_candidates(
+    request: &AlbumSelectionRequest,
+    tracks: &[WantedTrack],
+    candidates: Vec<CandidateSlot>,
+) -> AlbumAttemptPlan {
+    let total = tracks.len();
+    let mut considered = 0_usize;
+    let mut mapped = 0_usize;
+    let mut attempts = Vec::new();
+    if total == 0 {
+        return AlbumAttemptPlan {
+            attempts,
+            failure: Some(FailureReason::NoCandidates),
+        };
+    }
+    for slot in candidates {
+        let file_count = slot.candidate.files.len();
+        if file_count < total || file_count > total + ALBUM_FILE_SLACK {
+            continue;
+        }
+        considered += 1;
+        let Some((mappings, tier, mean_score)) =
+            map_album_candidate(request, tracks, &slot.candidate)
+        else {
+            continue;
+        };
+        mapped += 1;
+        attempts.push(AlbumCandidate {
+            instance_index: slot.instance_index,
+            candidate_index: slot.candidate_index,
+            tier,
+            tier_preference: request.profile.preference(tier),
+            eta: estimate_eta(&slot.candidate),
+            mean_score,
+            mappings,
+            candidate: slot.candidate,
+        });
+    }
+    let complete = total;
+    attempts.sort_by(|left, right| {
+        let left_complete = left.mappings.len() == complete;
+        let right_complete = right.mappings.len() == complete;
+        right_complete
+            .cmp(&left_complete)
+            .then_with(|| left.tier_preference.cmp(&right.tier_preference))
+            .then_with(|| compare_score(right.mean_score, left.mean_score))
+            .then_with(|| compare_eta(left.eta, right.eta))
+            .then_with(|| left.instance_index.cmp(&right.instance_index))
+            .then_with(|| left.candidate_index.cmp(&right.candidate_index))
+    });
+    attempts.truncate(request.max_candidates);
+    let failure = if attempts.is_empty() {
+        Some(if mapped > 0 {
+            FailureReason::NoCandidates
+        } else if considered > 0 {
+            FailureReason::NoAcceptableQuality
+        } else {
+            FailureReason::NoCandidates
+        })
+    } else {
+        None
+    };
+    AlbumAttemptPlan { attempts, failure }
+}
+
+/// Maps one album candidate's files onto the album's tracks.
+///
+/// # Returns
+///
+/// The mappings in track order, the lowest mapped tier and the mean mapped
+/// score, or `None` when the candidate maps too few tracks or its lowest tier
+/// misses the profile minimum.
+fn map_album_candidate(
+    request: &AlbumSelectionRequest,
+    tracks: &[WantedTrack],
+    candidate: &Candidate,
+) -> Option<(Vec<AlbumFileMapping>, QualityTier, f64)> {
+    let total = tracks.len();
+    let mut pairs = Vec::new();
+    for (file_index, file) in candidate.files.iter().enumerate() {
+        let Some(tier) = quality_tier(file) else {
+            continue;
+        };
+        let single = Candidate {
+            token: String::new(),
+            title: String::new(),
+            path: file.name.clone(),
+            files: vec![file.clone()],
+            source: candidate.source.clone(),
+        };
+        for (track_index, track) in tracks.iter().enumerate() {
+            let target = MatchTarget::from_track(track, request.album.as_deref());
+            let MatchOutcome::Matched(score) = score_candidate(&target, &single) else {
+                continue;
+            };
+            if !score.is_accepted(request.min_match_score) {
+                continue;
+            }
+            if !within_album_tolerance(track.duration_ms, file.duration_ms) {
+                continue;
+            }
+            let agreement = track_number_agreement(file.track_index, track_index);
+            pairs.push((
+                score.total + ALBUM_TRACK_AGREEMENT_BONUS * agreement,
+                score.total,
+                file_index,
+                track_index,
+                tier,
+            ));
+        }
+    }
+    pairs.sort_by(|left, right| {
+        right
+            .0
+            .total_cmp(&left.0)
+            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| left.3.cmp(&right.3))
+    });
+    let mut used_files = vec![false; candidate.files.len()];
+    let mut used_tracks = vec![false; total];
+    let mut mappings = Vec::new();
+    for (_, score, file_index, track_index, tier) in pairs {
+        if used_files[file_index] || used_tracks[track_index] {
+            continue;
+        }
+        used_files[file_index] = true;
+        used_tracks[track_index] = true;
+        mappings.push(AlbumFileMapping {
+            file_index: u32::try_from(file_index).ok()?,
+            track_index,
+            score,
+            tier,
+        });
+    }
+    let required = ((total as f64) * ALBUM_MAPPING_SHARE).ceil() as usize;
+    if mappings.len() < required {
+        return None;
+    }
+    let tier = mappings
+        .iter()
+        .map(|mapping| mapping.tier)
+        .min_by_key(|tier| request.profile.preference(*tier))?;
+    if !request.profile.meets_minimum(tier) {
+        return None;
+    }
+    mappings.sort_by_key(|mapping| mapping.track_index);
+    let mean_score =
+        mappings.iter().map(|mapping| mapping.score).sum::<f64>() / mappings.len() as f64;
+    Some((mappings, tier, mean_score))
+}
+
+/// Returns whether a file's duration is close enough to a track's to map.
+///
+/// # Parameters
+///
+/// - `wanted_ms`: the track's duration, when known.
+/// - `found_ms`: the file's duration, when known.
+///
+/// # Returns
+///
+/// `true` when either duration is unknown, or when the two are within
+/// [`ALBUM_DURATION_TOLERANCE_MS`].
+fn within_album_tolerance(wanted_ms: Option<u32>, found_ms: Option<u32>) -> bool {
+    match (wanted_ms, found_ms) {
+        (Some(wanted), Some(found)) => wanted.abs_diff(found) <= ALBUM_DURATION_TOLERANCE_MS,
+        _ => true,
+    }
+}
+
+/// Returns how well a file's track number agrees with a track's position.
+///
+/// # Parameters
+///
+/// - `file_index`: the provider's track index for the file, when it reported
+///   one.
+/// - `track_index`: the track's position in the album's playing order.
+///
+/// # Returns
+///
+/// 1 when the two agree, 0.5 when the file names no track, and 0 otherwise.
+fn track_number_agreement(file_index: Option<u32>, track_index: usize) -> f64 {
+    match file_index {
+        Some(index) if usize::try_from(index).ok() == Some(track_index) => 1.0,
+        Some(_) => 0.0,
+        None => 0.5,
+    }
 }
 
 /// Scores, filters and orders the candidates of one acquisition.
@@ -1240,5 +1621,157 @@ mod tests {
         assert_eq!(request.min_match_score, DEFAULT_MIN_MATCH_SCORE);
         assert_eq!(request.interactive_eta_target, Duration::from_secs(60));
         assert_eq!(request.max_candidates, DEFAULT_MAX_CANDIDATES);
+    }
+
+    /// Builds the wanted tracks of a release titled `Album` with `count` tracks.
+    fn album_tracks(count: usize) -> Vec<WantedTrack> {
+        (1..=count)
+            .map(|number| WantedTrack {
+                title: format!("Album {number}"),
+                artists: vec!["Hello Artist".to_owned()],
+                track_number: u16::try_from(number).ok(),
+                disc_number: Some(1),
+                duration_ms: Some(200_000),
+                isrc: None,
+                ids: Vec::new(),
+            })
+            .collect()
+    }
+
+    /// Builds an album folder whose files are named after the release's tracks.
+    fn album_candidate(
+        token: &str,
+        tracks: usize,
+        format: &str,
+        bitrate_kbps: Option<u32>,
+        speed_bps: Option<u64>,
+    ) -> CandidateSlot {
+        let files = (1..=tracks)
+            .map(|number| CandidateFile {
+                name: format!("{number:02} - Album {number}.{format}"),
+                size: Some(1_000_000),
+                format: Some(format.to_owned()),
+                bitrate_kbps,
+                sample_rate: Some(44_100),
+                bit_depth: None,
+                duration_ms: Some(200_000),
+                track_index: Some(u32::try_from(number - 1).unwrap()),
+            })
+            .collect();
+        CandidateSlot::new(
+            0,
+            0,
+            Candidate {
+                token: token.to_owned(),
+                title: "Album".to_owned(),
+                path: "Hello Artist/Album".to_owned(),
+                files,
+                source: SourceInfo {
+                    key: "peer".to_owned(),
+                    speed_bps,
+                    queue_length: Some(0),
+                    free_slot: Some(true),
+                },
+            },
+        )
+    }
+
+    /// An album request with the default thresholds.
+    fn album_request() -> AlbumSelectionRequest {
+        AlbumSelectionRequest::new(
+            RequestClass::Background,
+            QualityProfile::lossless_preferred(),
+            Some("Album".to_owned()),
+        )
+    }
+
+    #[test]
+    fn a_complete_folder_beats_a_partial_higher_tier_folder() {
+        let mut partial = album_candidate("partial", 2, "flac", None, None);
+        // The partial folder only offers the first two tracks of three.
+        partial.candidate.files.truncate(2);
+        let complete = album_candidate("complete", 3, "mp3", Some(320), None);
+        let plan =
+            select_album_candidates(&album_request(), &album_tracks(3), vec![partial, complete]);
+        assert_eq!(plan.attempts.len(), 1, "the partial folder is rejected");
+        assert_eq!(plan.attempts[0].candidate.token, "complete");
+        assert_eq!(plan.attempts[0].mappings.len(), 3);
+        assert_eq!(plan.failure, None);
+    }
+
+    #[test]
+    fn a_folder_with_the_wrong_file_count_is_rejected() {
+        let too_few = album_candidate("too-few", 1, "flac", None, None);
+        let too_many = album_candidate("too-many", 5, "flac", None, None);
+        let plan =
+            select_album_candidates(&album_request(), &album_tracks(2), vec![too_few, too_many]);
+        assert!(plan.attempts.is_empty());
+        assert_eq!(plan.failure, Some(FailureReason::NoCandidates));
+    }
+
+    #[test]
+    fn a_folder_below_the_mapping_share_is_rejected() {
+        let mut slots = Vec::new();
+        // Eight of ten tracks are named correctly; the rest are unrelated.
+        for number in 1..=8 {
+            slots.push(CandidateSlot::new(
+                0,
+                number,
+                Candidate {
+                    token: format!("partial-{number}"),
+                    title: String::new(),
+                    path: "Hello Artist/Album".to_owned(),
+                    files: vec![CandidateFile {
+                        name: format!("{number:02} - Album {number}.flac"),
+                        size: Some(1_000_000),
+                        format: Some("flac".to_owned()),
+                        bitrate_kbps: None,
+                        sample_rate: Some(44_100),
+                        bit_depth: None,
+                        duration_ms: Some(200_000),
+                        track_index: Some(u32::try_from(number - 1).unwrap()),
+                    }],
+                    source: SourceInfo {
+                        key: "peer".to_owned(),
+                        speed_bps: None,
+                        queue_length: None,
+                        free_slot: None,
+                    },
+                },
+            ));
+        }
+        let plan = select_album_candidates(&album_request(), &album_tracks(10), slots);
+        assert!(plan.attempts.is_empty());
+    }
+
+    #[test]
+    fn a_folder_below_the_profile_minimum_is_rejected() {
+        let mut request = album_request();
+        request.profile.minimum = hearthsound_core::QualityTier::LossyHigh;
+        let candidate = album_candidate("low", 2, "mp3", Some(128), None);
+        let plan = select_album_candidates(&request, &album_tracks(2), vec![candidate]);
+        assert!(plan.attempts.is_empty());
+        assert_eq!(plan.failure, Some(FailureReason::NoAcceptableQuality));
+    }
+
+    #[test]
+    fn the_mapping_follows_the_file_names() {
+        let mut candidate = album_candidate("shuffled", 2, "flac", None, None);
+        candidate.candidate.files.swap(0, 1);
+        let plan =
+            select_album_candidates(&album_request(), &album_tracks(2), vec![candidate.clone()]);
+        assert_eq!(plan.attempts.len(), 1);
+        let mappings = &plan.attempts[0].mappings;
+        assert_eq!(mappings.len(), 2);
+        for mapping in mappings {
+            let file = &candidate.candidate.files[mapping.file_index as usize];
+            assert!(
+                file.name
+                    .contains(&format!("Album {}", mapping.track_index + 1)),
+                "`{}` is mapped to track {}",
+                file.name,
+                mapping.track_index + 1
+            );
+        }
     }
 }

@@ -67,6 +67,7 @@ use crate::error::AcquireError;
 use crate::orchestrator::{AcquisitionOrchestrator, DestinationReservation};
 use crate::profile;
 use crate::repo::{self, AcquisitionRow};
+use crate::select::AlbumFileMapping;
 
 /// The window within which a downloaded file's duration must match the wanted
 /// track's catalog duration, in milliseconds.
@@ -107,6 +108,30 @@ pub(crate) struct VerifiedFile {
     pub(crate) file: ResolvedFile,
     /// The probe of the file, which the import's rows are built from.
     pub(crate) probe: ProbeResult,
+}
+
+/// The managed file one import wrote.
+struct ImportedFile {
+    /// The absolute path the file landed at.
+    destination: PathBuf,
+    /// The path relative to the storage root, as the row stores it.
+    rel_path: String,
+    /// The storage root the file landed under.
+    storage: StorageClass,
+    /// The availability the imported file gives its track.
+    availability: Availability,
+    /// The quality tier computed from the probe.
+    tier: Option<QualityTier>,
+    /// The `media_files` row the import wrote.
+    media_file_id: Uuid,
+}
+
+/// What importing one album download's files produced.
+pub(crate) struct AlbumImportSummary {
+    /// How many of the album's tracks were imported.
+    pub(crate) imported: usize,
+    /// The detail of the last per-file failure, for the acquisition's log.
+    pub(crate) detail: Option<String>,
 }
 
 /// Why a candidate was rejected.
@@ -323,7 +348,8 @@ impl AcquisitionOrchestrator {
             Ok(verified) => verified,
             Err(rejection) => {
                 cleanup_rejected(files).await;
-                self.log_rejection(acquisition_id, &rejection).await;
+                self.log_rejection(acquisition_id, AcquisitionState::Downloading, &rejection)
+                    .await;
                 tracing::warn!(
                     acquisition = %acquisition_id,
                     instance = instance.slug().as_str(),
@@ -459,10 +485,285 @@ impl AcquisitionOrchestrator {
             }
             Err(rejection) => {
                 cleanup_rejected(&settled).await;
-                self.log_rejection(id, &rejection).await;
+                self.log_rejection(id, AcquisitionState::Verifying, &rejection)
+                    .await;
                 self.fail_acquisition(id, rejection.reason, Some(&rejection.detail))
                     .await
             }
+        }
+    }
+
+    /// Imports every verified file of an album download against its own track.
+    ///
+    /// Each file is checked against the duration and tier of the track its
+    /// mapping names and, when it passes, imported for that track. A file that
+    /// fails verification or cannot be imported is logged and skipped, so one
+    /// bad file does not lose the tracks that did import; the download stage
+    /// turns the summary into completion or failure and hands the remaining
+    /// tracks to the per-track fan-out.
+    ///
+    /// # Parameters
+    ///
+    /// - `acquisition_id`: the album acquisition being imported.
+    /// - `instance`: the instance that served the download.
+    /// - `row`: the album acquisition's ledger row, whose state decides whether
+    ///   the `importing` transition still has to be written.
+    /// - `tracks`: the album's tracks, in playing order.
+    /// - `mappings`: the candidate's mapping, in track order.
+    /// - `files`: the resolved files aligned with the mapping; a slot is empty
+    ///   when the backend reported no file for that track.
+    ///
+    /// # Returns
+    ///
+    /// How many tracks were imported and the detail of the last per-file
+    /// failure, when one failed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger, settings or filesystem error that stopped the
+    /// transition or a library read.
+    pub(crate) async fn import_album_files(
+        &self,
+        acquisition_id: Uuid,
+        instance: &RegistryInstance,
+        tracks: &[Track],
+        mappings: &[AlbumFileMapping],
+        verified: &[Option<VerifiedFile>],
+    ) -> Result<AlbumImportSummary, AcquireError> {
+        let Some(current) = self.repository().get(acquisition_id).await? else {
+            return Err(AcquireError::UnknownAcquisition(acquisition_id));
+        };
+        if current.state == AcquisitionState::Downloading {
+            self.repository()
+                .transition(
+                    acquisition_id,
+                    AcquisitionState::Verifying,
+                    Some("the album folder passed the download stage"),
+                )
+                .await?;
+        }
+        if current.state != AcquisitionState::Importing {
+            self.repository()
+                .transition(
+                    acquisition_id,
+                    AcquisitionState::Importing,
+                    Some("importing the verified album files"),
+                )
+                .await?;
+        }
+        let mut summary = AlbumImportSummary {
+            imported: 0,
+            detail: None,
+        };
+        for (mapping, verified) in mappings.iter().zip(verified) {
+            let Some(verified) = verified else {
+                continue;
+            };
+            let Some(track) = tracks.get(mapping.track_index) else {
+                continue;
+            };
+            match self
+                .import_file_for_track(acquisition_id, instance, track.id, verified)
+                .await
+            {
+                Ok(imported) => {
+                    summary.imported += 1;
+                    self.publish_availability(track.id, imported.availability, imported.tier);
+                    self.events()
+                        .publish(ServerEvent::LibraryChanged(LibraryChanged {
+                            entity_kind: EntityKind::Track,
+                            entity_id: track.id.to_string(),
+                            change: LibraryChange::Added,
+                        }));
+                    post_import(instance, &verified.file).await;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        acquisition = %acquisition_id,
+                        track = %track.id,
+                        path = %verified.file.absolute_path.display(),
+                        %error,
+                        "an album file could not be imported"
+                    );
+                    summary.detail = Some(format!(
+                        "the import of `{}` failed: {error}",
+                        verified.file.path
+                    ));
+                }
+            }
+        }
+        Ok(summary)
+    }
+
+    /// Verifies every file of an album download against the track it maps to.
+    ///
+    /// A file that fails is logged and removed from the staging directory; the
+    /// tracks that did verify keep their files, because one bad file does not
+    /// make a whole folder useless.
+    ///
+    /// # Parameters
+    ///
+    /// - `acquisition_id`: the album acquisition being verified.
+    /// - `tracks`: the album's tracks, in playing order.
+    /// - `mappings`: the candidate's mapping, in track order.
+    /// - `files`: the resolved files aligned with the mapping.
+    ///
+    /// # Returns
+    ///
+    /// One verified file per mapping that passed, `None` for a slot without a
+    /// file and for a file that was rejected, plus the detail of the last
+    /// rejection.
+    pub(crate) async fn verify_album_files(
+        &self,
+        acquisition_id: Uuid,
+        tracks: &[Track],
+        mappings: &[AlbumFileMapping],
+        files: &[Option<ResolvedFile>],
+    ) -> (Vec<Option<VerifiedFile>>, Option<String>) {
+        let mut verified = Vec::with_capacity(mappings.len());
+        let mut detail = None;
+        for (mapping, file) in mappings.iter().zip(files) {
+            let Some(file) = file else {
+                verified.push(None);
+                continue;
+            };
+            let Some(track) = tracks.get(mapping.track_index) else {
+                verified.push(None);
+                continue;
+            };
+            match self.verify_one(file, track.duration_ms, mapping.tier).await {
+                Ok(one) => verified.push(Some(one)),
+                Err(rejection) => {
+                    tracing::warn!(
+                        acquisition = %acquisition_id,
+                        track = %track.id,
+                        reason = rejection.reason.as_str(),
+                        detail = rejection.detail.as_str(),
+                        "rejected an album file"
+                    );
+                    self.log_rejection(acquisition_id, AcquisitionState::Downloading, &rejection)
+                        .await;
+                    detail = Some(rejection.detail);
+                    if file.root == STAGING_ROOT {
+                        let _ = tokio::fs::remove_file(&file.absolute_path).await;
+                    }
+                    verified.push(None);
+                }
+            }
+        }
+        (verified, detail)
+    }
+
+    /// Verifies and imports the files of an album download a previous process
+    /// finished.
+    ///
+    /// The ledger holds the resolved files and the track each belongs to, so
+    /// the import runs where the previous process stopped. A row whose files or
+    /// mapping cannot be recovered is failed and fanned out, because the album
+    /// pipeline has no way back to a search from `verifying` or `importing`.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the album acquisition's ledger row, in `verifying` or
+    ///   `importing`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger, settings, library or filesystem error that stopped
+    /// the import.
+    pub(crate) async fn resume_album_import(
+        &self,
+        row: &AcquisitionRow,
+    ) -> Result<(), AcquireError> {
+        let id = row.id;
+        let Some(album_id) = row.album_id else {
+            return self
+                .fail_album_acquisition(
+                    row,
+                    FailureReason::VerificationFailed,
+                    Some("the ledger does not name the album to import"),
+                )
+                .await;
+        };
+        let stored = stored_candidate(row.candidate.as_deref());
+        let instance = row.instance_id.and_then(|id| self.instance_by_id(id));
+        let (Some(stored), Some(instance)) = (stored, instance) else {
+            return self
+                .fail_album_acquisition(
+                    row,
+                    FailureReason::VerificationFailed,
+                    Some("the ledger no longer names the files to import"),
+                )
+                .await;
+        };
+        let (Some(resolved), Some(album)) = (stored.resolved.as_ref(), stored.album.as_ref())
+        else {
+            return self
+                .fail_album_acquisition(
+                    row,
+                    FailureReason::VerificationFailed,
+                    Some("the ledger does not hold the resolved album files"),
+                )
+                .await;
+        };
+        if resolved.is_empty() || album.is_empty() {
+            return self
+                .fail_album_acquisition(
+                    row,
+                    FailureReason::VerificationFailed,
+                    Some("the ledger holds no resolved album file"),
+                )
+                .await;
+        }
+        let candidate = stored.to_candidate();
+        let mut mappings = Vec::with_capacity(album.len());
+        let mut files = Vec::with_capacity(album.len());
+        for (mapping, file) in album.iter().zip(resolved) {
+            let tier = candidate
+                .files
+                .get(mapping.file_index as usize)
+                .and_then(profile::quality_tier)
+                .unwrap_or(QualityTier::LossyLow);
+            mappings.push(AlbumFileMapping {
+                file_index: mapping.file_index,
+                track_index: mapping.track_index as usize,
+                score: 0.0,
+                tier,
+            });
+            let (size, _) = self
+                .wait_for_stable_size(&file.to_resolved().absolute_path)
+                .await?;
+            files.push(Some(ResolvedFile {
+                size,
+                ..file.to_resolved()
+            }));
+        }
+        let tracks = self.library().list_tracks_for_album(album_id).await?;
+        tracing::info!(
+            acquisition = %id,
+            instance = instance.slug().as_str(),
+            "resuming the import of a verified album download"
+        );
+        let (verified, detail) = self
+            .verify_album_files(id, &tracks, &mappings, &files)
+            .await;
+        if verified.iter().all(Option::is_none) {
+            return self
+                .fail_album_acquisition(row, FailureReason::VerificationFailed, detail.as_deref())
+                .await;
+        }
+        let summary = self
+            .import_album_files(id, &instance, &tracks, &mappings, &verified)
+            .await?;
+        if summary.imported > 0 {
+            self.complete_album_acquisition(row, summary.imported).await
+        } else {
+            self.fail_album_acquisition(
+                row,
+                FailureReason::VerificationFailed,
+                summary.detail.as_deref(),
+            )
+            .await
         }
     }
 
@@ -475,8 +776,14 @@ impl AcquisitionOrchestrator {
     /// # Parameters
     ///
     /// - `acquisition_id`: the acquisition whose log to append to.
+    /// - `state`: the state the acquisition is in.
     /// - `rejection`: what the check saw.
-    async fn log_rejection(&self, acquisition_id: Uuid, rejection: &Rejection) {
+    async fn log_rejection(
+        &self,
+        acquisition_id: Uuid,
+        state: AcquisitionState,
+        rejection: &Rejection,
+    ) {
         let message = format!(
             "rejected a candidate as {}: {}",
             rejection.reason.as_str(),
@@ -485,14 +792,9 @@ impl AcquisitionOrchestrator {
         let Ok(mut tx) = self.database().writer().begin().await else {
             return;
         };
-        if crate::repo::write_log(
-            &mut tx,
-            acquisition_id,
-            AcquisitionState::Downloading,
-            Some(&message),
-        )
-        .await
-        .is_err()
+        if crate::repo::write_log(&mut tx, acquisition_id, state, Some(&message))
+            .await
+            .is_err()
             || tx.commit().await.is_err()
         {
             tracing::debug!(acquisition = %acquisition_id, "a rejection could not be logged");
@@ -521,54 +823,79 @@ impl AcquisitionOrchestrator {
     ) -> Result<Vec<VerifiedFile>, Rejection> {
         let mut verified = Vec::with_capacity(files.len());
         for file in files {
-            let path = &file.absolute_path;
-            if let Err(error) = verify_decodes(path, self.ffmpeg()).await {
+            verified.push(
+                self.verify_one(file, catalog_duration_ms, claimed_tier)
+                    .await?,
+            );
+        }
+        Ok(verified)
+    }
+
+    /// Runs the verification checks on one file.
+    ///
+    /// # Parameters
+    ///
+    /// - `file`: the resolved file to check.
+    /// - `catalog_duration_ms`: the wanted track's catalog duration, when it is
+    ///   known; the duration check is skipped when it is not.
+    /// - `claimed_tier`: the tier the candidate claimed for the file; a lossless
+    ///   tier is a claim the file has to live up to.
+    ///
+    /// # Returns
+    ///
+    /// The verified file, or the reason it was rejected.
+    async fn verify_one(
+        &self,
+        file: &ResolvedFile,
+        catalog_duration_ms: Option<i64>,
+        claimed_tier: QualityTier,
+    ) -> Result<VerifiedFile, Rejection> {
+        let path = &file.absolute_path;
+        if let Err(error) = verify_decodes(path, self.ffmpeg()).await {
+            return Err(Rejection {
+                reason: FailureReason::VerificationFailed,
+                detail: format!("`{}` does not decode: {error}", path.display()),
+            });
+        }
+        let probe = match probe(path).await {
+            Ok(probe) => probe,
+            Err(error) => {
                 return Err(Rejection {
                     reason: FailureReason::VerificationFailed,
-                    detail: format!("`{}` does not decode: {error}", path.display()),
+                    detail: format!("`{}` cannot be probed: {error}", path.display()),
                 });
             }
-            let probe = match probe(path).await {
-                Ok(probe) => probe,
-                Err(error) => {
-                    return Err(Rejection {
-                        reason: FailureReason::VerificationFailed,
-                        detail: format!("`{}` cannot be probed: {error}", path.display()),
-                    });
-                }
-            };
-            if let Some(catalog) = catalog_duration_ms {
-                let difference = (probe.duration_ms as i64 - catalog).abs();
-                if difference > DURATION_TOLERANCE_MS {
-                    return Err(Rejection {
-                        reason: FailureReason::VerificationFailed,
-                        detail: format!(
-                            "`{}` lasts {} ms, which is more than {DURATION_TOLERANCE_MS} ms from the track's {catalog} ms",
-                            path.display(),
-                            probe.duration_ms
-                        ),
-                    });
-                }
-            }
-            if matches!(
-                claimed_tier,
-                QualityTier::Lossless | QualityTier::LosslessHires
-            ) && !probe.lossless
-            {
+        };
+        if let Some(catalog) = catalog_duration_ms {
+            let difference = (probe.duration_ms as i64 - catalog).abs();
+            if difference > DURATION_TOLERANCE_MS {
                 return Err(Rejection {
                     reason: FailureReason::VerificationFailed,
                     detail: format!(
-                        "`{}` was claimed as {claimed_tier} but decodes as a lossy codec",
-                        path.display()
+                        "`{}` lasts {} ms, which is more than {DURATION_TOLERANCE_MS} ms from the track's {catalog} ms",
+                        path.display(),
+                        probe.duration_ms
                     ),
                 });
             }
-            verified.push(VerifiedFile {
-                file: file.clone(),
-                probe,
+        }
+        if matches!(
+            claimed_tier,
+            QualityTier::Lossless | QualityTier::LosslessHires
+        ) && !probe.lossless
+        {
+            return Err(Rejection {
+                reason: FailureReason::VerificationFailed,
+                detail: format!(
+                    "`{}` was claimed as {claimed_tier} but decodes as a lossy codec",
+                    path.display()
+                ),
             });
         }
-        Ok(verified)
+        Ok(VerifiedFile {
+            file: file.clone(),
+            probe,
+        })
     }
 
     /// Imports one verified file into managed storage.
@@ -683,6 +1010,84 @@ impl AcquisitionOrchestrator {
                 .await?;
         }
 
+        let imported = self
+            .import_file_for_track(acquisition_id, instance, track_id, verified)
+            .await?;
+
+        let mut tx = self.database().writer().begin().await?;
+        repo::complete(
+            &mut tx,
+            acquisition_id,
+            imported.media_file_id,
+            Some("the file was imported into managed storage"),
+        )
+        .await?;
+        tx.commit().await?;
+
+        let mut progress = self.progress_of_row(row, row.priority);
+        progress.state = AcquisitionState::Completed;
+        progress.instance = Some(instance.slug().as_str().to_owned());
+        progress.percent = None;
+        progress.eta_secs = None;
+        progress.file = Some(imported.destination.clone());
+        self.announce(&progress);
+        self.publish_availability(track_id, imported.availability, imported.tier);
+        self.events()
+            .publish(ServerEvent::LibraryChanged(LibraryChanged {
+                entity_kind: EntityKind::Track,
+                entity_id: track_id.to_string(),
+                change: LibraryChange::Added,
+            }));
+        tracing::info!(
+            acquisition = %acquisition_id,
+            track = %track_id,
+            instance = instance.slug().as_str(),
+            storage = imported.storage.as_str(),
+            rel_path = imported.rel_path.as_str(),
+            source_root = verified.file.root.as_str(),
+            source_path = verified.file.path.as_str(),
+            source_bytes = verified.file.size,
+            "imported the acquired file"
+        );
+        post_import(instance, &verified.file).await;
+        self.release_staging(acquisition_id).await;
+        Ok(())
+    }
+
+    /// Imports one verified file for one track into managed storage.
+    ///
+    /// The file is copied into the acquisition's staging directory and tagged
+    /// there, or hardlinked from a `link`-mode import root, before it is
+    /// installed under the root retention chooses. The transaction writes the
+    /// `media_files` row, ensures the track's retention row and sets the track's
+    /// availability; the availability and library-change events are published
+    /// after it commits. No acquisition state is written, so an album
+    /// acquisition can import several files before it completes.
+    ///
+    /// # Parameters
+    ///
+    /// - `acquisition_id`: the acquisition the file is imported for.
+    /// - `instance`: the instance that served the download, for its slug and its
+    ///   import roots.
+    /// - `track_id`: the track the file is for.
+    /// - `verified`: the verified file, whose probe the rows are built from.
+    ///
+    /// # Returns
+    ///
+    /// The managed file the import wrote.
+    ///
+    /// # Errors
+    ///
+    /// Returns the library, settings, filesystem or ledger error that stopped
+    /// the import, and [`AcquireError::ImportPath`] when every name under the
+    /// destination's directory is taken.
+    async fn import_file_for_track(
+        &self,
+        acquisition_id: Uuid,
+        instance: &RegistryInstance,
+        track_id: EntityId,
+        verified: &VerifiedFile,
+    ) -> Result<ImportedFile, AcquireError> {
         let track = self
             .library()
             .get_track(track_id)
@@ -910,45 +1315,17 @@ impl AcquisitionOrchestrator {
                 retention::remove_pin_reason(&mut tx, track_id, PinReason::Admin).await?;
             }
             tracks::set_track_availability(&mut tx, track_id, availability, None).await?;
-            repo::complete(
-                &mut tx,
-                acquisition_id,
-                media_file_id,
-                Some("the file was imported into managed storage"),
-            )
-            .await?;
             tx.commit().await?;
             drop(reservation);
 
-            let mut progress = self.progress_of_row(row, row.priority);
-            progress.state = AcquisitionState::Completed;
-            progress.instance = Some(instance.slug().as_str().to_owned());
-            progress.percent = None;
-            progress.eta_secs = None;
-            progress.file = Some(destination.clone());
-            self.announce(&progress);
-            self.publish_availability(track_id, availability, tier);
-            self.events()
-                .publish(ServerEvent::LibraryChanged(LibraryChanged {
-                    entity_kind: EntityKind::Track,
-                    entity_id: track_id.to_string(),
-                    change: LibraryChange::Added,
-                }));
-            tracing::info!(
-                acquisition = %acquisition_id,
-                track = %track_id,
-                instance = instance.slug().as_str(),
-                storage = storage.as_str(),
-                rel_path = rel_path.as_str(),
-                source_root = verified.file.root.as_str(),
-                source_path = verified.file.path.as_str(),
-                source_bytes = verified.file.size,
-                "imported the acquired file"
-            );
-
-            post_import(instance, &verified.file).await;
-            self.release_staging(acquisition_id).await;
-            return Ok(());
+            return Ok(ImportedFile {
+                destination,
+                rel_path,
+                storage,
+                availability,
+                tier,
+                media_file_id,
+            });
         }
 
         Err(AcquireError::ImportPath { path: base })

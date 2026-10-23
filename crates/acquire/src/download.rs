@@ -34,6 +34,7 @@ use hearthsound_core::providers::{
     Progress, SourceInfo,
 };
 use hearthsound_core::{AcquisitionState, FailureReason, ProviderError, QualityTier};
+use hearthsound_library::Track;
 use hearthsound_plugin_host::RegistryInstance;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, OwnedSemaphorePermit};
@@ -45,7 +46,9 @@ use crate::error::AcquireError;
 use crate::import::HandoffOutcome;
 use crate::orchestrator::AcquisitionOrchestrator;
 use crate::repo::AcquisitionRow;
-use crate::select::{AttemptPlan, RequestClass, ScoredCandidate};
+use crate::select::{
+    AlbumAttemptPlan, AlbumCandidate, AlbumFileMapping, AttemptPlan, RequestClass,
+};
 
 /// How long the completion rule waits for a file to stop growing.
 const COMPLETION_MAX_WAIT: Duration = Duration::from_secs(30);
@@ -79,6 +82,8 @@ pub(crate) struct ResolvedFile {
     pub(crate) absolute_path: PathBuf,
     /// The file's size in bytes, as the last check saw it.
     pub(crate) size: u64,
+    /// The track index the backend reported for the file, when it did.
+    pub(crate) track_index: Option<u32>,
 }
 
 /// What one candidate's download attempt produced.
@@ -112,6 +117,60 @@ pub(crate) enum AttemptVerdict {
     /// The candidate was rejected; the caller may try the next one, and fails
     /// the acquisition with the reason when none is left.
     Next(Option<(FailureReason, Option<String>)>),
+}
+
+/// What one album candidate's attempt leaves to do.
+enum AlbumVerdict {
+    /// The candidate imported this many tracks; the album acquisition is done.
+    Imported(usize),
+    /// The candidate imported nothing; the caller may try the next one.
+    Next(Option<(FailureReason, Option<String>)>),
+    /// The candidate's files verified but none could be imported, which leaves
+    /// no way to try another candidate and ends the stage.
+    Abort(Option<(FailureReason, Option<String>)>),
+    /// The acquisition was cancelled.
+    Cancelled,
+}
+
+/// Lines a completed album download's files up with the candidate's mapping.
+///
+/// A file the backend reports with a track index is placed at that mapping;
+/// the rest fill the free slots in the order the backend reported them, which is
+/// the order the mapped files were requested in for a backend that keeps it.
+///
+/// # Parameters
+///
+/// - `mappings`: the candidate's mapping, in track order.
+/// - `resolved`: the files the completion rule accepted, in the backend's order.
+///
+/// # Returns
+///
+/// One slot per mapping, in track order, holding the file when one was reported
+/// for it.
+fn order_album_files(
+    mappings: &[AlbumFileMapping],
+    resolved: Vec<ResolvedFile>,
+) -> Vec<Option<ResolvedFile>> {
+    let mut slots: Vec<Option<ResolvedFile>> = mappings.iter().map(|_| None).collect();
+    let mut unmatched = Vec::new();
+    for file in resolved {
+        let by_index = file.track_index.and_then(|index| {
+            mappings
+                .iter()
+                .position(|mapping| mapping.file_index == index)
+        });
+        if let Some(index) = by_index.filter(|index| slots[*index].is_none()) {
+            slots[index] = Some(file);
+        } else {
+            unmatched.push(file);
+        }
+    }
+    for file in unmatched {
+        if let Some(index) = slots.iter().position(Option::is_none) {
+            slots[index] = Some(file);
+        }
+    }
+    slots
 }
 
 /// How long one candidate's attempt may take and how often it is polled.
@@ -164,6 +223,22 @@ pub(crate) struct StoredCandidate {
     /// The files the download produced, once its completion was accepted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) resolved: Option<Vec<StoredResolvedFile>>,
+    /// The album track each resolved file belongs to, for an album download.
+    ///
+    /// The two lists are written together and in the same order, so
+    /// `resolved[i]` is the file of `album[i]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) album: Option<Vec<StoredAlbumMapping>>,
+}
+
+/// One resolved file's place in an album download.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StoredAlbumMapping {
+    /// The position of the file in the candidate's file list.
+    pub(crate) file_index: u32,
+    /// The position of the track in the album's playing order.
+    pub(crate) track_index: u32,
 }
 
 /// One file of a [`StoredCandidate`].
@@ -268,6 +343,7 @@ impl StoredCandidate {
                 free_slot: candidate.source.free_slot,
             },
             resolved: None,
+            album: None,
         }
     }
 
@@ -343,6 +419,7 @@ impl StoredResolvedFile {
             path: self.path.clone(),
             absolute_path: PathBuf::from(&self.absolute_path),
             size: self.size,
+            track_index: None,
         }
     }
 }
@@ -486,9 +563,20 @@ impl AcquisitionOrchestrator {
             );
 
             let mut must_wait = false;
+            let files: Vec<u32> = (0..attempt.candidate.files.len() as u32).collect();
             let outcome = loop {
                 match self
-                    .run_candidate(row, instance, provider.as_ref(), attempt, limits, must_wait)
+                    .run_candidate(
+                        row,
+                        instance,
+                        provider.as_ref(),
+                        CandidateAttemptInput {
+                            candidate: &attempt.candidate,
+                            files: &files,
+                            limits,
+                            must_wait,
+                        },
+                    )
                     .await?
                 {
                     CandidateAttempt::Preempted => {
@@ -754,6 +842,283 @@ impl AcquisitionOrchestrator {
         }
     }
 
+    /// Runs the download stage of an album-granular acquisition.
+    ///
+    /// Each candidate is downloaded as a folder: only the mapped files are
+    /// requested, the backend's output is lined up with the mapping, and every
+    /// file is verified and imported against its own track. The first candidate
+    /// that imports at least one track ends the stage with the acquisition
+    /// completed; a candidate that imports nothing is a failed candidate like
+    /// any other. When every candidate is spent the acquisition fails with the
+    /// last reason, and in both outcomes the tracks that did not get a file are
+    /// handed to the per-track fan-out.
+    ///
+    /// # Parameters
+    ///
+    /// - `acquisition_id`: the album acquisition to download.
+    /// - `instances`: the instances the search walked, in layer order.
+    /// - `plan`: the album candidates to try, best first.
+    /// - `tracks`: the album's tracks, in playing order.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` once the acquisition is completed, failed or cancelled.
+    ///
+    /// # Errors
+    ///
+    /// Returns the settings, ledger or filesystem error that stopped the stage.
+    pub(crate) async fn download_album(
+        &self,
+        acquisition_id: Uuid,
+        instances: &[Arc<RegistryInstance>],
+        plan: &AlbumAttemptPlan,
+        tracks: &[Track],
+    ) -> Result<(), AcquireError> {
+        let Some(row) = self.repository().get(acquisition_id).await? else {
+            return Err(AcquireError::UnknownAcquisition(acquisition_id));
+        };
+        let row = &row;
+        let max_candidates = self
+            .settings()
+            .current()
+            .get(keys::ACQUISITION_MAX_CANDIDATES)?
+            .max(0) as usize;
+        let limits = self.attempt_limits(row)?;
+
+        let mut attempts = row.attempts;
+        let mut failure: Option<(FailureReason, Option<String>)> = None;
+        for attempt in plan.attempts.iter().take(max_candidates) {
+            let Some(instance) = instances.get(attempt.instance_index) else {
+                continue;
+            };
+            let Some(provider) = instance.acquisition().cloned() else {
+                continue;
+            };
+            if attempts == row.attempts {
+                self.repository()
+                    .transition(
+                        row.id,
+                        AcquisitionState::Downloading,
+                        Some(&format!(
+                            "downloading the album folder `{}`",
+                            attempt.candidate.path
+                        )),
+                    )
+                    .await?;
+            }
+            attempts += 1;
+            self.repository().set_attempts(row.id, attempts).await?;
+            tracing::info!(
+                acquisition = %row.id,
+                instance = instance.slug().as_str(),
+                candidate = attempt.candidate.path.as_str(),
+                files = attempt.mappings.len(),
+                attempt = attempts,
+                "starting an album folder download"
+            );
+
+            let files: Vec<u32> = attempt
+                .mappings
+                .iter()
+                .map(|mapping| mapping.file_index)
+                .collect();
+            let mut must_wait = false;
+            let outcome = loop {
+                match self
+                    .run_candidate(
+                        row,
+                        instance,
+                        provider.as_ref(),
+                        CandidateAttemptInput {
+                            candidate: &attempt.candidate,
+                            files: &files,
+                            limits,
+                            must_wait,
+                        },
+                    )
+                    .await?
+                {
+                    CandidateAttempt::Preempted => {
+                        self.log_message(
+                            row.id,
+                            AcquisitionState::Downloading,
+                            "preempted by an interactive request",
+                        )
+                        .await?;
+                        must_wait = true;
+                        continue;
+                    }
+                    other => break other,
+                }
+            };
+
+            match self
+                .settle_album_attempt(row, instance, provider.as_ref(), attempt, tracks, outcome)
+                .await?
+            {
+                AlbumVerdict::Imported(imported) => {
+                    self.complete_album_acquisition(row, imported).await?;
+                    return Ok(());
+                }
+                AlbumVerdict::Next(reason) => {
+                    if reason.is_some() {
+                        failure = reason;
+                    }
+                }
+                AlbumVerdict::Abort(reason) => {
+                    failure = reason;
+                    break;
+                }
+                AlbumVerdict::Cancelled => return Ok(()),
+            }
+        }
+
+        let (reason, detail) = failure.unwrap_or((FailureReason::AllCandidatesFailed, None));
+        self.fail_album_acquisition(row, reason, detail.as_deref())
+            .await
+    }
+
+    /// Acts on one finished album candidate attempt.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the album acquisition's ledger row.
+    /// - `instance`: the instance that served the attempt.
+    /// - `provider`: the instance's acquisition provider.
+    /// - `attempt`: the candidate that was attempted.
+    /// - `tracks`: the album's tracks, in playing order.
+    /// - `outcome`: what the attempt produced.
+    ///
+    /// # Returns
+    ///
+    /// [`AlbumVerdict::Imported`] with the number of tracks it imported,
+    /// [`AlbumVerdict::Next`] when the caller should try the next candidate, and
+    /// [`AlbumVerdict::Cancelled`] when the acquisition was cancelled.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger or filesystem error that stopped the stage.
+    async fn settle_album_attempt(
+        &self,
+        row: &AcquisitionRow,
+        instance: &RegistryInstance,
+        provider: &dyn AcquisitionProvider,
+        attempt: &AlbumCandidate,
+        tracks: &[Track],
+        outcome: CandidateAttempt,
+    ) -> Result<AlbumVerdict, AcquireError> {
+        let context = AcquisitionContext::new(self.staging_dir(row.id));
+        match outcome {
+            CandidateAttempt::Downloaded { token, files } => {
+                match self
+                    .stabilize_download(instance, &context, provider, &token, &files)
+                    .await?
+                {
+                    Stability::Stable(resolved) | Stability::StillComplete(resolved) => {
+                        let ordered = order_album_files(&attempt.mappings, resolved);
+                        let (verified, detail) = self
+                            .verify_album_files(row.id, tracks, &attempt.mappings, &ordered)
+                            .await;
+                        if verified.iter().all(Option::is_none) {
+                            return Ok(AlbumVerdict::Next(Some((
+                                FailureReason::VerificationFailed,
+                                detail,
+                            ))));
+                        }
+                        self.record_album_resolved(
+                            row.id,
+                            instance,
+                            &token,
+                            &attempt.mappings,
+                            &ordered,
+                        )
+                        .await?;
+                        let summary = self
+                            .import_album_files(
+                                row.id,
+                                instance,
+                                tracks,
+                                &attempt.mappings,
+                                &verified,
+                            )
+                            .await?;
+                        if summary.imported > 0 {
+                            Ok(AlbumVerdict::Imported(summary.imported))
+                        } else {
+                            Ok(AlbumVerdict::Abort(Some((
+                                FailureReason::VerificationFailed,
+                                summary.detail,
+                            ))))
+                        }
+                    }
+                    Stability::Failed { reason, detail } => {
+                        Ok(AlbumVerdict::Next(Some((reason, detail))))
+                    }
+                }
+            }
+            CandidateAttempt::Failed { reason, detail } => {
+                Ok(AlbumVerdict::Next(Some((reason, detail))))
+            }
+            CandidateAttempt::Cancelled => Ok(AlbumVerdict::Cancelled),
+            CandidateAttempt::LostToken => Ok(AlbumVerdict::Next(Some((
+                FailureReason::BackendUnavailable,
+                Some("the backend lost the download token".to_owned()),
+            )))),
+            CandidateAttempt::Preempted => unreachable!("the preemption loop retries"),
+        }
+    }
+
+    /// Records the files of a completed album download and their tracks.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the album acquisition being downloaded.
+    /// - `instance`: the instance that served the download.
+    /// - `token`: the download token the backend issued.
+    /// - `mappings`: the candidate's mapping, in track order.
+    /// - `ordered`: the resolved files aligned with the mapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::Json`] when the candidate cannot be serialized
+    /// and the ledger error when the row cannot be written.
+    async fn record_album_resolved(
+        &self,
+        id: Uuid,
+        instance: &RegistryInstance,
+        token: &str,
+        mappings: &[AlbumFileMapping],
+        ordered: &[Option<ResolvedFile>],
+    ) -> Result<(), AcquireError> {
+        let Some(mut stored) = self
+            .repository()
+            .get(id)
+            .await?
+            .and_then(|row| stored_candidate(row.candidate.as_deref()))
+        else {
+            return Ok(());
+        };
+        let mut resolved = Vec::new();
+        let mut album = Vec::new();
+        for (mapping, file) in mappings.iter().zip(ordered) {
+            let Some(file) = file else {
+                continue;
+            };
+            resolved.push(StoredResolvedFile::from_resolved(file));
+            album.push(StoredAlbumMapping {
+                file_index: mapping.file_index,
+                track_index: u32::try_from(mapping.track_index).unwrap_or(u32::MAX),
+            });
+        }
+        stored.resolved = Some(resolved);
+        stored.album = Some(album);
+        let text = serde_json::to_string(&stored)?;
+        self.repository()
+            .set_download(id, Some(instance.id()), Some(&text), Some(token))
+            .await?;
+        Ok(())
+    }
+
     /// Reads the limits one download attempt obeys.
     ///
     /// The poll interval and the queue timeout follow the request's class: a user
@@ -796,7 +1161,22 @@ impl AcquisitionOrchestrator {
             ),
         })
     }
+}
 
+/// What one candidate download attempt is given.
+struct CandidateAttemptInput<'a> {
+    /// The candidate to download.
+    candidate: &'a Candidate,
+    /// The positions of the candidate's files to fetch.
+    files: &'a [u32],
+    /// How long the attempt may take and how often it is polled.
+    limits: AttemptLimits,
+    /// Whether the slot has to be waited for, which is set for the retry that
+    /// follows a preemption.
+    must_wait: bool,
+}
+
+impl AcquisitionOrchestrator {
     /// Downloads one candidate, holding an instance download slot for the whole
     /// attempt.
     ///
@@ -811,10 +1191,7 @@ impl AcquisitionOrchestrator {
     /// - `row`: the acquisition's ledger row.
     /// - `instance`: the instance the candidate came from.
     /// - `provider`: the instance's acquisition provider.
-    /// - `attempt`: the candidate to download.
-    /// - `limits`: how long the attempt may take and how often it is polled.
-    /// - `must_wait`: whether the slot has to be waited for, which is set for the
-    ///   retry that follows a preemption.
+    /// - `input`: the candidate, the files to fetch and how the attempt is run.
     ///
     /// # Errors
     ///
@@ -824,11 +1201,12 @@ impl AcquisitionOrchestrator {
         row: &AcquisitionRow,
         instance: &RegistryInstance,
         provider: &dyn AcquisitionProvider,
-        attempt: &ScoredCandidate,
-        limits: AttemptLimits,
-        must_wait: bool,
+        input: CandidateAttemptInput<'_>,
     ) -> Result<CandidateAttempt, AcquireError> {
-        let Some(permit) = self.take_download_slot(row, instance, must_wait).await else {
+        let Some(permit) = self
+            .take_download_slot(row, instance, input.must_wait)
+            .await
+        else {
             return Ok(CandidateAttempt::Failed {
                 reason: FailureReason::BackendUnavailable,
                 detail: Some("the download budget is closed".to_owned()),
@@ -838,7 +1216,7 @@ impl AcquisitionOrchestrator {
             .download_budgets()
             .register(row.id, instance.id(), row.priority);
         let outcome = self
-            .poll_candidate(row, instance, provider, attempt, limits, &preempted)
+            .poll_candidate(row, instance, provider, input, &preempted)
             .await;
         self.download_budgets().unregister(row.id);
         drop(permit);
@@ -938,6 +1316,7 @@ impl AcquisitionOrchestrator {
     /// - `instance`: the instance serving the download.
     /// - `provider`: the instance's acquisition provider.
     /// - `attempt`: the candidate to download.
+    /// - `files`: the positions of the candidate's files to fetch.
     /// - `limits`: how long the attempt may take and how often it is polled.
     /// - `preempted`: the notifier a `play` request wakes to take the slot.
     ///
@@ -949,14 +1328,18 @@ impl AcquisitionOrchestrator {
         row: &AcquisitionRow,
         instance: &RegistryInstance,
         provider: &dyn AcquisitionProvider,
-        attempt: &ScoredCandidate,
-        limits: AttemptLimits,
+        input: CandidateAttemptInput<'_>,
         preempted: &Notify,
     ) -> Result<CandidateAttempt, AcquireError> {
+        let CandidateAttemptInput {
+            candidate,
+            files,
+            limits,
+            ..
+        } = input;
         let context = AcquisitionContext::new(self.staging_dir(row.id));
-        let files: Vec<u32> = (0..attempt.candidate.files.len() as u32).collect();
         let token = match provider
-            .start_download(&context, &attempt.candidate.token, &files)
+            .start_download(&context, &candidate.token, files)
             .await
         {
             Ok(token) => token,
@@ -972,7 +1355,7 @@ impl AcquisitionOrchestrator {
                 });
             }
         };
-        self.record_download(row.id, instance, &attempt.candidate, &token)
+        self.record_download(row.id, instance, candidate, &token)
             .await?;
         self.watch_download(row, instance, provider, &token, limits, preempted)
             .await
@@ -1171,6 +1554,7 @@ impl AcquisitionOrchestrator {
                 path: file.path.clone(),
                 absolute_path: absolute,
                 size,
+                track_index: file.track_index,
             });
         }
         if all_stable {

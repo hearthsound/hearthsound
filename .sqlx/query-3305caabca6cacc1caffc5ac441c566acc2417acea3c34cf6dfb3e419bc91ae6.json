@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT granularity FROM acquisitions WHERE track_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "granularity",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "granularity"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3305caabca6cacc1caffc5ac441c566acc2417acea3c34cf6dfb3e419bc91ae6"
+}

@@ -6,6 +6,7 @@
 //! linked once per test run, which is what keeps the test build and CI short.
 
 mod admission;
+mod album;
 mod announce;
 mod batch;
 mod common;

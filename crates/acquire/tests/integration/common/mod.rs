@@ -666,6 +666,117 @@ impl Env {
             .unwrap()
     }
 
+    /// Inserts an album and its tracks, each catalog-only.
+    ///
+    /// The album names a MusicBrainz release group and release, so a test can
+    /// check that an album search carries them.
+    ///
+    /// # Parameters
+    ///
+    /// - `title`: the album title; the tracks are titled `{title} {number}`.
+    /// - `artist`: the album and track artist.
+    /// - `tracks`: how many tracks to insert, numbered from one.
+    ///
+    /// # Returns
+    ///
+    /// The album and its track ids, in playing order.
+    pub async fn add_album(
+        &self,
+        title: &str,
+        artist: &str,
+        tracks: usize,
+    ) -> (EntityId, Vec<EntityId>) {
+        let mut album_input = AlbumInput::new(title, Origin::Catalog);
+        album_input.display_artist = Some(artist.to_owned());
+        album_input.year = Some(1993);
+        album_input.mb_release_group_id = Some("b84e3b1c-6a0b-4f56-9a63-1e3f6b0a8f21".to_owned());
+        album_input.mb_release_id = Some("0c9a2c0f-7d5e-4a2b-8f3d-5b1e9a7c6d40".to_owned());
+        let album = self
+            .library
+            .upsert_album(&album_input, &[ArtistCredit::new(artist, "main")])
+            .await
+            .unwrap();
+        let mut ids = Vec::with_capacity(tracks);
+        for number in 1..=tracks {
+            let mut input = TrackInput::new(
+                format!("{title} {number}"),
+                Origin::Catalog,
+                Availability::Remote,
+            );
+            input.album_id = Some(album);
+            input.display_artist = Some(artist.to_owned());
+            input.disc_number = Some(1);
+            input.track_number = i64::try_from(number).ok();
+            input.duration_ms = Some(200);
+            ids.push(
+                self.library
+                    .insert_track(&input, &[ArtistCredit::new(artist, "main")], &[])
+                    .await
+                    .unwrap(),
+            );
+        }
+        (album, ids)
+    }
+
+    /// Writes a generated audio file into an album folder under the import root.
+    ///
+    /// # Parameters
+    ///
+    /// - `folder`: the folder the fixture's album candidate names.
+    /// - `name`: the file name inside it.
+    ///
+    /// # Returns
+    ///
+    /// The path of the written file.
+    pub async fn place_album_file(&self, folder: &str, name: &str) -> PathBuf {
+        let directory = self.downloads.join(folder);
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+        AudioFixture::new(AudioFormat::Flac)
+            .seconds(0.2)
+            .file_name(name.to_owned())
+            .write_into(&directory)
+            .await
+            .unwrap()
+    }
+
+    /// Writes bytes that are not audio into an album folder.
+    ///
+    /// # Parameters
+    ///
+    /// - `folder`: the folder the fixture's album candidate names.
+    /// - `name`: the file name inside it.
+    pub async fn place_undecodable_album_file(&self, folder: &str, name: &str) {
+        let directory = self.downloads.join(folder);
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+        std::fs::write(directory.join(name), b"this is not audio").unwrap();
+    }
+
+    /// Waits until a track has an acquisition row.
+    ///
+    /// The per-track fan-out of an album acquisition happens after the album row
+    /// is terminal, so a test that waits for the album alone can observe the row
+    /// before the tracks have theirs.
+    ///
+    /// # Parameters
+    ///
+    /// - `track_id`: the track to wait for.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no row appears within [`WAIT_TIMEOUT`].
+    pub async fn wait_for_track_acquisition(&self, track_id: EntityId) {
+        let deadline = Instant::now() + WAIT_TIMEOUT;
+        loop {
+            if self.acquisitions_for(track_id).await > 0 {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("track {track_id} got no acquisition within {WAIT_TIMEOUT:?}");
+            }
+            tokio::time::sleep(WAIT_POLL_INTERVAL).await;
+        }
+    }
+
     /// Starts the scheduler.
     pub fn start(&self) {
         self.orchestrator.start();
@@ -961,6 +1072,58 @@ pub fn candidate(token: &str, format: &str, bitrate_kbps: Option<u32>) -> Value 
             }
         ],
         "source": { "key": "peer-1", "speedBps": 1250000, "queueLength": 0, "freeSlot": true },
+    })
+}
+
+/// The fixture configuration of a backend that downloads whole album folders.
+///
+/// The instance advertises only the `album` granularity, answers every album
+/// search with `folders`, and reports the files it was asked for from each
+/// folder under the `downloads` import root.
+///
+/// # Parameters
+///
+/// - `folders`: the album candidates, built with [`album_folder`].
+pub fn album_instance_config(folders: Value) -> Value {
+    json!({
+        "candidates": [],
+        "albumCandidates": folders,
+        "granularities": ["album"],
+        "scenario": "normal",
+        "searchPolls": 0,
+        "downloadQueuedPolls": 0,
+        "downloadRunningPolls": 1,
+        "downloadBytesPerPoll": 4000,
+        "outputRoot": "downloads",
+        "matchSuffix": ".flac",
+    })
+}
+
+/// One album candidate the fixture reports: a folder and its files.
+///
+/// # Parameters
+///
+/// - `folder`: the folder name, which is also the candidate token.
+/// - `files`: the file names, formats and bitrates the folder offers.
+pub fn album_folder(folder: &str, files: &[(&str, &str, Option<u32>)]) -> Value {
+    let files: Vec<Value> = files
+        .iter()
+        .map(|(name, format, bitrate_kbps)| {
+            json!({
+                "name": name,
+                "size": 4000,
+                "format": format,
+                "bitrateKbps": bitrate_kbps,
+                "sampleRate": 44100,
+                "bitDepth": 16,
+                "durationMs": 200,
+            })
+        })
+        .collect();
+    json!({
+        "folder": folder,
+        "files": files,
+        "source": { "key": format!("peer-{folder}"), "speedBps": 1250000, "queueLength": 0, "freeSlot": true },
     })
 }
 

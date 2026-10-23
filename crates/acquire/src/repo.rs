@@ -363,6 +363,46 @@ pub async fn active_for_track(
     row.map(AcquisitionDbRow::decode).transpose()
 }
 
+/// Reads the active album-granular acquisition of an album.
+///
+/// An album has at most one such row in an [`ACTIVE_STATES`] state, so a track
+/// request for one of the album's tracks can attach to it instead of starting a
+/// second job for the same release.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `album_id`: the album to look up.
+///
+/// # Returns
+///
+/// The album's active acquisition, or `None` when it has none.
+///
+/// # Errors
+///
+/// Returns [`AcquireError::Database`] when the read fails, or a decode error when
+/// a stored row does not decode.
+pub async fn active_for_album(
+    conn: &mut SqliteConnection,
+    album_id: EntityId,
+) -> Result<Option<AcquisitionRow>, AcquireError> {
+    let row = sqlx::query_as!(
+        AcquisitionDbRow,
+        "SELECT id, track_id, album_id, granularity, priority, reason, state, requested_by, \
+                instance_id, candidate, plugin_token, progress, attempts, failure_reason, \
+                error_detail, media_file_id, created_at, updated_at \
+         FROM acquisitions \
+         WHERE album_id = ? AND granularity = 'album' \
+           AND state IN ('queued', 'resolving', 'searching', 'downloading', \
+                         'verifying', 'importing') \
+         ORDER BY created_at DESC LIMIT 1",
+        album_id.uuid().as_bytes().to_vec(),
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    row.map(AcquisitionDbRow::decode).transpose()
+}
+
 /// The number of track ids one batch query binds.
 ///
 /// Keeps every statement well under SQLite's bind-parameter limit; longer lists
@@ -734,6 +774,46 @@ pub async fn complete(
         "UPDATE acquisitions SET state = 'completed', media_file_id = ?, updated_at = ? \
          WHERE id = ?",
         media_file_id.as_bytes().to_vec(),
+        crate::now_millis(),
+        uuid_key(id),
+    )
+    .execute(&mut *conn)
+    .await?;
+    write_log(conn, id, AcquisitionState::Completed, message).await
+}
+
+/// Completes an album-granular acquisition.
+///
+/// An album acquisition imports several files, so no single `media_files` row is
+/// its product and the column stays empty; the files still name the acquisition
+/// they were imported for.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `id`: the acquisition to complete.
+/// - `message`: the free-text detail of the transition.
+///
+/// # Errors
+///
+/// Returns [`AcquireError::IllegalTransition`] when the current state has no
+/// edge to `completed` and [`AcquireError::UnknownAcquisition`] when the row is
+/// missing.
+pub async fn complete_album(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    message: Option<&str>,
+) -> Result<(), AcquireError> {
+    let from = state(conn, id).await?;
+    if !from.can_transition_to(AcquisitionState::Completed) {
+        return Err(AcquireError::IllegalTransition {
+            from,
+            to: AcquisitionState::Completed,
+        });
+    }
+    sqlx::query!(
+        "UPDATE acquisitions SET state = 'completed', media_file_id = NULL, updated_at = ? \
+         WHERE id = ?",
         crate::now_millis(),
         uuid_key(id),
     )

@@ -37,8 +37,10 @@ struct AcquisitionFixture;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct Config {
-    /// The candidates a search returns.
+    /// The candidates a track search returns.
     candidates: Vec<CandidateRecord>,
+    /// The folders an album search returns.
+    album_candidates: Vec<AlbumCandidateRecord>,
     /// How many polls answer `running` before a search completes.
     search_polls: u32,
     /// How many polls answer `queued` before a download starts running.
@@ -63,6 +65,7 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             candidates: Vec::new(),
+            album_candidates: Vec::new(),
             search_polls: 1,
             download_queued_polls: 1,
             download_running_polls: 2,
@@ -71,7 +74,7 @@ impl Default for Config {
             match_suffix: None,
             scenario: Scenario::Normal,
             progressive: false,
-            granularities: vec!["track".to_string(), "album".to_string()],
+            granularities: vec!["track".to_string()],
         }
     }
 }
@@ -102,6 +105,19 @@ struct CandidateRecord {
     /// The backend's path for the candidate.
     path: String,
     /// The files the candidate offers.
+    #[serde(default)]
+    files: Vec<FileRecord>,
+    /// What the backend knows about the source.
+    source: SourceRecord,
+}
+
+/// One configured album folder, and its persisted form.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AlbumCandidateRecord {
+    /// The folder the download writes its files under.
+    folder: String,
+    /// The files the folder offers.
     #[serde(default)]
     files: Vec<FileRecord>,
     /// What the backend knows about the source.
@@ -186,6 +202,11 @@ struct DownloadRecord {
     output_root: String,
     /// The suffix a reported output file must have.
     match_suffix: Option<String>,
+    /// The album folder the download writes into, when it is an album folder.
+    folder: Option<String>,
+    /// The positions of the candidate's files the download was asked for.
+    #[serde(default)]
+    requested_files: Vec<u32>,
 }
 
 /// Returns the key a search's state is stored under.
@@ -241,7 +262,34 @@ fn to_candidate(record: &CandidateRecord) -> Candidate {
     }
 }
 
+/// Converts a configured album folder into the search record it answers with.
+///
+/// The folder's name is the candidate's token, so a download addressed by that
+/// token can find the folder again, and each file carries its position as its
+/// track index, which is what the core maps against the album's tracks.
+fn album_record(record: &AlbumCandidateRecord) -> CandidateRecord {
+    CandidateRecord {
+        token: record.folder.clone(),
+        title: record.folder.clone(),
+        path: record.folder.clone(),
+        files: record
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| FileRecord {
+                track_index: Some(index as u32),
+                ..file.clone()
+            })
+            .collect(),
+        source: record.source.clone(),
+    }
+}
+
 /// Reports the files a completed download produced.
+///
+/// A track download lists the configured output root; an album download lists
+/// the files of its configured folder that were requested, in request order, so
+/// the core can line each one up with the track it was downloaded for.
 ///
 /// # Parameters
 ///
@@ -252,6 +300,37 @@ fn to_candidate(record: &CandidateRecord) -> Candidate {
 /// Returns [`ProviderError::Unavailable`] when the output root cannot be
 /// listed, which a misconfigured instance can cause.
 fn output_files(record: &DownloadRecord) -> Result<Vec<OutputFile>, ProviderError> {
+    if let Some(folder) = &record.folder {
+        let config = config()?;
+        let Some(candidate) = config
+            .album_candidates
+            .iter()
+            .find(|candidate| &candidate.folder == folder)
+        else {
+            return Err(ProviderError::Unavailable(format!(
+                "the album folder {folder} is not configured"
+            )));
+        };
+        let mut produced = Vec::new();
+        for index in &record.requested_files {
+            let Some(file) = candidate.files.get(*index as usize) else {
+                continue;
+            };
+            let path = format!("{folder}/{}", file.name);
+            let Some(stat) = files::stat(&record.output_root, &path) else {
+                continue;
+            };
+            if stat.is_dir {
+                continue;
+            }
+            produced.push(OutputFile {
+                root: record.output_root.clone(),
+                path,
+                track_index: Some(*index),
+            });
+        }
+        return Ok(produced);
+    }
     let entries = files::list_dir(&record.output_root, "").map_err(|error| {
         ProviderError::Unavailable(format!("listing {}: {error}", record.output_root))
     })?;
@@ -319,7 +398,10 @@ impl acquisition::Guest for AcquisitionFixture {
 
         let candidates = match config.scenario {
             Scenario::NoCandidates => Vec::new(),
-            _ => config.candidates.clone(),
+            _ => match query.granularity {
+                Granularity::Album => config.album_candidates.iter().map(album_record).collect(),
+                Granularity::Track => config.candidates.clone(),
+            },
         };
         let record = SearchRecord {
             candidates,
@@ -355,6 +437,11 @@ impl acquisition::Guest for AcquisitionFixture {
         hearthsound_plugin::info!("downloading {candidate_token} file(s) {files:?}");
 
         let running_polls = config.download_running_polls;
+        let folder = config
+            .album_candidates
+            .iter()
+            .find(|candidate| candidate.folder == candidate_token)
+            .map(|candidate| candidate.folder.clone());
         let record = DownloadRecord {
             queued_left: config.download_queued_polls,
             running_left: running_polls,
@@ -365,6 +452,8 @@ impl acquisition::Guest for AcquisitionFixture {
             stalled: config.scenario == Scenario::Stalled,
             output_root: config.output_root,
             match_suffix: config.match_suffix,
+            folder,
+            requested_files: files,
         };
         let token = next_token("download")?;
         kv::set_json(&download_key(&token), &record, None)?;

@@ -39,7 +39,8 @@ use crate::profile::QualityProfile;
 use crate::repo::{self, AcquisitionRow};
 use crate::score::MatchTarget;
 use crate::select::{
-    AttemptPlan, CandidateSlot, RequestClass, SelectionRequest, select_candidates,
+    AlbumAttemptPlan, AlbumSelectionRequest, AttemptPlan, CandidateSlot, RequestClass,
+    SelectionRequest, select_album_candidates, select_candidates,
 };
 
 /// What one search produced.
@@ -52,6 +53,16 @@ pub(crate) enum SearchOutcome {
         instances: Vec<Arc<RegistryInstance>>,
         /// The candidates to try, best first.
         plan: AttemptPlan,
+    },
+    /// Album candidates to try, best first, with the album's tracks in playing
+    /// order so a mapping's `track_index` addresses them.
+    AlbumPlanned {
+        /// The instances that were searched, in layer order.
+        instances: Vec<Arc<RegistryInstance>>,
+        /// The candidates to try, best first.
+        plan: AlbumAttemptPlan,
+        /// The album's tracks, in playing order.
+        tracks: Vec<Track>,
     },
     /// Nothing could be tried and the acquisition was failed.
     Failed(FailureReason),
@@ -123,7 +134,7 @@ impl AcquisitionOrchestrator {
         let snapshot = self.settings().current();
         let profile = QualityProfile::builtin(&snapshot.get(keys::ACQUISITION_QUALITY_PROFILE)?)
             .unwrap_or_default();
-        let selection = SelectionRequest {
+        let selection = Selection::Track(SelectionRequest {
             class: RequestClass::from_priority(row.priority),
             target: MatchTarget::from_track(
                 &wanted,
@@ -137,7 +148,7 @@ impl AcquisitionOrchestrator {
                     .max(0) as u64,
             ),
             max_candidates: snapshot.get(keys::ACQUISITION_MAX_CANDIDATES)?.max(0) as usize,
-        };
+        });
         let poll_interval = Duration::from_millis(
             snapshot
                 .get(keys::ACQUISITION_SEARCH_POLL_INTERVAL_MS)?
@@ -159,7 +170,9 @@ impl AcquisitionOrchestrator {
             orchestrator: self,
             context: AcquisitionContext::new(self.staging_dir(row.id)),
             query,
+            granularity: Granularity::Track,
             selection,
+            album_tracks: Vec::new(),
             poll_interval,
             instances: Vec::new(),
             slots: Vec::new(),
@@ -175,7 +188,7 @@ impl AcquisitionOrchestrator {
             // A user is waiting: a usable candidate from one instance is
             // enough, and the rest of the layer is not worth the wait. Bulk
             // work searches every instance to maximize the choice of quality.
-            if run.selection.class.is_interactive() && run.has_usable_candidate() {
+            if run.interactive() && run.has_usable_candidate() {
                 break;
             }
         }
@@ -186,11 +199,11 @@ impl AcquisitionOrchestrator {
         }
 
         let plan = run.plan();
-        if plan.attempts.is_empty() {
+        if plan.is_empty() {
             let reason = if run.backend_failed {
                 FailureReason::BackendUnavailable
             } else {
-                plan.failure.unwrap_or(FailureReason::NoCandidates)
+                plan.failure().unwrap_or(FailureReason::NoCandidates)
             };
             self.fail_acquisition(
                 row.id,
@@ -205,12 +218,166 @@ impl AcquisitionOrchestrator {
         tracing::info!(
             acquisition = %row.id,
             track = %track_id,
-            candidates = plan.attempts.len(),
+            candidates = plan.len(),
             "the search selected candidates"
         );
+        let SearchPlan::Track(plan) = plan else {
+            // A track run only ever builds a track plan.
+            return Err(AcquireError::UnknownAcquisition(row.id));
+        };
         Ok(SearchOutcome::Planned {
             instances: run.instances,
             plan,
+        })
+    }
+
+    /// Runs the search stage of an album-granular acquisition.
+    ///
+    /// The query asks the instances for the whole album: every album track is a
+    /// wanted track, and each wanted track also carries the album-level ids the
+    /// server knows - the MusicBrainz release group and release and the UPC - so
+    /// a provider that looks albums up by release group can.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the album acquisition's ledger row, in `searching`.
+    ///
+    /// # Returns
+    ///
+    /// The album plan to download, the reason nothing could be tried, or the
+    /// cancellation. Unlike a track search, an empty plan does not fail the
+    /// acquisition here: the caller falls back to one acquisition per track.
+    ///
+    /// # Errors
+    ///
+    /// Returns the library, settings or database error that stopped the search.
+    pub(crate) async fn search_album(
+        &self,
+        row: &AcquisitionRow,
+    ) -> Result<SearchOutcome, AcquireError> {
+        let album_id = row
+            .album_id
+            .ok_or(AcquireError::UnknownAcquisition(row.id))?;
+        let album = self.library().get_album(album_id).await?;
+        let tracks = self.library().list_tracks_for_album(album_id).await?;
+        if tracks.is_empty() {
+            return Err(AcquireError::UnknownAlbum(album_id));
+        }
+        let album_artist = match album.as_ref() {
+            Some(album) => match album.display_artist.clone() {
+                Some(name) => Some(name),
+                None => self
+                    .library()
+                    .list_album_artists(album_id)
+                    .await?
+                    .into_iter()
+                    .next()
+                    .map(|artist| artist.name),
+            },
+            None => None,
+        };
+        let mut wanted = Vec::with_capacity(tracks.len());
+        for track in &tracks {
+            let artists = self
+                .library()
+                .list_track_artists(track.id)
+                .await?
+                .into_iter()
+                .map(|artist| artist.name)
+                .collect::<Vec<_>>();
+            let mut wanted_track = wanted_track(track, &artists);
+            if let Some(album) = &album {
+                wanted_track.ids.extend(album_external_ids(album));
+            }
+            wanted.push(wanted_track);
+        }
+
+        let snapshot = self.settings().current();
+        let profile = QualityProfile::builtin(&snapshot.get(keys::ACQUISITION_QUALITY_PROFILE)?)
+            .unwrap_or_default();
+        let mut request = AlbumSelectionRequest::new(
+            RequestClass::from_priority(row.priority),
+            profile.clone(),
+            album.as_ref().map(|album| album.title.clone()),
+        );
+        request.min_match_score = snapshot.get(keys::ACQUISITION_MIN_MATCH_SCORE)?;
+        request.interactive_eta_target = Duration::from_secs(
+            snapshot
+                .get(keys::ACQUISITION_INTERACTIVE_ETA_TARGET_SECS)?
+                .max(0) as u64,
+        );
+        request.max_candidates = snapshot.get(keys::ACQUISITION_MAX_CANDIDATES)?.max(0) as usize;
+        let poll_interval = Duration::from_millis(
+            snapshot
+                .get(keys::ACQUISITION_SEARCH_POLL_INTERVAL_MS)?
+                .max(0) as u64,
+        );
+        let query = AcquisitionQuery {
+            granularity: Granularity::Album,
+            album: album.as_ref().map(|album| album.title.clone()),
+            album_artist,
+            year: album
+                .as_ref()
+                .and_then(|album| album.year)
+                .and_then(|year| u16::try_from(year).ok()),
+            tracks: wanted,
+            preferred_formats: preferred_formats(&profile),
+        };
+
+        let mut run = LayerSearch {
+            orchestrator: self,
+            context: AcquisitionContext::new(self.staging_dir(row.id)),
+            query,
+            granularity: Granularity::Album,
+            selection: Selection::Album(Box::new(request)),
+            album_tracks: tracks,
+            poll_interval,
+            instances: Vec::new(),
+            slots: Vec::new(),
+            backend_failed: false,
+            cancelled: false,
+            stop: self.stop_signal(row.id),
+        };
+        for instance in self.registry().layers(Layer::Acquisition) {
+            run.run_instance(&instance).await;
+            if run.cancelled {
+                break;
+            }
+            if run.interactive() && run.has_usable_candidate() {
+                break;
+            }
+        }
+
+        if run.cancelled {
+            tracing::info!(acquisition = %row.id, "abandoned the album search of a cancelled acquisition");
+            return Ok(SearchOutcome::Cancelled);
+        }
+
+        let plan = run.plan();
+        if plan.is_empty() {
+            let reason = if run.backend_failed {
+                FailureReason::BackendUnavailable
+            } else {
+                plan.failure().unwrap_or(FailureReason::NoCandidates)
+            };
+            return Ok(SearchOutcome::Failed(reason));
+        }
+
+        self.log_search_result(row.id, &plan).await?;
+        tracing::info!(
+            acquisition = %row.id,
+            album = %album_id,
+            candidates = plan.len(),
+            "the album search selected candidates"
+        );
+        let SearchPlan::Album(plan) = plan else {
+            // An album run only ever builds an album plan.
+            return Err(AcquireError::UnknownAlbum(album_id));
+        };
+        Ok(SearchOutcome::AlbumPlanned {
+            instances: run.instances,
+            plan,
+            tracks: run.album_tracks,
         })
     }
 
@@ -227,16 +394,22 @@ impl AcquisitionOrchestrator {
     async fn log_search_result(
         &self,
         id: uuid::Uuid,
-        plan: &AttemptPlan,
+        plan: &SearchPlan,
     ) -> Result<(), AcquireError> {
-        let best = plan
-            .attempts
-            .first()
-            .map(|attempt| attempt.candidate.path.as_str())
-            .unwrap_or_default();
+        let best = match plan {
+            SearchPlan::Track(plan) => plan
+                .attempts
+                .first()
+                .map(|attempt| attempt.candidate.path.as_str()),
+            SearchPlan::Album(plan) => plan
+                .attempts
+                .first()
+                .map(|attempt| attempt.candidate.path.as_str()),
+        }
+        .unwrap_or_default();
         let message = format!(
             "the search selected {} candidate(s); the best is `{best}`",
-            plan.attempts.len()
+            plan.len()
         );
         let mut tx = self.database().writer().begin().await?;
         repo::write_log(
@@ -255,16 +428,22 @@ impl AcquisitionOrchestrator {
 ///
 /// The run holds everything the instances share: the query, the selection
 /// thresholds, the job context, the instances that were searched, and the
-/// candidates accumulated so far.
+/// candidates accumulated so far. A track run and an album run differ only in
+/// the granularity they ask for and in the rules that turn the candidates into
+/// a plan.
 struct LayerSearch<'a> {
     /// The orchestrator, for the instance budgets.
     orchestrator: &'a AcquisitionOrchestrator,
     /// The job context, which names the staging root.
     context: AcquisitionContext,
-    /// The search text and the wanted track.
+    /// The search text and the wanted tracks.
     query: AcquisitionQuery,
+    /// The granularity the instances have to advertise.
+    granularity: Granularity,
     /// The thresholds and the profile the candidates are judged by.
-    selection: SelectionRequest,
+    selection: Selection,
+    /// The album's tracks, in playing order; empty for a track run.
+    album_tracks: Vec<Track>,
     /// How long to wait between two polls of a running search
     /// (`acquisition.search_poll_interval_ms`).
     poll_interval: Duration,
@@ -280,20 +459,79 @@ struct LayerSearch<'a> {
     stop: Arc<Notify>,
 }
 
+/// Which selection rules a layer search applies.
+enum Selection {
+    /// One wanted track.
+    Track(SelectionRequest),
+    /// A whole album.
+    Album(Box<AlbumSelectionRequest>),
+}
+
+/// The plan a layer search produced.
+enum SearchPlan {
+    /// The track candidates to try.
+    Track(AttemptPlan),
+    /// The album candidates to try.
+    Album(AlbumAttemptPlan),
+}
+
+impl SearchPlan {
+    /// Returns whether the plan has nothing to try.
+    fn is_empty(&self) -> bool {
+        match self {
+            SearchPlan::Track(plan) => plan.attempts.is_empty(),
+            SearchPlan::Album(plan) => plan.attempts.is_empty(),
+        }
+    }
+
+    /// Returns why the plan has nothing to try.
+    fn failure(&self) -> Option<FailureReason> {
+        match self {
+            SearchPlan::Track(plan) => plan.failure,
+            SearchPlan::Album(plan) => plan.failure,
+        }
+    }
+
+    /// Returns the number of candidates the plan holds.
+    fn len(&self) -> usize {
+        match self {
+            SearchPlan::Track(plan) => plan.attempts.len(),
+            SearchPlan::Album(plan) => plan.attempts.len(),
+        }
+    }
+}
+
 impl LayerSearch<'_> {
     /// Returns the plan the accumulated candidates produce.
-    fn plan(&self) -> AttemptPlan {
-        select_candidates(&self.selection, self.slots.clone())
+    fn plan(&self) -> SearchPlan {
+        match &self.selection {
+            Selection::Track(request) => {
+                SearchPlan::Track(select_candidates(request, self.slots.clone()))
+            }
+            Selection::Album(request) => SearchPlan::Album(select_album_candidates(
+                request,
+                &self.query.tracks,
+                self.slots.clone(),
+            )),
+        }
+    }
+
+    /// Returns whether the run serves an interactive request.
+    fn interactive(&self) -> bool {
+        match &self.selection {
+            Selection::Track(request) => request.class.is_interactive(),
+            Selection::Album(request) => request.class.is_interactive(),
+        }
     }
 
     /// Returns whether a usable candidate has been found.
     fn has_usable_candidate(&self) -> bool {
-        !self.plan().attempts.is_empty()
+        !self.plan().is_empty()
     }
 
-    /// Searches one instance of the layer, if it can search a track.
+    /// Searches one instance of the layer, if it can search the granularity.
     ///
-    /// An instance that does not advertise the `track` granularity is skipped.
+    /// An instance that does not advertise the run's granularity is skipped.
     /// Bulk work waits for the instance's hourly token before it takes a search
     /// slot, so a throttled search can never block an interactive one that is
     /// waiting for the same slot.
@@ -310,10 +548,11 @@ impl LayerSearch<'_> {
         };
         match provider.get_capabilities(&self.context).await {
             Ok(capabilities) => {
-                if !capabilities.granularities.contains(&Granularity::Track) {
+                if !capabilities.granularities.contains(&self.granularity) {
                     tracing::debug!(
                         instance = instance.slug().as_str(),
-                        "skipped an instance that cannot search a track"
+                        granularity = self.granularity.as_str(),
+                        "skipped an instance that cannot search this granularity"
                     );
                     return;
                 }
@@ -330,7 +569,7 @@ impl LayerSearch<'_> {
         }
 
         let budget = self.orchestrator.search_budgets().search_budget(instance);
-        if !self.selection.class.is_interactive() {
+        if !self.interactive() {
             budget.hourly.until_ready().await;
         }
         let Ok(_search_slot) = Arc::clone(&budget.searches).acquire_owned().await else {
@@ -417,7 +656,7 @@ impl LayerSearch<'_> {
             // A user is waiting: as soon as the candidates collected so far
             // contain one this request would download, the rest of this
             // instance's search is not worth the wait.
-            if self.selection.class.is_interactive() && self.has_usable_candidate() {
+            if self.interactive() && self.has_usable_candidate() {
                 provider.cancel_search(&self.context, &token).await;
                 return Ok(());
             }
@@ -531,6 +770,36 @@ pub fn preferred_formats(profile: &QualityProfile) -> Vec<String> {
     formats
 }
 
+/// The album-level ids an album search repeats on every wanted track.
+///
+/// A track's own ids name the recording; an album folder is looked up by its
+/// release, so the release group, the release and the UPC are carried on each
+/// wanted track where the library knows them.
+///
+/// # Parameters
+///
+/// - `album`: the album being searched for.
+///
+/// # Returns
+///
+/// The ids, in a fixed order, with the ones the album does not know left out.
+fn album_external_ids(album: &hearthsound_library::Album) -> Vec<ExternalId> {
+    let mut ids = Vec::new();
+    for (namespace, value) in [
+        ("mb-release-group", album.mb_release_group_id.as_deref()),
+        ("mb-release", album.mb_release_id.as_deref()),
+        ("upc", album.upc.as_deref()),
+    ] {
+        if let Some(value) = value {
+            ids.push(ExternalId {
+                namespace: namespace.to_owned(),
+                value: value.to_owned(),
+            });
+        }
+    }
+    ids
+}
+
 /// The canonical extensions of one quality tier.
 ///
 /// # Parameters
@@ -544,5 +813,64 @@ fn formats_for(tier: QualityTier) -> &'static [&'static str] {
         QualityTier::LossyHigh | QualityTier::LossyMid | QualityTier::LossyLow => {
             &["mp3", "m4a", "opus", "ogg"]
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hearthsound_core::EntityId;
+    use hearthsound_core::IdPrefix;
+    use hearthsound_library::{Album, Origin};
+
+    use super::*;
+
+    /// Builds an album with the ids a test cares about.
+    fn album(
+        mb_release_group_id: Option<&str>,
+        mb_release_id: Option<&str>,
+        upc: Option<&str>,
+    ) -> Album {
+        Album {
+            id: EntityId::new(IdPrefix::Album),
+            title: "Album".to_owned(),
+            sort_title: "Album".to_owned(),
+            display_artist: Some("Hello Artist".to_owned()),
+            year: Some(1993),
+            release_date: None,
+            album_type: None,
+            mb_release_id: mb_release_id.map(str::to_owned),
+            mb_release_group_id: mb_release_group_id.map(str::to_owned),
+            upc: upc.map(str::to_owned),
+            origin: Origin::Catalog,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn an_album_search_carries_the_album_level_ids() {
+        let ids = album_external_ids(&album(Some("group-1"), Some("release-1"), Some("upc-1")));
+        assert_eq!(
+            ids,
+            [
+                ExternalId {
+                    namespace: "mb-release-group".to_owned(),
+                    value: "group-1".to_owned(),
+                },
+                ExternalId {
+                    namespace: "mb-release".to_owned(),
+                    value: "release-1".to_owned(),
+                },
+                ExternalId {
+                    namespace: "upc".to_owned(),
+                    value: "upc-1".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_album_without_ids_contributes_none() {
+        assert!(album_external_ids(&album(None, None, None)).is_empty());
     }
 }
