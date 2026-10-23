@@ -660,6 +660,80 @@ pub async fn list_artists(
         .collect()
 }
 
+/// Counts the artists in scope.
+///
+/// The count covers exactly the artists [`list_artists`] returns, so a client
+/// can size a page of placeholders before it has read any artist. It applies the
+/// same membership rules and drops only the `ORDER BY`, `LIMIT` and `OFFSET`.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `scope`: the scope to filter by.
+///
+/// # Returns
+///
+/// The number of artists in the scope.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn count_artists(conn: &mut SqliteConnection, scope: Scope) -> Result<i64, LibraryError> {
+    let counted: i64 = match scope {
+        Scope::Personal { user_id } => {
+            let user = user_id.as_bytes().as_slice();
+            sqlx::query_scalar!(
+                "WITH scope_tracks(track_id) AS ( \
+                     SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'track' \
+                     UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'track' AND value = 'like' \
+                     UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id \
+                         WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
+                     UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
+                         WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
+                 ) \
+                 SELECT count(*) AS counted FROM artists ar \
+                 WHERE ar.id IN (SELECT ta.artist_id FROM track_artists ta \
+                                   JOIN scope_tracks st ON st.track_id = ta.track_id) \
+                    OR ar.id IN (SELECT aa.artist_id FROM album_artists aa WHERE aa.album_id IN ( \
+                           SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id)) \
+                    OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ? AND entity_kind = 'artist' \
+                                 AND entity_id = ar.id) \
+                    OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'artist' \
+                                 AND value = 'like' AND entity_id = ar.id)",
+                user,
+                user,
+                user,
+                user,
+                user,
+                user,
+            )
+            .fetch_one(&mut *conn)
+            .await?
+        }
+        Scope::Server(view) => {
+            if view == ServerBrowse::Disabled {
+                return Ok(0);
+            }
+            let (available, cached) = view.availability_pair();
+            sqlx::query_scalar!(
+                "WITH scope_tracks(track_id) AS ( \
+                     SELECT id FROM tracks WHERE availability IN (?, ?) \
+                 ) \
+                 SELECT count(*) AS counted FROM artists ar \
+                 WHERE ar.id IN (SELECT ta.artist_id FROM track_artists ta \
+                                   JOIN scope_tracks st ON st.track_id = ta.track_id) \
+                    OR ar.id IN (SELECT aa.artist_id FROM album_artists aa WHERE aa.album_id IN ( \
+                           SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id))",
+                available,
+                cached,
+            )
+            .fetch_one(&mut *conn)
+            .await?
+        }
+    };
+    Ok(counted)
+}
+
 /// Lists the albums in scope.
 ///
 /// # Parameters
@@ -688,30 +762,7 @@ pub async fn list_albums(
         return Ok(Vec::new());
     }
     let mut builder = QueryBuilder::<Sqlite>::new("WITH scope_tracks(track_id) AS (");
-    match scope {
-        Scope::Personal { user_id } => {
-            let user = user_id.as_bytes().to_vec();
-            builder
-                .push("SELECT entity_id FROM user_library WHERE user_id = ")
-                .push_bind(user.clone())
-                .push(" AND entity_kind = 'track' UNION SELECT entity_id FROM user_feedback WHERE user_id = ")
-                .push_bind(user.clone())
-                .push(" AND entity_kind = 'track' AND value = 'like' UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id WHERE p.owner_user_id = ")
-                .push_bind(user.clone())
-                .push(" AND p.is_temporary = 0 UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id WHERE mf.storage = 'folder' AND lf.owner_user_id = ")
-                .push_bind(user)
-                .push(") ");
-        }
-        Scope::Server(view) => {
-            let (available, cached) = view.availability_pair();
-            builder
-                .push("SELECT id FROM tracks WHERE availability IN (")
-                .push_bind(available)
-                .push(", ")
-                .push_bind(cached)
-                .push(")) ");
-        }
-    }
+    push_album_scope(&mut builder, scope);
     builder.push(
         "SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
          al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, \
@@ -719,73 +770,7 @@ pub async fn list_albums(
          FROM albums al \
          WHERE ",
     );
-    match scope {
-        Scope::Personal { user_id } => {
-            let user = user_id.as_bytes().to_vec();
-            builder
-                .push("(al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id) OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ")
-                .push_bind(user.clone())
-                .push(" AND entity_kind = 'album' AND entity_id = al.id) OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ")
-                .push_bind(user)
-                .push(" AND entity_kind = 'album' AND value = 'like' AND entity_id = al.id))");
-        }
-        Scope::Server(_) => {
-            builder.push(
-                "al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id)",
-            );
-        }
-    }
-    // The lists that read what the user did carry only the albums that have
-    // that activity: an album never played is not recently played, and an
-    // unrated album has no place in a rating order.
-    match &sort {
-        AlbumSort::Highest { user } => {
-            builder
-                .push(" AND EXISTS (SELECT 1 FROM user_ratings r WHERE r.user_id = ")
-                .push_bind(user.as_bytes().to_vec())
-                .push(" AND r.entity_kind = 'album' AND r.entity_id = al.id AND r.rating > 0)");
-        }
-        AlbumSort::Frequent { user } => {
-            builder
-                .push(" AND EXISTS (SELECT 1 FROM plays p JOIN tracks t ON t.id = p.track_id WHERE p.user_id = ")
-                .push_bind(user.as_bytes().to_vec())
-                .push(" AND t.album_id = al.id)");
-        }
-        AlbumSort::Recent { user } => {
-            builder
-                .push(" AND EXISTS (SELECT 1 FROM plays p JOIN tracks t ON t.id = p.track_id WHERE p.user_id = ")
-                .push_bind(user.as_bytes().to_vec())
-                .push(" AND t.album_id = al.id)");
-        }
-        AlbumSort::Starred { user } => {
-            builder
-                .push(" AND EXISTS (SELECT 1 FROM user_feedback f WHERE f.user_id = ")
-                .push_bind(user.as_bytes().to_vec())
-                .push(" AND f.entity_kind = 'album' AND f.value = 'like' AND f.entity_id = al.id)");
-        }
-        AlbumSort::ByYear { from, to } => {
-            let (low, high) = if from <= to {
-                (*from, *to)
-            } else {
-                (*to, *from)
-            };
-            builder
-                .push(" AND al.year BETWEEN ")
-                .push_bind(low)
-                .push(" AND ")
-                .push_bind(high);
-        }
-        AlbumSort::ByGenre(genre) => {
-            builder
-                .push(
-                    " AND EXISTS (SELECT 1 FROM tracks t JOIN track_genres tg ON tg.track_id = t.id \
-                     JOIN genres g ON g.id = tg.genre_id WHERE t.album_id = al.id AND g.name = ",
-                )
-                .push_bind(fold_genre(genre))
-                .push(")");
-        }
-        _ => {}
-    }
+    push_album_filter(&mut builder, scope, Some(&sort));
     builder.push(" ORDER BY ");
     match &sort {
         AlbumSort::Newest => {
@@ -848,6 +833,156 @@ pub async fn list_albums(
         .fetch_all(&mut *conn)
         .await?;
     rows.into_iter().map(|row| row.into_album()).collect()
+}
+
+/// Pushes the `scope_tracks` common table expression an album query reads.
+///
+/// The CTE is the set of tracks one scope can see: the caller's personal library
+/// for a personal scope, and the tracks at the browsable availabilities for the
+/// server-wide one. The listing, its count and the genre counts all build on it,
+/// so they always agree on what the scope holds.
+///
+/// # Parameters
+///
+/// - `builder`: the query being built.
+/// - `scope`: the scope to filter by.
+fn push_album_scope(builder: &mut QueryBuilder<Sqlite>, scope: Scope) {
+    match scope {
+        Scope::Personal { user_id } => {
+            let user = user_id.as_bytes().to_vec();
+            builder
+                .push("SELECT entity_id FROM user_library WHERE user_id = ")
+                .push_bind(user.clone())
+                .push(" AND entity_kind = 'track' UNION SELECT entity_id FROM user_feedback WHERE user_id = ")
+                .push_bind(user.clone())
+                .push(" AND entity_kind = 'track' AND value = 'like' UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id WHERE p.owner_user_id = ")
+                .push_bind(user.clone())
+                .push(" AND p.is_temporary = 0 UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id WHERE mf.storage = 'folder' AND lf.owner_user_id = ")
+                .push_bind(user)
+                .push(") ");
+        }
+        Scope::Server(view) => {
+            let (available, cached) = view.availability_pair();
+            builder
+                .push("SELECT id FROM tracks WHERE availability IN (")
+                .push_bind(available)
+                .push(", ")
+                .push_bind(cached)
+                .push(")) ");
+        }
+    }
+}
+
+/// Pushes the `WHERE` clause of an album query.
+///
+/// # Parameters
+///
+/// - `builder`: the query being built, after its `FROM` and `WHERE`.
+/// - `scope`: the scope to filter by.
+/// - `sort`: the order the query will be read in, or `None` for a query that
+///   counts the scope without narrowing it to an activity.
+fn push_album_filter(builder: &mut QueryBuilder<Sqlite>, scope: Scope, sort: Option<&AlbumSort>) {
+    match scope {
+        Scope::Personal { user_id } => {
+            let user = user_id.as_bytes().to_vec();
+            builder
+                .push("(al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id) OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ")
+                .push_bind(user.clone())
+                .push(" AND entity_kind = 'album' AND entity_id = al.id) OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ")
+                .push_bind(user)
+                .push(" AND entity_kind = 'album' AND value = 'like' AND entity_id = al.id))");
+        }
+        Scope::Server(_) => {
+            builder.push(
+                "al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id)",
+            );
+        }
+    }
+    let Some(sort) = sort else {
+        return;
+    };
+    // The lists that read what the user did carry only the albums that have
+    // that activity: an album never played is not recently played, and an
+    // unrated album has no place in a rating order.
+    match sort {
+        AlbumSort::Highest { user } => {
+            builder
+                .push(" AND EXISTS (SELECT 1 FROM user_ratings r WHERE r.user_id = ")
+                .push_bind(user.as_bytes().to_vec())
+                .push(" AND r.entity_kind = 'album' AND r.entity_id = al.id AND r.rating > 0)");
+        }
+        AlbumSort::Frequent { user } => {
+            builder
+                .push(" AND EXISTS (SELECT 1 FROM plays p JOIN tracks t ON t.id = p.track_id WHERE p.user_id = ")
+                .push_bind(user.as_bytes().to_vec())
+                .push(" AND t.album_id = al.id)");
+        }
+        AlbumSort::Recent { user } => {
+            builder
+                .push(" AND EXISTS (SELECT 1 FROM plays p JOIN tracks t ON t.id = p.track_id WHERE p.user_id = ")
+                .push_bind(user.as_bytes().to_vec())
+                .push(" AND t.album_id = al.id)");
+        }
+        AlbumSort::Starred { user } => {
+            builder
+                .push(" AND EXISTS (SELECT 1 FROM user_feedback f WHERE f.user_id = ")
+                .push_bind(user.as_bytes().to_vec())
+                .push(" AND f.entity_kind = 'album' AND f.value = 'like' AND f.entity_id = al.id)");
+        }
+        AlbumSort::ByYear { from, to } => {
+            let (low, high) = if from <= to {
+                (*from, *to)
+            } else {
+                (*to, *from)
+            };
+            builder
+                .push(" AND al.year BETWEEN ")
+                .push_bind(low)
+                .push(" AND ")
+                .push_bind(high);
+        }
+        AlbumSort::ByGenre(genre) => {
+            builder
+                .push(
+                    " AND EXISTS (SELECT 1 FROM tracks t JOIN track_genres tg ON tg.track_id = t.id \
+                     JOIN genres g ON g.id = tg.genre_id WHERE t.album_id = al.id AND g.name = ",
+                )
+                .push_bind(fold_genre(genre))
+                .push(")");
+        }
+        _ => {}
+    }
+}
+
+/// Counts the albums in scope.
+///
+/// The count covers exactly the albums [`list_albums`] returns for a listing
+/// that narrows nothing, so a client can size a page of placeholders before it
+/// has read any album. It reads no `ORDER BY`, `LIMIT` or `OFFSET`: the same
+/// rows, counted.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `scope`: the scope to filter by.
+///
+/// # Returns
+///
+/// The number of albums in the scope.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn count_albums(conn: &mut SqliteConnection, scope: Scope) -> Result<i64, LibraryError> {
+    if scope == Scope::Server(ServerBrowse::Disabled) {
+        return Ok(0);
+    }
+    let mut builder = QueryBuilder::<Sqlite>::new("WITH scope_tracks(track_id) AS (");
+    push_album_scope(&mut builder, scope);
+    builder.push("SELECT count(*) AS counted FROM albums al WHERE ");
+    push_album_filter(&mut builder, scope, None);
+    let counted: i64 = builder.build_query_scalar().fetch_one(&mut *conn).await?;
+    Ok(counted)
 }
 
 /// A genre with how many songs and albums of it are in scope.
@@ -1303,6 +1438,87 @@ pub async fn starred(conn: &mut SqliteConnection, user_id: Uuid) -> Result<Starr
     Ok(starred)
 }
 
+/// How many entities one account liked, by kind.
+///
+/// A client reads this to size the placeholders of its likes view before the
+/// listing itself arrives.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_library::query::StarredCounts;
+///
+/// let counts = StarredCounts {
+///     artists: 2,
+///     albums: 3,
+///     tracks: 40,
+/// };
+/// assert_eq!(counts.albums, 3);
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StarredCounts {
+    /// The liked artists.
+    pub artists: i64,
+    /// The liked albums.
+    pub albums: i64,
+    /// The liked tracks.
+    pub tracks: i64,
+}
+
+/// Counts the entities a user liked.
+///
+/// The counts cover exactly the entities [`starred`] returns: a like whose row
+/// has since been removed from the library is not counted, so the counts and the
+/// listing never disagree.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `user_id`: the account whose likes are counted.
+///
+/// # Returns
+///
+/// The liked artists, albums, and tracks.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn starred_counts(
+    conn: &mut SqliteConnection,
+    user_id: Uuid,
+) -> Result<StarredCounts, LibraryError> {
+    let user = user_id.as_bytes().as_slice();
+    let artists: i64 = sqlx::query_scalar!(
+        "SELECT count(*) AS counted FROM user_feedback f \
+         WHERE f.user_id = ? AND f.value = 'like' AND f.entity_kind = 'artist' \
+           AND f.entity_id IN (SELECT id FROM artists)",
+        user,
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    let albums: i64 = sqlx::query_scalar!(
+        "SELECT count(*) AS counted FROM user_feedback f \
+         WHERE f.user_id = ? AND f.value = 'like' AND f.entity_kind = 'album' \
+           AND f.entity_id IN (SELECT id FROM albums)",
+        user,
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    let tracks: i64 = sqlx::query_scalar!(
+        "SELECT count(*) AS counted FROM user_feedback f \
+         WHERE f.user_id = ? AND f.value = 'like' AND f.entity_kind = 'track' \
+           AND f.entity_id IN (SELECT id FROM tracks)",
+        user,
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(StarredCounts {
+        artists,
+        albums,
+        tracks,
+    })
+}
+
 /// Counts the media files the scanned folders hold.
 ///
 /// A scan reports how many files it has dealt with while it runs; between
@@ -1556,6 +1772,64 @@ pub async fn list_tracks(
         }
     };
     track_views(conn, rows).await
+}
+
+/// Counts the tracks in scope.
+///
+/// The count covers exactly the tracks [`list_tracks`] returns for a listing
+/// that narrows nothing, which is what the songs view and an empty `search3`
+/// read. It applies the same scope and drops only the `ORDER BY`, `LIMIT` and
+/// `OFFSET`.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `scope`: the scope to filter by.
+///
+/// # Returns
+///
+/// The number of tracks in the scope.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub async fn count_tracks(conn: &mut SqliteConnection, scope: Scope) -> Result<i64, LibraryError> {
+    let counted: i64 = match scope {
+        Scope::Personal { user_id } => {
+            let user = user_id.as_bytes().as_slice();
+            sqlx::query_scalar!(
+                "WITH scope_tracks(track_id) AS ( \
+                     SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'track' \
+                     UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'track' AND value = 'like' \
+                     UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id \
+                         WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
+                     UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
+                         WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
+                 ) \
+                 SELECT count(*) AS counted FROM tracks t JOIN scope_tracks st ON st.track_id = t.id",
+                user,
+                user,
+                user,
+                user,
+            )
+            .fetch_one(&mut *conn)
+            .await?
+        }
+        Scope::Server(view) => {
+            if view == ServerBrowse::Disabled {
+                return Ok(0);
+            }
+            let (available, cached) = view.availability_pair();
+            sqlx::query_scalar!(
+                "SELECT count(*) AS counted FROM tracks t WHERE t.availability IN (?, ?)",
+                available,
+                cached,
+            )
+            .fetch_one(&mut *conn)
+            .await?
+        }
+    };
+    Ok(counted)
 }
 
 /// One track of a collection queue.

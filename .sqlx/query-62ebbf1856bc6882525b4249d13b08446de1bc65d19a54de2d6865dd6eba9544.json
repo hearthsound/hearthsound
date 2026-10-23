@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT count(*) AS counted FROM tracks t WHERE t.availability IN (?, ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "counted",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "62ebbf1856bc6882525b4249d13b08446de1bc65d19a54de2d6865dd6eba9544"
+}

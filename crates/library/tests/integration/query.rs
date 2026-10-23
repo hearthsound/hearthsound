@@ -641,6 +641,70 @@ async fn the_server_scope_follows_the_privacy_setting() {
     ));
 }
 
+/// The counts a client sizes its placeholders with match the lists they stand
+/// for.
+#[tokio::test]
+async fn the_counts_match_the_listings_they_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let seeded = seed(dir.path()).await;
+    let mut conn = seeded.db.readers().acquire().await.unwrap();
+
+    for scope in [
+        Scope::Personal {
+            user_id: seeded.user,
+        },
+        Scope::Server(ServerBrowse::PermanentOnly),
+    ] {
+        let artists = query::list_artists(&mut conn, scope, -1, 0)
+            .await
+            .unwrap()
+            .len() as i64;
+        let albums = query::list_albums(&mut conn, scope, AlbumSort::AlphabeticalByName, -1, 0)
+            .await
+            .unwrap()
+            .len() as i64;
+        let tracks = query::list_tracks(&mut conn, scope, -1, 0)
+            .await
+            .unwrap()
+            .len() as i64;
+
+        assert_eq!(
+            query::count_artists(&mut conn, scope).await.unwrap(),
+            artists,
+            "{scope:?} counts its artists as its listing lists them"
+        );
+        assert_eq!(
+            query::count_albums(&mut conn, scope).await.unwrap(),
+            albums,
+            "{scope:?} counts its albums as its listing lists them"
+        );
+        assert_eq!(
+            query::count_tracks(&mut conn, scope).await.unwrap(),
+            tracks,
+            "{scope:?} counts its tracks as its listing lists them"
+        );
+    }
+
+    let starred = query::starred(&mut conn, seeded.user).await.unwrap();
+    let counts = query::starred_counts(&mut conn, seeded.user).await.unwrap();
+    assert_eq!(counts.artists, starred.artists.len() as i64);
+    assert_eq!(counts.albums, starred.albums.len() as i64);
+    assert_eq!(counts.tracks, starred.tracks.len() as i64);
+    assert!(counts.tracks > 0, "the seeded account likes a track");
+    assert_eq!(
+        query::starred_counts(&mut conn, seeded.other)
+            .await
+            .unwrap(),
+        query::StarredCounts::default(),
+        "one account's likes are never counted for another"
+    );
+
+    let disabled = Scope::Server(ServerBrowse::Disabled);
+    assert_eq!(query::count_artists(&mut conn, disabled).await.unwrap(), 0);
+    assert_eq!(query::count_albums(&mut conn, disabled).await.unwrap(), 0);
+    assert_eq!(query::count_tracks(&mut conn, disabled).await.unwrap(), 0);
+}
+
 #[tokio::test]
 async fn album_lists_are_ordered_and_paged() {
     let dir = tempfile::tempdir().unwrap();

@@ -5,6 +5,10 @@
 //! dislike in place of a like, or neither. These tests cover the pins the three
 //! leave behind, the adoption a save and a like perform, the catalog ids they
 //! materialize, and the errors of the vendor gate and of the parameters.
+//!
+//! `hsGetLibraryCounts` reports the size of each list, which is what a client
+//! sizes its placeholders with: the counts are compared with the listings they
+//! stand for, and both encodings are snapshotted.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -15,7 +19,39 @@ use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, IdPrefix, Slug
 use hearthsound_library::LibraryRepository;
 use hearthsound_library::query::{personal_album_ids, personal_artist_ids, personal_track_ids};
 
-use crate::common::{Fixture, assert_error, assert_ok, get};
+use crate::common::seed::library;
+use crate::common::{Fixture, SNAPSHOT_FILTERS, assert_error, assert_ok, get};
+
+/// Reads the `libraryCounts` members out of a JSON body.
+///
+/// # Parameters
+///
+/// - `body`: the response body.
+///
+/// # Returns
+///
+/// The counts, in the order the endpoint emits them.
+///
+/// # Panics
+///
+/// Panics when the body carries no `libraryCounts`, which is a test's own
+/// arrangement mistake.
+fn library_counts(body: &str) -> Vec<(String, i64)> {
+    let marker = "\"libraryCounts\":{";
+    let start = body.find(marker).expect("the response carries the counts");
+    let rest = &body[start + marker.len()..];
+    let end = rest.find('}').expect("the counts object closes");
+    rest[..end]
+        .split(',')
+        .map(|member| {
+            let (name, value) = member.split_once(':').expect("a member has a value");
+            (
+                name.trim_matches('"').to_owned(),
+                value.trim().parse().expect("a count is a number"),
+            )
+        })
+        .collect()
+}
 
 /// Builds the `x_` id of one hello-catalog entity.
 fn catalog_id(kind: EntityKind, provider_id: &str) -> String {
@@ -689,4 +725,130 @@ async fn a_lifetime_change_answers_error_70_without_the_vendor_flag() {
     .await;
     assert_error(&probe, 70);
     assert!(is_pinned(&fixture, tracks[0]).await);
+}
+
+/// The counts match the listings they stand for, and both encodings carry them.
+#[tokio::test]
+async fn the_counts_match_the_listings_they_size() {
+    let fixture = Fixture::new().await;
+    let seeded = library(
+        &fixture.database,
+        &fixture.subdir("owned"),
+        &fixture.subdir("generic"),
+        fixture.user_id,
+    )
+    .await;
+    let app = fixture.app();
+    let key = fixture.api_key.clone();
+    let account = fixture.user_id.uuid();
+
+    // A like on one of each kind and one playlist, so the counts that are the
+    // account's own are not all zero.
+    get(
+        &app,
+        &format!(
+            "/rest/star?id={}&albumId={}&artistId={}&apiKey={key}&f=json",
+            seeded.alpha_tracks[0], seeded.alpha, seeded.cardinals
+        ),
+    )
+    .await;
+    get(
+        &app,
+        &format!(
+            "/rest/createPlaylist?name=Evening&songId={}&apiKey={key}&f=json",
+            seeded.alpha_tracks[0]
+        ),
+    )
+    .await;
+
+    let json = get(
+        &app,
+        &format!("/rest/hsGetLibraryCounts?musicFolderId=2&hearthsound=1&apiKey={key}&f=json"),
+    )
+    .await;
+    assert_ok(&json);
+    let counts = library_counts(&json.body);
+    assert_eq!(
+        counts
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "artists",
+            "albums",
+            "songs",
+            "playlists",
+            "likedArtists",
+            "likedAlbums",
+            "likedSongs",
+            "uploads"
+        ],
+        "the members are emitted in a fixed order"
+    );
+    // The default server view is the permanent library, so the cache album and
+    // its artist are outside it while the other four albums are inside.
+    let counted = |name: &str| {
+        counts
+            .iter()
+            .find(|(member, _)| member == name)
+            .map(|(_, value)| *value)
+            .unwrap()
+    };
+    assert_eq!(counted("albums"), 3, "{}", json.body);
+    assert_eq!(counted("songs"), 4, "{}", json.body);
+    assert_eq!(counted("artists"), 3, "{}", json.body);
+    assert_eq!(counted("playlists"), 1);
+    assert_eq!(counted("likedArtists"), 1);
+    assert_eq!(counted("likedAlbums"), 1);
+    assert_eq!(counted("likedSongs"), 1);
+    assert_eq!(counted("uploads"), 0);
+
+    let mut conn = fixture.database.readers().acquire().await.unwrap();
+    assert_eq!(
+        counted("songs"),
+        hearthsound_library::query::count_tracks(
+            &mut conn,
+            hearthsound_library::query::Scope::Server(
+                hearthsound_library::query::ServerBrowse::PermanentOnly
+            )
+        )
+        .await
+        .unwrap(),
+        "the count is the one the songs listing returns"
+    );
+    assert_eq!(
+        hearthsound_library::query::starred_counts(&mut conn, account)
+            .await
+            .unwrap()
+            .tracks,
+        counted("likedSongs")
+    );
+    drop(conn);
+
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("hs-library-counts-json", seeded.stabilize(&json.body));
+    });
+
+    let xml = get(
+        &app,
+        &format!("/rest/hsGetLibraryCounts?musicFolderId=2&hearthsound=1&apiKey={key}"),
+    )
+    .await;
+    assert_ok(&xml);
+    assert!(
+        xml.body.contains("<libraryCounts"),
+        "the XML carries the counts: {}",
+        xml.body
+    );
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("hs-library-counts-xml", seeded.stabilize(&xml.body));
+    });
+
+    // Without the vendor flag the endpoint is not there at all.
+    let standard = get(
+        &app,
+        &format!("/rest/hsGetLibraryCounts?musicFolderId=2&apiKey={key}&f=json"),
+    )
+    .await;
+    assert_error(&standard, 70);
 }

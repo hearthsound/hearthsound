@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   receives the bytes on disk, and an image that cannot be scaled is served
   unscaled.
 
+- `hsGetLibraryCounts` reports how many artists, albums, songs, playlists,
+  liked artists, liked albums, liked songs and uploads the library holds for the
+  requesting scope and account, so a client can size the placeholders of a view
+  before it has read the view. The counts apply the same membership rules as the
+  listings, honour `musicFolderId`, and are emitted in both encodings under the
+  `hearthsound=1` vendor flag.
+
 ### Changed
 
 - A plugin that an earlier release left waiting for approval is granted the

@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH scope_tracks(track_id) AS ( SELECT id FROM tracks WHERE availability IN (?, ?) ) SELECT count(*) AS counted FROM artists ar WHERE ar.id IN (SELECT ta.artist_id FROM track_artists ta JOIN scope_tracks st ON st.track_id = ta.track_id) OR ar.id IN (SELECT aa.artist_id FROM album_artists aa WHERE aa.album_id IN ( SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id))",
+  "describe": {
+    "columns": [
+      {
+        "name": "counted",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "690ab8e0b579bf98fb4d8f2e7f3b273054b5439779dcadaa90aafa96e92c301c"
+}

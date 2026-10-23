@@ -48,7 +48,9 @@ pub use genres::{
 pub use hs_acquisitions::{
     hs_acquire, hs_cancel_acquisition, hs_get_acquisitions, hs_get_availability,
 };
-pub use hs_library::{hs_save, hs_set_feedback, hs_set_playlist_lifetime, hs_unsave};
+pub use hs_library::{
+    hs_get_library_counts, hs_save, hs_set_feedback, hs_set_playlist_lifetime, hs_unsave,
+};
 pub use hs_queue::hs_set_queue;
 pub use hs_server::hs_get_server_info;
 pub use info::{get_album_info, get_album_info_2, get_artist_info, get_artist_info_2};

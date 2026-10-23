@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT count(*) AS counted FROM user_feedback f WHERE f.user_id = ? AND f.value = 'like' AND f.entity_kind = 'track' AND f.entity_id IN (SELECT id FROM tracks)",
+  "describe": {
+    "columns": [
+      {
+        "name": "counted",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "59523b4482011c8d787a1292b8c4a60cf5b4a513a0700eb5dc567dea303e6033"
+}

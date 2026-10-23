@@ -181,6 +181,11 @@ pub fn routes() -> Router<SubsonicState> {
         endpoints::hs_set_playlist_lifetime,
     );
     let router = register(router, "hsGetServerInfo", endpoints::hs_get_server_info);
+    let router = register(
+        router,
+        "hsGetLibraryCounts",
+        endpoints::hs_get_library_counts,
+    );
     router.route(NOT_FOUND_PATH, get(not_found).post(not_found))
 }
 

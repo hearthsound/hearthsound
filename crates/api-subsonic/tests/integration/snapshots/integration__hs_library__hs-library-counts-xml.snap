@@ -1,0 +1,5 @@
+---
+source: crates/api-subsonic/tests/integration/hs_library.rs
+expression: seeded.stabilize(&xml.body)
+---
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="hearthsound" serverVersion="0.1.5" openSubsonic="true"><libraryCounts artists="3" albums="3" songs="4" playlists="1" likedArtists="1" likedAlbums="1" likedSongs="1" uploads="0"/></subsonic-response>

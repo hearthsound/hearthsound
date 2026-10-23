@@ -19,17 +19,25 @@
 //! and a temporary one pins none, so converting a playlist to permanent is what
 //! makes the tracks of a synchronized playlist permanent for its owner.
 //!
+//! `hsGetLibraryCounts` reports how many items each list of the library holds,
+//! which is what lets a client size the placeholders of a view it has not read
+//! yet: the standard lists carry no total, and counting them client-side would
+//! cost the read the placeholder is meant to stand in for.
+//!
 //! Every endpoint here belongs to the `hearthsound` vendor extension, so each one
 //! is answered only when the request carries `hearthsound=1` and answers Subsonic
 //! error 70 without it.
 
 use hearthsound_activity::Feedback;
 use hearthsound_core::EntityKind;
+use hearthsound_library::query;
 use uuid::Uuid;
 
 use crate::auth::Call;
 use crate::browse;
 use crate::response::{Encoded, Response, SubsonicError, codes};
+use crate::scope;
+use crate::value::Object;
 
 use super::feedback::{adopt_saved, resolve};
 
@@ -189,6 +197,126 @@ pub async fn hs_set_feedback(call: Call) -> Encoded {
         adopt_saved(&call, user, &entities).await;
     }
     call.encode(Response::ok())
+}
+
+/// Answers `hsGetLibraryCounts`: how many items each library list holds.
+///
+/// The counts are read for the scope `musicFolderId` names, exactly as the
+/// browse listings resolve it, so a count always matches the number of items the
+/// matching listing returns. The like counts and the playlist count are the
+/// requesting account's own, because those lists are personal.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call. `musicFolderId` optionally narrows the
+///   scope, as it does on the browse endpoints. The request must carry
+///   `hearthsound=1`.
+///
+/// # Returns
+///
+/// A successful envelope carrying `libraryCounts` with the members `artists`,
+/// `albums`, `songs`, `playlists`, `likedArtists`, `likedAlbums`, `likedSongs`
+/// and `uploads`, all integers; or a failed envelope.
+///
+/// # Errors
+///
+/// Answers Subsonic error 70 when the request does not carry `hearthsound=1` or
+/// names an unknown `musicFolderId`, and a generic error when a read fails.
+pub async fn hs_get_library_counts(call: Call) -> Encoded {
+    if !call.vendor_enabled() {
+        return call.encode(Response::failed(SubsonicError::not_found()));
+    }
+    let scope = match scope::resolve(&call).await {
+        Ok(scope) => scope,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let user_id = call.principal().user_id.uuid();
+    let mut conn = match call.state().database().readers().acquire().await {
+        Ok(conn) => conn,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure(
+                "hsGetLibraryCounts",
+                &error,
+            )));
+        }
+    };
+    // One connection serves every count, so the rows are counted against one
+    // read snapshot rather than against a library that changes between them.
+    let counts = match query::count_artists(&mut conn, scope).await {
+        Ok(artists) => artists,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure(
+                "hsGetLibraryCounts",
+                &error,
+            )));
+        }
+    };
+    let albums = match query::count_albums(&mut conn, scope).await {
+        Ok(counted) => counted,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure(
+                "hsGetLibraryCounts",
+                &error,
+            )));
+        }
+    };
+    let songs = match query::count_tracks(&mut conn, scope).await {
+        Ok(counted) => counted,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure(
+                "hsGetLibraryCounts",
+                &error,
+            )));
+        }
+    };
+    let liked = match query::starred_counts(&mut conn, user_id).await {
+        Ok(liked) => liked,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure(
+                "hsGetLibraryCounts",
+                &error,
+            )));
+        }
+    };
+    let uploads = match query::uploaded_tracks(&mut conn, user_id).await {
+        Ok(uploads) => uploads.len() as i64,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure(
+                "hsGetLibraryCounts",
+                &error,
+            )));
+        }
+    };
+    let playlists = match call
+        .state()
+        .activity()
+        .playlists()
+        .list(user_id, None)
+        .await
+    {
+        Ok(playlists) => playlists.len() as i64,
+        Err(error) => {
+            return call.encode(Response::failed(browse::failure(
+                "hsGetLibraryCounts",
+                &error,
+            )));
+        }
+    };
+
+    call.encode(
+        Response::ok().member(
+            "libraryCounts",
+            Object::new()
+                .set("artists", counts)
+                .set("albums", albums)
+                .set("songs", songs)
+                .set("playlists", playlists)
+                .set("likedArtists", liked.artists)
+                .set("likedAlbums", liked.albums)
+                .set("likedSongs", liked.tracks)
+                .set("uploads", uploads),
+        ),
+    )
 }
 
 /// Answers `hsSetPlaylistLifetime`: converts a playlist between temporary and
