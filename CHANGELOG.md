@@ -49,6 +49,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `library.acquire_on_playlist_add` applies as it does to an edit through
   `updatePlaylist`.
 
+- `search2` and `search3` attach `hearthsound.score` to every song, album and
+  artist entry when the request carries `hearthsound=1`: a number from 0 to 1,
+  rounded to three decimals, that says how well the result matches the query.
+  An exact name scores 1, the query spelling out the artist and the name in
+  either order scores 0.98, a name that continues the query after a word
+  boundary scores 0.9, and a partial match stays below 0.89. The order of the
+  results does not change.
+
 ### Changed
 
 - Plugins build against `hearthsound:plugin@0.3.0`: the host loads that API

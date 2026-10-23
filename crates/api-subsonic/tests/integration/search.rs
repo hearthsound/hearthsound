@@ -345,3 +345,74 @@ async fn a_search_without_a_folder_reaches_beyond_the_personal_library() {
         assert!(!searched.body.contains(&mello), "{}", searched.body);
     }
 }
+
+/// With `hearthsound=1`, every song, album and artist of `search3` and
+/// `search2` carries a relevance score; without the flag the answer is the
+/// standard shape and holds no vendor member.
+#[tokio::test]
+async fn search_results_carry_relevance_scores_when_the_vendor_extension_is_on() {
+    let (fixture, seeded) = fixture().await;
+    fixture.install_hello_catalog().await;
+    let app = fixture.app();
+
+    let json = get(
+        &app,
+        &format!(
+            "/rest/search3?query=cardinals&apiKey={}&f=json&hearthsound=1",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&json);
+    assert!(json.body.contains("\"score\":"), "{}", json.body);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("scored-search3-json", seeded.stabilize(&json.body));
+    });
+
+    let xml = get(
+        &app,
+        &format!(
+            "/rest/search3.view?query=cardinals&apiKey={}&hearthsound=1",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&xml);
+    assert!(xml.body.contains("score=\""), "{}", xml.body);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("scored-search3-xml", seeded.stabilize(&xml.body));
+    });
+
+    let search2 = get(
+        &app,
+        &format!(
+            "/rest/search2?query=cardinals&apiKey={}&f=json&hearthsound=1",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&search2);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("scored-search2-json", seeded.stabilize(&search2.body));
+    });
+
+    let plain = get(
+        &app,
+        &format!(
+            "/rest/search3?query=cardinals&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&plain);
+    assert!(
+        !plain.body.contains("\"hearthsound\":"),
+        "without the flag the answer has no vendor member: {}",
+        plain.body
+    );
+    assert!(
+        !plain.body.contains("\"score\":"),
+        "without the flag no score is computed into the answer: {}",
+        plain.body
+    );
+}

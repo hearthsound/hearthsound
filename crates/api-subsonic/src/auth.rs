@@ -21,6 +21,7 @@
 //! element and is accepted without one, unless a browser labels it
 //! `Sec-Fetch-Site: cross-site`.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 
@@ -119,6 +120,42 @@ impl Call {
             Response::Payload(mut payload) if self.params.vendor_enabled() => {
                 let user = self.principal.user_id.uuid();
                 match crate::vendor::decorate(&self.state, user, &mut payload).await {
+                    Ok(()) => self.params.encode(Response::Payload(payload)),
+                    Err(error) => self.params.encode(Response::failed(error)),
+                }
+            }
+            response => self.params.encode(response),
+        }
+    }
+
+    /// Renders a response, decorating it with the `hearthsound` member and the
+    /// relevance score of each result when the request asked for the vendor
+    /// extension.
+    ///
+    /// This is [`Call::respond`] with the scores a search answer computed from
+    /// its query. Without `hearthsound=1` the scores are ignored and the
+    /// response is byte-identical to a plain search.
+    ///
+    /// # Parameters
+    ///
+    /// - `response`: the response to render.
+    /// - `scores`: the relevance of each result, keyed by the id its object
+    ///   carries.
+    ///
+    /// # Returns
+    ///
+    /// The encoded response, ready to be returned from the handler.
+    pub(crate) async fn respond_scored(
+        &self,
+        response: Response,
+        scores: &HashMap<String, f64>,
+    ) -> Encoded {
+        match response {
+            Response::Payload(mut payload) if self.params.vendor_enabled() => {
+                let user = self.principal.user_id.uuid();
+                match crate::vendor::decorate_with_scores(&self.state, user, &mut payload, scores)
+                    .await
+                {
                     Ok(()) => self.params.encode(Response::Payload(payload)),
                     Err(error) => self.params.encode(Response::failed(error)),
                 }

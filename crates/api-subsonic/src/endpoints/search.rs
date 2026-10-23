@@ -175,9 +175,15 @@ pub async fn search3(call: Call) -> Encoded {
     };
     let matches = &collected.matches;
     let database = call.state().database();
+    let query = call.get("query").unwrap_or_default();
+    let mut scores = HashMap::new();
 
     let mut artists = Vec::with_capacity(matches.artists.len() + matches.catalog_artists.len());
     for matched in &matches.artists {
+        scores.insert(
+            matched.artist.id.to_string(),
+            score_of(query, &matched.artist.name, None),
+        );
         artists.push(projection::artist_id3(
             &matched.artist,
             matched.album_count,
@@ -185,38 +191,68 @@ pub async fn search3(call: Call) -> Encoded {
         ));
     }
     for catalog in &matches.catalog_artists {
+        scores.insert(
+            catalog.id.to_string(),
+            score_of(query, &catalog.artist.name, None),
+        );
         artists.push(projection::catalog_artist(catalog, 0, &title_suffix));
     }
 
     let mut albums = Vec::with_capacity(matches.albums.len() + matches.catalog_albums.len());
     for (id, scope) in &matches.albums {
-        let object = match album_object(database, *scope, *id, &annotations).await {
+        let object = match album_object(database, *scope, *id, &annotations, query).await {
             Ok(object) => object,
             Err(error) => {
                 return call.encode(Response::failed(browse::failure("search3", &error)));
             }
         };
-        if let Some(object) = object {
+        if let Some((object, score)) = object {
+            scores.insert(id.to_string(), score);
             albums.push(object);
         }
     }
     for catalog in &matches.catalog_albums {
+        scores.insert(
+            catalog.id.to_string(),
+            score_of(
+                query,
+                &catalog.album.title,
+                catalog
+                    .album
+                    .artists
+                    .first()
+                    .map(|credit| credit.name.as_str()),
+            ),
+        );
         albums.push(projection::catalog_album_ref(catalog, &title_suffix));
     }
 
     let mut songs = Vec::with_capacity(matches.tracks.len() + matches.catalog_tracks.len());
     for (view, scope) in &matches.tracks {
-        let object = match track_object(database, *scope, view.clone(), &annotations).await {
+        let object = match track_object(database, *scope, view.clone(), &annotations, query).await {
             Ok(object) => object,
             Err(error) => {
                 return call.encode(Response::failed(browse::failure("search3", &error)));
             }
         };
-        if let Some(object) = object {
+        if let Some((object, score)) = object {
+            scores.insert(view.track.id.to_string(), score);
             songs.push(object);
         }
     }
     for catalog in &matches.catalog_tracks {
+        scores.insert(
+            catalog.id.to_string(),
+            score_of(
+                query,
+                &catalog.track.title,
+                catalog
+                    .track
+                    .artists
+                    .first()
+                    .map(|credit| credit.name.as_str()),
+            ),
+        );
         songs.push(projection::catalog_child(
             &catalog.id,
             &catalog.track,
@@ -228,8 +264,11 @@ pub async fn search3(call: Call) -> Encoded {
         .set("artist", Array::new(artists))
         .set("album", Array::new(albums))
         .set("song", Array::new(songs));
-    call.respond(Response::ok().member("searchResult3", search_result))
-        .await
+    call.respond_scored(
+        Response::ok().member("searchResult3", search_result),
+        &scores,
+    )
+    .await
 }
 
 /// Answers `search2`: the same matches as `search3`, in the older shape.
@@ -265,31 +304,54 @@ pub async fn search2(call: Call) -> Encoded {
     };
     let matches = &collected.matches;
     let database = call.state().database();
+    let query = call.get("query").unwrap_or_default();
+    let mut scores = HashMap::new();
 
     let mut artists = Vec::with_capacity(matches.artists.len() + matches.catalog_artists.len());
     for matched in &matches.artists {
+        scores.insert(
+            matched.artist.id.to_string(),
+            score_of(query, &matched.artist.name, None),
+        );
         artists.push(projection::starred_artist_ref(
             &matched.artist,
             &annotations.artist(matched.artist.id),
         ));
     }
     for catalog in &matches.catalog_artists {
+        scores.insert(
+            catalog.id.to_string(),
+            score_of(query, &catalog.artist.name, None),
+        );
         artists.push(projection::catalog_artist_ref(catalog));
     }
 
     let mut albums = Vec::with_capacity(matches.albums.len() + matches.catalog_albums.len());
     for (id, scope) in &matches.albums {
-        let object = match album_dir_object(database, *scope, *id, &annotations).await {
+        let object = match album_dir_object(database, *scope, *id, &annotations, query).await {
             Ok(object) => object,
             Err(error) => {
                 return call.encode(Response::failed(browse::failure("search2", &error)));
             }
         };
-        if let Some(object) = object {
+        if let Some((object, score)) = object {
+            scores.insert(id.to_string(), score);
             albums.push(object);
         }
     }
     for catalog in &matches.catalog_albums {
+        scores.insert(
+            catalog.id.to_string(),
+            score_of(
+                query,
+                &catalog.album.title,
+                catalog
+                    .album
+                    .artists
+                    .first()
+                    .map(|credit| credit.name.as_str()),
+            ),
+        );
         albums.push(projection::catalog_album_dir(
             &catalog.id,
             catalog,
@@ -299,17 +361,30 @@ pub async fn search2(call: Call) -> Encoded {
 
     let mut songs = Vec::with_capacity(matches.tracks.len() + matches.catalog_tracks.len());
     for (view, scope) in &matches.tracks {
-        let object = match track_object(database, *scope, view.clone(), &annotations).await {
+        let object = match track_object(database, *scope, view.clone(), &annotations, query).await {
             Ok(object) => object,
             Err(error) => {
                 return call.encode(Response::failed(browse::failure("search2", &error)));
             }
         };
-        if let Some(object) = object {
+        if let Some((object, score)) = object {
+            scores.insert(view.track.id.to_string(), score);
             songs.push(object);
         }
     }
     for catalog in &matches.catalog_tracks {
+        scores.insert(
+            catalog.id.to_string(),
+            score_of(
+                query,
+                &catalog.track.title,
+                catalog
+                    .track
+                    .artists
+                    .first()
+                    .map(|credit| credit.name.as_str()),
+            ),
+        );
         songs.push(projection::catalog_child(
             &catalog.id,
             &catalog.track,
@@ -321,8 +396,11 @@ pub async fn search2(call: Call) -> Encoded {
         .set("artist", Array::new(artists))
         .set("album", Array::new(albums))
         .set("song", Array::new(songs));
-    call.respond(Response::ok().member("searchResult2", search_result))
-        .await
+    call.respond_scored(
+        Response::ok().member("searchResult2", search_result),
+        &scores,
+    )
+    .await
 }
 
 /// Collects the matches of one search request, local first and then catalog.
@@ -775,11 +853,12 @@ async fn local_matches(
 /// - `scope`: the scope to filter by.
 /// - `album_id`: the album to load.
 /// - `annotations`: the user's annotations for the response.
+/// - `query`: the search text the relevance score is measured against.
 ///
 /// # Returns
 ///
-/// The album, or `None` when the album left the scope between the search and
-/// the read.
+/// The album with its relevance score, or `None` when the album left the scope
+/// between the search and the read.
 ///
 /// # Errors
 ///
@@ -789,15 +868,28 @@ async fn album_object(
     scope: Scope,
     album_id: EntityId,
     annotations: &Annotations,
-) -> Result<Option<Object>, LocalSideError> {
+    query: &str,
+) -> Result<Option<(Object, f64)>, LocalSideError> {
     let Some(loaded) = browse::album(database, scope, album_id).await? else {
         return Ok(None);
     };
-    Ok(Some(projection::album_id3(
-        &loaded.detail.album,
-        &loaded.detail.artists,
-        &loaded.detail.tracks,
-        &annotations.album(loaded.detail.album.id),
+    let score = score_of(
+        query,
+        &loaded.detail.album.title,
+        loaded
+            .detail
+            .artists
+            .first()
+            .map(|artist| artist.name.as_str()),
+    );
+    Ok(Some((
+        projection::album_id3(
+            &loaded.detail.album,
+            &loaded.detail.artists,
+            &loaded.detail.tracks,
+            &annotations.album(loaded.detail.album.id),
+        ),
+        score,
     )))
 }
 
@@ -809,11 +901,12 @@ async fn album_object(
 /// - `scope`: the scope to filter by.
 /// - `album_id`: the album to load.
 /// - `annotations`: the user's annotations for the response.
+/// - `query`: the search text the relevance score is measured against.
 ///
 /// # Returns
 ///
-/// The directory child, or `None` when the album left the scope between the
-/// search and the read.
+/// The directory child with its relevance score, or `None` when the album left
+/// the scope between the search and the read.
 ///
 /// # Errors
 ///
@@ -823,15 +916,28 @@ async fn album_dir_object(
     scope: Scope,
     album_id: EntityId,
     annotations: &Annotations,
-) -> Result<Option<Object>, LocalSideError> {
+    query: &str,
+) -> Result<Option<(Object, f64)>, LocalSideError> {
     let Some(loaded) = browse::album(database, scope, album_id).await? else {
         return Ok(None);
     };
-    Ok(Some(projection::album_dir(
-        &loaded.detail.album,
-        &loaded.detail.artists,
-        &loaded.detail.tracks,
-        &annotations.album(loaded.detail.album.id),
+    let score = score_of(
+        query,
+        &loaded.detail.album.title,
+        loaded
+            .detail
+            .artists
+            .first()
+            .map(|artist| artist.name.as_str()),
+    );
+    Ok(Some((
+        projection::album_dir(
+            &loaded.detail.album,
+            &loaded.detail.artists,
+            &loaded.detail.tracks,
+            &annotations.album(loaded.detail.album.id),
+        ),
+        score,
     )))
 }
 
@@ -843,11 +949,12 @@ async fn album_dir_object(
 /// - `scope`: the scope to filter by.
 /// - `view`: the track the local search or listing returned.
 /// - `annotations`: the user's annotations for the response.
+/// - `query`: the search text the relevance score is measured against.
 ///
 /// # Returns
 ///
-/// The song, or `None` when the track left the scope between the search and the
-/// read.
+/// The song with its relevance score, or `None` when the track left the scope
+/// between the search and the read.
 ///
 /// # Errors
 ///
@@ -857,16 +964,44 @@ async fn track_object(
     scope: Scope,
     view: TrackView,
     annotations: &Annotations,
-) -> Result<Option<Object>, LocalSideError> {
+    query: &str,
+) -> Result<Option<(Object, f64)>, LocalSideError> {
     let Some(loaded) = browse::track(database, scope, view.track.id).await? else {
         return Ok(None);
     };
-    Ok(Some(projection::child(
-        &loaded.view,
-        loaded.file.as_ref(),
-        &loaded.album_artists,
-        &annotations.track(loaded.view.track.id),
+    let score = score_of(
+        query,
+        &loaded.view.track.title,
+        loaded
+            .view
+            .artists
+            .first()
+            .map(|artist| artist.name.as_str()),
+    );
+    Ok(Some((
+        projection::child(
+            &loaded.view,
+            loaded.file.as_ref(),
+            &loaded.album_artists,
+            &annotations.track(loaded.view.track.id),
+        ),
+        score,
     )))
+}
+
+/// Scores one result against the query.
+///
+/// # Parameters
+///
+/// - `query`: the text the listener typed.
+/// - `name`: the result's title or name.
+/// - `artist`: its primary artist, when it has one.
+///
+/// # Returns
+///
+/// The relevance, from 0 to 1.
+fn score_of(query: &str, name: &str, artist: Option<&str>) -> f64 {
+    hearthsound_catalog::relevance::relevance(query, name, artist)
 }
 
 /// Reduces a local track to the fields deduplication compares.

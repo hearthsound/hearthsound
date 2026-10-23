@@ -62,6 +62,7 @@ pub mod dedupe;
 mod error;
 mod identity;
 mod materialize;
+pub mod relevance;
 mod service;
 mod wire;
 

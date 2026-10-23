@@ -51,6 +51,36 @@ pub(crate) async fn decorate(
     user: Uuid,
     payload: &mut Object,
 ) -> Result<(), SubsonicError> {
+    decorate_with_scores(state, user, payload, &HashMap::new()).await
+}
+
+/// Appends the `hearthsound` member to every decorable object, with a relevance
+/// score on the objects that have one.
+///
+/// A search response scores each of its results; every other payload passes an
+/// empty map and receives the same members as [`decorate`] builds.
+///
+/// # Parameters
+///
+/// - `state`: the endpoint state, whose database and catalog the reads use.
+/// - `user`: the account the personal state is read for.
+/// - `payload`: the payload to decorate in place.
+/// - `scores`: the relevance of each result, keyed by the id the object
+///   carries; empty when the payload is not a search answer.
+///
+/// # Returns
+///
+/// `Ok(())` once the payload is decorated, or when it holds nothing to decorate.
+///
+/// # Errors
+///
+/// Returns a generic [`SubsonicError`] when a read fails.
+pub(crate) async fn decorate_with_scores(
+    state: &SubsonicState,
+    user: Uuid,
+    payload: &mut Object,
+    scores: &HashMap<String, f64>,
+) -> Result<(), SubsonicError> {
     let mut raw = HashSet::new();
     collect_ids(payload, &mut raw);
     let mut subjects = HashMap::new();
@@ -62,7 +92,7 @@ pub(crate) async fn decorate(
     let mut members = if subjects.is_empty() {
         HashMap::new()
     } else {
-        members_for(state, user, &subjects).await?
+        members_for(state, user, &subjects, scores).await?
     };
     members.extend(playlist_members(state, user, &raw).await?);
     if members.is_empty() {
@@ -311,12 +341,19 @@ async fn members_for(
     state: &SubsonicState,
     user: Uuid,
     subjects: &HashMap<String, Subject>,
+    scores: &HashMap<String, f64>,
 ) -> Result<HashMap<String, Object>, SubsonicError> {
     let facts = facts(state, user, subjects).await?;
     Ok(subjects
         .iter()
         .filter_map(|(raw, subject)| {
-            member_for(&facts, subject).map(|member| (raw.clone(), member))
+            member_for(&facts, subject).map(|member| {
+                let member = match scores.get(raw) {
+                    Some(score) => member.set("score", *score),
+                    None => member,
+                };
+                (raw.clone(), member)
+            })
         })
         .collect())
 }
