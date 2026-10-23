@@ -15,6 +15,7 @@ axum = { workspace = true, features = ["multipart"] }
 data-encoding.workspace = true
 futures-util.workspace = true
 hearthsound-acquire = { path = "../acquire" }
+hearthsound-activity = { path = "../activity" }
 hearthsound-auth = { path = "../auth" }
 hearthsound-config = { path = "../config" }
 hearthsound-core = { path = "../core" }

@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listings, honour `musicFolderId`, and are emitted in both encodings under the
   `hearthsound=1` vendor flag.
 
+- `PUT /api/v1/playlists/{id}/order` rewrites a playlist's order in one request:
+  `order` lists the current zero-based positions in their new order and the
+  server writes them in a single transaction, so a playlist is never read
+  half-reordered. A list that is not a permutation of the playlist's positions
+  is a 400 `invalid-order`, and a playlist owned by another account answers 404
+  `not-found`, exactly as an edit through `updatePlaylist` does.
+
 ### Changed
 
 - Plugins build against `hearthsound:plugin@0.3.0`: the host loads that API

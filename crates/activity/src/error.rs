@@ -51,6 +51,16 @@ pub enum ActivityError {
         max: usize,
     },
 
+    /// A reorder did not list every position of the playlist exactly once.
+    ///
+    /// An order that repeats or omits a position would drop or duplicate an
+    /// entry, so it is refused before anything is written.
+    #[error("a playlist of {len} entries needs every position from 0 to {len} listed once")]
+    InvalidOrder {
+        /// How many entries the playlist holds.
+        len: usize,
+    },
+
     /// A saved play queue names an entry it does not hold.
     #[error("queue index {index} is outside a queue of {len} entries")]
     InvalidQueueIndex {

@@ -2925,6 +2925,80 @@
         ]
       }
     },
+    "/api/v1/playlists/{id}/order": {
+      "put": {
+        "tags": [
+          "playlists"
+        ],
+        "summary": "Rewrites the order of a playlist's entries.",
+        "description": "One request carries the whole new order, so the playlist is never left\nhalf-reordered: every position is written in one transaction, the entries\nkeep the instant they were added, and the playlist's `changed` timestamp\nmoves to now.\n\n# Parameters\n\n- `authed`: the caller, who must own the playlist.\n- `state`: the shared services.\n- `id`: the playlist's client id (`pl_...`).\n- `body`: the new order.\n\n# Returns\n\n`204 No Content` once the order is stored.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `not-found` (404) when the id\nnames no playlist or belongs to another account, `invalid-order` (400) when\n`order` is not a permutation of the playlist's positions, and `internal`\nwhen the write fails.",
+        "operationId": "reorder_playlist",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The playlist's client id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReorderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The playlist is reordered"
+          },
+          "400": {
+            "description": "The order is not a permutation of the playlist's positions",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No playlist with that id belongs to the caller",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/setup": {
       "get": {
         "tags": [
@@ -4704,6 +4778,24 @@
           }
         }
       },
+      "ReorderRequest": {
+        "type": "object",
+        "description": "The new order of a playlist's entries.",
+        "required": [
+          "order"
+        ],
+        "properties": {
+          "order": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "The playlist's current zero-based positions, in their new order: the\nentry at `order[0]` becomes first. It must be a permutation of\n`0..trackCount`."
+          }
+        }
+      },
       "RepositoryList": {
         "type": "object",
         "description": "The registered plugin repositories, by URL.",
@@ -5520,6 +5612,10 @@
     {
       "name": "me",
       "description": "The caller's own credentials and settings"
+    },
+    {
+      "name": "playlists",
+      "description": "The caller's own playlists"
     },
     {
       "name": "admin",

@@ -658,6 +658,7 @@ impl Services {
             trusted_proxies: self.trusted_proxies.clone(),
             registry: Arc::clone(&self.registry),
             orchestrator: Arc::clone(&self.orchestrator),
+            activity: Arc::clone(&self.activity),
             maintainer: Arc::clone(&self.maintainer),
             uploads: self.uploads.clone(),
             uploads_staging: self.config.paths.uploads_staging.clone(),

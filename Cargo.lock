@@ -1632,6 +1632,7 @@ dependencies = [
  "data-encoding",
  "futures-util",
  "hearthsound-acquire",
+ "hearthsound-activity",
  "hearthsound-auth",
  "hearthsound-config",
  "hearthsound-core",

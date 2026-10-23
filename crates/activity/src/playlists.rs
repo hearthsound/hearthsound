@@ -318,7 +318,87 @@ impl Playlists {
         Ok(playlist)
     }
 
-    /// Applies an edit to a playlist.
+    /// Reorders a playlist's entries.
+    ///
+    /// `order` lists the playlist's current zero-based positions in their new
+    /// order: the entry at position `order[0]` becomes first, the entry at
+    /// position `order[1]` second, and so on. It must be a permutation of
+    /// `0..len`, because any other list would drop or duplicate an entry; the
+    /// entries keep the instant they were added and every position is written
+    /// in one transaction, so a reader never sees a playlist twice in a row.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the playlist to reorder.
+    /// - `editor`: the account making the change; it must own the playlist.
+    /// - `order`: the current positions, in their new order.
+    ///
+    /// # Returns
+    ///
+    /// The playlist, with its entries in the new order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActivityError::UnknownPlaylist`] when no playlist has that id,
+    /// [`ActivityError::NotOwner`] when `editor` does not own it,
+    /// [`ActivityError::InvalidOrder`] when `order` is not a permutation of
+    /// `0..len`, and [`ActivityError::Database`] when a write fails.
+    pub async fn reorder(
+        &self,
+        id: EntityId,
+        editor: Uuid,
+        order: &[usize],
+    ) -> Result<Playlist, ActivityError> {
+        let mut tx = self.writer.begin_with(crate::READ_THEN_WRITE).await?;
+        let mut playlist = load_or_unknown(&mut tx, id).await?;
+        check_owner(&playlist, editor)?;
+        let len = playlist.entries.len();
+        if order.len() != len || !is_permutation(order, len) {
+            return Err(ActivityError::InvalidOrder { len });
+        }
+        let now = now_millis();
+        // Every position moves out of the range the final positions occupy
+        // before any of them is set, so the first primary key is never taken
+        // by a row that has not moved yet.
+        sqlx::query!(
+            "UPDATE playlist_tracks SET position = position + ? WHERE playlist_id = ?",
+            len as i64,
+            entity_key(id),
+        )
+        .execute(&mut *tx)
+        .await?;
+        for (position, old) in order.iter().enumerate() {
+            sqlx::query!(
+                "UPDATE playlist_tracks SET position = ? WHERE playlist_id = ? AND position = ?",
+                position as i64,
+                entity_key(id),
+                (*old as i64) + len as i64,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query!(
+            "UPDATE playlists SET updated_at = ? WHERE id = ?",
+            now,
+            entity_key(id),
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        self.signal.notify();
+        playlist.updated_at = now;
+        playlist.entries = order
+            .iter()
+            .enumerate()
+            .map(|(position, old)| {
+                let mut entry = playlist.entries[*old];
+                entry.position = position as i64;
+                entry
+            })
+            .collect();
+        Ok(playlist)
+    }
+
     ///
     /// The removals are applied first, against the order the playlist had
     /// before the edit, and the additions are appended after them.
@@ -771,6 +851,27 @@ fn check_owner(playlist: &Playlist, editor: Uuid) -> Result<(), ActivityError> {
         });
     }
     Ok(())
+}
+
+/// Reports whether a reorder lists every position of a playlist exactly once.
+///
+/// # Parameters
+///
+/// - `order`: the positions the caller listed, in their new order.
+/// - `len`: how many entries the playlist holds.
+///
+/// # Returns
+///
+/// `true` when `order` holds every value from `0` to `len` exactly once.
+fn is_permutation(order: &[usize], len: usize) -> bool {
+    let mut seen = vec![false; len];
+    for position in order {
+        if *position >= len || seen[*position] {
+            return false;
+        }
+        seen[*position] = true;
+    }
+    true
 }
 
 /// Returns the tracks whose membership changes between two entry lists.

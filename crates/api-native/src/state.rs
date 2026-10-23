@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use hearthsound_acquire::orchestrator::AcquisitionOrchestrator;
+use hearthsound_activity::ActivityService;
 use hearthsound_auth::{
     ApiKeys, AppPasswords, Authenticator, Quotas, Sessions, SetupGate, TrustedProxies,
     UserSettings, Users,
@@ -54,6 +55,9 @@ pub struct NativeServices {
     pub registry: Arc<ProviderRegistry>,
     /// The acquisition orchestrator.
     pub orchestrator: Arc<AcquisitionOrchestrator>,
+    /// The activity service: the repositories the caller's own playlists and
+    /// play history are read and written through.
+    pub activity: Arc<ActivityService>,
     /// The storage maintainer.
     pub maintainer: Arc<StorageMaintainer>,
     /// The upload ingest.
@@ -159,6 +163,14 @@ impl NativeState {
     /// Returns the settings service.
     pub fn settings(&self) -> &Settings {
         &self.inner.services.settings
+    }
+
+    /// Returns the activity service.
+    ///
+    /// The playlist routes read and write the caller's own playlists through
+    /// it, so a playlist edited here is the one `/rest/getPlaylist` answers.
+    pub fn activity(&self) -> &ActivityService {
+        &self.inner.services.activity
     }
 
     /// Returns the credential resolver.

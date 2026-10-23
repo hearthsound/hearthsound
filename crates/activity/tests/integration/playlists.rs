@@ -448,3 +448,75 @@ async fn the_expiry_job_deletes_what_has_passed() {
         .unwrap();
     assert!(playlist.get(created.id, user).await.unwrap().is_none());
 }
+
+/// A reorder writes every position in the requested order, and a list that is
+/// not a permutation of the playlist's positions is refused without writing.
+#[tokio::test]
+async fn reordering_rewrites_the_positions_and_refuses_a_bad_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let playlist = Playlists::new(&database);
+    let (owner, other) = (insert_user(&database).await, insert_user(&database).await);
+    let (album, tracks) = insert_album(&library).await;
+    let third = insert_track(&library, album, "Third", 3).await;
+    let ids = entities(&[tracks[0], tracks[1], third]);
+    let created = playlist
+        .create(owner, "Evening", None, false, &ids)
+        .await
+        .unwrap();
+    let added_at: Vec<i64> = created.entries.iter().map(|entry| entry.added_at).collect();
+
+    let reordered = playlist
+        .reorder(created.id, owner, &[2, 0, 1])
+        .await
+        .unwrap();
+    assert_eq!(order(&reordered, &ids), [2, 0, 1]);
+    assert_eq!(
+        reordered
+            .entries
+            .iter()
+            .map(|entry| entry.position)
+            .collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    assert_eq!(
+        reordered
+            .entries
+            .iter()
+            .map(|entry| entry.added_at)
+            .collect::<Vec<_>>(),
+        [added_at[2], added_at[0], added_at[1]],
+        "a reorder keeps the instant each entry was added"
+    );
+
+    let stored = playlist.get(created.id, owner).await.unwrap().unwrap();
+    assert_eq!(order(&stored, &ids), [2, 0, 1], "the rows were rewritten");
+
+    // Every entry stays pinned; a reorder changes no membership.
+    for track in &ids {
+        assert!(is_pinned(&library, track.uuid()).await);
+    }
+
+    for bad in [vec![0, 0, 1], vec![0, 1], vec![0, 1, 3]] {
+        assert!(matches!(
+            playlist.reorder(created.id, owner, &bad).await.unwrap_err(),
+            ActivityError::InvalidOrder { len: 3 }
+        ));
+    }
+    assert!(matches!(
+        playlist
+            .reorder(created.id, other, &[0, 1, 2])
+            .await
+            .unwrap_err(),
+        ActivityError::NotOwner { .. }
+    ));
+    assert_eq!(
+        order(
+            &playlist.get(created.id, owner).await.unwrap().unwrap(),
+            &ids
+        ),
+        [2, 0, 1],
+        "a refused reorder leaves the playlist as it was"
+    );
+}

@@ -29,6 +29,7 @@
 //! | `GET`/`POST /api/v1/me/api-keys`, `DELETE /api/v1/me/api-keys/{id}` | any user, own keys |
 //! | `GET`/`POST /api/v1/me/app-passwords`, `DELETE /api/v1/me/app-passwords/{id}` | any user, own app passwords |
 //! | `GET`/`PATCH /api/v1/me/settings` | any user, own overrides |
+//! | `PUT /api/v1/playlists/{id}/order` | any user, own playlist |
 //! | `GET`/`POST /api/v1/admin/users`, `GET`/`PATCH /api/v1/admin/users/{id}` | administrators |
 //! | `GET`/`POST /api/v1/admin/folders`, `PATCH /api/v1/admin/folders/{id}`, `POST /api/v1/admin/folders/{id}/scan` | administrators |
 //! | `GET`/`PATCH /api/v1/admin/settings` | administrators |
@@ -84,6 +85,7 @@ pub const OPENAPI_PATH: &str = "/api/v1/openapi.json";
         (name = "system", description = "What the server is and offers"),
         (name = "auth", description = "Web sessions"),
         (name = "me", description = "The caller's own credentials and settings"),
+        (name = "playlists", description = "The caller's own playlists"),
         (name = "admin", description = "Server administration"),
         (name = "uploads", description = "Audio files sent into the caller's library"),
         (name = "events", description = "The server event stream"),
@@ -197,6 +199,7 @@ fn api_router() -> OpenApiRouter<NativeState> {
         .routes(routes!(routes::events::create_ticket))
         .routes(routes!(routes::events::stream))
         .routes(routes!(routes::library::collection_queue))
+        .routes(routes!(routes::playlists::reorder_playlist))
         .merge(
             // The upload routes alone lift axum's 2 MB multipart body limit:
             // the limit is per router and the JSON routes keep theirs.

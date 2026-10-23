@@ -202,6 +202,16 @@ impl Problem {
         )
     }
 
+    /// A playlist reorder did not list every position exactly once.
+    pub fn invalid_order(detail: impl Into<String>) -> Problem {
+        Problem::new(
+            StatusCode::BAD_REQUEST,
+            "invalid-order",
+            "Invalid playlist order",
+            detail,
+        )
+    }
+
     /// The request contradicts the current state.
     pub fn conflict(detail: impl Into<String>) -> Problem {
         Problem::new(StatusCode::CONFLICT, "conflict", "Conflict", detail)
