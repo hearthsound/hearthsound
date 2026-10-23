@@ -2999,6 +2999,87 @@
         ]
       }
     },
+    "/api/v1/playlists/{id}/tracks": {
+      "post": {
+        "tags": [
+          "playlists"
+        ],
+        "summary": "Appends a whole album, playlist or artist to a playlist.",
+        "description": "The source is resolved exactly as `GET /api/v1/library/queue` resolves it:\nthrough the caller's personal library, in the collection's own order. A\ncatalog album id is materialized first, which is what an album result of a\nsearch carries, and its whole tracklist is appended in provider order.\n\nThe edit applies the same playlist pin and the same\n`library.acquire_on_playlist_add` step as an edit through `updatePlaylist`,\nso a missing track that a user keeps in a playlist is acquired at priority\n`queue`.\n\n# Parameters\n\n- `authed`: the caller, who must own the playlist.\n- `state`: the shared services.\n- `id`: the playlist's client id (`pl_...`).\n- `body`: the collection to append.\n\n# Returns\n\nHow many tracks were appended and how many the playlist holds afterwards.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `not-found` (404) when the\nplaylist, album, playlist source or artist is unknown or outside the\ncaller's library, `unknown-source` (400) for a source this route does not\naccept, and `internal` when a read, materialization or write fails.",
+        "operationId": "add_playlist_tracks",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The playlist's client id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddTracksRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The tracks the request appended and the playlist's size",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AddTracksView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The source is not one this route accepts",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The playlist, or a collection in the source, is unknown to the caller",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/setup": {
       "get": {
         "tags": [
@@ -3337,6 +3418,39 @@
             "type": "integer",
             "format": "int64",
             "description": "When the acquisition last changed, in unix milliseconds."
+          }
+        }
+      },
+      "AddTracksRequest": {
+        "type": "object",
+        "description": "The collection whose tracks a request adds to a playlist.",
+        "required": [
+          "source"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "description": "The collection to append: `album:<id>`, `playlist:<id>` or\n`artist:<id>`. An album id may be a stored album or a catalog album\n(`x_<slug>_a_<id>`), which is stored first."
+          }
+        }
+      },
+      "AddTracksView": {
+        "type": "object",
+        "description": "What one add-to-playlist request appended.",
+        "required": [
+          "added",
+          "trackCount"
+        ],
+        "properties": {
+          "added": {
+            "type": "integer",
+            "description": "How many tracks the request appended.",
+            "minimum": 0
+          },
+          "trackCount": {
+            "type": "integer",
+            "description": "How many tracks the playlist holds afterwards.",
+            "minimum": 0
           }
         }
       },

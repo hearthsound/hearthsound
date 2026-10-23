@@ -92,6 +92,57 @@ pub struct MaterializedAlbum {
     pub tracks: Vec<EntityId>,
 }
 
+/// Materializes one catalog id of any of the three materializable kinds.
+///
+/// A client that names a catalog entity only knows the kind its id encodes, so
+/// the caller that turns such an id into a stored row - a playlist edit, a
+/// save, a like - dispatches on it here instead of repeating the match. An
+/// album is materialized with its whole tracklist, which keeps the provider's
+/// track order.
+///
+/// # Parameters
+///
+/// - `catalog`: the catalog layer to materialize through.
+/// - `id`: the catalog id to store.
+///
+/// # Returns
+///
+/// The stored entity's row: the track, the album, or the artist.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::NotFound`] when the id names neither a track, an
+/// album nor an artist, and the errors of [`CatalogService::materialize_track`],
+/// [`CatalogService::materialize_album`] and
+/// [`CatalogService::materialize_artist`] otherwise.
+///
+/// # Examples
+///
+/// ```no_run
+/// # async fn example(
+/// #     catalog: &hearthsound_catalog::CatalogService,
+/// #     id: &hearthsound_core::CatalogId,
+/// # ) -> Result<(), hearthsound_catalog::CatalogError> {
+/// let stored = hearthsound_catalog::materialize_entity(catalog, id).await?;
+/// println!("{}", stored);
+/// # Ok(())
+/// # }
+/// ```
+pub async fn materialize_entity(
+    catalog: &CatalogService,
+    id: &CatalogId,
+) -> Result<EntityId, CatalogError> {
+    match id.kind() {
+        EntityKind::Track => catalog.materialize_track(id).await,
+        EntityKind::Album => catalog
+            .materialize_album(id)
+            .await
+            .map(|materialized| materialized.album),
+        EntityKind::Artist => catalog.materialize_artist(id).await,
+        _ => Err(CatalogError::NotFound),
+    }
+}
+
 impl CatalogService {
     /// Materializes one catalog track.
     ///

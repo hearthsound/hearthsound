@@ -151,7 +151,7 @@ pub struct QueueView {
 ///
 /// Answers `unknown-source` when the name is not one of the listed sources, and
 /// `not-found` when a prefixed source does not carry a valid id of its kind.
-fn collection_of(source: &str) -> Result<QueueCollection, Problem> {
+pub(crate) fn collection_of(source: &str) -> Result<QueueCollection, Problem> {
     match source {
         SOURCE_SONGS => Ok(QueueCollection::Songs),
         SOURCE_LIKED => Ok(QueueCollection::Liked),
@@ -203,7 +203,7 @@ fn entity(value: &str, prefix: IdPrefix) -> Result<EntityId, Problem> {
 /// # Returns
 ///
 /// The `unknown-source` problem.
-fn unknown_source(source: &str) -> Problem {
+pub(crate) fn unknown_source(source: &str) -> Problem {
     Problem::unknown_source(format!(
         "`{source}` is not a queue source; expected `songs`, `liked`, `uploads`, \
          `playlist:<id>`, `album:<id>`, `artist:<id>` or `artist-top:<id>`."
@@ -219,7 +219,7 @@ fn unknown_source(source: &str) -> Problem {
 /// # Returns
 ///
 /// The `not-found` problem.
-fn missing(collection: QueueCollection) -> Problem {
+pub(crate) fn missing(collection: QueueCollection) -> Problem {
     match collection {
         QueueCollection::Playlist(_) => {
             Problem::not_found("No playlist with that id is visible to this account.")

@@ -342,16 +342,7 @@ fn kind_of(prefix: IdPrefix) -> Option<(EntityKind, IdPrefix)> {
 /// generic error carrying the catalog's message when it cannot be stored.
 async fn materialize(call: &Call, id: &CatalogId) -> Result<Uuid, SubsonicError> {
     let catalog = call.state().catalog();
-    let stored = match id.kind() {
-        EntityKind::Track => catalog.materialize_track(id).await,
-        EntityKind::Album => catalog
-            .materialize_album(id)
-            .await
-            .map(|materialized| materialized.album),
-        EntityKind::Artist => catalog.materialize_artist(id).await,
-        _ => return Err(SubsonicError::not_found()),
-    };
-    match stored {
+    match hearthsound_catalog::materialize_entity(catalog, id).await {
         Ok(stored) => Ok(stored.uuid()),
         Err(error) => Err(catalog::failure(&error)),
     }

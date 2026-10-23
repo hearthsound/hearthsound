@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use crate::common::Fixture;
 use crate::multi_user::create_user;
 use crate::native::json as read_json;
+use crate::on_demand::{catalog_album_id, install_catalog};
 
 /// Inserts an album with `count` tracks and returns the track ids in order.
 ///
@@ -169,5 +170,229 @@ async fn another_account_cannot_reorder_a_playlist() {
         subsonic_order(&fixture, &playlist).await,
         [ids[0].clone(), ids[1].clone(), ids[2].clone()]
     );
+    fixture.stop().await;
+}
+
+/// Saves a track to the test account's personal library.
+///
+/// # Parameters
+///
+/// - `fixture`: the running server.
+/// - `track`: the track to save.
+async fn save(fixture: &Fixture, track: EntityId) {
+    sqlx::query(
+        "INSERT INTO user_library (user_id, entity_kind, entity_id, origin, added_at) \
+         VALUES (?, 'track', ?, 'saved', 0)",
+    )
+    .bind(fixture.user_id.as_bytes().as_slice())
+    .bind(track.uuid().as_bytes().as_slice())
+    .execute(fixture.services.database().writer())
+    .await
+    .unwrap();
+}
+
+/// Sends an add-to-playlist request and returns the response.
+async fn add_tracks(
+    fixture: &Fixture,
+    api_key: &str,
+    playlist: &str,
+    source: &str,
+) -> reqwest::Response {
+    fixture
+        .client
+        .post(format!(
+            "{}/api/v1/playlists/{playlist}/tracks",
+            fixture.base_url()
+        ))
+        .header(AUTHORIZATION, format!("Bearer {api_key}"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(json!({ "source": source }).to_string())
+        .send()
+        .await
+        .unwrap()
+}
+
+/// A catalog album is materialized and appended with its whole tracklist.
+#[tokio::test]
+async fn adding_a_catalog_album_materializes_it() {
+    let fixture = Fixture::new().await;
+    install_catalog(&fixture.services).await;
+    fixture.services.registry().rebuild().await.unwrap();
+    let album = catalog_album_id(&fixture).await;
+    let playlist = create_playlist(&fixture, &[]).await;
+
+    let response = add_tracks(
+        &fixture,
+        &fixture.api_key,
+        &playlist,
+        &format!("album:{album}"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = read_json(response).await;
+    assert_eq!(body["added"], 5, "{body}");
+    assert_eq!(body["trackCount"], 5, "{body}");
+    assert_eq!(subsonic_order(&fixture, &playlist).await.len(), 5);
+    fixture.stop().await;
+}
+
+/// An album source appends every track of the album in album order.
+#[tokio::test]
+async fn adding_an_album_appends_every_track_in_album_order() {
+    let fixture = Fixture::new().await;
+    let library = LibraryRepository::new(fixture.services.database());
+    let tracks = seed_tracks(&library, 3).await;
+    let album = library
+        .get_track(tracks[0])
+        .await
+        .unwrap()
+        .unwrap()
+        .album_id;
+    let album = album.unwrap();
+    // The queue reads an album through the personal scope, and a saved track
+    // is what puts the album there.
+    save(&fixture, tracks[0]).await;
+    let playlist = create_playlist(&fixture, &[]).await;
+
+    let response = add_tracks(
+        &fixture,
+        &fixture.api_key,
+        &playlist,
+        &format!("album:{album}"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = read_json(response).await;
+    assert_eq!(body["added"], 3, "{body}");
+    assert_eq!(body["trackCount"], 3, "{body}");
+
+    let ids: Vec<String> = tracks.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        subsonic_order(&fixture, &playlist).await,
+        [ids[0].clone(), ids[1].clone(), ids[2].clone()]
+    );
+    fixture.stop().await;
+}
+
+/// A playlist source appends its tracks in the playlist's own order.
+#[tokio::test]
+async fn adding_a_playlist_appends_its_tracks_in_order() {
+    let fixture = Fixture::new().await;
+    let tracks = seed_tracks(&LibraryRepository::new(fixture.services.database()), 3).await;
+    let source = create_playlist(&fixture, &[tracks[2], tracks[0]]).await;
+    let target = create_playlist(&fixture, &[]).await;
+
+    let response = add_tracks(
+        &fixture,
+        &fixture.api_key,
+        &target,
+        &format!("playlist:{source}"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = read_json(response).await;
+    assert_eq!(body["added"], 2, "{body}");
+    assert_eq!(body["trackCount"], 2, "{body}");
+
+    assert_eq!(
+        subsonic_order(&fixture, &target).await,
+        [tracks[2].to_string(), tracks[0].to_string()]
+    );
+    fixture.stop().await;
+}
+
+/// An artist source appends the artist's tracks from the personal scope.
+#[tokio::test]
+async fn adding_an_artist_appends_its_tracks() {
+    let fixture = Fixture::new().await;
+    let library = LibraryRepository::new(fixture.services.database());
+    let tracks = seed_tracks(&library, 3).await;
+    let album = library
+        .get_track(tracks[0])
+        .await
+        .unwrap()
+        .unwrap()
+        .album_id;
+    let artists = library.list_album_artists(album.unwrap()).await.unwrap();
+    let artist = artists[0].id;
+    for track in &tracks {
+        save(&fixture, *track).await;
+    }
+    let playlist = create_playlist(&fixture, &[]).await;
+
+    let response = add_tracks(
+        &fixture,
+        &fixture.api_key,
+        &playlist,
+        &format!("artist:{artist}"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = read_json(response).await;
+    assert_eq!(body["added"], 3, "{body}");
+    assert_eq!(body["trackCount"], 3, "{body}");
+    assert_eq!(subsonic_order(&fixture, &playlist).await.len(), 3);
+    fixture.stop().await;
+}
+
+/// `songs`, `liked`, `uploads` and `artist-top:` are not sources this route
+/// accepts, and an unknown collection is a 404.
+#[tokio::test]
+async fn adding_a_source_this_route_does_not_accept_is_refused() {
+    let fixture = Fixture::new().await;
+    let tracks = seed_tracks(&LibraryRepository::new(fixture.services.database()), 1).await;
+    let playlist = create_playlist(&fixture, &[]).await;
+
+    let library = LibraryRepository::new(fixture.services.database());
+    let album = library
+        .get_track(tracks[0])
+        .await
+        .unwrap()
+        .unwrap()
+        .album_id;
+    let artist = library.list_album_artists(album.unwrap()).await.unwrap()[0].id;
+    for source in [
+        "songs".to_owned(),
+        "liked".to_owned(),
+        "uploads".to_owned(),
+        format!("artist-top:{artist}"),
+    ] {
+        let response = add_tracks(&fixture, &fixture.api_key, &playlist, &source).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{source}");
+        let body: Value = read_json(response).await;
+        assert_eq!(body["code"], "unknown-source", "{source}: {body}");
+    }
+
+    let missing = add_tracks(
+        &fixture,
+        &fixture.api_key,
+        &playlist,
+        &format!("album:{}", tracks[0]),
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let body: Value = read_json(missing).await;
+    assert_eq!(body["code"], "not-found", "{body}");
+    fixture.stop().await;
+}
+
+/// Another account cannot add tracks to a playlist it does not own.
+#[tokio::test]
+async fn another_account_cannot_add_tracks_to_a_playlist() {
+    let fixture = Fixture::new().await;
+    let playlist = create_playlist(&fixture, &[]).await;
+    let (_, other_key) = create_user(&fixture, "adder", false).await;
+
+    let response = add_tracks(
+        &fixture,
+        &other_key,
+        &playlist,
+        &format!("playlist:{playlist}"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: Value = read_json(response).await;
+    assert_eq!(body["code"], "not-found", "{body}");
+    assert_eq!(subsonic_order(&fixture, &playlist).await.len(), 0);
     fixture.stop().await;
 }

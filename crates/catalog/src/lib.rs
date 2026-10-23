@@ -70,7 +70,7 @@ pub use cache::{ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
 pub use dedupe::{DURATION_TOLERANCE_MS, DedupedCatalog, LocalTrackHit, MaterializedEntity};
 pub use error::CatalogError;
 pub use identity::{IDENTITY_MATCH_THRESHOLD, IdentityRequest, ResolvedRecording};
-pub use materialize::{MaterializedAlbum, ProviderAlias};
+pub use materialize::{MaterializedAlbum, ProviderAlias, materialize_entity};
 pub use service::{
     CatalogAlbumRefResult, CatalogAlbumResult, CatalogArtistResult, CatalogSearch, CatalogService,
     CatalogTrackResult,

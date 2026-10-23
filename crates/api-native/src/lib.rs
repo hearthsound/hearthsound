@@ -30,6 +30,7 @@
 //! | `GET`/`POST /api/v1/me/app-passwords`, `DELETE /api/v1/me/app-passwords/{id}` | any user, own app passwords |
 //! | `GET`/`PATCH /api/v1/me/settings` | any user, own overrides |
 //! | `PUT /api/v1/playlists/{id}/order` | any user, own playlist |
+//! | `POST /api/v1/playlists/{id}/tracks` | any user, own playlist |
 //! | `GET`/`POST /api/v1/admin/users`, `GET`/`PATCH /api/v1/admin/users/{id}` | administrators |
 //! | `GET`/`POST /api/v1/admin/folders`, `PATCH /api/v1/admin/folders/{id}`, `POST /api/v1/admin/folders/{id}/scan` | administrators |
 //! | `GET`/`PATCH /api/v1/admin/settings` | administrators |
@@ -200,6 +201,7 @@ fn api_router() -> OpenApiRouter<NativeState> {
         .routes(routes!(routes::events::stream))
         .routes(routes!(routes::library::collection_queue))
         .routes(routes!(routes::playlists::reorder_playlist))
+        .routes(routes!(routes::playlists::add_playlist_tracks))
         .merge(
             // The upload routes alone lift axum's 2 MB multipart body limit:
             // the limit is per router and the JSON routes keep theirs.

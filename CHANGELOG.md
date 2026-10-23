@@ -40,6 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is a 400 `invalid-order`, and a playlist owned by another account answers 404
   `not-found`, exactly as an edit through `updatePlaylist` does.
 
+- `POST /api/v1/playlists/{id}/tracks` appends a whole album, playlist or
+  artist to a playlist in one request. `{"source": "album:<id>"}`,
+  `"playlist:<id>"` and `"artist:<id>"` are resolved through the caller's
+  personal library exactly as the queue endpoint resolves them, a catalog album
+  id is stored with its whole tracklist first, and the tracks are appended in
+  the collection's own order. The answer reports `added` and `trackCount`, and
+  `library.acquire_on_playlist_add` applies as it does to an edit through
+  `updatePlaylist`.
+
 ### Changed
 
 - Plugins build against `hearthsound:plugin@0.3.0`: the host loads that API

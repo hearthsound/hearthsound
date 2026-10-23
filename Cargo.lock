@@ -1634,6 +1634,7 @@ dependencies = [
  "hearthsound-acquire",
  "hearthsound-activity",
  "hearthsound-auth",
+ "hearthsound-catalog",
  "hearthsound-config",
  "hearthsound-core",
  "hearthsound-db",

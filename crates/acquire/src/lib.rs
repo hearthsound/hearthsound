@@ -46,6 +46,7 @@ pub mod download;
 pub mod normalize;
 pub mod orchestrator;
 pub mod path;
+pub mod playlist_add;
 pub mod prefetch;
 pub mod profile;
 pub mod repo;

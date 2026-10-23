@@ -10,18 +10,25 @@
 //! leaves the playlist pin of each affected track to the activity layer, which
 //! refreshes it in the same transaction as the write.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use hearthsound_activity::ActivityError;
+use hearthsound_acquire::playlist_add::acquire_playlist_additions;
+use hearthsound_activity::{ActivityError, PlaylistUpdate};
+use hearthsound_catalog::CatalogError;
 use hearthsound_core::EntityId;
 use hearthsound_core::IdPrefix;
 use hearthsound_core::events::{PlaylistChanged, ServerEvent};
-use serde::Deserialize;
+use hearthsound_core::{ClientId, EntityKind};
+use hearthsound_library::query::{self, QueueCollection};
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 use crate::auth::Authed;
 use crate::extract::JsonBody;
 use crate::problem::{self, Problem};
+use crate::routes::library;
 use crate::state::NativeState;
 use crate::views::parse_id;
 
@@ -99,7 +106,7 @@ pub async fn reorder_playlist(
     playlists
         .reorder(id, user, &order)
         .await
-        .map_err(|error| reorder_problem(&error))?;
+        .map_err(|error| edit_problem(&error, "reordering a playlist"))?;
     state
         .services()
         .events
@@ -108,6 +115,197 @@ pub async fn reorder_playlist(
             change: "reordered".to_owned(),
         }));
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The collection whose tracks a request adds to a playlist.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AddTracksRequest {
+    /// The collection to append: `album:<id>`, `playlist:<id>` or
+    /// `artist:<id>`. An album id may be a stored album or a catalog album
+    /// (`x_<slug>_a_<id>`), which is stored first.
+    pub source: String,
+}
+
+/// What one add-to-playlist request appended.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AddTracksView {
+    /// How many tracks the request appended.
+    pub added: usize,
+    /// How many tracks the playlist holds afterwards.
+    pub track_count: usize,
+}
+
+/// Appends a whole album, playlist or artist to a playlist.
+///
+/// The source is resolved exactly as `GET /api/v1/library/queue` resolves it:
+/// through the caller's personal library, in the collection's own order. A
+/// catalog album id is materialized first, which is what an album result of a
+/// search carries, and its whole tracklist is appended in provider order.
+///
+/// The edit applies the same playlist pin and the same
+/// `library.acquire_on_playlist_add` step as an edit through `updatePlaylist`,
+/// so a missing track that a user keeps in a playlist is acquired at priority
+/// `queue`.
+///
+/// # Parameters
+///
+/// - `authed`: the caller, who must own the playlist.
+/// - `state`: the shared services.
+/// - `id`: the playlist's client id (`pl_...`).
+/// - `body`: the collection to append.
+///
+/// # Returns
+///
+/// How many tracks were appended and how many the playlist holds afterwards.
+///
+/// # Errors
+///
+/// Answers `unauthenticated` without credentials, `not-found` (404) when the
+/// playlist, album, playlist source or artist is unknown or outside the
+/// caller's library, `unknown-source` (400) for a source this route does not
+/// accept, and `internal` when a read, materialization or write fails.
+#[utoipa::path(
+    post,
+    path = "/api/v1/playlists/{id}/tracks",
+    tag = "playlists",
+    params(("id" = String, Path, description = "The playlist's client id")),
+    request_body = AddTracksRequest,
+    responses(
+        (status = 200, description = "The tracks the request appended and the playlist's size", body = AddTracksView),
+        (status = 400, description = "The source is not one this route accepts", body = Problem, content_type = "application/problem+json"),
+        (status = 401, description = "No valid credential", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "The playlist, or a collection in the source, is unknown to the caller", body = Problem, content_type = "application/problem+json"),
+    ),
+    security(("bearer" = []), ("session" = []))
+)]
+pub async fn add_playlist_tracks(
+    authed: Authed,
+    State(state): State<NativeState>,
+    Path(id): Path<String>,
+    JsonBody(body): JsonBody<AddTracksRequest>,
+) -> Result<Json<AddTracksView>, Problem> {
+    let id = parse_id(&id, IdPrefix::Playlist)?;
+    let id = EntityId::from_uuid(IdPrefix::Playlist, id);
+    let user = authed.user_id();
+    let playlists = state.activity().playlists();
+    let playlist = playlists
+        .get(id, user)
+        .await
+        .map_err(|error| problem::internal("reading a playlist", &error))?
+        .ok_or_else(missing)?;
+    if playlist.owner_user_id != user {
+        return Err(missing());
+    }
+    let tracks = source_tracks(&state, user, &body.source).await?;
+    let playlist = playlists
+        .update(
+            id,
+            user,
+            &PlaylistUpdate {
+                add: tracks.clone(),
+                ..PlaylistUpdate::default()
+            },
+        )
+        .await
+        .map_err(|error| edit_problem(&error, "adding tracks to a playlist"))?;
+    acquire_playlist_additions(
+        Some(state.services().orchestrator.as_ref()),
+        user,
+        authed.principal.can_acquire,
+        &tracks,
+    )
+    .await;
+    state
+        .services()
+        .events
+        .publish(ServerEvent::PlaylistChanged(PlaylistChanged {
+            playlist_id: id.to_string(),
+            change: "tracks-added".to_owned(),
+        }));
+    Ok(Json(AddTracksView {
+        added: tracks.len(),
+        track_count: playlist.entries.len(),
+    }))
+}
+
+/// Reads the tracks of the collection a source names, in the source's order.
+///
+/// # Parameters
+///
+/// - `state`: the shared services.
+/// - `user`: the account whose personal library the collection is read from.
+/// - `source`: the source the request named.
+///
+/// # Returns
+///
+/// The tracks, in the collection's own order.
+///
+/// # Errors
+///
+/// Answers `unknown-source` (400) for a source this route does not accept, and
+/// `not-found` (404) for a collection that is unknown or outside the caller's
+/// library.
+async fn source_tracks(
+    state: &NativeState,
+    user: Uuid,
+    source: &str,
+) -> Result<Vec<EntityId>, Problem> {
+    if let Some(value) = source.strip_prefix("album:")
+        && let Ok(ClientId::Catalog(catalog)) = ClientId::parse(value)
+        && catalog.kind() == EntityKind::Album
+    {
+        return state
+            .services()
+            .orchestrator
+            .catalog()
+            .materialize_album(&catalog)
+            .await
+            .map(|materialized| materialized.tracks)
+            .map_err(|error| catalog_problem(&error));
+    }
+    let collection = library::collection_of(source)?;
+    match collection {
+        QueueCollection::Songs
+        | QueueCollection::Liked
+        | QueueCollection::Uploads
+        | QueueCollection::ArtistTop(_) => Err(library::unknown_source(source)),
+        _ => {
+            let mut conn = state
+                .database()
+                .readers()
+                .acquire()
+                .await
+                .map_err(|error| {
+                    problem::internal("acquiring a reader for a playlist source", &error)
+                })?;
+            let items = query::queue(&mut conn, user, collection)
+                .await
+                .map_err(|error| problem::internal("reading a playlist source", &error))?
+                .ok_or_else(|| library::missing(collection))?;
+            Ok(items.into_iter().map(|item| item.track_id).collect())
+        }
+    }
+}
+
+/// Maps a catalog failure onto the problem document the route answers.
+///
+/// # Parameters
+///
+/// - `error`: the failure the catalog layer reported.
+///
+/// # Returns
+///
+/// `not-found` when the id names no entity the catalog knows, and `internal`
+/// for anything else.
+fn catalog_problem(error: &CatalogError) -> Problem {
+    match error {
+        CatalogError::NotFound => {
+            Problem::not_found("No album with that id is known to the catalog.")
+        }
+        other => problem::internal("materializing a catalog album", other),
+    }
 }
 
 /// The problem an unknown or foreign playlist answers with.
@@ -124,18 +322,19 @@ fn missing() -> Problem {
 /// # Parameters
 ///
 /// - `error`: the failure the activity layer reported.
+/// - `operation`: what the handler was doing, for the logged internal failure.
 ///
 /// # Returns
 ///
 /// The problem: `not-found` for an unknown or foreign playlist,
 /// `invalid-order` for a list that is not a permutation, and `internal` for a
 /// failed read or write.
-fn reorder_problem(error: &ActivityError) -> Problem {
+fn edit_problem(error: &ActivityError, operation: &'static str) -> Problem {
     match error {
         ActivityError::UnknownPlaylist { .. } | ActivityError::NotOwner { .. } => missing(),
         ActivityError::InvalidOrder { len } => Problem::invalid_order(format!(
             "`order` must list every position from 0 to {len} exactly once."
         )),
-        other => problem::internal("reordering a playlist", other),
+        other => problem::internal(operation, other),
     }
 }
