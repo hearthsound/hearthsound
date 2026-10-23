@@ -9,7 +9,10 @@
 //!
 //! 1. the `p:<slug>` alias decides. When it exists the entity is already
 //!    materialized and the stored row is returned untouched, so the original
-//!    `x_` id keeps resolving forever;
+//!    `x_` id keeps resolving forever. An album is the exception: its stored
+//!    row is kept, but its tracklist is materialized again from the provider,
+//!    because an album whose tracks arrived one at a time can still be missing
+//!    some of them;
 //! 2. otherwise the full entity is fetched from the issuing instance, its rows
 //!    are written with origin `catalog` and availability `remote`, and the
 //!    provider id plus every canonical identifier the entity carries (ISRC,
@@ -39,10 +42,13 @@
 //!
 //! The database has exactly one writer connection, so two materializations
 //! serialize: each one takes the connection for the whole transaction. The
-//! alias is therefore checked twice - once before the provider call, to answer
-//! an already materialized id without spending provider quota, and once inside
-//! the write transaction, where no other writer can commit between the check
-//! and the insert. The alias insert itself is `ON CONFLICT DO NOTHING` and the
+//! alias is therefore checked twice for tracks and artists - once before the
+//! provider call, to answer an already materialized id without spending
+//! provider quota, and once inside the write transaction, where no other writer
+//! can commit between the check and the insert. An album always asks the
+//! provider for its tracklist, because only that answer says which tracks are
+//! missing; its tracks are then resolved inside the write transaction by the
+//! same alias rule. The alias insert itself is `ON CONFLICT DO NOTHING` and the
 //! winner is read back, so a conflict resolves to the row that exists rather
 //! than to an error.
 
@@ -51,7 +57,6 @@ use hearthsound_core::providers::{
     CatalogArtist, CatalogTrack, ExternalId, credit_provider_id,
 };
 use hearthsound_core::{Availability, CatalogId, EntityId, EntityKind, Slug};
-use hearthsound_db::Database;
 use hearthsound_library::{AlbumInput, ArtistCredit, ArtistInput, Origin, TrackInput};
 use hearthsound_library::{albums, artists, tracks};
 use sqlx::SqliteConnection;
@@ -197,9 +202,20 @@ impl CatalogService {
     ///
     /// The album is fetched with its tracklist and every track is materialized
     /// in order inside one transaction, so an album is never left half stored:
-    /// either the album and all of its tracks exist, or none of them does. An
-    /// album whose `p:<slug>` alias already exists is reported from the stored
-    /// rows without a provider call.
+    /// either the album and all of its tracks exist, or none of them does.
+    ///
+    /// An album whose `p:<slug>` alias already exists is completed the same
+    /// way: the provider's tracklist is fetched and every track that is not
+    /// stored yet is created against the stored album, so an album whose tracks
+    /// arrived one at a time - through a search result, a suggestion or a
+    /// single acquired track - gains the rest of them. A stored track keeps the
+    /// row its alias names, so materializing a fully stored album writes no
+    /// duplicate rows and reports the same ids.
+    ///
+    /// The provider is asked even when the album is fully stored, because only
+    /// its tracklist says whether anything is missing. A provider failure is
+    /// therefore reported for a stored album too, with the same error a
+    /// never-seen album reports; the stored tracks are left untouched.
     ///
     /// # Parameters
     ///
@@ -207,7 +223,7 @@ impl CatalogService {
     ///
     /// # Returns
     ///
-    /// The stored album row and its track rows, in track order.
+    /// The stored album row and its track rows, in the provider's track order.
     ///
     /// # Errors
     ///
@@ -220,10 +236,6 @@ impl CatalogService {
         id: &CatalogId,
     ) -> Result<MaterializedAlbum, CatalogError> {
         require_kind(id, EntityKind::Album)?;
-        if let Some(album) = self.stored_row(id).await? {
-            let tracks = stored_album_tracks(self.database(), album).await?;
-            return Ok(MaterializedAlbum { album, tracks });
-        }
         let album = self.album(id).await?;
         let slug = id.slug().clone();
 
@@ -439,6 +451,13 @@ async fn claim_alias(
 
 /// Stores one catalog album and its tracks in an open transaction.
 ///
+/// An album the transaction already stores - its `p:<slug>` alias exists - is
+/// completed rather than replaced: the stored row is kept and every provider
+/// track that is not stored yet is created against it, so the answer holds the
+/// provider's whole tracklist in its order. A track that is already stored
+/// keeps the row its alias names; the reuse and dedupe rules of [`store_track`]
+/// decide that, so a fully stored album is reported without duplicate rows.
+///
 /// # Parameters
 ///
 /// - `conn`: the transaction to write on.
@@ -447,7 +466,7 @@ async fn claim_alias(
 ///
 /// # Returns
 ///
-/// The stored album row and its track rows, in track order.
+/// The stored album row and its track rows, in the provider's track order.
 ///
 /// # Errors
 ///
@@ -462,12 +481,12 @@ async fn store_album(
     if let Some(stored) =
         aliases::entity_by_alias_conn(conn, &namespace, EntityKind::Album, &album.id).await?
     {
-        let tracks = tracks::list_tracks_for_album(conn, stored)
-            .await?
-            .into_iter()
-            .map(|track| track.id)
-            .collect();
-        return Ok((stored, tracks));
+        let mut tracks_stored = Vec::with_capacity(album.tracks.len());
+        for track in &album.tracks {
+            tracks_stored
+                .push(store_track(conn, slug, track, Some(TrackAlbum::Stored(stored))).await?);
+        }
+        return Ok((stored, tracks_stored));
     }
 
     let credits = credits(&album.artists);
@@ -858,32 +877,6 @@ async fn stored_credited_artist(
         None => artists::find_artist_by_name(conn, &credit.name).await?,
     };
     Ok(found.map(|artist| artist.id))
-}
-
-/// Reads the tracks of a stored album.
-///
-/// # Parameters
-///
-/// - `database`: the database to read.
-/// - `album`: the stored album row.
-///
-/// # Returns
-///
-/// The album's track rows, in the order the library lists them.
-///
-/// # Errors
-///
-/// Returns [`CatalogError::Database`] when the query fails.
-async fn stored_album_tracks(
-    database: &Database,
-    album: EntityId,
-) -> Result<Vec<EntityId>, CatalogError> {
-    let mut conn = database.readers().acquire().await?;
-    Ok(tracks::list_tracks_for_album(&mut conn, album)
-        .await?
-        .into_iter()
-        .map(|track| track.id)
-        .collect())
 }
 
 /// Maps a provider's credits to the library's input for them.

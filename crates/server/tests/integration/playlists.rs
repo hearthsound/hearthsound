@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::common::Fixture;
 use crate::multi_user::create_user;
 use crate::native::json as read_json;
-use crate::on_demand::{catalog_album_id, install_catalog};
+use crate::on_demand::{catalog_album_id, install_catalog, materialize};
 
 /// Inserts an album with `count` tracks and returns the track ids in order.
 ///
@@ -233,6 +233,71 @@ async fn adding_a_catalog_album_materializes_it() {
     assert_eq!(body["added"], 5, "{body}");
     assert_eq!(body["trackCount"], 5, "{body}");
     assert_eq!(subsonic_order(&fixture, &playlist).await.len(), 5);
+    fixture.stop().await;
+}
+
+/// A catalog album that is already partly stored is completed: the album
+/// source appends the provider's whole tracklist, not only the stored tracks.
+#[tokio::test]
+async fn adding_a_partially_stored_catalog_album_adds_every_track() {
+    let fixture = Fixture::new().await;
+    install_catalog(&fixture.services).await;
+    fixture.services.registry().rebuild().await.unwrap();
+    let album = catalog_album_id(&fixture).await;
+
+    // Two of the album's five tracks are already stored, the way a search
+    // result or a suggested track materializes them on their own.
+    let first = materialize(fixture.services.catalog(), 1).await.to_string();
+    let third = materialize(fixture.services.catalog(), 3).await.to_string();
+
+    let playlist = create_playlist(&fixture, &[]).await;
+    let response = add_tracks(
+        &fixture,
+        &fixture.api_key,
+        &playlist,
+        &format!("album:{album}"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = read_json(response).await;
+    assert_eq!(body["added"], 5, "{body}");
+    assert_eq!(body["trackCount"], 5, "{body}");
+
+    let response = fixture
+        .get(&format!(
+            "/rest/getPlaylist?id={playlist}&apiKey={}&f=json",
+            fixture.api_key
+        ))
+        .await;
+    let body: Value = read_json(response).await;
+    let entries = body["subsonic-response"]["playlist"]["entry"]
+        .as_array()
+        .unwrap();
+    let ids: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 5);
+    assert_eq!(ids[0], first, "the stored track keeps its row");
+    assert_eq!(
+        ids[2], third,
+        "the stored track keeps its place in the album"
+    );
+    let titles: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            "Fixture Song 1",
+            "Fixture Song 2",
+            "Fixture Song 3",
+            "Fixture Song 4",
+            "Fixture Song 5",
+        ],
+        "the playlist holds the provider's whole tracklist in order"
+    );
     fixture.stop().await;
 }
 

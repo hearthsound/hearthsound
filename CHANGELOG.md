@@ -260,6 +260,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Adding a catalog album to a playlist appends its whole tracklist even when
+  some of its tracks were already stored. Materializing an album now fetches
+  the provider's tracklist for a stored album too and creates every track that
+  has no row yet, instead of reporting only the tracks that happened to exist.
+  A stored track keeps its row and every track keeps the provider's order, so a
+  fully stored album reports the same ids and writes no duplicate rows. The
+  provider is asked even when the album is fully stored, because only its
+  answer says what is missing; a provider failure is reported with the same
+  error a never-seen album reports and the stored tracks are left untouched.
+
 - An artist whose portrait cannot be fetched is served the first cover image
   of its albums instead of a `503`. The artwork layer's failure no longer
   hides the local art an artist already has, and the stand-in is sent with

@@ -16,7 +16,7 @@ use crate::common::{
 };
 use hearthsound_core::{EntityKind, IdPrefix, Layer};
 use hearthsound_library::naming::{NamingContext, NamingTemplate};
-use hearthsound_test_support::HELLO_CATALOG;
+use hearthsound_test_support::{ALBUM_CATALOG, HELLO_CATALOG};
 use serde_json::{Value, json};
 
 /// Builds the environment a materialization test starts from.
@@ -339,12 +339,23 @@ async fn materializing_the_album_reuses_the_row_a_track_created() {
         "the album row the track created is the one reported"
     );
     assert_eq!(
-        materialized.tracks,
-        vec![track],
-        "the tracks linked to the album are reported"
+        materialized.tracks.len(),
+        2,
+        "the rest of the tracklist is materialized"
+    );
+    assert_eq!(
+        materialized.tracks[0], track,
+        "the stored track keeps its row and comes first in provider order"
+    );
+    assert_eq!(
+        stored_track(&env.database, materialized.tracks[1].uuid())
+            .await
+            .unwrap()
+            .title,
+        "Hello, again"
     );
     assert_eq!(count_rows(&env.database, "albums").await, 1);
-    assert_eq!(count_rows(&env.database, "tracks").await, 1);
+    assert_eq!(count_rows(&env.database, "tracks").await, 2);
     assert_eq!(
         alias_target(&env.database, "p:hello", EntityKind::Album, "hello-album-1").await,
         Some(album)
@@ -440,6 +451,91 @@ async fn an_album_is_materialized_with_its_tracks_in_order() {
         Some(album.tracks[1].uuid().as_bytes().to_vec()),
         "every track of the album keeps resolving through its provider id"
     );
+}
+
+#[tokio::test]
+async fn a_partially_stored_album_gains_the_rest_of_its_tracklist() {
+    let env = Env::new().await;
+    env.instance(
+        "album",
+        ALBUM_CATALOG,
+        "com.example.album-catalog",
+        json!({}),
+    )
+    .await;
+    env.assign(Layer::Catalog, &["album"]).await;
+    let service = env.service();
+
+    // Two of the album's five tracks arrive on their own, the way a search
+    // result or a suggested track is materialized.
+    let first = service
+        .materialize_track(&catalog_id(
+            "album",
+            EntityKind::Track,
+            "album-catalog-track-1",
+        ))
+        .await
+        .unwrap();
+    let third = service
+        .materialize_track(&catalog_id(
+            "album",
+            EntityKind::Track,
+            "album-catalog-track-3",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(count_rows(&env.database, "tracks").await, 2);
+
+    let id = catalog_id("album", EntityKind::Album, "album-catalog-album-1");
+    let materialized = service.materialize_album(&id).await.unwrap();
+
+    assert_eq!(
+        materialized.tracks.len(),
+        5,
+        "the provider's whole tracklist is materialized"
+    );
+    let unique: std::collections::HashSet<_> = materialized.tracks.iter().collect();
+    assert_eq!(unique.len(), 5, "no track row appears twice");
+    assert_eq!(
+        materialized.tracks[0], first,
+        "a stored track keeps its row and its place in provider order"
+    );
+    assert_eq!(materialized.tracks[2], third);
+
+    let mut titles = Vec::with_capacity(materialized.tracks.len());
+    for track in &materialized.tracks {
+        titles.push(
+            stored_track(&env.database, track.uuid())
+                .await
+                .unwrap()
+                .title,
+        );
+    }
+    assert_eq!(
+        titles,
+        [
+            "Fixture Song 1",
+            "Fixture Song 2",
+            "Fixture Song 3",
+            "Fixture Song 4",
+            "Fixture Song 5",
+        ],
+        "the tracks keep the provider's order"
+    );
+    assert_eq!(count_rows(&env.database, "tracks").await, 5);
+    assert_eq!(count_rows(&env.database, "albums").await, 1);
+
+    let again = service.materialize_album(&id).await.unwrap();
+    assert_eq!(
+        again, materialized,
+        "a now fully stored album reports the same rows in provider order"
+    );
+    assert_eq!(
+        count_rows(&env.database, "tracks").await,
+        5,
+        "materializing it again writes no duplicate rows"
+    );
+    assert_eq!(count_rows(&env.database, "albums").await, 1);
 }
 
 #[tokio::test]
