@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM scrobble_outbox\n             WHERE user_id = ? AND instance_id = ? AND state = 'pending'",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "179ea8690090c5637ece434861edaf743f4d5c6dad16d53c32a085eb595e9194"
+}

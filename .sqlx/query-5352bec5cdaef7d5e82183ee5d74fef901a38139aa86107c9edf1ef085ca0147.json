@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO scrobble_outbox (\n             id, user_id, instance_id, kind, payload, attempts, next_attempt_at, state\n         ) VALUES (?, ?, ?, ?, ?, 0, ?, 'pending')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "5352bec5cdaef7d5e82183ee5d74fef901a38139aa86107c9edf1ef085ca0147"
+}

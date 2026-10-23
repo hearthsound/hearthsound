@@ -15,3 +15,4 @@ mod playlists;
 mod plays;
 mod ratings;
 mod reports;
+mod scrobbles;

@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, user_id, instance_id, kind, payload, attempts\n             FROM scrobble_outbox\n             WHERE state = 'pending' AND next_attempt_at <= ?\n             ORDER BY instance_id, id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "scrobble_outbox",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "user_id",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "scrobble_outbox",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "name": "instance_id",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "scrobble_outbox",
+            "name": "instance_id"
+          }
+        }
+      },
+      {
+        "name": "kind",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scrobble_outbox",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "payload",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scrobble_outbox",
+            "name": "payload"
+          }
+        }
+      },
+      {
+        "name": "attempts",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "scrobble_outbox",
+            "name": "attempts"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b1c046e2a26f5556dc24f3516cbae6545a8929dd2471d1efde610cee1e77cbe8"
+}

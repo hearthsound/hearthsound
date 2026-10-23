@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT last_error FROM scrobble_outbox\n             WHERE user_id = ? AND instance_id = ? AND last_error IS NOT NULL\n             ORDER BY id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "last_error",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scrobble_outbox",
+            "name": "last_error"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "db292498195f8716c56e8615acb6a5d40bb9a8f8ada41db9821303a0985dfb7b"
+}

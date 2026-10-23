@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT namespace, value FROM external_ids\n                 WHERE entity_kind = 'album' AND entity_id = ?\n                   AND namespace IN ('mb-release', 'upc')",
+  "describe": {
+    "columns": [
+      {
+        "name": "namespace",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "external_ids",
+            "name": "namespace"
+          }
+        }
+      },
+      {
+        "name": "value",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "external_ids",
+            "name": "value"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "0f9439c66b050722e403dbdf1196584d95923ae53ab7e91a274a58f038bced48"
+}

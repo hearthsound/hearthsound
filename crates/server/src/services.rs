@@ -51,7 +51,11 @@ use std::sync::Arc;
 
 use hearthsound_acquire::orchestrator::{AcquisitionOrchestrator, AcquisitionStorage};
 use hearthsound_acquire::prefetch::PrefetchScheduler;
-use hearthsound_activity::{ActivityService, EXPIRE_JOB_KIND, EXPIRE_SCHEDULE, ExpireJobHandler};
+use hearthsound_activity::{
+    ActivityService, EXPIRE_JOB_KIND, EXPIRE_SCHEDULE, ExpireJobHandler, SCROBBLE_DELIVER_JOB_KIND,
+    SCROBBLE_DELIVER_SCHEDULE, ScrobbleDeliverJobHandler, ScrobbleDeliverer, ScrobbleOutbox,
+    ScrobbleTargets,
+};
 use hearthsound_api_native::{NativeServices, NativeState};
 use hearthsound_api_subsonic::{PendingSource, SubsonicState};
 use hearthsound_auth::{Authenticator, Sessions, SetupGate, TrustedProxies, Users};
@@ -81,6 +85,7 @@ use hearthsound_plugin_host::instances::InstanceService;
 use hearthsound_plugin_host::{
     IndexClient, PluginAdmin, PluginHost, PluginInstaller, PluginRepository, ProviderRegistry,
     UPDATE_CHECK_JOB_KIND, UPDATE_CHECK_SCHEDULE, UpdateCheckJobHandler, UpdateChecker,
+    UserConfigService,
 };
 use tower_http::cors::CorsLayer;
 
@@ -149,6 +154,8 @@ pub struct Services {
     scheduler: Arc<Scheduler>,
     /// The activity service: play recording and stream sessions.
     activity: Arc<ActivityService>,
+    /// Delivers the scrobbles the activity service queues.
+    scrobble_deliverer: Arc<ScrobbleDeliverer>,
     /// Keeps managed files in the root their pins imply and the cache within
     /// its limits.
     maintainer: Arc<StorageMaintainer>,
@@ -335,7 +342,13 @@ impl Services {
             settings.clone(),
         ));
 
-        let activity = Arc::new(ActivityService::new(&database));
+        let user_configs = UserConfigService::new(&database, secrets.clone());
+        let targets: Arc<dyn ScrobbleTargets> = registry.clone();
+        let scrobble_outbox = Arc::new(ScrobbleOutbox::new(&database, targets, user_configs));
+        let activity = Arc::new(
+            ActivityService::new(&database).with_scrobble_outbox(Arc::clone(&scrobble_outbox)),
+        );
+        let scrobble_deliverer = Arc::new(ScrobbleDeliverer::new(Arc::clone(&scrobble_outbox)));
         let storage_roots =
             StorageRoots::new(config.paths.library.clone(), config.paths.cache.clone());
         let maintainer = Arc::new(StorageMaintainer::new(
@@ -371,6 +384,12 @@ impl Services {
             EXPIRE_JOB_KIND,
             Arc::new(ExpireJobHandler::new(activity.playlists().clone())),
         );
+        runner.register(
+            SCROBBLE_DELIVER_JOB_KIND,
+            Arc::new(ScrobbleDeliverJobHandler::new(Arc::clone(
+                &scrobble_deliverer,
+            ))),
+        );
         let update_handler: Arc<dyn JobHandler> = update_job.clone();
         runner.register(UPDATE_CHECK_JOB_KIND, update_handler);
         let runner = Arc::new(runner);
@@ -401,6 +420,12 @@ impl Services {
             .await?;
         scheduler
             .upsert(ScheduleSpec::system(EXPIRE_JOB_KIND, EXPIRE_SCHEDULE))
+            .await?;
+        scheduler
+            .upsert(ScheduleSpec::system(
+                SCROBBLE_DELIVER_JOB_KIND,
+                SCROBBLE_DELIVER_SCHEDULE,
+            ))
             .await?;
         scheduler
             .upsert(ScheduleSpec::system(
@@ -454,6 +479,7 @@ impl Services {
             watcher,
             scheduler,
             activity,
+            scrobble_deliverer,
             maintainer,
             maintenance,
             uploads,
@@ -628,6 +654,14 @@ impl Services {
     /// Returns the activity service.
     pub fn activity(&self) -> &Arc<ActivityService> {
         &self.activity
+    }
+
+    /// Returns the deliverer that drains the scrobble outbox.
+    ///
+    /// The serving process runs one delivery worker for it, and the
+    /// `scrobble.deliver` job runs a pass through it.
+    pub fn scrobble_deliverer(&self) -> &Arc<ScrobbleDeliverer> {
+        &self.scrobble_deliverer
     }
 
     /// Returns the storage maintainer.

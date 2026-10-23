@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM scrobble_outbox\n             WHERE user_id = ? AND instance_id = ? AND state = 'failed'",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f36d0b6bb7f32c5ceb9ef8a0f1ccc52e1b4454ebe10b7565e7feb1bd4ad92493"
+}

@@ -34,6 +34,11 @@
 //! with a whole page of entities at once, for the listing endpoints that report
 //! stars, ratings, and play counts.
 //!
+//! A play, a now-playing report and a changed opinion are also scrobbles for the
+//! services the listener linked: [`ScrobbleOutbox`] queues one row per linked
+//! instance and [`ScrobbleDeliverer`] drains it with the service's own batching,
+//! pacing and retry rules, so a service that is down loses nothing.
+//!
 //! # Examples
 //!
 //! ```no_run
@@ -76,6 +81,7 @@ mod play_queues;
 mod playlists;
 mod ratings;
 mod reports;
+mod scrobble;
 mod service;
 mod session;
 
@@ -96,6 +102,11 @@ pub use ratings::{MAX_RATING, set_rating};
 pub use reports::{
     InMemoryReports, LISTENED_HALF_MS, MIN_TRACK_MS, PlaybackOutcome, PlaybackReport,
     PlaybackState, SCROBBLE_DEDUPE_MS,
+};
+pub use scrobble::{
+    DeliveryReport, NOW_PLAYING_TTL_MS, OUTBOX_MAX_AGE_MS, OutboxCounters,
+    SCROBBLE_DELIVER_JOB_KIND, SCROBBLE_DELIVER_SCHEDULE, ScrobbleDeliverJobHandler,
+    ScrobbleDeliverer, ScrobbleOutbox, ScrobbleTarget, ScrobbleTargets,
 };
 pub use service::{ActivityService, Feedback, Scrobble, ScrobbleOutcome};
 pub use session::{AudioDelivered, SessionOptions, StreamSession, StreamSessions};

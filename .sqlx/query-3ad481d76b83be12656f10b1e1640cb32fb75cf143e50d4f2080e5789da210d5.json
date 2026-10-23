@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.name FROM album_artists aa JOIN artists a ON a.id = aa.artist_id\n                 WHERE aa.album_id = ? ORDER BY aa.position LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "name"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3ad481d76b83be12656f10b1e1640cb32fb75cf143e50d4f2080e5789da210d5"
+}

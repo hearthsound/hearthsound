@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM scrobble_outbox\n                 WHERE user_id = ? AND instance_id = ? AND kind = 'now-playing'\n                   AND state = 'pending'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "d82fbb2b505a1a23dd8c6e562f6c4a8e512680512b9a769fd9ee041a5c94242a"
+}

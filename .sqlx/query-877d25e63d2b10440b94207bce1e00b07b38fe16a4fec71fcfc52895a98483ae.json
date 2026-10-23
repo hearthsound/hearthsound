@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM scrobble_outbox WHERE user_id = ? AND instance_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "877d25e63d2b10440b94207bce1e00b07b38fe16a4fec71fcfc52895a98483ae"
+}

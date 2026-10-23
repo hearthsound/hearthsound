@@ -16,13 +16,18 @@ hearthsound-core = { path = "../core" }
 hearthsound-db = { path = "../db" }
 hearthsound-jobs = { path = "../jobs" }
 hearthsound-library = { path = "../library" }
+hearthsound-plugin-host = { path = "../plugin-host" }
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 time.workspace = true
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+hearthsound-config = { path = "../config" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+

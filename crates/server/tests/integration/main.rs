@@ -19,6 +19,7 @@ mod plugin_admin;
 mod prefetch;
 mod queue;
 mod reload;
+mod scrobbles;
 mod setup;
 mod storage;
 mod stream_pending;

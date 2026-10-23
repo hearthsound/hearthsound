@@ -90,6 +90,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the server's secret key, and the plugin is handed the opened
   configuration with the listener's lowercase hyphenated id on every call.
 
+- Plays, now-playing reports and likes, dislikes and clears are scrobbled to
+  the services a listener linked. Every scrobble is written to a durable outbox
+  first and delivered by a worker and a `scrobble.deliver` job that runs every
+  minute, so a service that is down, slow or rate limiting loses nothing:
+  listens are batched up to the service's maximum, calls to one service keep
+  its minimum interval, a failed attempt is retried after one, five and thirty
+  minutes, two hours and then twelve, a rate-limited answer waits for the delay
+  the service asked for without counting an attempt, and a row that keeps
+  failing is given up on after seven days. A now-playing report is replaced by
+  the next one and dropped once it is ten minutes old.
+
 ### Changed
 
 - Plugins build against `hearthsound:plugin@0.3.0`: the host loads that API
@@ -171,6 +182,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GET /api/v1/library/queue` items carry `albumId` and `artistId`, so a client
   can open the album or the primary artist of any queued song from every
   source, not only from a library listing.
+
+- `GET /api/v1/me/providers` reports the scrobbles waiting for each linked
+  service (`pendingScrobbles`), the ones the outbox gave up on
+  (`failedScrobbles`) and the most recent delivery error (`lastError`), and
+  `DELETE /api/v1/me/providers/{slug}/link` also deletes the listens and
+  feedback still queued for the listener on that service.
 
 ### Removed
 

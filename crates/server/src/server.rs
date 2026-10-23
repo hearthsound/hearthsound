@@ -255,6 +255,10 @@ fn spawn_workers(services: &Arc<Services>, shutdown: Shutdown) -> Vec<JoinHandle
     let maintainer_task =
         tokio::spawn(async move { maintainer.run(signal, maintainer_shutdown).await });
 
+    let deliverer = Arc::clone(services.scrobble_deliverer());
+    let deliverer_shutdown = shutdown.clone();
+    let deliverer_task = tokio::spawn(async move { deliverer.run(deliverer_shutdown).await });
+
     let events = Arc::clone(services.events());
     let signal = services.maintenance().clone();
     let events_shutdown = shutdown.clone();
@@ -270,6 +274,7 @@ fn spawn_workers(services: &Arc<Services>, shutdown: Shutdown) -> Vec<JoinHandle
         scheduler_task,
         watchers_task,
         maintainer_task,
+        deliverer_task,
         events_task,
         external_task,
     ]

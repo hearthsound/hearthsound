@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use hearthsound_core::providers::FeedbackValue;
 use hearthsound_core::{EntityId, EntityKind, IdPrefix};
 use hearthsound_db::Database;
 use hearthsound_library::maintenance::MaintenanceSignal;
@@ -24,6 +25,7 @@ use crate::play_queues::PlayQueues;
 use crate::playlists::Playlists;
 use crate::ratings;
 use crate::reports::{InMemoryReports, PlaybackState};
+use crate::scrobble::ScrobbleOutbox;
 use crate::session::StreamSessions;
 use crate::{READ_THEN_WRITE, feedback, now_millis};
 
@@ -158,6 +160,9 @@ pub struct ActivityService {
     reports: Arc<InMemoryReports>,
     /// The stream sessions the guard reads.
     sessions: StreamSessions,
+    /// The scrobble outbox plays, now-playing reports and feedback are queued
+    /// in, when the server runs one.
+    scrobble_outbox: Option<Arc<ScrobbleOutbox>>,
     /// Woken after every like, unlike, playlist edit and recorded play, so the
     /// storage maintenance worker acts on the pins they change.
     signal: MaintenanceSignal,
@@ -216,6 +221,34 @@ impl ActivityService {
         ActivityService::build(db, sessions)
     }
 
+    /// Queues every play, now-playing report and feedback change in an outbox.
+    ///
+    /// Without one the service records plays and opinions locally only, which is
+    /// what a test or a tool that does not deliver scrobbles wants.
+    ///
+    /// # Parameters
+    ///
+    /// - `outbox`: the outbox to enqueue in.
+    ///
+    /// # Returns
+    ///
+    /// The service, sharing the outbox with its playback reports.
+    pub fn with_scrobble_outbox(mut self, outbox: Arc<ScrobbleOutbox>) -> ActivityService {
+        self.reports = Arc::new(
+            self.reports
+                .as_ref()
+                .clone()
+                .with_scrobble_outbox(Arc::clone(&outbox)),
+        );
+        self.scrobble_outbox = Some(outbox);
+        self
+    }
+
+    /// Returns the scrobble outbox, when the server configured one.
+    pub fn scrobble_outbox(&self) -> Option<&Arc<ScrobbleOutbox>> {
+        self.scrobble_outbox.as_ref()
+    }
+
     /// Builds the service with one maintenance signal shared by every
     /// repository that changes a pin or records a play.
     fn build(db: &Database, sessions: StreamSessions) -> ActivityService {
@@ -229,6 +262,7 @@ impl ActivityService {
             now_playing: NowPlaying::new(db),
             reports: Arc::new(InMemoryReports::new(db).with_signal(signal.clone())),
             sessions,
+            scrobble_outbox: None,
             signal,
         }
     }
@@ -326,6 +360,7 @@ impl ActivityService {
                     PlaybackState::Playing.as_str(),
                 )
                 .await?;
+            self.queue_now_playing(scrobble).await;
             return Ok(ScrobbleOutcome::NowPlaying);
         }
         if self
@@ -356,6 +391,14 @@ impl ActivityService {
                 true,
             )
             .await?;
+        self.queue_listen(
+            scrobble.user_id,
+            id,
+            scrobble.track_id,
+            scrobble.client,
+            scrobble.started_at,
+        )
+        .await;
         Ok(ScrobbleOutcome::Recorded(id))
     }
 
@@ -454,6 +497,8 @@ impl ActivityService {
         }
         tx.commit().await?;
         self.signal.notify();
+        self.queue_feedback(user_id, entities, FeedbackValue::Love)
+            .await;
         Ok(())
     }
 
@@ -481,6 +526,8 @@ impl ActivityService {
         }
         tx.commit().await?;
         self.signal.notify();
+        self.queue_feedback(user_id, entities, FeedbackValue::Clear)
+            .await;
         Ok(())
     }
 
@@ -520,6 +567,15 @@ impl ActivityService {
         }
         tx.commit().await?;
         self.signal.notify();
+        if kind == EntityKind::Track {
+            let value = match feedback {
+                Feedback::Like => FeedbackValue::Love,
+                Feedback::Dislike => FeedbackValue::Hate,
+                Feedback::None => FeedbackValue::Clear,
+            };
+            self.queue_feedback(user_id, &[(kind, entity_id)], value)
+                .await;
+        }
         Ok(())
     }
 
@@ -581,5 +637,85 @@ impl ActivityService {
         tx.commit().await?;
         self.signal.notify();
         Ok(())
+    }
+
+    /// Queues a now-playing report, logging rather than failing the request.
+    ///
+    /// # Parameters
+    ///
+    /// - `scrobble`: the request that reported playback.
+    async fn queue_now_playing(&self, scrobble: &Scrobble<'_>) {
+        let Some(outbox) = &self.scrobble_outbox else {
+            return;
+        };
+        if let Err(error) = outbox
+            .now_playing(
+                scrobble.user_id,
+                scrobble.track_id,
+                scrobble.client,
+                scrobble.started_at,
+            )
+            .await
+        {
+            tracing::warn!(%error, "could not queue a now-playing report");
+        }
+    }
+
+    /// Queues a recorded play as a listen, logging rather than failing the
+    /// request.
+    ///
+    /// # Parameters
+    ///
+    /// - `user_id`: the listener who played the track.
+    /// - `play_id`: the new play's row id.
+    /// - `track_id`: the track that was played.
+    /// - `client`: the client that played it, when known.
+    /// - `started_at`: when playback started, in unix milliseconds.
+    async fn queue_listen(
+        &self,
+        user_id: Uuid,
+        play_id: Uuid,
+        track_id: Uuid,
+        client: Option<&str>,
+        started_at: i64,
+    ) {
+        let Some(outbox) = &self.scrobble_outbox else {
+            return;
+        };
+        if let Err(error) = outbox
+            .listen(user_id, play_id, track_id, client, started_at)
+            .await
+        {
+            tracing::warn!(%error, "could not queue a listen");
+        }
+    }
+
+    /// Queues an opinion of every track among the named entities.
+    ///
+    /// An album, an artist or any other kind carries no listen, so it produces
+    /// no feedback row.
+    ///
+    /// # Parameters
+    ///
+    /// - `user_id`: the listener whose opinion changed.
+    /// - `entities`: the entities the request named, each with its kind.
+    /// - `value`: the opinion to report.
+    async fn queue_feedback(
+        &self,
+        user_id: Uuid,
+        entities: &[(EntityKind, Uuid)],
+        value: FeedbackValue,
+    ) {
+        let Some(outbox) = &self.scrobble_outbox else {
+            return;
+        };
+        for (kind, entity_id) in entities {
+            if *kind != EntityKind::Track {
+                continue;
+            }
+            if let Err(error) = outbox.feedback(user_id, *entity_id, value).await {
+                tracing::warn!(%error, "could not queue feedback");
+            }
+        }
     }
 }

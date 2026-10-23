@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT title, mb_release_id FROM albums WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "title",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "name": "mb_release_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "mb_release_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "12b67444857261ea2f6b0c16a32ebc6bbfedbd3fbd8330f8cf781766821d620e"
+}

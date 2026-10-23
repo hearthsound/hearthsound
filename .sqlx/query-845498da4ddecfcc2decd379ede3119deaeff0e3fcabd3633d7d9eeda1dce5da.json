@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT namespace, value FROM external_ids\n             WHERE entity_kind = 'track' AND entity_id = ?\n               AND namespace IN ('mb-recording', 'isrc')",
+  "describe": {
+    "columns": [
+      {
+        "name": "namespace",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "external_ids",
+            "name": "namespace"
+          }
+        }
+      },
+      {
+        "name": "value",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "external_ids",
+            "name": "value"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "845498da4ddecfcc2decd379ede3119deaeff0e3fcabd3633d7d9eeda1dce5da"
+}

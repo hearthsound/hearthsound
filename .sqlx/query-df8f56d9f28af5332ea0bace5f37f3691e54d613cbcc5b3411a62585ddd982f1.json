@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE plays SET scrobbled = 1 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "df8f56d9f28af5332ea0bace5f37f3691e54d613cbcc5b3411a62585ddd982f1"
+}

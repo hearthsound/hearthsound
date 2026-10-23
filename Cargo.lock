@@ -1610,10 +1610,13 @@ name = "hearthsound-activity"
 version = "0.1.5"
 dependencies = [
  "async-trait",
+ "hearthsound-config",
  "hearthsound-core",
  "hearthsound-db",
  "hearthsound-jobs",
  "hearthsound-library",
+ "hearthsound-plugin-host",
+ "serde",
  "serde_json",
  "sqlx",
  "tempfile",

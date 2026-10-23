@@ -23,7 +23,7 @@ use crate::{EntityKind, Granularity, ProviderError};
 ///
 /// A provider records the identifiers its upstream service uses so later calls
 /// can address the same entity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExternalId {
     /// The namespace the identifier belongs to, for example `musicbrainz`.
     pub namespace: String,
@@ -933,7 +933,11 @@ pub struct UserContext {
 }
 
 /// One listen of one track.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The field names serialize in camel case, which is the shape the scrobble
+/// outbox stores and the shape a plugin receives.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Listen {
     /// The track title.
     pub title: String,

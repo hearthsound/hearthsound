@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE scrobble_outbox\n                 SET attempts = ?, last_error = ?, state = 'failed', next_attempt_at = ?\n                 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "227e25cb7ce5b3d14b804a79d35d98bccbdffafab8ff2f819c742a08a73c0eab"
+}

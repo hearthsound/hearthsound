@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.name AS name, a.mb_artist_id AS mb_artist_id\n             FROM track_artists ta JOIN artists a ON a.id = ta.artist_id\n             WHERE ta.track_id = ? ORDER BY ta.position",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "mb_artist_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "mb_artist_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "01dd18a79432b70f9ead2bcd4d142b205e545faa6b0fbba77a69eca0625c3fc5"
+}

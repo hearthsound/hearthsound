@@ -15,6 +15,10 @@ pub enum ActivityError {
     #[error(transparent)]
     Library(#[from] hearthsound_library::LibraryError),
 
+    /// A listener's link to the provider instance could not be read or written.
+    #[error(transparent)]
+    ProviderConfig(#[from] hearthsound_plugin_host::UserConfigError),
+
     /// A 16-byte identifier stored as a BLOB did not decode as a UUID.
     #[error("stored identifier is not a UUID: {0}")]
     CorruptId(#[from] uuid::Error),

@@ -253,6 +253,9 @@ pub struct InMemoryReports {
     now_playing: NowPlaying,
     /// The sessions and the recently recorded plays.
     inner: Arc<Mutex<Inner>>,
+    /// The scrobble outbox a recorded play is queued in, when the server runs
+    /// one.
+    scrobble_outbox: Option<Arc<crate::scrobble::ScrobbleOutbox>>,
 }
 
 impl InMemoryReports {
@@ -273,7 +276,25 @@ impl InMemoryReports {
                 sessions: HashMap::new(),
                 recorded: HashMap::new(),
             })),
+            scrobble_outbox: None,
         }
+    }
+
+    /// Queues every play a report records in an outbox.
+    ///
+    /// # Parameters
+    ///
+    /// - `outbox`: the outbox to enqueue in.
+    ///
+    /// # Returns
+    ///
+    /// The reports, sharing the outbox with the activity service.
+    pub fn with_scrobble_outbox(
+        mut self,
+        outbox: Arc<crate::scrobble::ScrobbleOutbox>,
+    ) -> InMemoryReports {
+        self.scrobble_outbox = Some(outbox);
+        self
     }
 
     /// Wakes the given storage maintenance signal after every play a report
@@ -365,6 +386,19 @@ impl InMemoryReports {
                 true,
             )
             .await?;
+        if let Some(outbox) = &self.scrobble_outbox
+            && let Err(error) = outbox
+                .listen(
+                    report.user_id,
+                    id,
+                    track_id.uuid(),
+                    Some(report.client),
+                    started_at,
+                )
+                .await
+        {
+            tracing::warn!(%error, "could not queue a listen from a playback report");
+        }
         let mut inner = self.lock();
         inner
             .recorded

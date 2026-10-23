@@ -11,10 +11,10 @@
 //! secret key: the account name the service reported and the configuration the
 //! plugin needs for every later call. The listing never returns that
 //! configuration; it returns the schema the form is rendered from and the
-//! account name, so a token the listener entered is never handed back.
-//!
-//! Outbox counters are reported as zero and no last error is reported until the
-//! scrobble outbox exists, which is what fills them.
+//! account name, so a token the listener entered is never handed back. It also
+//! reports how many scrobbles are waiting for the service, how many the outbox
+//! gave up on, and the most recent delivery error, which is what the account
+//! menu shows.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,6 +26,7 @@ use axum::http::header::HOST;
 use axum::http::request::Parts;
 use axum::response::Redirect;
 use data_encoding::BASE64URL_NOPAD;
+use hearthsound_activity::OutboxCounters;
 use hearthsound_core::providers::{AccountLinkProvider, LinkMethod, UserContext};
 use hearthsound_plugin_host::manifest::ConfigSection;
 use hearthsound_plugin_host::{
@@ -213,7 +214,14 @@ pub async fn list_provider_links(
             .get(instance.id(), user)
             .await
             .map_err(link_storage_problem)?;
-        providers.push(provider_link(&instance, method, link));
+        let counters = match state.services().activity.scrobble_outbox() {
+            Some(outbox) => outbox
+                .counters(user, instance.id())
+                .await
+                .map_err(|error| problem::internal("reading scrobble outbox counters", &error))?,
+            None => OutboxCounters::default(),
+        };
+        providers.push(provider_link(&instance, method, link, counters));
     }
     Ok(Json(ProviderLinks { providers }))
 }
@@ -289,7 +297,14 @@ pub async fn put_provider_config(
         service = %instance.slug(),
         "linked a service with a configuration"
     );
-    Ok(Json(provider_link(&instance, method, Some(link))))
+    let counters = match state.services().activity.scrobble_outbox() {
+        Some(outbox) => outbox
+            .counters(authed.user_id(), instance.id())
+            .await
+            .map_err(|error| problem::internal("reading scrobble outbox counters", &error))?,
+        None => OutboxCounters::default(),
+    };
+    Ok(Json(provider_link(&instance, method, Some(link), counters)))
 }
 
 /// Starts a browser link and answers the URL to open.
@@ -486,6 +501,12 @@ pub async fn delete_provider_link(
             "The caller has not linked this service.",
         ));
     }
+    if let Some(outbox) = state.services().activity.scrobble_outbox() {
+        outbox
+            .delete_for_instance(authed.user_id(), instance.id())
+            .await
+            .map_err(|error| problem::internal("deleting queued scrobbles", &error))?;
+    }
     tracing::info!(
         user = %authed.user_id(),
         service = %instance.slug(),
@@ -561,6 +582,7 @@ fn provider_link(
     instance: &RegistryInstance,
     method: LinkMethod,
     link: Option<UserConfig>,
+    counters: OutboxCounters,
 ) -> ProviderLink {
     let mut layers = Vec::new();
     if instance.scrobble().is_some() {
@@ -590,9 +612,9 @@ fn provider_link(
         linked,
         account_name,
         linked_at,
-        pending_scrobbles: 0,
-        failed_scrobbles: 0,
-        last_error: None,
+        pending_scrobbles: counters.pending,
+        failed_scrobbles: counters.failed,
+        last_error: counters.last_error,
     }
 }
 
