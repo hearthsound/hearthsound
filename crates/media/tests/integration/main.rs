@@ -5,6 +5,7 @@
 //! once per test run, which is what keeps the test build and CI short.
 
 mod ffmpeg;
+mod fingerprint;
 mod probe;
 mod tags;
 mod transcode;

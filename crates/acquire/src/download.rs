@@ -46,6 +46,7 @@ use crate::error::AcquireError;
 use crate::import::HandoffOutcome;
 use crate::orchestrator::AcquisitionOrchestrator;
 use crate::repo::AcquisitionRow;
+use crate::search::SearchOutcome;
 use crate::select::{
     AlbumAttemptPlan, AlbumCandidate, AlbumFileMapping, AttemptPlan, RequestClass,
 };
@@ -523,6 +524,35 @@ impl AcquisitionOrchestrator {
         instances: &[Arc<RegistryInstance>],
         plan: &AttemptPlan,
     ) -> Result<DownloadOutcome, AcquireError> {
+        self.run_download_plan(acquisition_id, instances, plan, true)
+            .await
+    }
+
+    /// Runs a selected plan, optionally searching once more when it is spent.
+    ///
+    /// A plan whose candidates all failed verification earns one fresh search,
+    /// because the quarantine the failures wrote keeps the files the search
+    /// selected from being offered again; every other failure fails the
+    /// acquisition once the plan is spent.
+    ///
+    /// # Parameters
+    ///
+    /// - `acquisition_id`: the acquisition to download.
+    /// - `instances`: the instances the search walked, in layer order.
+    /// - `plan`: the candidates to try, best first.
+    /// - `allow_fresh_search`: whether a plan spent entirely on verification
+    ///   failures may be followed by one more search.
+    ///
+    /// # Errors
+    ///
+    /// Returns the settings, ledger or filesystem error that stopped the stage.
+    async fn run_download_plan(
+        &self,
+        acquisition_id: Uuid,
+        instances: &[Arc<RegistryInstance>],
+        plan: &AttemptPlan,
+        allow_fresh_search: bool,
+    ) -> Result<DownloadOutcome, AcquireError> {
         let Some(row) = self.repository().get(acquisition_id).await? else {
             return Err(AcquireError::UnknownAcquisition(acquisition_id));
         };
@@ -615,9 +645,75 @@ impl AcquisitionOrchestrator {
         }
 
         let (reason, detail) = failure.unwrap_or((FailureReason::AllCandidatesFailed, None));
+        let quarantined = reason == FailureReason::VerificationFailed
+            && detail
+                .as_deref()
+                .is_some_and(|detail| detail.starts_with("fingerprint mismatch:"));
+        if allow_fresh_search && quarantined {
+            return self
+                .search_again_after_rejection(row.id, detail.as_deref())
+                .await;
+        }
         self.fail_acquisition(row.id, reason, detail.as_deref())
             .await?;
         Ok(DownloadOutcome::Stopped)
+    }
+
+    /// Searches once more after every candidate of a plan failed verification.
+    ///
+    /// The failed candidates wrote their files to `source_blocklist`, so the
+    /// fresh search cannot select them again; when it finds nothing, the
+    /// acquisition fails with `verification-failed` and the detail of the last
+    /// rejection instead of with the search's own reason, because verification
+    /// is what left nothing to try.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the acquisition to search again.
+    /// - `detail`: the last rejection's detail, when there was one.
+    ///
+    /// # Returns
+    ///
+    /// What the second plan produced, or [`DownloadOutcome::Stopped`] when the
+    /// acquisition was failed.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger, settings or plugin error that stopped the search or
+    /// the download.
+    async fn search_again_after_rejection(
+        &self,
+        id: Uuid,
+        detail: Option<&str>,
+    ) -> Result<DownloadOutcome, AcquireError> {
+        let Some(row) = self.repository().get(id).await? else {
+            return Err(AcquireError::UnknownAcquisition(id));
+        };
+        if row.state.is_terminal() {
+            return Ok(DownloadOutcome::Stopped);
+        }
+        self.restart_search(
+            &row,
+            "every candidate was rejected; searching once more without them",
+        )
+        .await?;
+        let Some(row) = self.repository().get(id).await? else {
+            return Err(AcquireError::UnknownAcquisition(id));
+        };
+        match self.search_without_failing(&row).await? {
+            SearchOutcome::Planned { instances, plan } => {
+                Box::pin(self.run_download_plan(id, &instances, &plan, false)).await
+            }
+            SearchOutcome::Failed(_)
+            | SearchOutcome::Cancelled
+            | SearchOutcome::AlbumPlanned { .. } => {
+                let detail =
+                    detail.unwrap_or("no candidate passed verification after a fresh search");
+                self.fail_acquisition(id, FailureReason::VerificationFailed, Some(detail))
+                    .await?;
+                Ok(DownloadOutcome::Stopped)
+            }
+        }
     }
 
     /// Resumes a download that was already started.
@@ -874,6 +970,33 @@ impl AcquisitionOrchestrator {
         plan: &AlbumAttemptPlan,
         tracks: &[Track],
     ) -> Result<(), AcquireError> {
+        self.run_album_plan(acquisition_id, instances, plan, tracks, true)
+            .await
+    }
+
+    /// Runs a selected album plan, optionally searching once more when it is
+    /// spent on verification failures.
+    ///
+    /// # Parameters
+    ///
+    /// - `acquisition_id`: the album acquisition to download.
+    /// - `instances`: the instances the search walked, in layer order.
+    /// - `plan`: the album candidates to try, best first.
+    /// - `tracks`: the album's tracks, in playing order.
+    /// - `allow_fresh_search`: whether a plan spent entirely on verification
+    ///   failures may be followed by one more search.
+    ///
+    /// # Errors
+    ///
+    /// Returns the settings, ledger or filesystem error that stopped the stage.
+    async fn run_album_plan(
+        &self,
+        acquisition_id: Uuid,
+        instances: &[Arc<RegistryInstance>],
+        plan: &AlbumAttemptPlan,
+        tracks: &[Track],
+        allow_fresh_search: bool,
+    ) -> Result<(), AcquireError> {
         let Some(row) = self.repository().get(acquisition_id).await? else {
             return Err(AcquireError::UnknownAcquisition(acquisition_id));
         };
@@ -974,8 +1097,65 @@ impl AcquisitionOrchestrator {
         }
 
         let (reason, detail) = failure.unwrap_or((FailureReason::AllCandidatesFailed, None));
+        let quarantined = reason == FailureReason::VerificationFailed
+            && detail
+                .as_deref()
+                .is_some_and(|detail| detail.starts_with("fingerprint mismatch:"));
+        if allow_fresh_search && quarantined {
+            return self
+                .search_album_again_after_rejection(row, detail.as_deref())
+                .await;
+        }
         self.fail_album_acquisition(row, reason, detail.as_deref())
             .await
+    }
+
+    /// Searches the album layer once more after every folder failed verification.
+    ///
+    /// The rejected files are blocklisted, so the second search cannot select
+    /// them again. When it finds no folder either, the album acquisition fails
+    /// with `verification-failed` and the remaining tracks go to the per-track
+    /// fan-out as for every other album failure.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the album acquisition's ledger row.
+    /// - `detail`: the last rejection's detail, when there was one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger, settings or plugin error that stopped the search or
+    /// the download.
+    async fn search_album_again_after_rejection(
+        &self,
+        row: &AcquisitionRow,
+        detail: Option<&str>,
+    ) -> Result<(), AcquireError> {
+        if row.state.is_terminal() {
+            return Ok(());
+        }
+        let id = row.id;
+        self.restart_search(
+            row,
+            "every album folder was rejected; searching once more without them",
+        )
+        .await?;
+        let Some(row) = self.repository().get(id).await? else {
+            return Err(AcquireError::UnknownAcquisition(id));
+        };
+        match self.search_album(&row).await? {
+            SearchOutcome::AlbumPlanned {
+                instances,
+                plan,
+                tracks,
+            } => Box::pin(self.run_album_plan(id, &instances, &plan, &tracks, false)).await,
+            _ => {
+                let detail =
+                    detail.unwrap_or("no album folder passed verification after a fresh search");
+                self.fail_album_acquisition(&row, FailureReason::VerificationFailed, Some(detail))
+                    .await
+            }
+        }
     }
 
     /// Acts on one finished album candidate attempt.
@@ -1017,7 +1197,14 @@ impl AcquisitionOrchestrator {
                     Stability::Stable(resolved) | Stability::StillComplete(resolved) => {
                         let ordered = order_album_files(&attempt.mappings, resolved);
                         let (verified, detail) = self
-                            .verify_album_files(row.id, tracks, &attempt.mappings, &ordered)
+                            .verify_album_files(
+                                row,
+                                instance,
+                                &attempt.candidate,
+                                tracks,
+                                &attempt.mappings,
+                                &ordered,
+                            )
                             .await;
                         if verified.iter().all(Option::is_none) {
                             return Ok(AlbumVerdict::Next(Some((
@@ -1037,6 +1224,7 @@ impl AcquisitionOrchestrator {
                             .import_album_files(
                                 row.id,
                                 instance,
+                                &attempt.candidate,
                                 tracks,
                                 &attempt.mappings,
                                 &verified,
@@ -1635,7 +1823,7 @@ impl AcquisitionOrchestrator {
     /// # Errors
     ///
     /// Returns the database error when the entry cannot be written.
-    async fn log_message(
+    pub(crate) async fn log_message(
         &self,
         id: Uuid,
         state: AcquisitionState,

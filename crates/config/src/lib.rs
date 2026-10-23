@@ -484,6 +484,9 @@ pub mod keys {
     /// Whether acquired files are verified by fingerprint.
     pub const ACQUISITION_VERIFY_FINGERPRINT: SettingKey<bool> =
         SettingKey::new("acquisition.verify.fingerprint");
+    /// How long a source that failed fingerprint verification is skipped.
+    pub const ACQUISITION_VERIFY_QUARANTINE_DAYS: SettingKey<i64> =
+        SettingKey::new("acquisition.verify.quarantine_days");
 
     /// Whether upcoming queue items are prefetched.
     pub const PREFETCH_ENABLED: SettingKey<bool> = SettingKey::new("prefetch.enabled");
@@ -924,6 +927,12 @@ impl SettingsRegistry {
                     SettingKind::Bool,
                     SettingValue::Bool(false),
                     "Whether acquired files are verified by fingerprint",
+                ),
+                def(
+                    keys::ACQUISITION_VERIFY_QUARANTINE_DAYS,
+                    SettingKind::Integer { min: 1, max: 365 },
+                    SettingValue::Integer(30),
+                    "How long a source that failed fingerprint verification is skipped",
                 ),
                 def(
                     keys::TOOLS_YT_DLP_PATH,

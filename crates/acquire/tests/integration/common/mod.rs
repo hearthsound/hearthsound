@@ -31,9 +31,10 @@ use hearthsound_plugin_host::{
 };
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
 use hearthsound_test_support::{
-    ACQUISITION_FIXTURE, ALBUM_CATALOG, METADATA_FIXTURE, fixture_plugin,
+    ACQUISITION_FIXTURE, ALBUM_CATALOG, METADATA_FIXTURE, VERIFICATION_FIXTURE, fixture_plugin,
 };
 use serde_json::{Value, json};
+use sqlx::Row;
 use uuid::Uuid;
 
 /// The plugin id of the acquisition fixture.
@@ -505,6 +506,79 @@ impl Env {
             .unwrap();
         self.registry.rebuild().await.unwrap();
         view.id
+    }
+
+    /// Installs the verification fixture and makes it the verification layer.
+    ///
+    /// # Parameters
+    ///
+    /// - `server_config`: the fixture configuration, which lists the
+    ///   fingerprints it rejects or cannot identify, or makes it fail.
+    ///
+    /// # Returns
+    ///
+    /// The instance id.
+    pub async fn add_verification_instance(&self, server_config: Value) -> Uuid {
+        let installed = self
+            .host
+            .install(&fixture_plugin(VERIFICATION_FIXTURE))
+            .await
+            .unwrap();
+        self.repository
+            .register(&installed, PluginSource::Sideload)
+            .await
+            .unwrap();
+        let service = InstanceService::new(
+            Arc::clone(&self.host),
+            self.repository.clone(),
+            self.secrets.clone(),
+        );
+        let view = service
+            .create(&InstanceSpec {
+                slug: "verify".to_owned(),
+                plugin_id: "com.example.verification-fixture".to_owned(),
+                display_name: "Verification fixture".to_owned(),
+                server_config,
+                host_config: host_config(&self.downloads, InstanceLimits::default()),
+            })
+            .await
+            .unwrap();
+        service
+            .set_layer(Layer::Verification, &["verify".to_owned()])
+            .await
+            .unwrap();
+        self.registry.rebuild().await.unwrap();
+        view.id
+    }
+
+    /// Reads every `source_blocklist` row as (source key, file key, reason).
+    pub async fn quarantined(&self) -> Vec<(String, String, String)> {
+        let rows = sqlx::query("SELECT source_key, file_key, reason FROM source_blocklist")
+            .fetch_all(self.database.readers())
+            .await
+            .unwrap();
+        rows.into_iter()
+            .map(|row| {
+                (
+                    row.get::<String, _>("source_key"),
+                    row.get::<String, _>("file_key"),
+                    row.get::<Option<String>, _>("reason").unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+
+    /// Counts the `media_files` rows of a track.
+    ///
+    /// # Parameters
+    ///
+    /// - `track_id`: the track to count files for.
+    pub async fn media_files_for(&self, track_id: EntityId) -> i64 {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM media_files WHERE track_id = ?")
+            .bind(track_id.uuid().as_bytes().to_vec())
+            .fetch_one(self.database.readers())
+            .await
+            .unwrap()
     }
 
     /// Inserts an acquisition that stopped with its download finished.

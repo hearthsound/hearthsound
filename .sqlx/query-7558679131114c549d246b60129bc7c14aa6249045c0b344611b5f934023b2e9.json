@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT source_key, file_key FROM source_blocklist WHERE instance_id = ? AND (expires_at IS NULL OR expires_at > ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "source_key",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "source_blocklist",
+            "name": "source_key"
+          }
+        }
+      },
+      {
+        "name": "file_key",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "source_blocklist",
+            "name": "file_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "7558679131114c549d246b60129bc7c14aa6249045c0b344611b5f934023b2e9"
+}

@@ -786,3 +786,54 @@ async fn play_counts_pin_and_release_the_policy_reason() {
     let report = fixture.maintainer().autopin().await.unwrap();
     assert_eq!((report.pinned, report.released), (0, 2));
 }
+
+#[tokio::test]
+async fn removes_lapsed_source_quarantines_only() {
+    let fixture = Fixture::new().await;
+    let instance = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO plugins (id, version, api, manifest, sha256, source, enabled, installed_at) \
+         VALUES ('com.example.verifier', '0.1.0', 'hearthsound:plugin@0.3.0', '{}', X'00', 'sideload', 1, 0)",
+    )
+    .execute(fixture.db.writer())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO provider_instances \
+         (id, plugin_id, slug, display_name, server_config, host_config, enabled, created_at, updated_at) \
+         VALUES (?, 'com.example.verifier', 'verify', 'Verify', NULL, NULL, 1, 0, 0)",
+    )
+    .bind(instance.as_bytes().as_slice())
+    .execute(fixture.db.writer())
+    .await
+    .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    for (file, expires_at) in [
+        ("lapsed.flac", now - 1_000),
+        ("still-bad.flac", now + 86_400_000),
+        ("never.flac", i64::MAX),
+    ] {
+        sqlx::query(
+            "INSERT INTO source_blocklist (instance_id, source_key, file_key, reason, created_at, expires_at) \
+             VALUES (?, 'peer-1', ?, 'fingerprint mismatch: fixture', 0, ?)",
+        )
+        .bind(instance.as_bytes().as_slice())
+        .bind(file)
+        .bind(expires_at)
+        .execute(fixture.db.writer())
+        .await
+        .unwrap();
+    }
+
+    fixture.maintainer().run_once().await.unwrap();
+
+    let rows =
+        sqlx::query_scalar::<_, String>("SELECT file_key FROM source_blocklist ORDER BY file_key")
+            .fetch_all(fixture.db.readers())
+            .await
+            .unwrap();
+    assert_eq!(rows, ["never.flac", "still-bad.flac"]);
+}

@@ -12,9 +12,11 @@ workspace = true
 
 [dependencies]
 bytes.workspace = true
+data-encoding.workspace = true
 futures-util.workspace = true
 hearthsound-core = { path = "../core" }
 lofty.workspace = true
+rusty-chromaprint.workspace = true
 symphonia.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "process", "rt"] }

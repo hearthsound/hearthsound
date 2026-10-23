@@ -17,6 +17,7 @@
 //! when the acquisition is cancelled is cancelled on the backend instead and
 //! ends the stage without a failure.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +34,7 @@ use hearthsound_plugin_host::RegistryInstance;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
+use crate::blocklist::BlockedFile;
 use crate::error::AcquireError;
 use crate::orchestrator::AcquisitionOrchestrator;
 use crate::profile::QualityProfile;
@@ -92,6 +94,53 @@ impl AcquisitionOrchestrator {
     /// failed instance and reported as `backend-unavailable` when no candidate
     /// comes out of the whole layer.
     pub(crate) async fn search(&self, row: &AcquisitionRow) -> Result<SearchOutcome, AcquireError> {
+        self.run_search(row, true).await
+    }
+
+    /// Runs the track search stage and reports an empty result without failing.
+    ///
+    /// This is what a caller that has already decided what an empty search means
+    /// uses, for example the second search after every candidate failed
+    /// fingerprint verification.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the acquisition's ledger row, in `searching`.
+    ///
+    /// # Returns
+    ///
+    /// The same outcomes as [`AcquisitionOrchestrator::search`], except that an
+    /// empty plan is only reported as [`SearchOutcome::Failed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the library, settings or database error that stopped the search.
+    pub(crate) async fn search_without_failing(
+        &self,
+        row: &AcquisitionRow,
+    ) -> Result<SearchOutcome, AcquireError> {
+        self.run_search(row, false).await
+    }
+
+    /// Runs one track search and decides whether an empty plan fails the job.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the acquisition's ledger row, in `searching`.
+    /// - `fail_when_empty`: whether an empty plan marks the acquisition failed.
+    ///
+    /// # Returns
+    ///
+    /// The plan, the reason nothing came out of the layer, or the cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the library, settings or database error that stopped the search.
+    async fn run_search(
+        &self,
+        row: &AcquisitionRow,
+        fail_when_empty: bool,
+    ) -> Result<SearchOutcome, AcquireError> {
         let track_id = row
             .track_id
             .ok_or(AcquireError::UnknownAcquisition(row.id))?;
@@ -205,12 +254,20 @@ impl AcquisitionOrchestrator {
             } else {
                 plan.failure().unwrap_or(FailureReason::NoCandidates)
             };
-            self.fail_acquisition(
-                row.id,
-                reason,
-                Some("no candidate came out of the acquisition layer"),
-            )
-            .await?;
+            if fail_when_empty {
+                self.fail_acquisition(
+                    row.id,
+                    reason,
+                    Some("no candidate came out of the acquisition layer"),
+                )
+                .await?;
+            } else {
+                tracing::info!(
+                    acquisition = %row.id,
+                    reason = reason.as_str(),
+                    "a search found no candidate"
+                );
+            }
             return Ok(SearchOutcome::Failed(reason));
         }
 
@@ -580,8 +637,12 @@ impl LayerSearch<'_> {
         };
 
         let index = self.instances.len();
+        let blocked = self.orchestrator.blocked_files(instance.id()).await;
         self.instances.push(Arc::clone(instance));
-        match self.poll(provider.as_ref(), instance, index).await {
+        match self
+            .poll(provider.as_ref(), instance, index, &blocked)
+            .await
+        {
             Ok(()) => {}
             Err(failure) => {
                 if failure {
@@ -598,6 +659,8 @@ impl LayerSearch<'_> {
     /// - `provider`: the instance's acquisition provider.
     /// - `instance`: the instance, for its manifest and its slug in logs.
     /// - `index`: the position of the instance in the searched list.
+    /// - `blocked`: the source keys and file names the instance may not offer
+    ///   again.
     ///
     /// # Returns
     ///
@@ -610,6 +673,7 @@ impl LayerSearch<'_> {
         provider: &dyn AcquisitionProvider,
         instance: &RegistryInstance,
         index: usize,
+        blocked: &HashSet<BlockedFile>,
     ) -> Result<(), bool> {
         let deadline = Instant::now()
             + Duration::from_millis(u64::from(instance.manifest().resources.call_timeout_ms));
@@ -629,10 +693,10 @@ impl LayerSearch<'_> {
         loop {
             match provider.poll_search(&self.context, &token).await {
                 Ok(SearchState::Running(candidates)) => {
-                    self.accumulate(index, candidates);
+                    self.accumulate(index, candidates, blocked);
                 }
                 Ok(SearchState::Complete(candidates)) => {
-                    self.accumulate(index, candidates);
+                    self.accumulate(index, candidates, blocked);
                     return Ok(());
                 }
                 Err(ProviderError::NotFound) => {
@@ -684,12 +748,38 @@ impl LayerSearch<'_> {
 
     /// Appends one poll's candidates to the accumulator.
     ///
+    /// A candidate file whose source and file name are quarantined is dropped
+    /// before the candidate is scored, and a candidate whose files are all
+    /// dropped is not accumulated at all: the backend offered nothing this
+    /// server may download.
+    ///
     /// # Parameters
     ///
     /// - `index`: the position of the instance that reported the candidates.
     /// - `candidates`: the candidates the poll returned.
-    fn accumulate(&mut self, index: usize, candidates: Vec<Candidate>) {
-        for candidate in candidates {
+    /// - `blocked`: the source keys and file names that are quarantined.
+    fn accumulate(
+        &mut self,
+        index: usize,
+        candidates: Vec<Candidate>,
+        blocked: &HashSet<BlockedFile>,
+    ) {
+        for mut candidate in candidates {
+            if !blocked.is_empty() {
+                let source_key = candidate.source.key.clone();
+                let offered = candidate.files.len();
+                candidate
+                    .files
+                    .retain(|file| !blocked.contains(&(source_key.clone(), file.name.clone())));
+                if offered > 0 && candidate.files.is_empty() {
+                    tracing::info!(
+                        source = candidate.source.key.as_str(),
+                        candidate = candidate.path.as_str(),
+                        "dropped a candidate whose every file is quarantined"
+                    );
+                    continue;
+                }
+            }
             let candidate_index = self
                 .slots
                 .iter()

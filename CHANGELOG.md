@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An acquired file is fingerprinted with Chromaprint and checked against the
+  verification layer when `acquisition.verify.fingerprint` is on. A file the
+  service judges a different recording is quarantined: its source and file name
+  are written to `source_blocklist` with the reason and an expiry of
+  `acquisition.verify.quarantine_days` (default 30), its staged copy is removed,
+  and the next candidate is tried; a plan spent entirely on such rejections gets
+  one fresh search, which skips the quarantined files, before the acquisition
+  fails with `verification-failed`. A `play` acquisition imports and streams the
+  file first and checks it afterwards, removing a mismatching import through the
+  eviction removal path, publishing the track's availability and starting a
+  background acquisition. An `unknown` verdict or a provider error lets the file
+  through and is logged. The storage maintenance pass deletes lapsed quarantine
+  rows. Album acquisitions check every mapped file against its own track.
+
 - The plugin host drives plugins that report listening history, suggest music,
   verify downloads and link listener accounts. A `scrobble` plugin answers its
   batch and pacing limits and receives now-playing reports, finished listens and

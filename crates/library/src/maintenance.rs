@@ -392,11 +392,38 @@ impl StorageMaintainer {
         let autopin = self.autopin().await?;
         let relocation = self.relocate().await?;
         let eviction = self.evict().await?;
+        self.clear_expired_quarantines().await?;
         Ok(MaintenanceReport {
             autopin,
             relocation,
             eviction,
         })
+    }
+
+    /// Deletes the `source_blocklist` rows whose quarantine has lapsed.
+    ///
+    /// A quarantined source is only skipped while its entry is unexpired, so a
+    /// lapsed row has no meaning left; removing it keeps the search filter's
+    /// query small. The deletion is not part of the storage report: it changes
+    /// no file and no track.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when the delete fails.
+    async fn clear_expired_quarantines(&self) -> Result<(), LibraryError> {
+        let mut tx = self.writer.begin().await?;
+        let removed = sqlx::query!(
+            "DELETE FROM source_blocklist WHERE expires_at IS NOT NULL AND expires_at <= ?",
+            crate::now_millis(),
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        if removed > 0 {
+            tracing::debug!(rows = removed, "removed lapsed source quarantines");
+        }
+        Ok(())
     }
 
     /// Runs a pass whenever the signal asks for one, until shutdown.
@@ -1150,18 +1177,7 @@ impl StorageMaintainer {
         conn: &mut sqlx::SqliteConnection,
         track_id: EntityId,
     ) -> Result<Option<Availability>, LibraryError> {
-        let Some(track) = tracks::get_track(conn, track_id).await? else {
-            return Ok(None);
-        };
-        let files = media_files::list_media_files_for_track(conn, track_id).await?;
-        if files.is_empty() {
-            if track.availability == Availability::Acquiring {
-                return Ok(Some(track.availability));
-            }
-            tracks::set_track_availability(conn, track_id, Availability::Remote, None).await?;
-            return Ok(Some(Availability::Remote));
-        }
-        retention::recompute_availability(conn, track_id).await
+        settle_availability(conn, track_id).await
     }
 
     /// Reads the managed files whose storage and pins disagree.
@@ -1408,6 +1424,82 @@ async fn still_unpinned(
     .fetch_optional(&mut *conn)
     .await?;
     Ok(row.is_some_and(|row| row.pinned == 0 && row.storage == file.storage.as_str()))
+}
+
+/// Removes one managed file's row and brings its track's availability in step.
+///
+/// This is the database half of the removal path eviction takes: the row goes
+/// first and the track's availability is re-derived from the files it has left,
+/// so a caller that removes the file afterwards never leaves a row naming a file
+/// that is gone. The caller owns the file itself and publishes the availability
+/// the function returns.
+///
+/// # Parameters
+///
+/// - `conn`: the write transaction the removal runs in.
+/// - `id`: the `media_files` row to remove.
+///
+/// # Returns
+///
+/// The track the row belonged to and its availability after the removal, or
+/// `None` when no row has that id.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a read or a write fails.
+pub async fn remove_managed_file(
+    conn: &mut sqlx::SqliteConnection,
+    id: Uuid,
+) -> Result<Option<(EntityId, Option<Availability>)>, LibraryError> {
+    let track = sqlx::query_scalar!(
+        "SELECT track_id FROM media_files WHERE id = ?",
+        id.as_bytes().as_slice(),
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(track) = track else {
+        return Ok(None);
+    };
+    let track_id = decode_entity(IdPrefix::Track, &track)?;
+    media_files::delete_media_file(conn, id).await?;
+    let availability = settle_availability(conn, track_id).await?;
+    Ok(Some((track_id, availability)))
+}
+
+/// Brings a track's availability in step with the files it has left.
+///
+/// A track with no file at all is `remote` again - the acquisition in flight, if
+/// there is one, keeps its own state - and every other track takes the
+/// availability its preferred file and its pins imply.
+///
+/// # Parameters
+///
+/// - `conn`: the transaction to read and write on.
+/// - `track_id`: the track whose files changed.
+///
+/// # Returns
+///
+/// The availability the track has now, or `None` when it does not exist.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a read or a write fails.
+async fn settle_availability(
+    conn: &mut sqlx::SqliteConnection,
+    track_id: EntityId,
+) -> Result<Option<Availability>, LibraryError> {
+    let Some(track) = tracks::get_track(conn, track_id).await? else {
+        return Ok(None);
+    };
+    let files = media_files::list_media_files_for_track(conn, track_id).await?;
+    if files.is_empty() {
+        if track.availability == Availability::Acquiring {
+            return Ok(Some(track.availability));
+        }
+        tracks::set_track_availability(conn, track_id, Availability::Remote, None).await?;
+        return Ok(Some(Availability::Remote));
+    }
+    retention::recompute_availability(conn, track_id).await
 }
 
 /// Runs a maintenance pass for the `storage.maintain` job.

@@ -35,12 +35,14 @@
 
 mod error;
 pub mod ffmpeg;
+pub mod fingerprint;
 pub mod probe;
 pub mod tags;
 pub mod transcode;
 
 pub use error::MediaError;
 pub use ffmpeg::{FfmpegProcess, FfmpegRunner};
+pub use fingerprint::{Fingerprint, fingerprint};
 pub use probe::{
     Codec, Container, DecodeBackend, DecodeReport, ProbeResult, extract_picture, probe,
     verify_decodes,

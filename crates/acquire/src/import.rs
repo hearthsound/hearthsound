@@ -11,9 +11,10 @@
 //!
 //! A rejected candidate's staged copies are removed, so a backend that keeps
 //! listing its staging directory cannot hand the same file back as a fresh
-//! candidate. The design also quarantines the offending source in
-//! `source_blocklist`; that table does not exist yet, so a rejected source is
-//! only skipped for this acquisition - the next search may select it again.
+//! candidate. The offending file's source is also written to `source_blocklist`
+//! when the verification layer's fingerprint check judged it a different
+//! recording, so it is skipped by every later search until its quarantine
+//! lapses.
 //!
 //! Verification runs while the acquisition is still `downloading`, which is what
 //! lets a failure take the retry edge back to the next candidate. A candidate
@@ -46,10 +47,10 @@ use std::time::SystemTime;
 use hearthsound_catalog::CoverArtRequest;
 use hearthsound_config::keys;
 use hearthsound_core::events::{LibraryChange, LibraryChanged, ServerEvent};
-use hearthsound_core::providers::{CandidateFile, CatalogAlbum};
+use hearthsound_core::providers::{Candidate, CandidateFile, CatalogAlbum};
 use hearthsound_core::{
     AcquisitionState, Availability, CatalogId, ClientId, EntityId, EntityKind, FailureReason,
-    ImportMode, PinReason, QualityTier, StorageClass,
+    ImportMode, PinReason, Priority, QualityTier, StorageClass,
 };
 use hearthsound_library::naming::{NamingContext, NamingTemplate};
 use hearthsound_library::{
@@ -68,6 +69,7 @@ use crate::orchestrator::{AcquisitionOrchestrator, DestinationReservation};
 use crate::profile;
 use crate::repo::{self, AcquisitionRow};
 use crate::select::AlbumFileMapping;
+use crate::verify::SourceFile;
 
 /// The window within which a downloaded file's duration must match the wanted
 /// track's catalog duration, in milliseconds.
@@ -111,19 +113,19 @@ pub(crate) struct VerifiedFile {
 }
 
 /// The managed file one import wrote.
-struct ImportedFile {
+pub(crate) struct ImportedFile {
     /// The absolute path the file landed at.
-    destination: PathBuf,
+    pub(crate) destination: PathBuf,
     /// The path relative to the storage root, as the row stores it.
-    rel_path: String,
+    pub(crate) rel_path: String,
     /// The storage root the file landed under.
-    storage: StorageClass,
+    pub(crate) storage: StorageClass,
     /// The availability the imported file gives its track.
-    availability: Availability,
+    pub(crate) availability: Availability,
     /// The quality tier computed from the probe.
-    tier: Option<QualityTier>,
+    pub(crate) tier: Option<QualityTier>,
     /// The `media_files` row the import wrote.
-    media_file_id: Uuid,
+    pub(crate) media_file_id: Uuid,
 }
 
 /// What importing one album download's files produced.
@@ -364,6 +366,27 @@ impl AcquisitionOrchestrator {
             }
         };
 
+        if row.priority != Priority::Play
+            && let Some(rejection) = self
+                .fingerprint_rejection(instance, &row, &verified)
+                .await?
+        {
+            cleanup_rejected(files).await;
+            self.log_rejection(acquisition_id, AcquisitionState::Downloading, &rejection)
+                .await;
+            tracing::warn!(
+                acquisition = %acquisition_id,
+                instance = instance.slug().as_str(),
+                reason = rejection.reason.as_str(),
+                detail = rejection.detail.as_str(),
+                "quarantined a downloaded candidate"
+            );
+            return Ok(HandoffOutcome::Rejected {
+                reason: rejection.reason,
+                detail: Some(rejection.detail),
+            });
+        }
+
         self.repository()
             .transition(
                 acquisition_id,
@@ -472,6 +495,18 @@ impl AcquisitionOrchestrator {
         };
         match self.verify_files(tier, catalog_duration_ms, &settled).await {
             Ok(verified) => {
+                if row.priority != Priority::Play
+                    && let Some(rejection) = self
+                        .fingerprint_rejection(&instance, row, &verified)
+                        .await?
+                {
+                    cleanup_rejected(&settled).await;
+                    self.log_rejection(id, AcquisitionState::Verifying, &rejection)
+                        .await;
+                    return self
+                        .fail_acquisition(id, rejection.reason, Some(&rejection.detail))
+                        .await;
+                }
                 tracing::info!(
                     acquisition = %id,
                     instance = instance.slug().as_str(),
@@ -526,6 +561,7 @@ impl AcquisitionOrchestrator {
         &self,
         acquisition_id: Uuid,
         instance: &RegistryInstance,
+        candidate: &Candidate,
         tracks: &[Track],
         mappings: &[AlbumFileMapping],
         verified: &[Option<VerifiedFile>],
@@ -576,6 +612,23 @@ impl AcquisitionOrchestrator {
                             change: LibraryChange::Added,
                         }));
                     post_import(instance, &verified.file).await;
+                    let file_key = candidate
+                        .files
+                        .get(mapping.file_index as usize)
+                        .map(|offered| offered.name.clone())
+                        .unwrap_or_else(|| verified.file.path.clone());
+                    self.check_play_import(
+                        acquisition_id,
+                        instance,
+                        &current,
+                        track,
+                        &imported,
+                        SourceFile {
+                            source_key: &candidate.source.key,
+                            file_key: &file_key,
+                        },
+                    )
+                    .await;
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -599,11 +652,15 @@ impl AcquisitionOrchestrator {
     ///
     /// A file that fails is logged and removed from the staging directory; the
     /// tracks that did verify keep their files, because one bad file does not
-    /// make a whole folder useless.
+    /// make a whole folder useless. When fingerprint verification is enabled and
+    /// the priority is not `play`, each file that passed the local checks is
+    /// also checked against its own track, and a file the service judges a
+    /// different recording is rejected and its source quarantined.
     ///
     /// # Parameters
     ///
-    /// - `acquisition_id`: the album acquisition being verified.
+    /// - `row`: the album acquisition's ledger row.
+    /// - `instance`: the instance that served the download.
     /// - `tracks`: the album's tracks, in playing order.
     /// - `mappings`: the candidate's mapping, in track order.
     /// - `files`: the resolved files aligned with the mapping.
@@ -615,11 +672,14 @@ impl AcquisitionOrchestrator {
     /// rejection.
     pub(crate) async fn verify_album_files(
         &self,
-        acquisition_id: Uuid,
+        row: &AcquisitionRow,
+        instance: &RegistryInstance,
+        candidate: &Candidate,
         tracks: &[Track],
         mappings: &[AlbumFileMapping],
         files: &[Option<ResolvedFile>],
     ) -> (Vec<Option<VerifiedFile>>, Option<String>) {
+        let acquisition_id = row.id;
         let mut verified = Vec::with_capacity(mappings.len());
         let mut detail = None;
         for (mapping, file) in mappings.iter().zip(files) {
@@ -631,27 +691,90 @@ impl AcquisitionOrchestrator {
                 verified.push(None);
                 continue;
             };
-            match self.verify_one(file, track.duration_ms, mapping.tier).await {
-                Ok(one) => verified.push(Some(one)),
+            let checked = match self.verify_one(file, track.duration_ms, mapping.tier).await {
+                Ok(one) => one,
                 Err(rejection) => {
-                    tracing::warn!(
-                        acquisition = %acquisition_id,
-                        track = %track.id,
-                        reason = rejection.reason.as_str(),
-                        detail = rejection.detail.as_str(),
-                        "rejected an album file"
-                    );
-                    self.log_rejection(acquisition_id, AcquisitionState::Downloading, &rejection)
+                    self.reject_album_file(acquisition_id, track, file, &rejection)
                         .await;
                     detail = Some(rejection.detail);
-                    if file.root == STAGING_ROOT {
-                        let _ = tokio::fs::remove_file(&file.absolute_path).await;
-                    }
                     verified.push(None);
+                    continue;
+                }
+            };
+            if row.priority != Priority::Play {
+                let file_key = candidate
+                    .files
+                    .get(mapping.file_index as usize)
+                    .map(|offered| offered.name.as_str())
+                    .unwrap_or(file.path.as_str());
+                let mismatch = match self
+                    .check_fingerprint(
+                        instance,
+                        row,
+                        track,
+                        file,
+                        SourceFile {
+                            source_key: &candidate.source.key,
+                            file_key,
+                        },
+                    )
+                    .await
+                {
+                    Ok(mismatch) => mismatch,
+                    Err(error) => {
+                        tracing::warn!(
+                            acquisition = %acquisition_id,
+                            track = %track.id,
+                            %error,
+                            "an album file could not be fingerprint checked"
+                        );
+                        None
+                    }
+                };
+                if let Some(detail_text) = mismatch {
+                    let rejection = Rejection {
+                        reason: FailureReason::VerificationFailed,
+                        detail: format!("fingerprint mismatch: {detail_text}"),
+                    };
+                    self.reject_album_file(acquisition_id, track, file, &rejection)
+                        .await;
+                    detail = Some(rejection.detail);
+                    verified.push(None);
+                    continue;
                 }
             }
+            verified.push(Some(checked));
         }
         (verified, detail)
+    }
+
+    /// Logs a rejected album file and removes its staged copy.
+    ///
+    /// # Parameters
+    ///
+    /// - `acquisition_id`: the album acquisition being verified.
+    /// - `track`: the track the file was mapped to.
+    /// - `file`: the file that was rejected.
+    /// - `rejection`: why it was rejected.
+    async fn reject_album_file(
+        &self,
+        acquisition_id: Uuid,
+        track: &Track,
+        file: &ResolvedFile,
+        rejection: &Rejection,
+    ) {
+        tracing::warn!(
+            acquisition = %acquisition_id,
+            track = %track.id,
+            reason = rejection.reason.as_str(),
+            detail = rejection.detail.as_str(),
+            "rejected an album file"
+        );
+        self.log_rejection(acquisition_id, AcquisitionState::Downloading, rejection)
+            .await;
+        if file.root == STAGING_ROOT {
+            let _ = tokio::fs::remove_file(&file.absolute_path).await;
+        }
     }
 
     /// Verifies and imports the files of an album download a previous process
@@ -745,7 +868,7 @@ impl AcquisitionOrchestrator {
             "resuming the import of a verified album download"
         );
         let (verified, detail) = self
-            .verify_album_files(id, &tracks, &mappings, &files)
+            .verify_album_files(row, &instance, &candidate, &tracks, &mappings, &files)
             .await;
         if verified.iter().all(Option::is_none) {
             return self
@@ -753,7 +876,7 @@ impl AcquisitionOrchestrator {
                 .await;
         }
         let summary = self
-            .import_album_files(id, &instance, &tracks, &mappings, &verified)
+            .import_album_files(id, &instance, &candidate, &tracks, &mappings, &verified)
             .await?;
         if summary.imported > 0 {
             self.complete_album_acquisition(row, summary.imported).await
@@ -829,6 +952,68 @@ impl AcquisitionOrchestrator {
             );
         }
         Ok(verified)
+    }
+
+    /// Fingerprints every verified file of a track candidate and asks the
+    /// verification layer whether it is the wanted recording.
+    ///
+    /// A file the service judges a different recording is quarantined by the
+    /// check itself; the first mismatch becomes the rejection of the whole
+    /// candidate, exactly like a failed decode or duration check.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance`: the acquisition instance that served the candidate.
+    /// - `row`: the acquisition's ledger row, whose candidate names the source.
+    /// - `verified`: the files that passed the decode, duration and tier checks.
+    ///
+    /// # Returns
+    ///
+    /// The rejection when a file mismatched, and `None` when every checked file
+    /// passed or the check was skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns the library, settings or database error that stopped the check.
+    async fn fingerprint_rejection(
+        &self,
+        instance: &RegistryInstance,
+        row: &AcquisitionRow,
+        verified: &[VerifiedFile],
+    ) -> Result<Option<Rejection>, AcquireError> {
+        let Some(track_id) = row.track_id else {
+            return Ok(None);
+        };
+        let Some(track) = self.library().get_track(track_id).await? else {
+            return Ok(None);
+        };
+        let Some(candidate) =
+            stored_candidate(row.candidate.as_deref()).map(|stored| stored.to_candidate())
+        else {
+            return Ok(None);
+        };
+        for file in verified {
+            let file_key = candidate_file_key(&candidate, &file.file);
+            if let Some(detail) = self
+                .check_fingerprint(
+                    instance,
+                    row,
+                    &track,
+                    &file.file,
+                    SourceFile {
+                        source_key: &candidate.source.key,
+                        file_key: &file_key,
+                    },
+                )
+                .await?
+            {
+                return Ok(Some(Rejection {
+                    reason: FailureReason::VerificationFailed,
+                    detail: format!("fingerprint mismatch: {detail}"),
+                }));
+            }
+        }
+        Ok(None)
     }
 
     /// Runs the verification checks on one file.
@@ -944,7 +1129,41 @@ impl AcquisitionOrchestrator {
             .import_verified_file(acquisition_id, instance, verified, row)
             .await
         {
-            Ok(()) => Ok(ImportOutcome::Imported),
+            Ok(imported) => {
+                if let (Some(track_id), Some(verified)) = (row.track_id, verified.first()) {
+                    match self.library().get_track(track_id).await {
+                        Ok(Some(track)) => {
+                            if let Some(candidate) = stored_candidate(row.candidate.as_deref())
+                                .map(|stored| stored.to_candidate())
+                            {
+                                let file_key = candidate_file_key(&candidate, &verified.file);
+                                self.check_play_import(
+                                    acquisition_id,
+                                    instance,
+                                    row,
+                                    &track,
+                                    &imported,
+                                    SourceFile {
+                                        source_key: &candidate.source.key,
+                                        file_key: &file_key,
+                                    },
+                                )
+                                .await;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                acquisition = %acquisition_id,
+                                track = %track_id,
+                                %error,
+                                "the imported track could not be read for its fingerprint check"
+                            );
+                        }
+                    }
+                }
+                Ok(ImportOutcome::Imported)
+            }
             Err(error) => {
                 let detail = format!("the import failed: {error}");
                 tracing::warn!(
@@ -981,6 +1200,10 @@ impl AcquisitionOrchestrator {
     /// - `row`: the acquisition's ledger row, whose state decides whether the
     ///   `importing` transition still has to be written.
     ///
+    /// # Returns
+    ///
+    /// The managed file the import wrote.
+    ///
     /// # Errors
     ///
     /// Returns the library, settings, filesystem or ledger error that stopped
@@ -992,7 +1215,7 @@ impl AcquisitionOrchestrator {
         instance: &RegistryInstance,
         verified: &[VerifiedFile],
         row: &AcquisitionRow,
-    ) -> Result<(), AcquireError> {
+    ) -> Result<ImportedFile, AcquireError> {
         let track_id = row
             .track_id
             .ok_or(AcquireError::UnknownAcquisition(acquisition_id))?;
@@ -1051,7 +1274,7 @@ impl AcquisitionOrchestrator {
         );
         post_import(instance, &verified.file).await;
         self.release_staging(acquisition_id).await;
-        Ok(())
+        Ok(imported)
     }
 
     /// Imports one verified file for one track into managed storage.
@@ -1478,6 +1701,39 @@ impl AcquisitionOrchestrator {
         let cover = self.catalog().cover_art(&request).await.ok()?;
         Some(Artwork::new(cover.mime_type, cover.bytes))
     }
+}
+
+/// Returns the key a candidate file is blocklisted under.
+///
+/// The candidate's own name is what a later search compares, so a resolved
+/// output path is matched back to the candidate file it came from by its file
+/// name; an unmatched path falls back to itself.
+///
+/// # Parameters
+///
+/// - `candidate`: the stored candidate, whose files name what was offered.
+/// - `file`: the file the download produced.
+///
+/// # Returns
+///
+/// The candidate file's name, or the reported path when no file matches.
+fn candidate_file_key(candidate: &Candidate, file: &ResolvedFile) -> String {
+    let name = Path::new(&file.path)
+        .file_name()
+        .and_then(|name| name.to_str());
+    candidate
+        .files
+        .iter()
+        .find(|offered| {
+            offered.name == file.path
+                || Some(offered.name.as_str()) == name
+                || Path::new(&offered.name)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    == name
+        })
+        .map(|offered| offered.name.clone())
+        .unwrap_or_else(|| file.path.clone())
 }
 
 /// Removes the staged copies of a rejected candidate.

@@ -34,11 +34,13 @@
 //! reads them through [`hearthsound_config::settings::Settings`].
 #![forbid(unsafe_code)]
 
+mod blocklist;
 mod brackets;
 mod budget;
 mod error;
 mod identity;
 mod import;
+mod verify;
 
 pub mod adopt;
 pub mod announce;

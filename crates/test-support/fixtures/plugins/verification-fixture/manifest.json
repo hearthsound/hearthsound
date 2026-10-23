@@ -3,7 +3,7 @@
   "id": "com.example.verification-fixture",
   "name": "Verification fixture",
   "version": "0.1.0",
-  "description": "A verification plugin that rejects the fingerprints an administrator lists and matches everything else.",
+  "description": "A verification plugin that answers from the fingerprints an administrator lists and matches everything else.",
   "authors": ["Hearthsound contributors"],
   "license": "MIT OR Apache-2.0",
   "homepage": "https://github.com/hearthsound/hearthsound",
@@ -20,13 +20,24 @@
             "type": "array",
             "title": "Rejected fingerprints",
             "items": { "type": "string", "title": "Fingerprint" }
+          },
+          "unknownFingerprints": {
+            "type": "array",
+            "title": "Unknown fingerprints",
+            "items": { "type": "string", "title": "Fingerprint" }
+          },
+          "fail": {
+            "type": "boolean",
+            "title": "Fail every check"
           }
         }
       },
       "uiSchema": {
         "type": "VerticalLayout",
         "elements": [
-          { "type": "Control", "scope": "#/properties/rejectFingerprints" }
+          { "type": "Control", "scope": "#/properties/rejectFingerprints" },
+          { "type": "Control", "scope": "#/properties/unknownFingerprints" },
+          { "type": "Control", "scope": "#/properties/fail" }
         ]
       }
     },

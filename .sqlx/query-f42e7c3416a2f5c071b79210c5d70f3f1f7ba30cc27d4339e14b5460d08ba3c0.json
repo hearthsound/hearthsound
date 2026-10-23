@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM source_blocklist WHERE expires_at IS NOT NULL AND expires_at <= ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "f42e7c3416a2f5c071b79210c5d70f3f1f7ba30cc27d4339e14b5460d08ba3c0"
+}

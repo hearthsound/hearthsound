@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO source_blocklist (instance_id, source_key, file_key, reason, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (instance_id, source_key, file_key) DO UPDATE SET reason = excluded.reason, created_at = excluded.created_at, expires_at = excluded.expires_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "4ae86b13de3381f5a5dae720fc2f4d92545b334f8c2d0412f7de842ba34a7de8"
+}
