@@ -137,6 +137,90 @@ impl CatalogService {
         }
     }
 
+    /// Returns an artist's portrait renditions from the artwork layer.
+    ///
+    /// The first artwork instance, in the administrator's order, that answers a
+    /// non-empty image list wins. Nothing is fetched: the URLs are what a client
+    /// receives, and an instance that describes them has already promised they
+    /// are reachable. An instance that fails is logged and skipped, and a
+    /// stored artist's local album art is not substituted, because a caller
+    /// that receives an empty list falls back to its own picture.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: a stored artist id, or the catalog id of an artist.
+    ///
+    /// # Returns
+    ///
+    /// The portrait images the layer describes, in the answering instance's
+    /// order, with their dimensions where the provider states them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::NotFound`] when the id names no artist, and
+    /// [`CatalogError::Database`] when the artist cannot be read. A provider
+    /// failure is logged and skipped, never returned.
+    pub async fn artist_portraits(&self, id: &ClientId) -> Result<Vec<Image>, CatalogError> {
+        let subject = self.subject(id).await?;
+        if subject.kind != EntityKind::Artist {
+            return Err(CatalogError::NotFound);
+        }
+        let instances = self
+            .registry()
+            .layers(Layer::Artwork)
+            .into_iter()
+            .filter(|instance| instance.artwork().is_some())
+            .collect::<Vec<_>>();
+        if instances.is_empty() {
+            return Ok(Vec::new());
+        }
+        let timeout = artwork_timeout(&self.settings_snapshot())?;
+        let key = RequestKey::artwork(subject.kind, &subject);
+
+        for instance in instances {
+            let Some(provider) = instance.artwork() else {
+                continue;
+            };
+            let images = match self.cached_images(instance.id(), &key).await {
+                Some(images) => images,
+                None => {
+                    let asked =
+                        tokio::time::timeout(timeout, provider.find_artwork(&subject)).await;
+                    match asked {
+                        Ok(Ok(images)) => {
+                            let ttl = if images.is_empty() {
+                                EMPTY_ARTWORK_TTL
+                            } else {
+                                ARTWORK_TTL
+                            };
+                            self.store_images(instance.id(), &key, &images, ttl).await;
+                            images
+                        }
+                        Ok(Err(error)) => {
+                            tracing::debug!(
+                                instance = instance.slug().as_str(),
+                                %error,
+                                "an artwork instance could not answer an artist portrait request"
+                            );
+                            continue;
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                instance = instance.slug().as_str(),
+                                "an artwork instance did not answer an artist portrait request in time"
+                            );
+                            continue;
+                        }
+                    }
+                }
+            };
+            if !images.is_empty() {
+                return Ok(images);
+            }
+        }
+        Ok(Vec::new())
+    }
+
     /// Asks the artwork layer for an entity's picture.
     ///
     /// Every instance is asked in layer order until one delivers an image. An
@@ -442,7 +526,7 @@ impl CatalogService {
     /// Returns [`CatalogError::NotFound`] when the id names no entity, when it
     /// names a kind with no picture, and when a catalog lookup finds nothing, and
     /// the mapped provider failure when a catalog lookup fails.
-    async fn subject(&self, id: &ClientId) -> Result<ArtworkSubject, CatalogError> {
+    pub(crate) async fn subject(&self, id: &ClientId) -> Result<ArtworkSubject, CatalogError> {
         match id {
             ClientId::Entity(entity) => self.stored_subject(*entity).await,
             ClientId::Catalog(catalog) => match catalog.kind() {

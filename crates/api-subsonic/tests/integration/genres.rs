@@ -6,6 +6,7 @@
 
 use crate::common::seed::{Seeded, library};
 use crate::common::{Fixture, SNAPSHOT_FILTERS, assert_error, assert_ok, get};
+use hearthsound_core::EntityId;
 
 /// Counts the songs of a listing response.
 ///
@@ -388,4 +389,377 @@ async fn similar_songs_answer_an_empty_listing() {
     )
     .await;
     assert_error(&missing, 10);
+}
+
+/// `getSimilarSongs2` serves a stored suggestion as the stored song and a
+/// catalog-only one as a catalog song, in both response shapes.
+#[tokio::test]
+async fn similar_songs_mix_stored_and_catalog_songs() {
+    let (fixture, seeded) = fixture().await;
+    let (stored, album, artist) = fixture
+        .seed_track("Fixture Album", "Fixture Artist", "Fixture Song 1", 180_000)
+        .await;
+    fixture
+        .install_album_catalog(serde_json::json!({
+            "searchResults": [{ "text": "Fixture Song 2", "track": 2 }],
+        }))
+        .await;
+    fixture
+        .install_discovery_layer(&[(
+            "scrobble",
+            serde_json::json!({
+                "similarTracks": [
+                    { "title": "Fixture Song 1", "artists": ["Fixture Artist"] },
+                    { "title": "Fixture Song 2", "artists": ["Fixture Artist"] },
+                ],
+            }),
+        )])
+        .await;
+    let app = fixture.app();
+    let json = get(
+        &app,
+        &format!(
+            "/rest/getSimilarSongs2?id={}&apiKey={}&f=json",
+            seeded.alpha_tracks[0], fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&json);
+    assert!(
+        json.body.contains(&stored.to_string()),
+        "the stored suggestion is served as the stored song: {}",
+        json.body
+    );
+    assert!(
+        json.body.contains(catalog_track(2).as_str()),
+        "the other suggestion is served as a catalog song: {}",
+        json.body
+    );
+    let stabilized = stabilize(&json.body, stored, album, artist);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("similar-songs-mixed-json", stabilized);
+    });
+
+    let xml = get(
+        &app,
+        &format!(
+            "/rest/getSimilarSongs2.view?id={}&apiKey={}",
+            seeded.alpha_tracks[0], fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&xml);
+    assert!(
+        xml.body.contains(&stored.to_string()),
+        "the stored suggestion is served as the stored song: {}",
+        xml.body
+    );
+    assert!(
+        xml.body.contains(catalog_track(2).as_str()),
+        "the other suggestion is served as a catalog song: {}",
+        xml.body
+    );
+    let stabilized = stabilize(&xml.body, stored, album, artist);
+    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("similar-songs-mixed-xml", stabilized);
+    });
+}
+
+/// `getSimilarSongs2` seeds similar artists from an album or artist id and
+/// interleaves their popular tracks.
+#[tokio::test]
+async fn similar_songs_from_an_artist_interleave_artist_tracks() {
+    let (fixture, seeded) = fixture().await;
+    fixture
+        .install_album_catalog(serde_json::json!({
+            "searchResults": [
+                { "text": "Fixture Song 1", "track": 1 },
+                { "text": "Fixture Song 2", "track": 2 },
+            ],
+        }))
+        .await;
+    fixture
+        .install_discovery_layer(&[(
+            "scrobble",
+            serde_json::json!({
+                "similarArtists": [{ "name": "First" }, { "name": "Second" }],
+                "topTracks": [
+                    { "title": "Fixture Song 1", "artists": ["Fixture Artist"] },
+                    { "title": "Fixture Song 2", "artists": ["Fixture Artist"] },
+                ],
+            }),
+        )])
+        .await;
+    let app = fixture.app();
+
+    let listed = get(
+        &app,
+        &format!(
+            "/rest/getSimilarSongs2?id={}&apiKey={}&f=json",
+            seeded.cardinals, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&listed);
+    let ids = song_ids(&listed.body, "similarSongs2");
+    assert_eq!(
+        ids,
+        vec![
+            catalog_track(1),
+            catalog_track(1),
+            catalog_track(2),
+            catalog_track(2),
+        ],
+        "the artists' tracks are interleaved: {}",
+        listed.body
+    );
+
+    let capped = get(
+        &app,
+        &format!(
+            "/rest/getSimilarSongs2?id={}&apiKey={}&count=3&f=json",
+            seeded.alpha, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&capped);
+    assert_eq!(
+        song_ids(&capped.body, "similarSongs2"),
+        vec![catalog_track(1), catalog_track(1), catalog_track(2),],
+        "the album seeds the same artists and the count caps the listing: {}",
+        capped.body
+    );
+}
+
+/// The discovery layer skips an instance that cannot answer and asks the next.
+#[tokio::test]
+async fn a_failing_discovery_instance_is_skipped() {
+    let (fixture, seeded) = fixture().await;
+    fixture
+        .install_album_catalog(serde_json::json!({
+            "searchResults": [{ "text": "Fixture Song 1", "track": 1 }],
+        }))
+        .await;
+    fixture
+        .install_discovery_layer(&[
+            ("broken", serde_json::json!({ "failDiscovery": true })),
+            (
+                "working",
+                serde_json::json!({
+                    "similarTracks": [
+                        { "title": "Fixture Song 1", "artists": ["Fixture Artist"] },
+                    ],
+                }),
+            ),
+        ])
+        .await;
+    let app = fixture.app();
+
+    let listed = get(
+        &app,
+        &format!(
+            "/rest/getSimilarSongs2?id={}&apiKey={}&f=json",
+            seeded.alpha_tracks[0], fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&listed);
+    assert!(
+        listed.body.contains(catalog_track(1).as_str()),
+        "the working instance answered: {}",
+        listed.body
+    );
+}
+
+/// A cached discovery answer is served without asking the instance again.
+#[tokio::test]
+async fn a_cached_discovery_answer_is_not_asked_again() {
+    let (fixture, seeded) = fixture().await;
+    fixture
+        .install_album_catalog(serde_json::json!({
+            "searchResults": [
+                { "text": "Fixture Song 1", "track": 1 },
+                { "text": "Fixture Song 2", "track": 2 },
+            ],
+        }))
+        .await;
+    fixture
+        .install_discovery_layer(&[(
+            "scrobble",
+            serde_json::json!({
+                "similarTracks": [
+                    { "title": "Fixture Song 1", "artists": ["Fixture Artist"] },
+                ],
+            }),
+        )])
+        .await;
+    let app = fixture.app();
+    let first = get(
+        &app,
+        &format!(
+            "/rest/getSimilarSongs2?id={}&apiKey={}&f=json",
+            seeded.alpha_tracks[0], fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&first);
+    assert!(first.body.contains(catalog_track(1).as_str()));
+
+    fixture
+        .update_discovery_config(
+            "scrobble",
+            serde_json::json!({
+                "similarTracks": [
+                    { "title": "Fixture Song 2", "artists": ["Fixture Artist"] },
+                ],
+            }),
+        )
+        .await;
+
+    let again = get(
+        &app,
+        &format!(
+            "/rest/getSimilarSongs2?id={}&apiKey={}&f=json",
+            seeded.alpha_tracks[0], fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&again);
+    assert!(
+        again.body.contains(catalog_track(1).as_str()),
+        "the cached answer is served: {}",
+        again.body
+    );
+    assert!(
+        !again.body.contains(catalog_track(2).as_str()),
+        "the instance was not asked again: {}",
+        again.body
+    );
+
+    // Another limit is another question, so it asks the instance and sees the
+    // configuration it now has.
+    let other = get(
+        &app,
+        &format!(
+            "/rest/getSimilarSongs2?id={}&apiKey={}&count=5&f=json",
+            seeded.alpha_tracks[0], fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&other);
+    assert!(
+        other.body.contains(catalog_track(2).as_str()),
+        "a new argument asks the instance again: {}",
+        other.body
+    );
+}
+
+/// `getTopSongs` prefers the discovery layer and falls back to the library's
+/// like counts when no instance answers.
+#[tokio::test]
+async fn top_songs_use_discovery_then_likes() {
+    let (first, seeded) = fixture().await;
+    first
+        .install_album_catalog(serde_json::json!({
+            "searchResults": [{ "text": "Fixture Song 2", "track": 2 }],
+        }))
+        .await;
+    first
+        .install_discovery_layer(&[(
+            "scrobble",
+            serde_json::json!({
+                "topTracks": [
+                    { "title": "Fixture Song 2", "artists": ["Fixture Artist"] },
+                ],
+            }),
+        )])
+        .await;
+    let app = first.app();
+
+    let discovered = get(
+        &app,
+        &format!(
+            "/rest/getTopSongs?id={}&apiKey={}&f=json",
+            seeded.cardinals, first.api_key
+        ),
+    )
+    .await;
+    assert_ok(&discovered);
+    assert!(
+        discovered.body.contains(catalog_track(2).as_str()),
+        "the discovery layer answered: {}",
+        discovered.body
+    );
+    assert!(
+        !discovered.body.contains("Zero"),
+        "the library fallback did not answer: {}",
+        discovered.body
+    );
+
+    // A second fixture has a discovery layer with nothing configured, so the
+    // stored artist's songs are ranked by the library.
+    let (ranked, ranked_seeded) = fixture().await;
+    ranked
+        .state
+        .activity()
+        .set_feedback(
+            ranked.user_id.uuid(),
+            hearthsound_core::EntityKind::Track,
+            ranked_seeded.alpha_tracks[0].uuid(),
+            hearthsound_activity::Feedback::Like,
+        )
+        .await
+        .unwrap();
+    let ranked_app = ranked.app();
+    let listed = get(
+        &ranked_app,
+        &format!(
+            "/rest/getTopSongs?id={}&apiKey={}&f=json",
+            ranked_seeded.cardinals, ranked.api_key
+        ),
+    )
+    .await;
+    assert_ok(&listed);
+    let first = listed.body.find("Zero").expect("the liked song");
+    let second = listed.body.find("One").expect("the unliked song");
+    assert!(
+        first < second,
+        "the liked song comes first when neither was played: {}",
+        listed.body
+    );
+}
+
+/// Returns the client id of one track of the album catalog fixture.
+///
+/// # Parameters
+///
+/// - `number`: the track number within the fixture's album.
+fn catalog_track(number: u8) -> String {
+    hearthsound_core::CatalogId::new(
+        hearthsound_core::Slug::new("album").expect("the fixture slug is valid"),
+        hearthsound_core::EntityKind::Track,
+        format!("album-catalog-track-{number}"),
+    )
+    .expect("the fixture id is valid")
+    .to_string()
+}
+
+/// Replaces the ids of a freshly seeded track with names, so a snapshot of a
+/// response that carries them stays stable.
+fn stabilize(body: &str, track: EntityId, album: EntityId, artist: EntityId) -> String {
+    body.replace(&track.to_string(), "STORED_TRACK")
+        .replace(&album.to_string(), "STORED_ALBUM")
+        .replace(&artist.to_string(), "STORED_ARTIST")
+        .replace(&catalog_track(2), "CATALOG_TRACK")
+}
+
+/// Reads the ids of a response's song listing.
+fn song_ids(body: &str, member: &str) -> Vec<String> {
+    let value: serde_json::Value = serde_json::from_str(body).unwrap();
+    value["subsonic-response"][member]["song"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|song| song["id"].as_str().unwrap().to_owned())
+        .collect()
 }

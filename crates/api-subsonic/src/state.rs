@@ -16,7 +16,7 @@ use hearthsound_auth::{
     Authenticator, Principal, ResolveError, Sessions, SubsonicCredentials, TrustedProxies,
     UserSettings,
 };
-use hearthsound_catalog::CatalogService;
+use hearthsound_catalog::{CatalogService, DiscoveryService};
 use hearthsound_config::SettingsStore;
 use hearthsound_config::settings::Settings;
 use hearthsound_db::Database;
@@ -73,6 +73,12 @@ struct Inner {
     jobs: Option<Arc<JobQueue>>,
     /// The scaled local cover cache, when the composition root has one.
     thumbnails: Option<Arc<ThumbnailCache>>,
+    /// The discovery layer, when the composition root has one.
+    ///
+    /// The similar-songs and artist-information endpoints ask it for
+    /// suggestions. Without one they answer the same empty or local-only shapes
+    /// a server with no discovery instance answers.
+    discovery: Option<Arc<DiscoveryService>>,
 }
 
 impl std::fmt::Debug for Inner {
@@ -104,6 +110,10 @@ impl std::fmt::Debug for Inner {
             .field("scanner", &self.scanner)
             .field("jobs", &self.jobs)
             .field("thumbnails", &self.thumbnails)
+            .field(
+                "discovery",
+                &self.discovery.as_ref().map(|_| "DiscoveryService"),
+            )
             .finish()
     }
 }
@@ -176,6 +186,7 @@ impl SubsonicState {
                 scanner: None,
                 jobs: None,
                 thumbnails: None,
+                discovery: None,
             }),
         }
     }
@@ -210,6 +221,7 @@ impl SubsonicState {
                 scanner: self.inner.scanner.clone(),
                 jobs: self.inner.jobs.clone(),
                 thumbnails: self.inner.thumbnails.clone(),
+                discovery: self.inner.discovery.clone(),
             }),
         }
     }
@@ -244,6 +256,7 @@ impl SubsonicState {
                 scanner: self.inner.scanner.clone(),
                 jobs: self.inner.jobs.clone(),
                 thumbnails: self.inner.thumbnails.clone(),
+                discovery: self.inner.discovery.clone(),
             }),
         }
     }
@@ -282,6 +295,7 @@ impl SubsonicState {
                 scanner: self.inner.scanner.clone(),
                 jobs: self.inner.jobs.clone(),
                 thumbnails: self.inner.thumbnails.clone(),
+                discovery: self.inner.discovery.clone(),
             }),
         }
     }
@@ -319,6 +333,7 @@ impl SubsonicState {
                 scanner: self.inner.scanner.clone(),
                 jobs: self.inner.jobs.clone(),
                 thumbnails: self.inner.thumbnails.clone(),
+                discovery: self.inner.discovery.clone(),
             }),
         }
     }
@@ -353,6 +368,7 @@ impl SubsonicState {
                 scanner: self.inner.scanner.clone(),
                 jobs: self.inner.jobs.clone(),
                 thumbnails: self.inner.thumbnails.clone(),
+                discovery: self.inner.discovery.clone(),
             }),
         }
     }
@@ -390,6 +406,42 @@ impl SubsonicState {
                 scanner: self.inner.scanner.clone(),
                 jobs: self.inner.jobs.clone(),
                 thumbnails: Some(thumbnails),
+                discovery: self.inner.discovery.clone(),
+            }),
+        }
+    }
+
+    /// Sets the discovery layer the suggestion endpoints ask.
+    ///
+    /// # Parameters
+    ///
+    /// - `discovery`: the service built over the same provider registry and
+    ///   catalog layer, so a suggestion it returns resolves through the catalog
+    ///   the rest of the surface serves.
+    ///
+    /// # Returns
+    ///
+    /// The state, sharing everything else with the state it was called on.
+    pub fn with_discovery(self, discovery: Arc<DiscoveryService>) -> SubsonicState {
+        SubsonicState {
+            inner: Arc::new(Inner {
+                database: Arc::clone(&self.inner.database),
+                sessions: self.inner.sessions.clone(),
+                settings: self.inner.settings.clone(),
+                user_settings: self.inner.user_settings.clone(),
+                catalog: Arc::clone(&self.inner.catalog),
+                activity: Arc::clone(&self.inner.activity),
+                stream: self.inner.stream.clone(),
+                ffmpeg: Arc::clone(&self.inner.ffmpeg),
+                authenticator: Arc::clone(&self.inner.authenticator),
+                prefetch: self.inner.prefetch.clone(),
+                acquisitions: self.inner.acquisitions.clone(),
+                registry: self.inner.registry.clone(),
+                trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
+                scanner: self.inner.scanner.clone(),
+                jobs: self.inner.jobs.clone(),
+                thumbnails: self.inner.thumbnails.clone(),
+                discovery: Some(discovery),
             }),
         }
     }
@@ -487,6 +539,7 @@ impl SubsonicState {
                 scanner: Some(scanner),
                 jobs: Some(jobs),
                 thumbnails: self.inner.thumbnails.clone(),
+                discovery: self.inner.discovery.clone(),
             }),
         }
     }
@@ -531,6 +584,15 @@ impl SubsonicState {
     /// resolve an unmaterialized `x_` id through it.
     pub fn catalog(&self) -> &CatalogService {
         &self.inner.catalog
+    }
+
+    /// Returns the discovery layer, when the composition root has one.
+    ///
+    /// `getSimilarSongs`, `getArtistInfo` and `getTopSongs` ask it for
+    /// suggestions. Without one they answer from the library alone, which is
+    /// what a server with no discovery instance serves.
+    pub fn discovery(&self) -> Option<&DiscoveryService> {
+        self.inner.discovery.as_deref()
     }
 
     /// Returns the activity service.

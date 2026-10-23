@@ -5,8 +5,11 @@
 //! it is a track this instance resolves on its own. The provider ids are stable,
 //! so a test can build an `x_<slug>_t_<id>` id without asking the plugin first.
 //!
-//! Nothing else about it is special: it has no configuration, asks for no host
-//! permissions, and reports no images.
+//! A search answers the first track by default. The optional `searchResults`
+//! table makes a query answer another track of the album: an entry matches when
+//! the query text contains its `text` ignoring case, so a test can resolve two
+//! different suggestions through one instance. The plugin asks for no host
+//! permissions and reports no images.
 
 use hearthsound_plugin::catalog_provider::exports::hearthsound::plugin::catalog::{
     SearchQuery, SearchResults,
@@ -15,9 +18,56 @@ use hearthsound_plugin::catalog_provider::exports::hearthsound::plugin::{catalog
 use hearthsound_plugin::types::{
     Album, AlbumRef, Artist, ArtistCredit, EntityKind, IdPair, ProviderError, Track,
 };
+use serde::Deserialize;
 
 /// The plugin implementation.
 struct AlbumCatalog;
+
+/// Server-scoped configuration of the plugin.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Config {
+    /// The track each configured query answers with.
+    #[serde(default)]
+    search_results: Vec<ConfiguredSearchResult>,
+}
+
+/// One query text and the track it answers with.
+#[derive(Deserialize)]
+struct ConfiguredSearchResult {
+    /// The text the query must contain, compared ignoring case.
+    text: String,
+    /// The one-based track number the query answers with.
+    track: u8,
+}
+
+/// Reads the plugin's server configuration, falling back to the defaults.
+///
+/// # Returns
+///
+/// The configuration.
+fn config() -> Config {
+    hearthsound_plugin::config::server_config().unwrap_or_default()
+}
+
+/// Returns the track a search query answers with.
+///
+/// # Parameters
+///
+/// - `text`: the query text the provider received.
+///
+/// # Returns
+///
+/// The configured track number of the first entry the text contains, or one.
+fn search_track(text: &str) -> u8 {
+    let text = text.to_lowercase();
+    config()
+        .search_results
+        .iter()
+        .find(|entry| text.contains(&entry.text.to_lowercase()))
+        .map(|entry| entry.track.clamp(1, TRACKS))
+        .unwrap_or(1)
+}
 
 /// The provider id of the fixture's album.
 const ALBUM: &str = "album-catalog-album-1";
@@ -152,8 +202,11 @@ fn track_number(id: &str) -> Option<u8> {
 
 /// Implements the lifecycle interface.
 impl lifecycle::Guest for AlbumCatalog {
-    fn validate_config(_server_config: String) -> Result<(), Vec<String>> {
-        Ok(())
+    fn validate_config(server_config: String) -> Result<(), Vec<String>> {
+        match serde_json::from_str::<Config>(&server_config) {
+            Ok(_) => Ok(()),
+            Err(error) => Err(vec![error.to_string()]),
+        }
     }
 
     fn health() -> Result<String, ProviderError> {
@@ -176,7 +229,7 @@ impl catalog::Guest for AlbumCatalog {
 
         Ok(SearchResults {
             tracks: if wants(&query.kinds, EntityKind::Track) {
-                vec![track(1)]
+                vec![track(search_track(&query.text))]
             } else {
                 vec![]
             },

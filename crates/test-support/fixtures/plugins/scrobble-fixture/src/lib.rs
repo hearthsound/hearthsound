@@ -10,6 +10,10 @@
 //! the plugin posts nothing to verify it, and the token `good` names the account
 //! `fixture-user`. A `browser` link method answers the mock service's
 //! authorization URL and accepts the callback token `approved`.
+//!
+//! `failDiscovery` makes the three suggestion queries answer with an
+//! unavailable error, which is what lets a test prove that the discovery layer
+//! skips an instance that cannot answer.
 
 use hearthsound_plugin::http;
 use hearthsound_plugin::scrobble_discovery_link_provider::exports::hearthsound::plugin::{
@@ -55,6 +59,12 @@ struct Config {
     /// The playlists `playlists` reports.
     #[serde(default)]
     playlists: Vec<ConfiguredPlaylist>,
+    /// Whether the discovery methods fail instead of answering.
+    ///
+    /// A test uses it to prove that the layer skips an instance that cannot
+    /// answer and asks the next one.
+    #[serde(default)]
+    fail_discovery: bool,
 }
 
 /// How a listener links their account.
@@ -350,7 +360,11 @@ impl discovery::Guest for ScrobbleFixture {
         _seed: discovery::TrackSeed,
         limit: u32,
     ) -> Result<Vec<discovery::SuggestedTrack>, ProviderError> {
-        Ok(suggested_tracks(config()?.similar_tracks, limit))
+        let config = config()?;
+        if config.fail_discovery {
+            return Err(ProviderError::Unavailable("the fixture is configured to fail".to_owned()));
+        }
+        Ok(suggested_tracks(config.similar_tracks, limit))
     }
 
     fn similar_artists(
@@ -358,7 +372,11 @@ impl discovery::Guest for ScrobbleFixture {
         _seed: discovery::ArtistSeed,
         limit: u32,
     ) -> Result<Vec<discovery::SuggestedArtist>, ProviderError> {
-        Ok(config()?
+        let config = config()?;
+        if config.fail_discovery {
+            return Err(ProviderError::Unavailable("the fixture is configured to fail".to_owned()));
+        }
+        Ok(config
             .similar_artists
             .into_iter()
             .take(limit as usize)
@@ -375,7 +393,11 @@ impl discovery::Guest for ScrobbleFixture {
         _artist: discovery::ArtistSeed,
         limit: u32,
     ) -> Result<Vec<discovery::SuggestedTrack>, ProviderError> {
-        Ok(suggested_tracks(config()?.top_tracks, limit))
+        let config = config()?;
+        if config.fail_discovery {
+            return Err(ProviderError::Unavailable("the fixture is configured to fail".to_owned()));
+        }
+        Ok(suggested_tracks(config.top_tracks, limit))
     }
 
     fn recommended_tracks(

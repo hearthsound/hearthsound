@@ -5,7 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use crate::common::seed::{Seeded, library};
-use crate::common::{Fixture, SNAPSHOT_FILTERS, assert_error, assert_ok, get};
+use crate::common::{Fixture, PORTRAIT_BASE, SNAPSHOT_FILTERS, assert_error, assert_ok, get};
 
 /// Builds a fixture with the seeded library.
 ///
@@ -170,4 +170,136 @@ async fn information_requests_are_refused_without_usable_ids() {
     )
     .await;
     assert_error(&unknown, 70);
+}
+
+/// `getArtistInfo2` lists similar artists from the discovery layer, describes
+/// their portraits, and keeps the metadata layer's order for the biography.
+#[tokio::test]
+async fn artist_info_lists_similar_artists_and_portraits() {
+    let (fixture, seeded) = fixture().await;
+    fixture.install_album_catalog(serde_json::json!({})).await;
+    fixture
+        .install_discovery_layer(&[(
+            "scrobble",
+            serde_json::json!({
+                "similarArtists": [
+                    { "name": "The Cardinals" },
+                    { "name": "Fixture Artist" },
+                ],
+            }),
+        )])
+        .await;
+    fixture.install_artist_portraits(&["The Cardinals"]).await;
+    fixture
+        .install_metadata_layer(&[
+            serde_json::json!({
+                "artists": [{
+                    "name": "The Cardinals",
+                    "biography": "First biography",
+                }],
+            }),
+            serde_json::json!({
+                "artists": [{
+                    "name": "The Cardinals",
+                    "biography": "Second biography",
+                }],
+            }),
+        ])
+        .await;
+    let app = fixture.app();
+
+    let listed = get(
+        &app,
+        &format!(
+            "/rest/getArtistInfo2?id={}&apiKey={}&f=json",
+            seeded.cardinals, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&listed);
+    assert!(
+        listed.body.contains("First biography"),
+        "the first metadata instance answers: {}",
+        listed.body
+    );
+    assert!(
+        !listed.body.contains("Second biography"),
+        "the second instance is not asked: {}",
+        listed.body
+    );
+    let portrait = format!("{PORTRAIT_BASE}/portrait.jpg");
+    assert_eq!(
+        listed.body.matches(&portrait).count(),
+        3,
+        "one portrait fills the three sizes: {}",
+        listed.body
+    );
+    assert!(
+        listed.body.contains(&seeded.cardinals.to_string()),
+        "the stored similar artist is listed: {}",
+        listed.body
+    );
+    assert!(
+        !listed.body.contains("x_album_r_"),
+        "a catalog artist is not listed without includeNotPresent: {}",
+        listed.body
+    );
+    let local = listed.body.find(&seeded.cardinals.to_string()).unwrap();
+    assert!(local > listed.body.find("similarArtist").unwrap());
+
+    let with_catalog = get(
+        &app,
+        &format!(
+            "/rest/getArtistInfo2?id={}&apiKey={}&includeNotPresent=true&f=json",
+            seeded.cardinals, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&with_catalog);
+    assert!(
+        with_catalog.body.contains(catalog_artist().as_str()),
+        "the catalog artist is listed with includeNotPresent: {}",
+        with_catalog.body
+    );
+    let stored = with_catalog
+        .body
+        .find(&seeded.cardinals.to_string())
+        .unwrap();
+    let catalog = with_catalog.body.find(catalog_artist().as_str()).unwrap();
+    assert!(
+        stored < catalog,
+        "the stored artists are listed first: {}",
+        with_catalog.body
+    );
+
+    let xml = get(
+        &app,
+        &format!(
+            "/rest/getArtistInfo2.view?id={}&apiKey={}&includeNotPresent=true",
+            seeded.cardinals, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&xml);
+    assert!(
+        xml.body.contains(&portrait),
+        "the portrait URL is an element text: {}",
+        xml.body
+    );
+    assert!(
+        xml.body.contains("<similarArtist"),
+        "the similar artists are child elements: {}",
+        xml.body
+    );
+}
+
+/// Returns the client id of the album catalog fixture's artist.
+fn catalog_artist() -> String {
+    hearthsound_core::CatalogId::new(
+        hearthsound_core::Slug::new("album").expect("the fixture slug is valid"),
+        hearthsound_core::EntityKind::Artist,
+        "album-catalog-artist-1",
+    )
+    .expect("the fixture id is valid")
+    .to_string()
 }

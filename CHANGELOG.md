@@ -22,6 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   background acquisition. An `unknown` verdict or a provider error lets the file
   through and is logged. The storage maintenance pass deletes lapsed quarantine
   rows. Album acquisitions check every mapped file against its own track.
+- The Subsonic suggestion endpoints answer from the discovery layer.
+  `getSimilarSongs` and `getSimilarSongs2` seed similar tracks from a song id and
+  similar artists, whose popular tracks are interleaved, from an album or artist
+  id; every suggestion is resolved through the catalog and rendered through the
+  same local-then-catalog merge as `search3`, so a suggestion the server stores
+  is served as the stored song. `getArtistInfo` and `getArtistInfo2` list
+  similar artists, stored ones first and catalog ones only with
+  `includeNotPresent=true`, and fill the three portrait URLs from the artwork
+  layer. `getTopSongs` prefers the discovery layer and otherwise ranks a stored
+  artist's songs by the server's play count, then by how many users liked the
+  song, then by album order. Answers are cached for an hour per instance,
+  operation, arguments and listener, an instance that cannot answer is skipped,
+  and a listener's linked configuration is passed through a source the account
+  linking service supplies.
 
 - The plugin host drives plugins that report listening history, suggest music,
   verify downloads and link listener accounts. A `scrobble` plugin answers its

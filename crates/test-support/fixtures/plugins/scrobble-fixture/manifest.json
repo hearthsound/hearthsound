@@ -37,6 +37,12 @@
           "maxBatch": { "type": "integer", "minimum": 1, "default": 50, "title": "Maximum batch size" },
           "minIntervalMs": { "type": "integer", "minimum": 0, "default": 0, "title": "Minimum interval in milliseconds" },
           "feedback": { "type": "boolean", "default": true, "title": "Send feedback" },
+          "failDiscovery": {
+            "type": "boolean",
+            "default": false,
+            "title": "Fail discovery queries",
+            "description": "Answer every suggestion query with an unavailable error, so a test can prove the layer skips it."
+          },
           "similarTracks": {
             "type": "array",
             "title": "Similar tracks",
@@ -117,6 +123,7 @@
           { "type": "Control", "scope": "#/properties/maxBatch" },
           { "type": "Control", "scope": "#/properties/minIntervalMs" },
           { "type": "Control", "scope": "#/properties/feedback" },
+          { "type": "Control", "scope": "#/properties/failDiscovery" },
           { "type": "Control", "scope": "#/properties/similarTracks" },
           { "type": "Control", "scope": "#/properties/similarArtists" },
           { "type": "Control", "scope": "#/properties/topTracks" },

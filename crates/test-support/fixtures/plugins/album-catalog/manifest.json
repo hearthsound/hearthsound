@@ -11,7 +11,39 @@
   "provides": ["catalog"],
   "permissions": {},
   "config": {
-    "server": null,
+    "server": {
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "searchResults": {
+            "type": "array",
+            "title": "Search results",
+            "items": {
+              "type": "object",
+              "required": ["text", "track"],
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "title": "Query text",
+                  "description": "The query answers with the track when it contains this text, ignoring case."
+                },
+                "track": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 5,
+                  "title": "Track number"
+                }
+              }
+            }
+          }
+        }
+      },
+      "uiSchema": {
+        "type": "VerticalLayout",
+        "elements": [{ "type": "Control", "scope": "#/properties/searchResults" }]
+      }
+    },
     "user": null
   },
   "resources": { "memoryMb": 64, "callTimeoutMs": 5000, "maxInstances": 2 },

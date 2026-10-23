@@ -59,7 +59,7 @@ use hearthsound_activity::{
 use hearthsound_api_native::{NativeServices, NativeState};
 use hearthsound_api_subsonic::{PendingSource, SubsonicState};
 use hearthsound_auth::{Authenticator, Sessions, SetupGate, TrustedProxies, Users};
-use hearthsound_catalog::CatalogService;
+use hearthsound_catalog::{CatalogService, DiscoveryService, NoUserContexts};
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_config::keys;
 use hearthsound_config::secret::{SecretBox, SecretKey};
@@ -120,6 +120,8 @@ pub struct Services {
     registry: Arc<ProviderRegistry>,
     /// The catalog layer over the provider registry.
     catalog: Arc<CatalogService>,
+    /// The discovery layer over the provider registry.
+    discovery: Arc<DiscoveryService>,
     /// The write side of the plugin instance and layer tables.
     instances: InstanceService,
     /// The plugin tables the admin views and the repository routes read.
@@ -312,6 +314,16 @@ impl Services {
             config.paths.artwork.clone(),
         ));
 
+        // The listener's per-instance configuration comes from the stored
+        // provider links. Until that service is wired, every instance is asked
+        // without a listener context, which is the same call an instance the
+        // listener has not linked receives.
+        let discovery = Arc::new(DiscoveryService::new(
+            Arc::clone(&registry),
+            Arc::clone(&catalog),
+            Arc::new(NoUserContexts),
+        ));
+
         let ffmpeg = Arc::new(FfmpegRunner::new(
             None,
             max_concurrent_transcodes(&snapshot)?,
@@ -463,6 +475,7 @@ impl Services {
             plugins,
             registry,
             catalog,
+            discovery,
             instances,
             plugin_repository: repository.clone(),
             admin,
@@ -543,6 +556,14 @@ impl Services {
     /// through it.
     pub fn catalog(&self) -> &Arc<CatalogService> {
         &self.catalog
+    }
+
+    /// Returns the discovery layer.
+    ///
+    /// The `/rest` suggestion endpoints ask it for similar songs, similar
+    /// artists and an artist's popular tracks.
+    pub fn discovery(&self) -> &Arc<DiscoveryService> {
+        &self.discovery
     }
 
     /// Returns the plugin instance and layer service.
@@ -740,6 +761,7 @@ impl Services {
         .with_trusted_proxies(self.trusted_proxies.clone())
         .with_scanner(Arc::clone(&self.scanner), Arc::clone(&self.queue))
         .with_thumbnails(Arc::clone(&self.thumbnails))
+        .with_discovery(Arc::clone(&self.discovery))
     }
 
     /// Returns the CORS layer, or `None` when cross-origin reads are denied.

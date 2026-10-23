@@ -1229,8 +1229,9 @@ async fn track_views(
 
 /// Lists the most played songs that credit an artist.
 ///
-/// The play counts are the server's own: every play any user recorded, which is
-/// what makes this a *top* listing rather than a personal one.
+/// The counts are the server's own: every play any user recorded, then how many
+/// users liked the song, which is what makes this a *top* listing rather than a
+/// personal one.
 ///
 /// # Parameters
 ///
@@ -1241,18 +1242,12 @@ async fn track_views(
 ///
 /// # Returns
 ///
-/// The songs, most played first, then the oldest album, disc, and track; a song
-/// with no plays still appears, after the played ones.
+/// The songs, most played first, then most liked, then the oldest album, disc,
+/// and track; a song with no plays still appears, after the played ones.
 ///
 /// # Errors
 ///
 /// Returns [`LibraryError`] when a query fails.
-///
-/// # Stub
-///
-/// The server's own play counts are the only popularity signal here: they are a
-/// stub for a real popularity source, such as catalog popularity and/or play
-/// counts, that proper `getTopSongs` conformance requires.
 pub async fn top_tracks_for_artist(
     conn: &mut SqliteConnection,
     scope: Scope,
@@ -1275,6 +1270,8 @@ pub async fn top_tracks_for_artist(
         .push_bind(entity_key(artist_id))
         .push(
             " ORDER BY (SELECT count(*) FROM plays p WHERE p.track_id = t.id) DESC, \
+             (SELECT count(*) FROM user_feedback f WHERE f.entity_kind = 'track' \
+                AND f.entity_id = t.id AND f.value = 'like') DESC, \
              al.year, t.disc_number, t.track_number, t.id LIMIT ",
         )
         .push_bind(count);

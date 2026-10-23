@@ -19,7 +19,7 @@ use hearthsound_acquire::prefetch::PrefetchScheduler;
 use hearthsound_activity::ActivityService;
 use hearthsound_api_subsonic::{PendingSource, SubsonicState};
 use hearthsound_auth::{ApiKeys, AppPasswords, Authenticator, NewUser, Users};
-use hearthsound_catalog::CatalogService;
+use hearthsound_catalog::{CatalogService, DiscoveryService, NoUserContexts};
 use hearthsound_config::secret::SecretBox;
 use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingSources, SettingValue, SettingsRegistry, keys};
@@ -30,18 +30,27 @@ use hearthsound_jobs::{JobQueue, QueueOptions};
 use hearthsound_library::scan::LibraryScanner;
 use hearthsound_library::thumbnails::ThumbnailCache;
 use hearthsound_library::{
-    AlbumInput, ArtistCredit, LibraryRepository, Origin, StorageRoots, TrackInput,
+    AlbumInput, ArtistCredit, LibraryRepository, Origin, ScannedMediaFile, StorageRoots, TrackInput,
 };
 use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::{
     InstanceService, InstanceSpec, PluginHost, PluginRepository, PluginSource, ProviderRegistry,
 };
-use hearthsound_test_support::{ARTWORK_FIXTURE, HELLO_CATALOG, fixture_plugin};
+use hearthsound_test_support::{
+    ALBUM_CATALOG, ARTWORK_FIXTURE, HELLO_CATALOG, METADATA_FIXTURE, SCROBBLE_FIXTURE,
+    fixture_plugin,
+};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
 /// The bytes the artwork layer's mock server serves.
 pub const ARTWORK_IMAGE: &[u8] = b"\x89PNG\r\n\x1a\nartwork layer image";
+
+/// The base URL the portrait fixture describes its images from.
+///
+/// The artist-information endpoint returns the URL without fetching it, so no
+/// server has to answer it.
+pub const PORTRAIT_BASE: &str = "http://images.example";
 
 /// The login name of the test account.
 pub const USERNAME: &str = "echo";
@@ -82,6 +91,8 @@ pub struct Fixture {
     pub state: SubsonicState,
     /// The catalog layer the state and the acquisition layer share.
     pub catalog: Arc<CatalogService>,
+    /// The discovery layer the suggestion endpoints ask.
+    pub discovery: Arc<DiscoveryService>,
     /// The event bus the acquisition layer publishes on.
     pub events: Arc<EventBus>,
     /// The managed storage roots the state resolves stored files against.
@@ -186,6 +197,11 @@ impl Fixture {
             settings.clone(),
             artwork.clone(),
         ));
+        let discovery = Arc::new(DiscoveryService::new(
+            Arc::clone(&registry),
+            Arc::clone(&catalog),
+            Arc::new(NoUserContexts),
+        ));
         let activity = Arc::new(ActivityService::new(&database));
         let roots = StorageRoots::new(dir.path().join("library"), dir.path().join("cache"));
         std::fs::create_dir_all(roots.library.as_path()).unwrap();
@@ -205,7 +221,8 @@ impl Fixture {
         )
         // The registry the catalog layer resolves instances through, so the
         // vendor endpoints report the layers this fixture enabled.
-        .with_registry(Arc::clone(&registry));
+        .with_registry(Arc::clone(&registry))
+        .with_discovery(Arc::clone(&discovery));
         let state = match pending {
             Some(pending) => state.with_pending_source(pending),
             None => state,
@@ -236,6 +253,7 @@ impl Fixture {
             app_password,
             state,
             catalog,
+            discovery,
             events,
             roots,
             ffmpeg,
@@ -287,6 +305,255 @@ impl Fixture {
             .await
             .unwrap();
         self.registry.rebuild().await.unwrap();
+    }
+
+    /// Installs the album catalog fixture as the catalog layer.
+    ///
+    /// # Parameters
+    ///
+    /// - `config`: the server configuration, whose `searchResults` table makes
+    ///   a query answer another track of the fixture's album.
+    pub async fn install_album_catalog(&self, config: serde_json::Value) {
+        let plugin_id = self
+            .install(ALBUM_CATALOG, "com.example.album-catalog")
+            .await;
+        self.instance_service()
+            .create(&InstanceSpec {
+                slug: "album".to_owned(),
+                plugin_id,
+                display_name: "Album catalog".to_owned(),
+                server_config: config,
+                host_config: serde_json::Value::Null,
+            })
+            .await
+            .unwrap();
+        self.instance_service()
+            .set_layer(Layer::Catalog, &["album".to_owned()])
+            .await
+            .unwrap();
+        self.registry.rebuild().await.unwrap();
+    }
+
+    /// Installs the scrobble fixture as the discovery layer.
+    ///
+    /// # Parameters
+    ///
+    /// - `instances`: one `(slug, server config)` per instance, in layer order.
+    ///   Each config carries the fixture's discovery tables, so a test states
+    ///   the exact suggestions the layer answers.
+    pub async fn install_discovery_layer(&self, instances: &[(&str, serde_json::Value)]) {
+        let plugin_id = self
+            .install(SCROBBLE_FIXTURE, "com.example.scrobble-fixture")
+            .await;
+        let service = self.instance_service();
+        let mut slugs = Vec::with_capacity(instances.len());
+        for (slug, config) in instances {
+            service
+                .create(&InstanceSpec {
+                    slug: (*slug).to_owned(),
+                    plugin_id: plugin_id.clone(),
+                    display_name: format!("Discovery {slug}"),
+                    server_config: discovery_config(config.clone()),
+                    host_config: serde_json::Value::Null,
+                })
+                .await
+                .unwrap();
+            slugs.push((*slug).to_owned());
+        }
+        service.set_layer(Layer::Discovery, &slugs).await.unwrap();
+        self.registry.rebuild().await.unwrap();
+    }
+
+    /// Reconfigures one discovery instance and rebuilds the registry.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the instance to reconfigure.
+    /// - `config`: the new server configuration.
+    pub async fn update_discovery_config(&self, slug: &str, config: serde_json::Value) {
+        self.instance_service()
+            .update(
+                slug,
+                &InstanceSpec {
+                    slug: slug.to_owned(),
+                    plugin_id: "com.example.scrobble-fixture".to_owned(),
+                    display_name: format!("Discovery {slug}"),
+                    server_config: discovery_config(config),
+                    host_config: serde_json::Value::Null,
+                },
+            )
+            .await
+            .unwrap();
+        self.registry.rebuild().await.unwrap();
+    }
+
+    /// Installs the metadata fixture once per configuration and assigns the
+    /// instances to the metadata layer in that order.
+    ///
+    /// # Parameters
+    ///
+    /// - `configs`: one server configuration per instance; the first is asked
+    ///   first.
+    pub async fn install_metadata_layer(&self, configs: &[serde_json::Value]) {
+        let plugin_id = self
+            .install(METADATA_FIXTURE, "com.example.metadata-fixture")
+            .await;
+        let service = self.instance_service();
+        let mut slugs = Vec::with_capacity(configs.len());
+        for (index, config) in configs.iter().enumerate() {
+            let slug = format!("metadata{}", index + 1);
+            service
+                .create(&InstanceSpec {
+                    slug: slug.clone(),
+                    plugin_id: plugin_id.clone(),
+                    display_name: format!("Metadata {}", index + 1),
+                    server_config: config.clone(),
+                    host_config: serde_json::Value::Null,
+                })
+                .await
+                .unwrap();
+            slugs.push(slug);
+        }
+        service.set_layer(Layer::Metadata, &slugs).await.unwrap();
+        self.registry.rebuild().await.unwrap();
+    }
+
+    /// Installs the artwork fixture with portrait renditions for some artists.
+    ///
+    /// The URLs are not fetched: the artist-information endpoint describes them
+    /// to the client, so the fixture only has to name them.
+    ///
+    /// # Parameters
+    ///
+    /// - `artists`: the artist names the fixture describes a portrait for.
+    pub async fn install_artist_portraits(&self, artists: &[&str]) {
+        let plugin_id = self
+            .install(ARTWORK_FIXTURE, "com.example.artwork-fixture")
+            .await;
+        self.instance_service()
+            .create(&InstanceSpec {
+                slug: "artwork".to_owned(),
+                plugin_id,
+                display_name: "Artwork".to_owned(),
+                server_config: serde_json::json!({
+                    "imageUrl": PORTRAIT_BASE,
+                    "artists": artists
+                        .iter()
+                        .map(|name| serde_json::json!({
+                            "title": name,
+                            "images": [{ "path": "/portrait.jpg", "width": 500 }],
+                        }))
+                        .collect::<Vec<_>>(),
+                }),
+                host_config: serde_json::Value::Null,
+            })
+            .await
+            .unwrap();
+        self.instance_service()
+            .set_layer(Layer::Artwork, &["artwork".to_owned()])
+            .await
+            .unwrap();
+        self.registry.rebuild().await.unwrap();
+    }
+
+    /// Installs a fixture plugin, returning its plugin id.
+    ///
+    /// Installing a plugin that is already registered returns the registered
+    /// id, so one fixture can hold several instances of one plugin.
+    ///
+    /// # Parameters
+    ///
+    /// - `archive`: the fixture archive file name.
+    /// - `plugin_id`: the fixture's plugin id.
+    async fn install(&self, archive: &str, plugin_id: &str) -> String {
+        let installed = self.host.install(&fixture_plugin(archive)).await.unwrap();
+        match self
+            .repository
+            .register(&installed, PluginSource::Sideload)
+            .await
+        {
+            Ok(registration) => registration.id,
+            Err(error) => panic!("registering {plugin_id} failed: {error}"),
+        }
+    }
+
+    /// Returns the instance service over this fixture's host and tables.
+    fn instance_service(&self) -> InstanceService {
+        InstanceService::new(
+            Arc::clone(&self.host),
+            self.repository.clone(),
+            self.secrets.clone(),
+        )
+    }
+
+    /// Stores one album and one track with a folder file the account owns.
+    ///
+    /// The track is visible in the account's personal scope, which is what the
+    /// suggestion endpoints search to decide whether a suggestion is stored.
+    ///
+    /// # Parameters
+    ///
+    /// - `album`: the album title.
+    /// - `artist`: the artist name.
+    /// - `title`: the track title.
+    /// - `duration_ms`: the track duration in milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// The stored track, album and artist ids.
+    pub async fn seed_track(
+        &self,
+        album: &str,
+        artist: &str,
+        title: &str,
+        duration_ms: i64,
+    ) -> (EntityId, EntityId, EntityId) {
+        let library = LibraryRepository::new(&self.database);
+        let folder = library
+            .add_library_folder(&self.subdir("suggestions"), Some(self.user_id.uuid()))
+            .await
+            .unwrap();
+        let album_id = library
+            .upsert_album(
+                &AlbumInput::new(album, Origin::Local),
+                &[ArtistCredit::new(artist, "main")],
+            )
+            .await
+            .unwrap();
+        let artist_id = library.list_album_artists(album_id).await.unwrap()[0].id;
+        let mut input = TrackInput::new(title, Origin::Local, Availability::Local);
+        input.album_id = Some(album_id);
+        input.display_artist = Some(artist.to_owned());
+        input.track_number = Some(1);
+        input.disc_number = Some(1);
+        input.duration_ms = Some(duration_ms);
+        let track_id = library
+            .insert_track(&input, &[ArtistCredit::new(artist, "main")], &[])
+            .await
+            .unwrap();
+        library
+            .upsert_folder_media_file(
+                track_id,
+                &ScannedMediaFile {
+                    folder_id: folder.id,
+                    rel_path: format!("{title}.mp3"),
+                    size: 1_024,
+                    mtime_ms: 0,
+                    format: Some("mp3".to_owned()),
+                    codec: Some("mp3".to_owned()),
+                    bitrate_kbps: Some(320),
+                    sample_rate: Some(44_100),
+                    bit_depth: None,
+                    channels: Some(2),
+                    duration_ms: Some(duration_ms),
+                    lossless: Some(false),
+                    replaygain: None,
+                    has_embedded_art: Some(false),
+                },
+            )
+            .await
+            .unwrap();
+        (track_id, album_id, artist_id)
     }
 
     /// Installs the artwork fixture as the artwork layer and serves one image.
@@ -627,6 +894,28 @@ impl Probe {
             .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
     }
+}
+
+/// Adds the mock endpoint the scrobble fixture requires when a test config
+/// omits it.
+///
+/// The discovery queries never use the endpoint, but the fixture's schema
+/// requires it, so a suggestion-only instance still has to name one.
+///
+/// # Parameters
+///
+/// - `config`: the server configuration a test wrote.
+///
+/// # Returns
+///
+/// The configuration with an `endpoint` member.
+fn discovery_config(mut config: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = config.as_object_mut() {
+        object
+            .entry("endpoint")
+            .or_insert_with(|| serde_json::Value::String("http://127.0.0.1:9".to_owned()));
+    }
+    config
 }
 
 /// Sends a GET request through a router.

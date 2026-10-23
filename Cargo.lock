@@ -1724,6 +1724,8 @@ dependencies = [
 name = "hearthsound-catalog"
 version = "0.1.5"
 dependencies = [
+ "async-trait",
+ "futures-util",
  "hearthsound-config",
  "hearthsound-core",
  "hearthsound-db",

@@ -16,6 +16,8 @@ hearthsound-core = { path = "../core" }
 hearthsound-db = { path = "../db" }
 hearthsound-library = { path = "../library" }
 hearthsound-plugin-host = { path = "../plugin-host" }
+async-trait.workspace = true
+futures-util.workspace = true
 moka.workspace = true
 serde.workspace = true
 serde_json.workspace = true
