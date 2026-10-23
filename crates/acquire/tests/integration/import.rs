@@ -4,6 +4,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashSet;
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 
 use crate::common::{Env, InstanceLimits, config, has_availability_event, one_candidate};
@@ -191,6 +192,13 @@ async fn a_copy_import_root_keeps_the_source() {
 
     assert!(source.is_file(), "a copy import root leaves the source");
     assert!(env.cache_root.join(RELATIVE).is_file());
+    let source_meta = std::fs::metadata(&source).unwrap();
+    let copied_meta = std::fs::metadata(env.cache_root.join(RELATIVE)).unwrap();
+    assert_ne!(
+        (copied_meta.ino(), copied_meta.dev()),
+        (source_meta.ino(), source_meta.dev()),
+        "a copy import root copies rather than links"
+    );
 }
 
 #[tokio::test]
@@ -205,19 +213,101 @@ async fn a_link_import_root_keeps_the_source() {
     .await;
     let source = place(&env, "01 - Hello Song.flac").await;
     let original = std::fs::read(&source).unwrap();
+    let before = std::fs::metadata(&source).unwrap();
     let track = env.remote_track("Hello Song", "Hello Artist").await;
     let id = request(&env, track, Priority::Play).await.id;
 
     env.start();
     env.wait_for_state(id, AcquisitionState::Completed).await;
 
+    let destination = env.cache_root.join(RELATIVE);
+    assert!(destination.is_file());
     assert!(source.is_file(), "a link import root leaves the original");
+    let after = std::fs::metadata(&source).unwrap();
     assert_eq!(
         std::fs::read(&source).unwrap(),
         original,
         "the original is never written to"
     );
-    assert!(env.cache_root.join(RELATIVE).is_file());
+    assert_eq!(
+        (before.ino(), before.dev()),
+        (after.ino(), after.dev()),
+        "the source is the file that was linked"
+    );
+    assert_eq!(
+        before.modified().unwrap(),
+        after.modified().unwrap(),
+        "the source keeps its modification time"
+    );
+    let linked = std::fs::metadata(&destination).unwrap();
+    assert_eq!(
+        (linked.ino(), linked.dev()),
+        (after.ino(), after.dev()),
+        "the managed file is the source inode"
+    );
+    let probed = probe(&destination).await.unwrap();
+    assert_eq!(
+        probed.tags.title, None,
+        "a linked file is byte-identical and therefore untagged"
+    );
+    assert!(probed.tags.artists.is_empty());
+    assert_eq!(
+        std::fs::read(&destination).unwrap(),
+        original,
+        "the managed file is byte-identical to the source"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_hardlink_falls_back_to_a_tagged_copy() {
+    let env = Env::with_hardlink(
+        config(one_candidate(), "normal", 0, "downloads", ".flac"),
+        InstanceLimits::default(),
+        &[],
+        "link",
+        std::sync::Arc::new(|_: &std::path::Path, _: &std::path::Path| {
+            Err(std::io::Error::other("injected hardlink failure"))
+        }),
+    )
+    .await;
+    let source = place(&env, "01 - Hello Song.flac").await;
+    let original = std::fs::read(&source).unwrap();
+    let before = std::fs::metadata(&source).unwrap();
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    let id = request(&env, track, Priority::Play).await.id;
+
+    env.start();
+    env.wait_for_state(id, AcquisitionState::Completed).await;
+
+    let destination = env.cache_root.join(RELATIVE);
+    assert!(destination.is_file(), "the copy fallback lands the file");
+    assert!(
+        source.is_file(),
+        "the source of a link root is never removed"
+    );
+    let after = std::fs::metadata(&source).unwrap();
+    assert_eq!(
+        std::fs::read(&source).unwrap(),
+        original,
+        "the source is never written to"
+    );
+    assert_eq!(
+        before.modified().unwrap(),
+        after.modified().unwrap(),
+        "the fallback does not touch the source"
+    );
+    let copied = std::fs::metadata(&destination).unwrap();
+    assert_ne!(
+        (copied.ino(), copied.dev()),
+        (after.ino(), after.dev()),
+        "the fallback is a copy, not the source inode"
+    );
+    let probed = probe(&destination).await.unwrap();
+    assert_eq!(
+        probed.tags.title.as_deref(),
+        Some("Hello Song"),
+        "the fallback writes the tags the linked file cannot carry"
+    );
 }
 
 #[tokio::test]

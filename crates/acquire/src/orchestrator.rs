@@ -29,7 +29,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use hearthsound_catalog::CatalogService;
@@ -511,6 +511,19 @@ pub struct AcquisitionOrchestrator {
     inner: Arc<Inner>,
 }
 
+/// The hardlink function the import stage runs on the blocking pool.
+///
+/// # Parameters
+///
+/// - the absolute source path.
+/// - the absolute destination path.
+///
+/// # Returns
+///
+/// The operating system's result, which the import classifies as a placed name,
+/// a taken name or a failure that falls back to copying.
+pub(crate) type Hardlink = dyn Fn(&Path, &Path) -> std::io::Result<()> + Send + Sync + 'static;
+
 /// The state one orchestrator shares with its clones.
 struct Inner {
     /// The database holding the ledger.
@@ -533,6 +546,13 @@ struct Inner {
     staging_root: PathBuf,
     /// The managed storage roots imported files land under.
     storage_roots: StorageRoots,
+    /// The function the import stage links a source file into managed storage
+    /// with.
+    ///
+    /// It is a field rather than a direct call so a test can make a link fail
+    /// and see the copy fallback; production always uses
+    /// [`std::fs::hard_link`].
+    hardlink: RwLock<Arc<Hardlink>>,
     /// The import destinations this process has reserved but not stored yet.
     ///
     /// The filesystem alone cannot keep two imports apart: neither has written
@@ -628,6 +648,9 @@ impl AcquisitionOrchestrator {
                 repository,
                 staging_root: storage.staging_root,
                 storage_roots: storage.roots,
+                hardlink: RwLock::new(Arc::new(|source: &Path, destination: &Path| {
+                    std::fs::hard_link(source, destination)
+                })),
                 reserved_destinations: Mutex::new(HashSet::new()),
                 waiters: Mutex::new(HashMap::new()),
                 announce_gate: Mutex::new(AnnounceGate::default()),
@@ -639,6 +662,54 @@ impl AcquisitionOrchestrator {
                 notify: Notify::new(),
             }),
         }
+    }
+
+    /// Replaces the hardlink function the import stage runs.
+    ///
+    /// The stage links a source from a `link`-mode import root into managed
+    /// storage, and a link the filesystem refuses falls back to a tagged copy.
+    /// Production never replaces the function; a test replaces it with one that
+    /// fails to exercise that fallback.
+    ///
+    /// # Parameters
+    ///
+    /// - `hardlink`: the function to call on the blocking pool, given the
+    ///   absolute source and destination paths.
+    ///
+    /// # Returns
+    ///
+    /// The orchestrator, so a caller can chain the call while it builds one.
+    pub fn with_hardlink<F>(&self, hardlink: F) -> &AcquisitionOrchestrator
+    where
+        F: Fn(&Path, &Path) -> std::io::Result<()> + Send + Sync + 'static,
+    {
+        *write_lock(&self.inner.hardlink) = Arc::new(hardlink);
+        self
+    }
+
+    /// Links a source file to a destination on the blocking pool.
+    ///
+    /// # Parameters
+    ///
+    /// - `source`: the absolute path of the file to link.
+    /// - `destination`: the absolute path the new name is created at.
+    ///
+    /// # Returns
+    ///
+    /// The operating system's result, so the caller can tell a taken name from
+    /// a filesystem that cannot link.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error the hardlink function reported, and an error when the
+    /// blocking task itself could not be joined.
+    pub(crate) async fn hardlink(&self, source: &Path, destination: &Path) -> std::io::Result<()> {
+        let hardlink = Arc::clone(&read_lock(&self.inner.hardlink));
+        let source = source.to_path_buf();
+        let destination = destination.to_path_buf();
+        tokio::task::spawn_blocking(move || hardlink(&source, &destination))
+            .await
+            .map_err(std::io::Error::other)?
     }
 
     /// Returns the open database.
@@ -2144,6 +2215,25 @@ impl AcquisitionOrchestrator {
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Reads a read-write lock, ignoring poisoning.
+///
+/// # Panics
+///
+/// Does not panic; the underlying lock's poisoning is ignored.
+fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Writes a read-write lock, ignoring poisoning.
+///
+/// # Panics
+///
+/// Does not panic; the underlying lock's poisoning is ignored.
+fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 

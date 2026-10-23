@@ -24,6 +24,14 @@
 //! availability and the acquisition's completion. A failed download or a failed
 //! import therefore never leaves a partially named file in managed storage.
 //!
+//! A verified source that came from an import root in `link` mode takes the
+//! other path: it is hardlinked straight to its managed destination, with no
+//! copy and no tags, so the source keeps its bytes, inode and modification time
+//! and the server stores no second copy. A filesystem that refuses the link - a
+//! destination on another device, one without hard links or a permission the
+//! server lacks - falls back to the copy-and-tag path above. The source and its
+//! directory are never modified or removed in either case.
+//!
 //! The destination name is reserved before the file is written and held until
 //! the transaction has committed, because two imports that render the same
 //! relative path would otherwise both see it free and both choose it; a name a
@@ -793,26 +801,44 @@ impl AcquisitionOrchestrator {
         // next collision suffix, which is what keeps the retry from picking the
         // same name again.
         let mut taken: HashSet<PathBuf> = HashSet::new();
+        let link_mode =
+            import_root(instance, &verified.file).is_some_and(|root| root.mode == ImportMode::Link);
         for _ in 0..placement::MAX_COLLISIONS {
             let (destination, reservation) = self.reserve_destination(&base, &mut taken).await?;
             let rel_path = placement::relative_path(self.storage_roots(), storage, &destination);
-            let staged = staged_dir.join(
-                destination
-                    .file_name()
-                    .unwrap_or_else(|| relative.as_os_str()),
-            );
-            copy_file(&verified.file.absolute_path, &staged).await?;
-            write_tags(
-                &staged,
-                &tags,
-                if embed_cover { cover.as_ref() } else { None },
-            )
-            .await?;
-            match install(&staged, &destination).await? {
-                Installed::Placed => {}
-                Installed::Taken => {
-                    taken.insert(destination);
-                    continue;
+            let mut linked = false;
+            if link_mode {
+                match self
+                    .link_into_place(&verified.file.absolute_path, &destination)
+                    .await?
+                {
+                    Linked::Placed => linked = true,
+                    Linked::Taken => {
+                        taken.insert(destination);
+                        continue;
+                    }
+                    Linked::Unsupported => {}
+                }
+            }
+            if !linked {
+                let staged = staged_dir.join(
+                    destination
+                        .file_name()
+                        .unwrap_or_else(|| relative.as_os_str()),
+                );
+                copy_file(&verified.file.absolute_path, &staged).await?;
+                write_tags(
+                    &staged,
+                    &tags,
+                    if embed_cover { cover.as_ref() } else { None },
+                )
+                .await?;
+                match install(&staged, &destination).await? {
+                    Installed::Placed => {}
+                    Installed::Taken => {
+                        taken.insert(destination);
+                        continue;
+                    }
                 }
             }
 
@@ -1237,6 +1263,66 @@ fn is_stored_path_conflict(error: &LibraryError) -> bool {
         return false;
     };
     database.is_unique_violation() && database.message().contains("media_files")
+}
+
+/// What linking a verified source into managed storage did.
+enum Linked {
+    /// The destination names the source's inode.
+    Placed,
+    /// A file already held the destination, which was left untouched.
+    Taken,
+    /// The filesystem refused the link, so the caller copies and tags instead.
+    Unsupported,
+}
+
+impl AcquisitionOrchestrator {
+    /// Links a verified source from a `link`-mode import root into managed
+    /// storage.
+    ///
+    /// The link is created on the blocking pool, because linking across a busy
+    /// filesystem can take as long as a stat. A destination that already exists
+    /// is reported rather than replaced, which is what lets the caller move on
+    /// to the next collision suffix.
+    ///
+    /// # Parameters
+    ///
+    /// - `source`: the absolute path of the file the candidate verified.
+    /// - `destination`: the absolute managed path to link it to.
+    ///
+    /// # Returns
+    ///
+    /// [`Linked::Placed`] when the destination now names the source,
+    /// [`Linked::Taken`] when a file holds the name, and
+    /// [`Linked::Unsupported`] when the filesystem refused the link - a
+    /// cross-device destination, a filesystem without hard links or a
+    /// permission the server does not have.
+    ///
+    /// # Errors
+    ///
+    /// Returns the filesystem error when the destination's directory cannot be
+    /// created.
+    async fn link_into_place(
+        &self,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<Linked, AcquireError> {
+        if let Some(parent) = destination.parent() {
+            create_dir_all(parent).await?;
+        }
+        match self.hardlink(source, destination).await {
+            Ok(()) => Ok(Linked::Placed),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(Linked::Taken),
+            Err(error) => {
+                tracing::debug!(
+                    source = %source.display(),
+                    destination = %destination.display(),
+                    %error,
+                    "a source could not be linked into managed storage; copying it instead"
+                );
+                Ok(Linked::Unsupported)
+            }
+        }
+    }
 }
 
 /// What installing a tagged staged file at its destination did.

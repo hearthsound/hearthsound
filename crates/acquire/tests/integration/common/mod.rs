@@ -73,6 +73,9 @@ impl Default for InstanceLimits {
     }
 }
 
+/// The hardlink function an environment's import stage runs.
+pub type Hardlink = Arc<dyn Fn(&Path, &Path) -> std::io::Result<()> + Send + Sync>;
+
 /// One test's database, plugin host, settings and orchestrator.
 pub struct Env {
     /// Kept alive so the temporary tree outlives everything built over it.
@@ -143,7 +146,7 @@ impl Env {
     ///   their full `HEARTHSOUND__...` name. They are the highest-precedence
     ///   source, which is how a test shortens a timeout or lowers a bound.
     pub async fn new(server_config: Value, limits: InstanceLimits, env: &[(&str, &str)]) -> Env {
-        Env::build(server_config, limits, env, "move", false).await
+        Env::build(server_config, limits, env, "move", false, None).await
     }
 
     /// Opens an environment over a directory a previous environment built.
@@ -161,7 +164,7 @@ impl Env {
     /// - `env`: extra settings environment variables, the same ones the previous
     ///   environment was built with.
     pub async fn reopen(root: &Path, env: &[(&str, &str)]) -> Env {
-        let environment = Env::open(root, env).await;
+        let environment = Env::open(root, env, None).await;
         environment.registry.rebuild().await.unwrap();
         environment
     }
@@ -191,16 +194,47 @@ impl Env {
         mode: &str,
         read_only: bool,
     ) -> Env {
-        Env::build(server_config, limits, env, mode, read_only).await
+        Env::build(server_config, limits, env, mode, read_only, None).await
+    }
+
+    /// Builds an environment whose import stage links with a given function.
+    ///
+    /// # Parameters
+    ///
+    /// - `server_config`: the fixture's server-scoped configuration.
+    /// - `limits`: the instance's concurrency and rate limits.
+    /// - `env`: extra environment variables for the settings layer.
+    /// - `mode`: the import root's post-import mode, `move`, `copy` or `link`.
+    /// - `hardlink`: the function the import stage calls instead of the
+    ///   operating system's hard links.
+    pub async fn with_hardlink(
+        server_config: Value,
+        limits: InstanceLimits,
+        env: &[(&str, &str)],
+        mode: &str,
+        hardlink: Hardlink,
+    ) -> Env {
+        Env::build(server_config, limits, env, mode, false, Some(hardlink)).await
     }
 
     /// Builds a fresh environment with the given import-root mode.
+    ///
+    /// # Parameters
+    ///
+    /// - `server_config`: the fixture's server-scoped configuration.
+    /// - `limits`: the instance's concurrency and rate limits.
+    /// - `env`: extra settings environment variables.
+    /// - `mode`: the import root's post-import mode, `move`, `copy` or `link`.
+    /// - `read_only`: whether the import root is read-only.
+    /// - `hardlink`: the function the import stage links with, or `None` for the
+    ///   operating system's own hard links.
     async fn build(
         server_config: Value,
         limits: InstanceLimits,
         env: &[(&str, &str)],
         mode: &str,
         read_only: bool,
+        hardlink: Option<Hardlink>,
     ) -> Env {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
@@ -212,7 +246,7 @@ impl Env {
         ] {
             std::fs::create_dir_all(root.join(directory)).unwrap();
         }
-        let mut environment = Env::open(&root, env).await;
+        let mut environment = Env::open(&root, env, hardlink).await;
         environment.dir = Some(dir);
 
         let installed = environment
@@ -262,7 +296,9 @@ impl Env {
     ///
     /// - `root`: the directory the database and the storage live in.
     /// - `env`: extra settings environment variables.
-    async fn open(root: &Path, env: &[(&str, &str)]) -> Env {
+    /// - `hardlink`: the function the import stage links with, or `None` for the
+    ///   operating system's own hard links.
+    async fn open(root: &Path, env: &[(&str, &str)], hardlink: Option<Hardlink>) -> Env {
         let database = Database::open(&root.join("hearthsound.db")).await.unwrap();
         MIGRATOR.run(database.writer()).await.unwrap();
         let database = Arc::new(database);
@@ -312,7 +348,7 @@ impl Env {
         let staging = root.join("storage/staging");
         let library_root = root.join("storage/library");
         let cache_root = root.join("storage/cache");
-        let orchestrator = Arc::new(AcquisitionOrchestrator::new(
+        let orchestrator = AcquisitionOrchestrator::new(
             Arc::clone(&database),
             settings.clone(),
             Arc::clone(&registry),
@@ -323,7 +359,13 @@ impl Env {
                 staging.clone(),
                 StorageRoots::new(library_root.clone(), cache_root.clone()),
             ),
-        ));
+        );
+        if let Some(hardlink) = hardlink {
+            orchestrator.with_hardlink(move |source: &Path, destination: &Path| {
+                hardlink(source, destination)
+            });
+        }
+        let orchestrator = Arc::new(orchestrator);
 
         Env {
             dir: None,

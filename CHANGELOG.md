@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finishes a browser flow; it is a capability rather than a layer, so it does
   not appear in `provides`. The provider registry serves every one of these
   instances with the accessor its layer uses.
+- A verified download from an import root in `link` mode is hardlinked straight
+  to its managed destination instead of being copied and re-tagged, so the
+  source keeps its bytes, inode and modification time and the server stores no
+  second copy. A filesystem that refuses the link - the destination on another
+  device, no hardlink support, a missing permission - falls back to the tagged
+  copy, and the source and its directory are never modified or removed either
+  way.
 
 - An acquisition plugin can run a tool the administrator configured: the
   `host-process` import starts `yt-dlp` (or another tool the manifest lists
