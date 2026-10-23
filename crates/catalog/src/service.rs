@@ -28,8 +28,10 @@ use hearthsound_core::providers::{
 use hearthsound_core::{CatalogId, EntityKind, Layer, ProviderError, Slug};
 use hearthsound_db::Database;
 use hearthsound_plugin_host::{ProviderRegistry, RegistryInstance};
+use moka::future::Cache as MemoryCache;
 use tokio::time::error::Elapsed;
 
+use crate::artwork::REFUSED_IMAGE_TTL;
 use crate::cache::{Cache, ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
 use crate::error::CatalogError;
 use crate::wire::{WireAlbum, WireAlbumRefs, WireArtist, WireResults, WireTrack, WireTracks};
@@ -159,7 +161,20 @@ struct Inner {
     cache: Cache,
     /// The directory cached cover images are written to.
     artwork_dir: PathBuf,
+    /// The image URLs an image host refused, and when the refusal expires.
+    ///
+    /// An image host that answers a burst with a refusal answers the next
+    /// request of that burst the same way, so a URL that was refused is not
+    /// asked again until its entry expires. A tile grid of a hundred covers
+    /// therefore costs one refusal per image, not one per visit.
+    refused_images: MemoryCache<String, ()>,
 }
+
+/// How many image URLs the refusal window remembers.
+///
+/// A bound, not a target: the window only has to hold the images one grid asks
+/// for at a time, and an evicted entry costs one request.
+const REFUSED_IMAGE_CAPACITY: u64 = 4_096;
 
 impl CatalogService {
     /// Builds the service.
@@ -181,6 +196,10 @@ impl CatalogService {
         artwork_dir: impl Into<PathBuf>,
     ) -> CatalogService {
         let cache = Cache::new(Arc::clone(&database));
+        let refused_images = MemoryCache::builder()
+            .max_capacity(REFUSED_IMAGE_CAPACITY)
+            .time_to_live(REFUSED_IMAGE_TTL)
+            .build();
         CatalogService {
             inner: Arc::new(Inner {
                 registry,
@@ -188,6 +207,7 @@ impl CatalogService {
                 settings,
                 cache,
                 artwork_dir: artwork_dir.into(),
+                refused_images,
             }),
         }
     }
@@ -227,6 +247,15 @@ impl CatalogService {
     /// Returns the directory cached cover images are written to.
     pub(crate) fn artwork_dir(&self) -> &Path {
         &self.inner.artwork_dir
+    }
+
+    /// Returns the image URLs whose host refused them, with their expiry.
+    ///
+    /// The artwork layer reads it before it asks an image host for a URL and
+    /// writes it when the host answers with a refusal, so a burst of a hundred
+    /// cover requests does not ask a throttling host a hundred times.
+    pub(crate) fn refused_images(&self) -> &MemoryCache<String, ()> {
+        &self.inner.refused_images
     }
 
     /// Looks up one track.

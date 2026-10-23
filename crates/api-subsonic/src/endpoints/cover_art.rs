@@ -16,6 +16,11 @@
 //! - a stored entity with no image of its own but a `p:<slug>` alias - one the
 //!   catalog layer materialized - is served the image its issuing instance
 //!   describes, exactly like a catalog id;
+//! - an artist whose portrait the artwork layer cannot deliver - because the
+//!   image host refused the request or the instance missed its deadline - is
+//!   served the first image of its albums instead, because a local cover beats
+//!   an empty frame. That image is sent with `no-cache`, so the client asks
+//!   again and picks up the portrait once the layer can serve it;
 //! - a catalog id (`x_<slug>_<kind>_<payload>`) is proxied through the instance
 //!   that issued it, under that instance's `host-http` permission and image
 //!   cache policy: an image from an instance that declared `no-store` is passed
@@ -29,12 +34,14 @@
 //!
 //! A served image carries its MIME type, its length, a strong `ETag` over the
 //! bytes, and a `Cache-Control`; a request whose `If-None-Match` already names
-//! that tag is answered with HTTP 304 and no body. A refusal is HTTP 400 for a
-//! missing `id` or an unparsable `size`, HTTP 404 for an id that names no entity
-//! with an image, HTTP 500 for a read the server could not complete, and HTTP
-//! 503 with `Retry-After` when the entity's catalog instance cannot answer right
-//! now. Credential failures are answered by the extractor before the handler
-//! runs, with HTTP 401.
+//! that tag is answered with HTTP 304 and no body. An entity with no image is
+//! answered with HTTP 404 and `private, max-age=3600`, so a grid of cards does
+//! not ask for the same missing image on every visit. A refusal is HTTP 400 for
+//! a missing `id` or an unparsable `size`, HTTP 404 for an id that names no
+//! entity with an image, HTTP 500 for a read the server could not complete, and
+//! HTTP 503 with `Retry-After` when the entity's catalog instance cannot answer
+//! right now. Credential failures are answered by the extractor before the
+//! handler runs, with HTTP 401.
 
 use axum::body::Body;
 use axum::http::HeaderMap;
@@ -66,6 +73,21 @@ const STORED_CACHE_CONTROL: &str = "public, max-age=86400";
 /// The instance's manifest asked for this: its terms do not allow the image to
 /// be kept, so neither the server nor the client stores it.
 const NO_STORE_CACHE_CONTROL: &str = "no-store";
+
+/// The `Cache-Control` of a local image served because its portrait failed.
+///
+/// The portrait was not refused for good, only for now, so the image may be
+/// available on the next request: the client keeps it but revalidates it every
+/// time, which its `ETag` makes cheap.
+const FALLBACK_CACHE_CONTROL: &str = "no-cache";
+
+/// The `Cache-Control` of a refusal that says the entity has no image.
+///
+/// An hour, and private: a stored entity that has no image today may gain one
+/// when its next track is imported, but a grid of a hundred covers must not ask
+/// for the missing ones on every visit. `private` keeps a shared proxy from
+/// answering for another user.
+const NOT_FOUND_CACHE_CONTROL: &str = "private, max-age=3600";
 
 /// How long a client waits before asking again for an image the catalog could
 /// not deliver.
@@ -119,6 +141,13 @@ pub async fn get_cover_art(call: BinaryCall) -> HttpResponse {
 /// is then asked of the instance that issued it, which is what makes the cover
 /// art of an acquired-but-not-yet-stored entity available.
 ///
+/// An artist is asked the other way round, because its portrait is the picture
+/// a client wants: the artwork layer first, and the first track of its albums
+/// when the layer has none. When the layer fails rather than answering that it
+/// has none - a throttling image host, an instance at its deadline - the local
+/// art is served with a policy that makes the client revalidate, so the
+/// portrait takes over as soon as the layer can deliver it.
+///
 /// # Parameters
 ///
 /// - `call`: the authenticated call.
@@ -134,20 +163,56 @@ async fn stored(call: &BinaryCall, entity: EntityId, size: Option<u32>) -> HttpR
     }
     // An artist has no image of its own, so the artwork layer is asked for a
     // portrait before the local fallback that walks its albums is tried.
-    if entity.kind() == IdPrefix::Artist
-        && let Some(response) = artwork_layer(call, entity, size).await
-    {
-        return response;
+    if entity.kind() == IdPrefix::Artist {
+        return match artwork_layer(call, entity, size).await {
+            LayerAnswer::Served(response) => response,
+            LayerAnswer::Missing => local_image(call, &entity, STORED_CACHE_CONTROL).await,
+            LayerAnswer::Failed(response) => match local(call, entity).await {
+                Ok(Some(art)) => match load(art, FALLBACK_CACHE_CONTROL).await {
+                    Ok(served) => image(call.headers(), served),
+                    Err(error) => internal("reading a local cover image", &error),
+                },
+                Ok(None) => response,
+                Err(error) => internal("resolving local cover art", &error),
+            },
+        };
     }
     match local(call, entity).await {
-        Ok(Some(art)) => match load(art).await {
+        Ok(Some(art)) => match load(art, STORED_CACHE_CONTROL).await {
             Ok(served) => image(call.headers(), served),
             Err(error) => internal("reading a local cover image", &error),
         },
         Ok(None) => match artwork_layer(call, entity, size).await {
-            Some(response) => response,
-            None => not_found(&entity),
+            LayerAnswer::Served(response) | LayerAnswer::Failed(response) => response,
+            LayerAnswer::Missing => not_found(&entity),
         },
+        Err(error) => internal("resolving local cover art", &error),
+    }
+}
+
+/// Serves the image a stored entity has of its own.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `entity`: the stored entity the request named.
+/// - `cache_control`: the `Cache-Control` the response carries.
+///
+/// # Returns
+///
+/// The image response, HTTP 404 when the entity has no image, or HTTP 500 when
+/// the read failed.
+async fn local_image(
+    call: &BinaryCall,
+    entity: &EntityId,
+    cache_control: &'static str,
+) -> HttpResponse {
+    match local(call, *entity).await {
+        Ok(Some(art)) => match load(art, cache_control).await {
+            Ok(served) => image(call.headers(), served),
+            Err(error) => internal("reading a local cover image", &error),
+        },
+        Ok(None) => not_found(entity),
         Err(error) => internal("resolving local cover art", &error),
     }
 }
@@ -167,20 +232,17 @@ async fn stored(call: &BinaryCall, entity: EntityId, size: Option<u32>) -> HttpR
 ///
 /// # Returns
 ///
-/// The image response, or `None` when no instance knows a picture of the entity,
-/// which leaves the caller to answer its own refusal.
-async fn artwork_layer(
-    call: &BinaryCall,
-    entity: EntityId,
-    size: Option<u32>,
-) -> Option<HttpResponse> {
+/// How the artwork layer answered: the image it served, that it has none, or
+/// the refusal response a client should see when nothing local can take its
+/// place.
+async fn artwork_layer(call: &BinaryCall, entity: EntityId, size: Option<u32>) -> LayerAnswer {
     let catalog = call.state().catalog();
     let request = CoverArtRequest {
         id: ClientId::Entity(entity),
         size,
     };
     match catalog.cover_art(&request).await {
-        Ok(cover) => Some(image(
+        Ok(cover) => LayerAnswer::Served(image(
             call.headers(),
             Served {
                 mime_type: cover.mime_type,
@@ -188,8 +250,8 @@ async fn artwork_layer(
                 cache_control: STORED_CACHE_CONTROL,
             },
         )),
-        Err(CatalogError::NotFound) => None,
-        Err(error) => Some(catalog_failure(&entity, &error)),
+        Err(CatalogError::NotFound) => LayerAnswer::Missing,
+        Err(error) => LayerAnswer::Failed(catalog_failure(&entity, &error)),
     }
 }
 
@@ -226,7 +288,7 @@ async fn playlist(call: &BinaryCall, playlist_id: EntityId) -> HttpResponse {
     let roots = call.state().storage_roots();
     for entry in &playlist.entries {
         match track_cover(&library, &settings, roots, entry.track_id).await {
-            Ok(Some(art)) => match load(art).await {
+            Ok(Some(art)) => match load(art, STORED_CACHE_CONTROL).await {
                 Ok(served) => return image(call.headers(), served),
                 Err(error) => return internal("reading a local cover image", &error),
             },
@@ -370,27 +432,30 @@ async fn proxy(call: &BinaryCall, id: &ClientId, slug: &Slug, size: Option<u32>)
 /// # Parameters
 ///
 /// - `art`: the image the library layer found.
+/// - `cache_control`: the `Cache-Control` the response carries, which one
+///   caller lowers to `no-cache` for an image that stands in for a portrait
+///   that could not be fetched.
 ///
 /// # Returns
 ///
-/// The image with the `Cache-Control` a locally stored image is served with.
+/// The image with the given cache policy.
 ///
 /// # Errors
 ///
 /// Returns the I/O error of a sidecar image that could not be read.
-async fn load(art: CoverArt) -> Result<Served, std::io::Error> {
+async fn load(art: CoverArt, cache_control: &'static str) -> Result<Served, std::io::Error> {
     match art {
         CoverArt::Embedded { mime_type, data } => Ok(Served {
             mime_type,
             bytes: data,
-            cache_control: STORED_CACHE_CONTROL,
+            cache_control,
         }),
         CoverArt::Sidecar { path, mime_type } => {
             let bytes = tokio::fs::read(&path).await?;
             Ok(Served {
                 mime_type,
                 bytes,
-                cache_control: STORED_CACHE_CONTROL,
+                cache_control,
             })
         }
     }
@@ -566,7 +631,7 @@ fn catalog_failure(id: &dyn std::fmt::Display, error: &CatalogError) -> HttpResp
                 id = %id,
                 "the catalog has no cover art for that id"
             );
-            StatusCode::NOT_FOUND.into_response()
+            not_found(id)
         }
         CatalogError::RateLimited { retry_after_ms, .. } => {
             tracing::debug!(
@@ -635,10 +700,15 @@ fn bad_request(parameter: &'static str) -> HttpResponse {
 ///
 /// # Returns
 ///
-/// HTTP 404 with an empty body.
+/// HTTP 404 with an empty body, and a `Cache-Control` that spares the client a
+/// repeat request for an hour.
 fn not_found(id: &dyn std::fmt::Display) -> HttpResponse {
     tracing::debug!(id = %id, "no cover art for that id");
-    StatusCode::NOT_FOUND.into_response()
+    (
+        StatusCode::NOT_FOUND,
+        [(CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)],
+    )
+        .into_response()
 }
 
 /// Answers that this server could not produce the image.
@@ -654,6 +724,21 @@ fn not_found(id: &dyn std::fmt::Display) -> HttpResponse {
 fn internal(context: &'static str, error: &dyn std::fmt::Display) -> HttpResponse {
     tracing::error!(context, error = %error, "could not serve cover art");
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
+}
+
+/// How the artwork layer answered a request.
+///
+/// The three cases are kept apart because a caller treats them differently: an
+/// image is served at once, an answer that the layer has no picture lets the
+/// caller fall back to local art, and a refusal is what the client sees when
+/// nothing local can take the image's place.
+enum LayerAnswer {
+    /// The layer served the image.
+    Served(HttpResponse),
+    /// The layer has no picture of the entity.
+    Missing,
+    /// The layer could not deliver the image, with the refusal to answer.
+    Failed(HttpResponse),
 }
 
 /// One image and the policy its response carries.

@@ -292,16 +292,36 @@ impl Fixture {
     ///
     /// The bytes the mock server serves as the image.
     pub async fn install_artwork_layer(&self, path: &str, artists: &[&str]) -> Vec<u8> {
-        let server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path(path.to_owned()))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200)
-                    .insert_header("content-type", "image/png")
-                    .set_body_bytes(ARTWORK_IMAGE),
-            )
-            .mount(&server)
-            .await;
+        let server = artwork_server(path, 200).await;
+        let served = self.install_artwork_layer_at(&server, path, artists).await;
+        // The server lives as long as the fixture keeps its own runtime alive;
+        // leaking it here is what a test's mock server does in this harness.
+        std::mem::forget(server);
+        served
+    }
+
+    /// Installs the artwork fixture as the artwork layer, served by a mock
+    /// server the caller owns.
+    ///
+    /// The caller owns the server so it can answer with a refusal and assert
+    /// how often it was asked. The fixture plugin is installed only once per
+    /// fixture: a second call updates nothing and fails.
+    ///
+    /// # Parameters
+    ///
+    /// - `server`: the mock server that answers the image path.
+    /// - `path`: the image path the fixture configures.
+    /// - `artists`: the artist names the fixture answers a portrait for.
+    ///
+    /// # Returns
+    ///
+    /// The bytes [`ARTWORK_IMAGE`] holds, which is what a 200 answer serves.
+    pub async fn install_artwork_layer_at(
+        &self,
+        server: &wiremock::MockServer,
+        path: &str,
+        artists: &[&str],
+    ) -> Vec<u8> {
         let installed = self
             .host
             .install(&fixture_plugin(ARTWORK_FIXTURE))
@@ -346,9 +366,6 @@ impl Fixture {
             .await
             .unwrap();
         self.registry.rebuild().await.unwrap();
-        // The server lives as long as the fixture keeps its own runtime alive;
-        // leaking it here is what a test's mock server does in this harness.
-        std::mem::forget(server);
         ARTWORK_IMAGE.to_vec()
     }
 
@@ -598,6 +615,32 @@ impl Probe {
 /// Sends a GET request through a router.
 pub async fn get(app: &Router, uri: &str) -> Probe {
     request(app, Method::GET, uri, &[]).await
+}
+
+/// Starts a mock server that answers one image path with a status.
+///
+/// # Parameters
+///
+/// - `path`: the image path the server answers.
+/// - `status`: the HTTP status it answers with; 200 carries
+///   [`ARTWORK_IMAGE`] and any other status carries no body.
+///
+/// # Returns
+///
+/// The running server, with that one mock mounted.
+pub async fn artwork_server(path: &str, status: u16) -> wiremock::MockServer {
+    let server = wiremock::MockServer::start().await;
+    let body: &[u8] = if status == 200 { ARTWORK_IMAGE } else { &[] };
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path(path.to_owned()))
+        .respond_with(
+            wiremock::ResponseTemplate::new(status)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(body.to_vec()),
+        )
+        .mount(&server)
+        .await;
+    server
 }
 
 /// Sends a request with explicit method and headers through a router.

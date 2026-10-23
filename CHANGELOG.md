@@ -56,6 +56,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updates its checks find, and an update that widens the installed permission
   set is still held for review.
 
+- An image URL whose host refused it is not asked again for ten minutes. An
+  image host that throttles a burst of cover requests refuses the rest of the
+  burst too, so a grid of a hundred cards now costs one refusal per image
+  instead of one per visit. A network error or a timeout is not remembered:
+  this server's own rate limiter produces those.
+
+### Fixed
+
+- An artist whose portrait cannot be fetched is served the first cover image
+  of its albums instead of a `503`. The artwork layer's failure no longer
+  hides the local art an artist already has, and the stand-in is sent with
+  `no-cache` so the portrait takes over as soon as the layer can deliver it.
+
+- `getCoverArt` answers an entity with no image with
+  `Cache-Control: private, max-age=3600`. Without a cache header the browser
+  asked again on every visit, for every card.
+
 ## [0.1.5] - 2026-10-22
 
 ### Added

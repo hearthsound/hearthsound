@@ -53,6 +53,14 @@ const ARTWORK_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// picture of an album today may have one tomorrow.
 const EMPTY_ARTWORK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// How long an image URL whose host refused it is not asked again.
+///
+/// Ten minutes. An image host that answers a burst of requests with a refusal,
+/// throttling being the usual reason, keeps refusing while the burst lasts; the
+/// window outlasts one page of covers and is short enough that a temporary
+/// refusal does not hide a picture for the rest of the day.
+pub(crate) const REFUSED_IMAGE_TTL: Duration = Duration::from_secs(10 * 60);
+
 /// What a caller asks for cover art of.
 ///
 /// The id is either a catalog id (`x_<slug>_<kind>_<payload>`, the entity is
@@ -262,6 +270,17 @@ impl CatalogService {
             return Ok(cached);
         }
 
+        if self.image_refused(&slug, &image.url).await {
+            tracing::debug!(
+                instance = slug.as_str(),
+                url = image.url.as_str(),
+                "an image host refused this URL recently; not asking again yet"
+            );
+            return Err(CatalogError::Unavailable {
+                instance: slug.as_str().to_owned(),
+            });
+        }
+
         let fetched = self
             .registry()
             .fetch_image(slug.as_str(), &image.url)
@@ -282,6 +301,7 @@ impl CatalogService {
                 status = fetched.status,
                 "the catalog instance answered an image request with a failure"
             );
+            self.refuse_image(&slug, &image.url).await;
             return Err(CatalogError::Unavailable {
                 instance: slug.as_str().to_owned(),
             });
@@ -644,6 +664,40 @@ impl CatalogService {
         self.cache().put(instance, key, &wire, ttl).await;
     }
 
+    /// Returns whether an image URL was refused recently enough to skip.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the instance that described the image.
+    /// - `url`: the image's URL.
+    ///
+    /// # Returns
+    ///
+    /// `true` when that instance's host refused this URL within
+    /// [`REFUSED_IMAGE_TTL`], so the caller answers without asking again.
+    async fn image_refused(&self, slug: &Slug, url: &str) -> bool {
+        self.refused_images()
+            .get(&refused_image_key(slug, url))
+            .await
+            .is_some()
+    }
+
+    /// Remembers that an image host refused a URL.
+    ///
+    /// Only a refusal the host itself stated is remembered. A network error or
+    /// a timeout is not: this server's own rate limiter produces those, and
+    /// they say nothing about the host.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the instance that described the image.
+    /// - `url`: the image's URL.
+    async fn refuse_image(&self, slug: &Slug, url: &str) {
+        self.refused_images()
+            .insert(refused_image_key(slug, url), ())
+            .await;
+    }
+
     /// Fetches one image an artwork instance described.
     ///
     /// The fetch goes through the instance's own HTTP grant, so an image host the
@@ -679,6 +733,18 @@ impl CatalogService {
         if let Some(cached) = self.cached_cover(&key).await {
             return Ok(cached);
         }
+
+        if self.image_refused(&slug, &image.url).await {
+            tracing::debug!(
+                instance = slug.as_str(),
+                url = image.url.as_str(),
+                "an image host refused this URL recently; not asking again yet"
+            );
+            return Err(CatalogError::Unavailable {
+                instance: slug.as_str().to_owned(),
+            });
+        }
+
         let fetched = self
             .registry()
             .fetch_image(slug.as_str(), &image.url)
@@ -699,6 +765,7 @@ impl CatalogService {
                 status = fetched.status,
                 "an artwork instance answered an image request with a failure"
             );
+            self.refuse_image(&slug, &image.url).await;
             return Err(CatalogError::Unavailable {
                 instance: slug.as_str().to_owned(),
             });
@@ -884,6 +951,20 @@ fn pick_image(images: &[Image], size: Option<u32>) -> Option<&Image> {
 /// - `image`: the image.
 fn dimension(image: &Image) -> Option<u32> {
     image.width.max(image.height)
+}
+
+/// Returns the refusal window's key for an image URL.
+///
+/// The instance is part of the key because two instances may describe the same
+/// URL under different grants, and only the instance whose host refused it
+/// should skip it.
+///
+/// # Parameters
+///
+/// - `slug`: the instance that described the image.
+/// - `url`: the image's URL.
+fn refused_image_key(slug: &Slug, url: &str) -> String {
+    format!("{} {url}", slug.as_str())
 }
 
 /// Builds the cache key of one catalog cover image.

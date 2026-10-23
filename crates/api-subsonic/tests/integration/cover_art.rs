@@ -19,8 +19,8 @@ use tower::ServiceExt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use crate::common::Fixture;
 use crate::common::artwork::{Art, files_in, seed_album};
+use crate::common::{Fixture, artwork_server};
 
 /// The bytes the mock server serves as an image.
 const IMAGE: &[u8] = b"\x89PNG\r\n\x1a\nnot really a png";
@@ -296,6 +296,98 @@ async fn an_entity_without_art_is_not_found() {
         assert_eq!(probe.status, StatusCode::NOT_FOUND, "{id}");
         assert!(probe.bytes.is_empty());
     }
+}
+
+/// A refusal the client can stop repeating for an hour.
+#[tokio::test]
+async fn an_entity_without_art_is_answered_with_a_cacheable_not_found() {
+    let fixture = Fixture::new().await;
+    let seeded = seed_album(&fixture, "Delta", &[Art::None]).await;
+    let app = fixture.app();
+
+    for id in [seeded.first_track(), seeded.album, seeded.artist] {
+        let probe = request(&app, &url(&fixture, &id.to_string()), &[]).await;
+        assert_eq!(probe.status, StatusCode::NOT_FOUND, "{id}");
+        assert_eq!(
+            probe.header(CACHE_CONTROL),
+            Some("private, max-age=3600"),
+            "a grid of cards asks for the same missing image only once an hour"
+        );
+    }
+}
+
+/// An artist's local cover stands in for a portrait the image host refused.
+#[tokio::test]
+async fn an_artist_whose_portrait_host_refuses_is_served_its_local_art() {
+    let fixture = Fixture::new().await;
+    let seeded = seed_album(
+        &fixture,
+        "Gamma",
+        &[Art::Embedded {
+            size: 32,
+            rgb: 0x00ff_0000,
+        }],
+    )
+    .await;
+    let picture = seeded.embedded.clone().unwrap();
+    let server = artwork_server("/portrait.png", 403).await;
+    fixture
+        .install_artwork_layer_at(&server, "/portrait.png", &["Gamma Artist"])
+        .await;
+    let app = fixture.app();
+
+    let artist = request(&app, &url(&fixture, &seeded.artist.to_string()), &[]).await;
+    assert_eq!(
+        artist.status,
+        StatusCode::OK,
+        "a refused portrait falls back to local art instead of a refusal"
+    );
+    assert_eq!(artist.bytes, picture);
+    assert_eq!(
+        artist.header(CACHE_CONTROL),
+        Some("no-cache"),
+        "the portrait may arrive later, so the client revalidates the stand-in"
+    );
+}
+
+/// A URL the host refused is not asked again within the refusal window.
+#[tokio::test]
+async fn a_refused_image_url_is_not_asked_again_at_once() {
+    let fixture = Fixture::new().await;
+    let seeded = seed_album(
+        &fixture,
+        "Gamma",
+        &[Art::Embedded {
+            size: 32,
+            rgb: 0x00ff_0000,
+        }],
+    )
+    .await;
+    let picture = seeded.embedded.clone().unwrap();
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/portrait.png"))
+        .respond_with(wiremock::ResponseTemplate::new(403))
+        .expect(1)
+        .mount(&server)
+        .await;
+    fixture
+        .install_artwork_layer_at(&server, "/portrait.png", &["Gamma Artist"])
+        .await;
+    let app = fixture.app();
+    let uri = url(&fixture, &seeded.artist.to_string());
+
+    let first = request(&app, &uri, &[]).await;
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(first.bytes, picture);
+
+    let second = request(&app, &uri, &[]).await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(
+        second.bytes, picture,
+        "the second request is answered without asking the refusing host again"
+    );
+    drop(server);
 }
 
 #[tokio::test]
