@@ -2837,6 +2837,300 @@
         ]
       }
     },
+    "/api/v1/me/providers": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Lists the services the caller may link.",
+        "description": "One entry per enabled instance whose plugin exports `account-link`, ordered\nby slug, with the account the caller linked when there is one.\n\n# Errors\n\nAnswers `unauthenticated` without credentials and `internal` when the\ninstance or link rows cannot be read. Answers `link-failed` when an instance\ncannot be asked how it links accounts.",
+        "operationId": "list_provider_links",
+        "responses": {
+          "200": {
+            "description": "The services the caller may link",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderLinks"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "A service could not be asked how it links accounts",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/providers/{slug}/config": {
+      "put": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Stores the caller's configuration for a service that links by configuration.",
+        "description": "The configuration is checked against the plugin's user schema, with the\nschema's defaults filled in, and the plugin's `verify-account` names the\naccount before anything is stored. A service that links through its own site\nanswers `wrong-link-method`.\n\n# Errors\n\nAnswers `not-found` for an unknown or non-linkable slug, `wrong-link-method`\nfor a browser service, `invalid-config` when the configuration does not match\nthe schema, `link-failed` when the plugin rejects the configuration or cannot\nanswer, and `internal` when the link cannot be stored.",
+        "operationId": "put_provider_config",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "The provider instance slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserConfigUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The stored link",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderLink"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such linkable service",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The service links through the browser",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The configuration cannot be used",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/providers/{slug}/link": {
+      "post": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Starts a browser link and answers the URL to open.",
+        "description": "The callback the service sends the listener back to carries a single-use\nnonce, and the flow is remembered against the caller and the instance for ten\nminutes.\n\n# Errors\n\nAnswers `not-found` for an unknown or non-linkable slug, `wrong-link-method`\nfor a configuration service, and `link-failed` when the plugin cannot answer\nor refuses to start the flow.",
+        "operationId": "start_provider_link",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "The provider instance slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The authorization URL to open",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderLinkUrl"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such linkable service",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The service links with a configuration",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The service could not start the flow",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Deletes the caller's link to a service.",
+        "description": "# Errors\n\nAnswers `not-found` for an unknown or non-linkable slug or when the caller\nhas not linked the service, and `internal` when the row cannot be removed.",
+        "operationId": "delete_provider_link",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "The provider instance slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The link was removed"
+          },
+          "404": {
+            "description": "No such linkable service, or not linked",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/providers/{slug}/link/callback": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Finishes a browser link from the query the service redirected with.",
+        "description": "The route always answers a redirect to the account menu: `<path>?linked=<slug>`\nwhen the link was stored and `<path>?linkError=<slug>` for a missing, expired\nor foreign nonce, or any failure of the plugin.\n\n# Errors\n\nAnswers `unauthenticated` without credentials; every other outcome is a\nredirect, because the address is opened in a browser.",
+        "operationId": "provider_link_callback",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "The provider instance slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "The single-use nonce the link started with",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "The account menu, with `linked` or `linkError`"
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/me/settings": {
       "get": {
         "tags": [
@@ -4625,6 +4919,119 @@
           }
         }
       },
+      "ProviderLink": {
+        "type": "object",
+        "description": "One service a listener may link.",
+        "required": [
+          "slug",
+          "displayName",
+          "pluginId",
+          "layers",
+          "linkMethod",
+          "linked",
+          "pendingScrobbles",
+          "failedScrobbles"
+        ],
+        "properties": {
+          "accountName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name of the linked account, when there is one."
+          },
+          "displayName": {
+            "type": "string",
+            "description": "The name shown in the account menu."
+          },
+          "failedScrobbles": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Scrobbles the outbox gave up on.",
+            "minimum": 0
+          },
+          "lastError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The most recent delivery failure."
+          },
+          "layers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The layers the instance takes part in, from `scrobble` and `discovery`."
+          },
+          "linkMethod": {
+            "type": "string",
+            "description": "How the account is linked: `config` or `browser`."
+          },
+          "linked": {
+            "type": "boolean",
+            "description": "Whether the listener has linked the service."
+          },
+          "linkedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the account was linked, in unix milliseconds."
+          },
+          "pendingScrobbles": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Scrobbles waiting to be delivered.",
+            "minimum": 0
+          },
+          "pluginId": {
+            "type": "string",
+            "description": "The plugin the instance is configured from."
+          },
+          "slug": {
+            "type": "string",
+            "description": "The provider instance slug."
+          },
+          "userConfig": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The user configuration form, or `null` when the plugin links through the\nservice's site."
+          }
+        }
+      },
+      "ProviderLinkUrl": {
+        "type": "object",
+        "description": "The address of the service's authorization page.",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The URL to open so the listener can approve the link."
+          }
+        }
+      },
+      "ProviderLinks": {
+        "type": "object",
+        "description": "The services a listener may link.",
+        "required": [
+          "providers"
+        ],
+        "properties": {
+          "providers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProviderLink"
+            },
+            "description": "The services, ordered by slug."
+          }
+        }
+      },
       "ProviderList": {
         "type": "object",
         "description": "The configured provider instances, by slug.",
@@ -5567,6 +5974,20 @@
             "description": "The track's client id (`tr_...`), which `/rest/getSong` and\n`/rest/stream` accept."
           }
         }
+      },
+      "UserConfigUpdate": {
+        "type": "object",
+        "description": "A listener's configuration for one service.",
+        "required": [
+          "config"
+        ],
+        "properties": {
+          "config": {
+            "type": "object",
+            "description": "The fields of the plugin's user configuration schema."
+          }
+        },
+        "additionalProperties": false
       },
       "UserPage": {
         "type": "object",

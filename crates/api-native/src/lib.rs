@@ -29,6 +29,7 @@
 //! | `GET`/`POST /api/v1/me/api-keys`, `DELETE /api/v1/me/api-keys/{id}` | any user, own keys |
 //! | `GET`/`POST /api/v1/me/app-passwords`, `DELETE /api/v1/me/app-passwords/{id}` | any user, own app passwords |
 //! | `GET`/`PATCH /api/v1/me/settings` | any user, own overrides |
+//! | `GET /api/v1/me/providers`, `PUT /api/v1/me/providers/{slug}/config`, `POST`/`DELETE /api/v1/me/providers/{slug}/link`, `GET /api/v1/me/providers/{slug}/link/callback` | any user, own links |
 //! | `PUT /api/v1/playlists/{id}/order` | any user, own playlist |
 //! | `POST /api/v1/playlists/{id}/tracks` | any user, own playlist |
 //! | `GET`/`POST /api/v1/admin/users`, `GET`/`PATCH /api/v1/admin/users/{id}` | administrators |
@@ -143,6 +144,13 @@ fn api_router() -> OpenApiRouter<NativeState> {
             routes::me::get_settings,
             routes::me::patch_settings
         ))
+        .routes(routes!(routes::me_providers::list_provider_links))
+        .routes(routes!(routes::me_providers::put_provider_config))
+        .routes(routes!(
+            routes::me_providers::start_provider_link,
+            routes::me_providers::delete_provider_link
+        ))
+        .routes(routes!(routes::me_providers::provider_link_callback))
         .routes(routes!(
             routes::admin_users::list_users,
             routes::admin_users::create_user

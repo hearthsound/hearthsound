@@ -56,6 +56,7 @@ mod repo;
 mod scrobble;
 mod state;
 mod updates;
+mod user_configs;
 mod validate;
 mod verification;
 
@@ -92,5 +93,8 @@ pub use state::InstanceState;
 pub use updates::{
     PluginUpdate, UPDATE_CHECK_JOB_KIND, UPDATE_CHECK_SCHEDULE, UpdateCheckJobHandler,
     UpdateCheckReport, UpdateChecker,
+};
+pub use user_configs::{
+    LinkedUser, UserConfig, UserConfigError, UserConfigService, validate_user_config,
 };
 pub use validate::HOSTED_LAYERS;

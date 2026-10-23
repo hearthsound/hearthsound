@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT config, linked_at FROM provider_user_configs\n             WHERE instance_id = ? AND user_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "config",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_user_configs",
+            "name": "config"
+          }
+        }
+      },
+      {
+        "name": "linked_at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "provider_user_configs",
+            "name": "linked_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "69237752ec8d78ab78b9bfa2936681c1011ca5113226e4c8b006dbcf56dbd231"
+}

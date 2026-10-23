@@ -1630,6 +1630,7 @@ version = "0.1.5"
 dependencies = [
  "axum",
  "data-encoding",
+ "form_urlencoded",
  "futures-util",
  "hearthsound-acquire",
  "hearthsound-activity",
@@ -1641,6 +1642,7 @@ dependencies = [
  "hearthsound-jobs",
  "hearthsound-library",
  "hearthsound-plugin-host",
+ "moka",
  "rand 0.10.3",
  "serde",
  "serde_json",
@@ -1893,6 +1895,7 @@ dependencies = [
  "async-trait",
  "axum",
  "data-encoding",
+ "form_urlencoded",
  "hearthsound-acquire",
  "hearthsound-activity",
  "hearthsound-api-native",

@@ -20,4 +20,5 @@ mod plugin_log;
 mod provisioning;
 mod repositories;
 mod scrobble_provider;
+mod user_configs;
 mod verification_provider;

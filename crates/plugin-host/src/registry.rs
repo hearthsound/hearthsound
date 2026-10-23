@@ -455,6 +455,23 @@ impl ProviderRegistry {
         self.read().by_slug.get(slug).cloned()
     }
 
+    /// Returns every instance the registry serves, ordered by slug.
+    ///
+    /// This is the set of enabled instances an administrator assigned to at
+    /// least one layer; an instance that is not in service is absent, because
+    /// nothing can be called through it.
+    ///
+    /// # Returns
+    ///
+    /// A snapshot of the entries, ordered by slug, so a caller that lists them
+    /// is deterministic and a later rebuild does not change the vector.
+    pub fn instances(&self) -> Vec<Arc<RegistryInstance>> {
+        let state = self.read();
+        let mut entries: Vec<Arc<RegistryInstance>> = state.by_slug.values().cloned().collect();
+        entries.sort_by(|left, right| left.slug.as_str().cmp(right.slug.as_str()));
+        entries
+    }
+
     /// Fetches one image under the permissions of the instance with `slug`.
     ///
     /// The fetch is the host's, so it also applies to instances that are not

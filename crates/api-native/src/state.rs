@@ -20,7 +20,7 @@ use hearthsound_library::upload::UploadIngest;
 use hearthsound_library::watch::LibraryWatcher;
 use hearthsound_plugin_host::{
     InstanceService, PluginAdmin, PluginHost, PluginInstaller, PluginRepository, ProviderRegistry,
-    UpdateCheckJobHandler, UpdateChecker,
+    UpdateCheckJobHandler, UpdateChecker, UserConfigService,
 };
 
 use crate::tickets::Tickets;
@@ -38,6 +38,11 @@ pub struct NativeServices {
     /// The one-time token the first-run setup link carries, shared with the
     /// composition root that logs the URL for it.
     pub setup: Arc<SetupGate>,
+    /// `server.base_url` as the administrator configured it, or the empty string
+    /// when it is unset. A browser link flow starts from this address when it is
+    /// set, so the service sends the listener back to the address the operator
+    /// published.
+    pub base_url: String,
     /// Whether `server.base_url` names an `https://` address, computed once at
     /// startup. The session cookie carries `Secure` when this is set or when the
     /// request came through a trusted proxy over HTTPS.
@@ -114,6 +119,10 @@ struct Inner {
     api_keys: ApiKeys,
     /// The app password table.
     app_passwords: AppPasswords,
+    /// The per-user provider configuration table.
+    user_configs: UserConfigService,
+    /// The browser link flows waiting for a service's callback.
+    link_states: crate::routes::me_providers::LinkStates,
     /// The event-stream ticket store.
     tickets: Tickets,
 }
@@ -144,6 +153,8 @@ impl NativeState {
                 quotas: Quotas::new(&database),
                 api_keys: ApiKeys::new(&database),
                 app_passwords: AppPasswords::new(&database, services.secrets.clone()),
+                user_configs: UserConfigService::new(&database, services.secrets.clone()),
+                link_states: crate::routes::me_providers::LinkStates::new(),
                 tickets: Tickets::default(),
                 services,
             }),
@@ -211,6 +222,20 @@ impl NativeState {
     /// Returns the app password table.
     pub fn app_passwords(&self) -> &AppPasswords {
         &self.inner.app_passwords
+    }
+
+    /// Returns the per-user provider configuration table.
+    ///
+    /// The provider routes read and write a listener's link through it, so a
+    /// link written here is the one the scrobble outbox and the discovery
+    /// surfaces call the plugin with.
+    pub fn user_configs(&self) -> &UserConfigService {
+        &self.inner.user_configs
+    }
+
+    /// Returns the browser link flows waiting for a service's callback.
+    pub(crate) fn link_states(&self) -> &crate::routes::me_providers::LinkStates {
+        &self.inner.link_states
     }
 
     /// Returns the store of outstanding event-stream tickets.

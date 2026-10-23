@@ -39,6 +39,7 @@ tower-http.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+form_urlencoded.workspace = true
 hearthsound-test-support = { path = "../test-support" }
 md-5.workspace = true
 minisign.workspace = true

@@ -23,6 +23,9 @@
 //! | `unsupported-media` | 415 | an upload is not audio the library indexes |
 //! | `invalid-plugin` | 422 | the archive is not a plugin this server can host |
 //! | `invalid-provider` | 422 | the provider instance cannot be configured this way |
+//! | `invalid-config` | 422 | a listener's configuration does not match the plugin's user schema |
+//! | `wrong-link-method` | 409 | the account is linked by the other method |
+//! | `link-failed` | 422, 502 | the service refused to link the account |
 //! | `invalid-layer` | 422 | the layer cannot take these instances |
 //! | `rate-limited` | 429 | too many failed sign-ins; `Retry-After` says when to retry |
 //! | `internal` | 500 | the server failed; the log has the details |
@@ -265,6 +268,50 @@ impl Problem {
             "Invalid layer assignment",
             detail,
         )
+    }
+
+    /// A listener's configuration does not match the plugin's user schema.
+    ///
+    /// # Parameters
+    ///
+    /// - `detail`: the schema violations, one per line.
+    pub fn invalid_config(detail: impl Into<String>) -> Problem {
+        Problem::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid-config",
+            "Configuration rejected",
+            detail,
+        )
+    }
+
+    /// The account is linked by the plugin's other method.
+    ///
+    /// A plugin that links accounts with a configuration takes
+    /// `PUT /me/providers/{slug}/config`; one that links them through the
+    /// service's site takes `POST /me/providers/{slug}/link`.
+    ///
+    /// # Parameters
+    ///
+    /// - `detail`: which method the plugin uses.
+    pub fn wrong_link_method(detail: impl Into<String>) -> Problem {
+        Problem::new(
+            StatusCode::CONFLICT,
+            "wrong-link-method",
+            "Wrong link method",
+            detail,
+        )
+    }
+
+    /// The plugin refused to link the account.
+    ///
+    /// # Parameters
+    ///
+    /// - `status`: the status the route answers with: 422 when a configuration
+    ///   the listener entered was rejected, 502 when the service could not be
+    ///   reached or answered an error.
+    /// - `detail`: the provider's failure.
+    pub fn link_failed(status: StatusCode, detail: impl Into<String>) -> Problem {
+        Problem::new(status, "link-failed", "Linking failed", detail)
     }
 
     /// A plugin index is unsigned or its signature does not verify.

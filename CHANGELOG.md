@@ -77,6 +77,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boundary scores 0.9, and a partial match stays below 0.89. The order of the
   results does not change.
 
+- A listener can link their accounts on scrobble and discovery services:
+  `GET /api/v1/me/providers` lists every service that exports `account-link`
+  with the layers it serves, its link method, the form a configuration is
+  entered through and the account the caller linked. `PUT
+  /api/v1/me/providers/{slug}/config` validates the form against the plugin's
+  user schema and stores the link after the plugin names the account, while
+  `POST /api/v1/me/providers/{slug}/link` starts a browser flow whose callback
+  carries a single-use, ten-minute state and lands on the account menu with
+  `linked` or `linkError`. `DELETE /api/v1/me/providers/{slug}/link` removes
+  the link. The stored configuration and account name are one envelope sealed
+  with the server's secret key, and the plugin is handed the opened
+  configuration with the listener's lowercase hyphenated id on every call.
+
 ### Changed
 
 - Plugins build against `hearthsound:plugin@0.3.0`: the host loads that API

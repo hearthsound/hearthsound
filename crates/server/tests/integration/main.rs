@@ -10,6 +10,7 @@ mod common;
 mod cors;
 mod events;
 mod health;
+mod me_providers;
 mod multi_user;
 mod native;
 mod on_demand;

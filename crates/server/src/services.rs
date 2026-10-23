@@ -646,6 +646,7 @@ impl Services {
             database: Arc::clone(&self.database),
             sessions: self.sessions.clone(),
             setup: Arc::clone(&self.setup),
+            base_url: self.config.server.base_url.clone(),
             base_url_is_https: self
                 .config
                 .server

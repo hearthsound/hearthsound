@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM provider_user_configs WHERE instance_id = ? AND user_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "8c2e14025d4a2cdb40b8b67340c1a3a2c8791d5d0ed49220425b453cacd19856"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO provider_user_configs (instance_id, user_id, config, linked_at)\n             VALUES (?, ?, ?, ?)\n             ON CONFLICT(instance_id, user_id) DO UPDATE SET\n                config = excluded.config,\n                linked_at = excluded.linked_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "f55c476dccfd50f5851717e3a1c3d1634d08c30341296cdd3bf66964ec6334a1"
+}

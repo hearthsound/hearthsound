@@ -845,7 +845,7 @@ fn seal_server_config(
 }
 
 /// Seals one value into the stored representation of a secret.
-fn seal_value(value: &Value, secrets: &SecretBox) -> Result<Value, InstanceError> {
+pub(crate) fn seal_value(value: &Value, secrets: &SecretBox) -> Result<Value, InstanceError> {
     let plaintext = serde_json::to_vec(value).map_err(RepoError::from)?;
     let (ciphertext, nonce) = secrets.seal(&plaintext)?;
     let mut sealed = Map::new();
@@ -923,7 +923,7 @@ pub(crate) fn open_server_config(
 }
 
 /// Opens one stored secret back into its plaintext value.
-fn open_value(value: &Value, secrets: &SecretBox) -> Result<Value, InstanceError> {
+pub(crate) fn open_value(value: &Value, secrets: &SecretBox) -> Result<Value, InstanceError> {
     let sealed = value.get(SEALED_KEY);
     let ciphertext = sealed
         .and_then(|sealed| sealed.get(CIPHERTEXT_KEY))
@@ -958,7 +958,7 @@ fn open_value(value: &Value, secrets: &SecretBox) -> Result<Value, InstanceError
 ///
 /// - `schema`: the JSON Schema to read defaults from.
 /// - `config`: the configuration to fill in.
-fn apply_defaults(schema: &Value, config: &mut Value) {
+pub(crate) fn apply_defaults(schema: &Value, config: &mut Value) {
     let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
         if let (Some(item_schema), Some(items)) = (schema.get("items"), config.as_array_mut()) {
             for item in items {
