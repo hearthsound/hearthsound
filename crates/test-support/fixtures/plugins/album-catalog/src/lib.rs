@@ -30,6 +30,10 @@ struct Config {
     /// The track each configured query answers with.
     #[serde(default)]
     search_results: Vec<ConfiguredSearchResult>,
+    /// Whether a searched track's album reference carries no artists, year or
+    /// images, the way a service that names only the album does.
+    #[serde(default)]
+    bare_album_refs: bool,
 }
 
 /// One query text and the track it answers with.
@@ -67,6 +71,31 @@ fn search_track(text: &str) -> u8 {
         .find(|entry| text.contains(&entry.text.to_lowercase()))
         .map(|entry| entry.track.clamp(1, TRACKS))
         .unwrap_or(1)
+}
+
+/// Builds the track a search answers with.
+///
+/// The configured `bareAlbumRefs` option strips the album's artists, year and
+/// images from the track, which is what a service that names only its albums
+/// returns.
+///
+/// # Parameters
+///
+/// - `text`: the query text the provider received.
+///
+/// # Returns
+///
+/// The track to answer with.
+fn searched_track(text: &str) -> Track {
+    let mut track = track(search_track(text));
+    if config().bare_album_refs
+        && let Some(album) = &mut track.album
+    {
+        album.artists.clear();
+        album.year = None;
+        album.images.clear();
+    }
+    track
 }
 
 /// The provider id of the fixture's album.
@@ -229,7 +258,7 @@ impl catalog::Guest for AlbumCatalog {
 
         Ok(SearchResults {
             tracks: if wants(&query.kinds, EntityKind::Track) {
-                vec![track(search_track(&query.text))]
+                vec![searched_track(&query.text)]
             } else {
                 vec![]
             },

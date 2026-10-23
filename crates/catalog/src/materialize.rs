@@ -960,7 +960,7 @@ pub(crate) fn canonical_id<'a>(ids: &'a [ExternalId], namespace: &str) -> Option
 /// # Returns
 ///
 /// The year, or `None` when the date does not start with four digits.
-fn release_year(date: Option<&str>) -> Option<i64> {
+pub(crate) fn release_year(date: Option<&str>) -> Option<i64> {
     let year = date?.get(..4)?;
     if year.bytes().all(|byte| byte.is_ascii_digit()) {
         year.parse().ok()

@@ -269,6 +269,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `hsGetRecommendedAlbums` names the artist of a catalog album. A
+  recommendation often names its album with only an id and a title, which left
+  the shelf entry without `artist`, `artistId`, `artists`, `displayArtist`, the
+  release year or the cover; the album now takes the credit from the resolved
+  track and, when that is not enough, the album artist, release year and cover
+  from the catalog's album lookup.
+
 - `getSimilarSongs`, `getSimilarSongs2` and `getTopSongs` list each song once.
   A discovery service can name one recording twice, under two spellings or
   through two similar artists, and two catalog entities can both be the stored

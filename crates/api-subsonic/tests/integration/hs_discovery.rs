@@ -112,6 +112,58 @@ async fn recommended_albums_are_distinct_and_ordered() {
     insta::assert_snapshot!("recommended-albums-xml", xml_answer.body);
 }
 
+/// A recommended album the catalog knows names its artist and year even when
+/// the service that recommended it named only the album.
+#[tokio::test]
+async fn recommended_albums_name_the_artist_of_a_catalog_album() {
+    let fixture = Fixture::new().await;
+    fixture
+        .install_album_catalog(json!({
+            "searchResults": [{ "text": "song 1", "track": 1 }],
+            "bareAlbumRefs": true
+        }))
+        .await;
+    fixture
+        .install_discovery_layer(&[(
+            "discovery",
+            json!({
+                "recommended": [
+                    { "title": "Fixture Song 1", "artists": ["Fixture Artist"] }
+                ]
+            }),
+        )])
+        .await;
+    fixture.link_discovery("discovery").await;
+    let app = fixture.app();
+
+    let answer = get(
+        &app,
+        &format!(
+            "/rest/hsGetRecommendedAlbums?apiKey={}&hearthsound=1&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&answer);
+    let response = body_json(&answer.body);
+    let album = &response["subsonic-response"]["recommendedAlbums"]["album"][0];
+    assert_eq!(album["artist"], "Fixture Artist", "{}", answer.body);
+    assert_eq!(album["displayArtist"], "Fixture Artist", "{}", answer.body);
+    assert_eq!(
+        album["artists"][0]["name"], "Fixture Artist",
+        "{}",
+        answer.body
+    );
+    let artist_id = hearthsound_core::CatalogId::new(
+        hearthsound_core::Slug::new("album").unwrap(),
+        hearthsound_core::EntityKind::Artist,
+        "album-catalog-artist-1",
+    )
+    .unwrap();
+    assert_eq!(album["artistId"], artist_id.to_string(), "{}", answer.body);
+    assert_eq!(album["year"], 2026, "{}", answer.body);
+}
+
 /// The recommended-albums endpoint answers error 70 without the flag.
 #[tokio::test]
 async fn recommended_albums_need_the_vendor_flag() {

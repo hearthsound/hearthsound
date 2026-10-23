@@ -70,8 +70,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use hearthsound_core::providers::{
-    ArtistSeed, CatalogQuery, GeneratedPlaylist, SuggestedArtist, SuggestedTrack, TrackSeed,
-    UserContext,
+    ArtistSeed, CatalogAlbumRef, CatalogQuery, CatalogTrack, GeneratedPlaylist, SuggestedArtist,
+    SuggestedTrack, TrackSeed, UserContext,
 };
 use hearthsound_core::{CatalogId, EntityKind, Layer};
 use hearthsound_db::Database;
@@ -83,6 +83,7 @@ use uuid::Uuid;
 
 use crate::dedupe::normalize;
 use crate::error::CatalogError;
+use crate::materialize::release_year;
 use crate::service::{
     CatalogAlbumRefResult, CatalogArtistResult, CatalogService, CatalogTrackResult,
 };
@@ -811,6 +812,12 @@ impl DiscoveryService {
     /// named them, one album per provider album id. A track whose provider
     /// reported no album contributes nothing.
     ///
+    /// A recommendation usually names its album with only an id and a title,
+    /// so every album reference is completed for the client: its artists come
+    /// from the track's credits when the reference carries none, and the
+    /// catalog's album lookup adds the album artist, the release year and the
+    /// cover when they are still missing.
+    ///
     /// # Parameters
     ///
     /// - `user`: the listener the recommendations are for.
@@ -841,7 +848,7 @@ impl DiscoveryService {
         let mut albums = Vec::new();
         let mut seen = HashSet::new();
         for result in resolved {
-            let Some(album) = result.track.album else {
+            let Some(album) = result.track.album.clone() else {
                 continue;
             };
             let Ok(id) = CatalogId::new(
@@ -854,12 +861,70 @@ impl DiscoveryService {
             if !seen.insert(id.to_string()) {
                 continue;
             }
+            let album = self.completed_album(&result.track, album, &id).await;
             albums.push(CatalogAlbumRefResult { id, album });
             if albums.len() >= usize::try_from(limit).unwrap_or(usize::MAX) {
                 break;
             }
         }
         Ok(albums)
+    }
+
+    /// Fills in an album reference a recommended track named.
+    ///
+    /// A recommendation can name its album with only an id and a title, which
+    /// leaves a shelf entry without an artist and often without a year or a
+    /// cover. The resolved track already carries the credit its album is filed
+    /// under, so that credit is used first; the catalog's album lookup, which
+    /// is cached, then supplies the album artist, the release year and the
+    /// cover when they are still missing. A failed lookup is logged and the
+    /// reference is returned with what the track carried, because an entry
+    /// without a cover is better than a section that failed.
+    ///
+    /// # Parameters
+    ///
+    /// - `track`: the resolved catalog track that named the album.
+    /// - `album`: the album reference the track carried.
+    /// - `id`: the catalog id of the album.
+    ///
+    /// # Returns
+    ///
+    /// The album reference, with as many fields filled as the data allowed.
+    async fn completed_album(
+        &self,
+        track: &CatalogTrack,
+        mut album: CatalogAlbumRef,
+        id: &CatalogId,
+    ) -> CatalogAlbumRef {
+        if album.artists.is_empty()
+            && let Some(primary) = track.artists.first()
+        {
+            album.artists = vec![primary.clone()];
+        }
+        if album.artists.is_empty() || album.year.is_none() || album.images.is_empty() {
+            match self.inner.catalog.album(id).await {
+                Ok(full) => {
+                    if album.artists.is_empty() {
+                        album.artists = full.album.artists;
+                    }
+                    if album.year.is_none() {
+                        album.year = release_year(full.album.release_date.as_deref())
+                            .and_then(|year| u16::try_from(year).ok());
+                    }
+                    if album.images.is_empty() {
+                        album.images = full.album.images;
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        album = %id,
+                        "a recommended album is served without its catalog details"
+                    );
+                }
+            }
+        }
+        album
     }
 
     /// Lists the albums of the artists similar to the listener's last play.
