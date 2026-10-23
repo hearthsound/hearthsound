@@ -74,6 +74,11 @@ pub struct QueueItemView {
     pub title: String,
     /// The credited artists, comma separated; `null` when unknown.
     pub artist: Option<String>,
+    /// The album's client id (`al_...`); `null` when the track has no album.
+    pub album_id: Option<String>,
+    /// The primary credited artist's client id (`ar_...`); `null` when the
+    /// track has no credit.
+    pub artist_id: Option<String>,
     /// The album's title; `null` when the track has no album.
     pub album: Option<String>,
     /// The track's length in seconds; `null` when unknown.
@@ -107,6 +112,8 @@ impl QueueItemView {
             id: item.track_id.to_string(),
             title: item.title,
             artist: item.artist,
+            album_id: item.album_id.map(|id| id.to_string()),
+            artist_id: item.artist_id.map(|id| id.to_string()),
             album: item.album,
             duration: item.duration_ms.map(|millis| millis / 1000),
             cover_art: item.album_id.unwrap_or(item.track_id).to_string(),

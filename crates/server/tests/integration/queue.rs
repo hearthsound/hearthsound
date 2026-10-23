@@ -351,6 +351,8 @@ async fn the_songs_queue_answers_the_library_in_order_and_starts_at_from() {
     assert_eq!(first["title"], "Alpha One");
     assert_eq!(first["artist"], "Alpha");
     assert_eq!(first["album"], "Alpha Album");
+    assert_eq!(first["albumId"], seeded.alpha_album.to_string());
+    assert_eq!(first["artistId"], seeded.alpha_artist.to_string());
     assert_eq!(first["duration"], 180);
     assert_eq!(first["coverArt"], seeded.alpha_album.to_string());
     assert_eq!(first["availability"], "local");
@@ -381,7 +383,8 @@ async fn the_liked_and_uploads_queues_list_their_own_tracks() {
     let seeded = seed(&fixture, dir.path()).await;
     let db = fixture.services.database();
     let library = LibraryRepository::new(db);
-    let (upload_album, _) = seed_album(&library, "Uploader", "Upload Album", 2020).await;
+    let (upload_album, upload_artist) =
+        seed_album(&library, "Uploader", "Upload Album", 2020).await;
     let upload_one = seed_track(&library, upload_album, "Uploader", "Yellow One", 1).await;
     let upload_two = seed_track(&library, upload_album, "Uploader", "Zulu Two", 2).await;
     sqlx::query(
@@ -417,6 +420,16 @@ async fn the_liked_and_uploads_queues_list_their_own_tracks() {
     );
     assert!(body["items"][0]["liked"].as_bool().unwrap());
     assert_eq!(body["items"][1]["rating"], 4);
+    assert_eq!(
+        body["items"][1]["albumId"],
+        seeded.alpha_album.to_string(),
+        "{body}"
+    );
+    assert_eq!(
+        body["items"][1]["artistId"],
+        seeded.alpha_artist.to_string(),
+        "{body}"
+    );
 
     let (status, body) = get_queue(&fixture, "source=uploads").await;
     assert_eq!(status, StatusCode::OK);
@@ -425,6 +438,16 @@ async fn the_liked_and_uploads_queues_list_their_own_tracks() {
         item_ids(&body),
         vec![upload_two.to_string(), upload_one.to_string()],
         "the newest upload first"
+    );
+    assert_eq!(
+        body["items"][0]["albumId"],
+        upload_album.to_string(),
+        "{body}"
+    );
+    assert_eq!(
+        body["items"][0]["artistId"],
+        upload_artist.to_string(),
+        "{body}"
     );
 }
 
@@ -444,6 +467,16 @@ async fn the_playlist_queue_follows_playlist_order() {
         item_ids(&body),
         vec![seeded.alpha_two.to_string(), seeded.alpha_one.to_string()],
         "the playlist's order, not the library's"
+    );
+    assert_eq!(
+        body["items"][0]["albumId"],
+        seeded.alpha_album.to_string(),
+        "{body}"
+    );
+    assert_eq!(
+        body["items"][0]["artistId"],
+        seeded.alpha_artist.to_string(),
+        "{body}"
     );
 
     let other_mix = EntityId::from_uuid(IdPrefix::Playlist, seeded.other_mix);

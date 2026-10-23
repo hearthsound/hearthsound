@@ -111,6 +111,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says whether the caller may browse the server view, instead of the name of
   a setting's value.
 
+- `GET /api/v1/library/queue` items carry `albumId` and `artistId`, so a client
+  can open the album or the primary artist of any queued song from every
+  source, not only from a library listing.
+
 ### Removed
 
 - `privacy.server_browse` is gone, because the view it decided is an

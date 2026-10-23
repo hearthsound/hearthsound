@@ -4561,12 +4561,26 @@
             ],
             "description": "The album's title; `null` when the track has no album."
           },
+          "albumId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The album's client id (`al_...`); `null` when the track has no album."
+          },
           "artist": {
             "type": [
               "string",
               "null"
             ],
             "description": "The credited artists, comma separated; `null` when unknown."
+          },
+          "artistId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The primary credited artist's client id (`ar_...`); `null` when the\ntrack has no credit."
           },
           "availability": {
             "type": "string",

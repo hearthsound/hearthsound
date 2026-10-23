@@ -1813,6 +1813,7 @@ pub async fn count_tracks(conn: &mut SqliteConnection, scope: Scope) -> Result<i
 ///     title: "Example".to_owned(),
 ///     artist: None,
 ///     album_id: None,
+///     artist_id: None,
 ///     album: None,
 ///     duration_ms: Some(1_000),
 ///     availability: Availability::Local,
@@ -1833,6 +1834,9 @@ pub struct QueueItem {
     pub artist: Option<String>,
     /// The album the track belongs to, when it has one.
     pub album_id: Option<EntityId>,
+    /// The primary credited artist, the one in credit position zero, when the
+    /// track has a credit.
+    pub artist_id: Option<EntityId>,
     /// The album's title, when the track belongs to one.
     pub album: Option<String>,
     /// The track's length in milliseconds, when it is known.
@@ -2045,6 +2049,8 @@ fn push_queue_projection(builder: &mut QueryBuilder<Sqlite>, user: &[u8]) {
                  (SELECT group_concat(ar.name, ', ') FROM track_artists ta \
                   JOIN artists ar ON ar.id = ta.artist_id WHERE ta.track_id = t.id)) AS artist, \
              t.album_id AS album_id, al.title AS album, t.duration_ms AS duration_ms, \
+             (SELECT ta.artist_id FROM track_artists ta WHERE ta.track_id = t.id \
+              ORDER BY ta.position LIMIT 1) AS artist_id, \
              t.availability AS availability, \
              (SELECT r.rating FROM user_ratings r WHERE r.user_id = ",
         )
@@ -2113,6 +2119,8 @@ struct QueueRow {
     album_id: Option<Vec<u8>>,
     /// The album's title, when the track has an album.
     album: Option<String>,
+    /// The primary artist's primary key, when the track has a credit.
+    artist_id: Option<Vec<u8>>,
     /// The track's length in milliseconds.
     duration_ms: Option<i64>,
     /// The stored availability literal.
@@ -2145,11 +2153,18 @@ impl QueueRow {
             .map(|bytes| decode_entity(IdPrefix::Album, bytes))
             .transpose()
             .map_err(LibraryError::from)?;
+        let artist_id = self
+            .artist_id
+            .as_deref()
+            .map(|bytes| decode_entity(IdPrefix::Artist, bytes))
+            .transpose()
+            .map_err(LibraryError::from)?;
         Ok(QueueItem {
             track_id: decode_entity(IdPrefix::Track, &self.id).map_err(LibraryError::from)?,
             title: self.title,
             artist: self.artist.filter(|name| !name.is_empty()),
             album_id,
+            artist_id,
             album: self.album,
             duration_ms: self.duration_ms,
             availability,
