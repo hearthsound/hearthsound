@@ -1610,6 +1610,7 @@ name = "hearthsound-activity"
 version = "0.1.5"
 dependencies = [
  "async-trait",
+ "hearthsound-catalog",
  "hearthsound-config",
  "hearthsound-core",
  "hearthsound-db",

@@ -52,14 +52,15 @@ use std::sync::Arc;
 use hearthsound_acquire::orchestrator::{AcquisitionOrchestrator, AcquisitionStorage};
 use hearthsound_acquire::prefetch::PrefetchScheduler;
 use hearthsound_activity::{
-    ActivityService, EXPIRE_JOB_KIND, EXPIRE_SCHEDULE, ExpireJobHandler, SCROBBLE_DELIVER_JOB_KIND,
+    ActivityService, DISCOVERY_SYNC_JOB_KIND, DISCOVERY_SYNC_SCHEDULE, DiscoverySyncJobHandler,
+    EXPIRE_JOB_KIND, EXPIRE_SCHEDULE, ExpireJobHandler, SCROBBLE_DELIVER_JOB_KIND,
     SCROBBLE_DELIVER_SCHEDULE, ScrobbleDeliverJobHandler, ScrobbleDeliverer, ScrobbleOutbox,
     ScrobbleTargets,
 };
 use hearthsound_api_native::{NativeServices, NativeState};
 use hearthsound_api_subsonic::{PendingSource, SubsonicState};
 use hearthsound_auth::{Authenticator, Sessions, SetupGate, TrustedProxies, Users};
-use hearthsound_catalog::{CatalogService, DiscoveryService, NoUserContexts};
+use hearthsound_catalog::{CatalogService, DiscoveryService, LinkedUserContexts};
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_config::keys;
 use hearthsound_config::secret::{SecretBox, SecretKey};
@@ -158,6 +159,8 @@ pub struct Services {
     activity: Arc<ActivityService>,
     /// Delivers the scrobbles the activity service queues.
     scrobble_deliverer: Arc<ScrobbleDeliverer>,
+    /// The generated-playlist sync job.
+    discovery_sync: Arc<DiscoverySyncJobHandler>,
     /// Keeps managed files in the root their pins imply and the cache within
     /// its limits.
     maintainer: Arc<StorageMaintainer>,
@@ -315,13 +318,13 @@ impl Services {
         ));
 
         // The listener's per-instance configuration comes from the stored
-        // provider links. Until that service is wired, every instance is asked
-        // without a listener context, which is the same call an instance the
-        // listener has not linked receives.
+        // provider links; an instance the listener has not linked is asked
+        // without a context, as a public lookup is.
+        let user_configs = UserConfigService::new(&database, secrets.clone());
         let discovery = Arc::new(DiscoveryService::new(
             Arc::clone(&registry),
             Arc::clone(&catalog),
-            Arc::new(NoUserContexts),
+            Arc::new(LinkedUserContexts::new(user_configs.clone())),
         ));
 
         let ffmpeg = Arc::new(FfmpegRunner::new(
@@ -356,7 +359,11 @@ impl Services {
 
         let user_configs = UserConfigService::new(&database, secrets.clone());
         let targets: Arc<dyn ScrobbleTargets> = registry.clone();
-        let scrobble_outbox = Arc::new(ScrobbleOutbox::new(&database, targets, user_configs));
+        let scrobble_outbox = Arc::new(ScrobbleOutbox::new(
+            &database,
+            targets,
+            user_configs.clone(),
+        ));
         let activity = Arc::new(
             ActivityService::new(&database).with_scrobble_outbox(Arc::clone(&scrobble_outbox)),
         );
@@ -402,6 +409,15 @@ impl Services {
                 &scrobble_deliverer,
             ))),
         );
+        let discovery_sync = Arc::new(DiscoverySyncJobHandler::new(
+            Arc::clone(&discovery),
+            Arc::clone(&catalog),
+            Arc::clone(&registry),
+            user_configs,
+            activity.playlists().clone(),
+            Arc::clone(&events),
+        ));
+        runner.register(DISCOVERY_SYNC_JOB_KIND, discovery_sync.clone());
         let update_handler: Arc<dyn JobHandler> = update_job.clone();
         runner.register(UPDATE_CHECK_JOB_KIND, update_handler);
         let runner = Arc::new(runner);
@@ -437,6 +453,12 @@ impl Services {
             .upsert(ScheduleSpec::system(
                 SCROBBLE_DELIVER_JOB_KIND,
                 SCROBBLE_DELIVER_SCHEDULE,
+            ))
+            .await?;
+        scheduler
+            .upsert(ScheduleSpec::system(
+                DISCOVERY_SYNC_JOB_KIND,
+                DISCOVERY_SYNC_SCHEDULE,
             ))
             .await?;
         scheduler
@@ -493,6 +515,7 @@ impl Services {
             scheduler,
             activity,
             scrobble_deliverer,
+            discovery_sync,
             maintainer,
             maintenance,
             uploads,
@@ -683,6 +706,14 @@ impl Services {
     /// `scrobble.deliver` job runs a pass through it.
     pub fn scrobble_deliverer(&self) -> &Arc<ScrobbleDeliverer> {
         &self.scrobble_deliverer
+    }
+
+    /// Returns the generated-playlist sync job.
+    ///
+    /// The account routes enqueue it when a listener links a discovery
+    /// instance, and the system schedule runs it for every linked listener.
+    pub fn discovery_sync(&self) -> &Arc<DiscoverySyncJobHandler> {
+        &self.discovery_sync
     }
 
     /// Returns the storage maintainer.

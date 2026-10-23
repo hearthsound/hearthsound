@@ -8,6 +8,7 @@
 mod client_checklist;
 mod common;
 mod cors;
+mod discovery_sync;
 mod events;
 mod health;
 mod me_providers;

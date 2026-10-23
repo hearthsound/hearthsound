@@ -22,6 +22,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   background acquisition. An `unknown` verdict or a provider error lets the file
   through and is logged. The storage maintenance pass deletes lapsed quarantine
   rows. Album acquisitions check every mapped file against its own track.
+- The playlists a discovery service generated for a listener are imported as
+  the listener's temporary playlists. The `discovery.sync` job runs every
+  morning for every account linked to a discovery instance, and immediately
+  when an account links one, resolves each suggested track through the catalog,
+  stores the entities, and writes the playlist into the slot its owner,
+  instance and service reference name, so a refresh keeps the playlist id and
+  replaces its tracks. A generated playlist pins nothing and expires eight days
+  after the sync unless the service names its own expiry, and
+  `getPlaylists`/`getPlaylist` report the generating instance's display name as
+  `hearthsound.generatedBy`.
+
+- `hsGetRecommendedAlbums` lists the distinct albums of the account's
+  recommended tracks in recommendation order, and `hsGetSimilarArtistAlbums`
+  names the artist of the account's most recent play and lists the albums of
+  the artists similar to it, an artist's personal-library albums before its
+  catalog ones, interleaved by artist and capped by `size`. Both answer
+  `AlbumID3` entries and are answered only with `hearthsound=1`.
+
 - The Subsonic suggestion endpoints answer from the discovery layer.
   `getSimilarSongs` and `getSimilarSongs2` seed similar tracks from a song id and
   similar artists, whose popular tracks are interleaved, from an album or artist

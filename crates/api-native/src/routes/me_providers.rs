@@ -26,8 +26,9 @@ use axum::http::header::HOST;
 use axum::http::request::Parts;
 use axum::response::Redirect;
 use data_encoding::BASE64URL_NOPAD;
-use hearthsound_activity::OutboxCounters;
+use hearthsound_activity::{DISCOVERY_SYNC_JOB_KIND, DiscoverySyncPayload, OutboxCounters};
 use hearthsound_core::providers::{AccountLinkProvider, LinkMethod, UserContext};
+use hearthsound_jobs::NewJob;
 use hearthsound_plugin_host::manifest::ConfigSection;
 use hearthsound_plugin_host::{
     RegistryInstance, UserConfig, UserConfigError, validate_user_config,
@@ -304,6 +305,9 @@ pub async fn put_provider_config(
             .map_err(|error| problem::internal("reading scrobble outbox counters", &error))?,
         None => OutboxCounters::default(),
     };
+    if instance.discovery().is_some() {
+        enqueue_discovery_sync(&state, authed.user_id()).await;
+    }
     Ok(Json(provider_link(&instance, method, Some(link), counters)))
 }
 
@@ -459,6 +463,9 @@ pub async fn provider_link_callback(
                 service = %slug,
                 "linked a service through the browser"
             );
+            if instance.discovery().is_some() {
+                enqueue_discovery_sync(&state, issued_to).await;
+            }
             Redirect::to(&format!("{ACCOUNT_SERVICES_PATH}?linked={slug}"))
         }
         Err(error) => {
@@ -513,6 +520,33 @@ pub async fn delete_provider_link(
         "unlinked a service"
     );
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Enqueues a discovery sync for a listener who just linked an instance.
+///
+/// The sync reads the playlists the newly linked service generated for the
+/// listener, so they appear without waiting for the daily schedule. A failure
+/// to enqueue is logged rather than reported: the link itself is stored, and
+/// the schedule would catch up regardless.
+///
+/// # Parameters
+///
+/// - `state`: the native state, whose job queue the sync is enqueued on.
+/// - `user`: the listener whose link was just stored.
+async fn enqueue_discovery_sync(state: &NativeState, user: Uuid) {
+    let payload = DiscoverySyncPayload {
+        user_id: Some(user),
+    };
+    let job = match NewJob::new(DISCOVERY_SYNC_JOB_KIND).payload(&payload) {
+        Ok(job) => job,
+        Err(error) => {
+            tracing::warn!(%error, "could not encode a discovery sync job");
+            return;
+        }
+    };
+    if let Err(error) = state.services().jobs.enqueue(job).await {
+        tracing::warn!(%error, %user, "could not enqueue a discovery sync");
+    }
 }
 
 /// Returns every instance a listener can link, ordered by slug.

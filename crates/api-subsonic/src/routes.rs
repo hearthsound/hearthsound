@@ -183,6 +183,16 @@ pub fn routes() -> Router<SubsonicState> {
     let router = register(router, "hsGetServerInfo", endpoints::hs_get_server_info);
     let router = register(
         router,
+        "hsGetRecommendedAlbums",
+        endpoints::hs_get_recommended_albums,
+    );
+    let router = register(
+        router,
+        "hsGetSimilarArtistAlbums",
+        endpoints::hs_get_similar_artist_albums,
+    );
+    let router = register(
+        router,
         "hsGetLibraryCounts",
         endpoints::hs_get_library_counts,
     );

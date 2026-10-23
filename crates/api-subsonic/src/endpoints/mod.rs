@@ -17,6 +17,7 @@ pub mod download;
 pub mod feedback;
 pub mod genres;
 pub mod hs_acquisitions;
+pub mod hs_discovery;
 pub mod hs_library;
 pub mod hs_queue;
 pub mod hs_server;
@@ -48,6 +49,7 @@ pub use genres::{
 pub use hs_acquisitions::{
     hs_acquire, hs_cancel_acquisition, hs_get_acquisitions, hs_get_availability,
 };
+pub use hs_discovery::{hs_get_recommended_albums, hs_get_similar_artist_albums};
 pub use hs_library::{
     hs_get_library_counts, hs_save, hs_set_feedback, hs_set_playlist_lifetime, hs_unsave,
 };

@@ -711,3 +711,76 @@ async fn playlist_requests_are_refused_without_usable_values() {
     .await;
     assert_error(&bad_public, 0);
 }
+
+/// A generated playlist names the service that generated it, and the standard
+/// response is unchanged by that member.
+#[tokio::test]
+async fn a_generated_playlist_names_its_service() {
+    let (fixture, seeded) = fixture().await;
+    fixture
+        .install_discovery_layer(&[("discovery", serde_json::json!({}))])
+        .await;
+    let instance = fixture.instance_id("discovery");
+    let playlists = hearthsound_activity::Playlists::new(&fixture.database);
+    let tracks = vec![seeded.alpha_tracks[0], seeded.alpha_tracks[1]];
+    let created = playlists
+        .upsert_generated(
+            &hearthsound_activity::SyncedPlaylist {
+                owner_user_id: fixture.user_id.uuid(),
+                source_instance_id: instance,
+                source_ref: "weekly-jams",
+                name: "Weekly Jams",
+                comment: Some("A week of listening"),
+                expires_at: 4_000,
+                tracks: &tracks,
+            },
+            1_000,
+        )
+        .await
+        .unwrap();
+    let app = fixture.app();
+    let key = fixture.api_key.clone();
+
+    // Without the flag the playlist is the standard one, with no vendor
+    // member at all.
+    let standard = get(&app, &format!("/rest/getPlaylists?apiKey={key}&f=json")).await;
+    assert_ok(&standard);
+    assert!(
+        !standard.body.contains("\"hearthsound\":{"),
+        "a standard response has no vendor member: {}",
+        standard.body
+    );
+
+    // With the flag the member names the generating instance.
+    let vendor = get(
+        &app,
+        &format!("/rest/getPlaylists?apiKey={key}&hearthsound=1&f=json"),
+    )
+    .await;
+    assert_ok(&vendor);
+    assert!(
+        vendor
+            .body
+            .contains("\"generatedBy\":\"Discovery discovery\""),
+        "{}",
+        vendor.body
+    );
+    assert!(
+        vendor.body.contains(&format!("\"id\":\"{}\"", created.id)),
+        "{}",
+        vendor.body
+    );
+
+    // The XML encoding carries the same member.
+    let xml = get(
+        &app,
+        &format!("/rest/getPlaylists?apiKey={key}&hearthsound=1"),
+    )
+    .await;
+    assert_ok(&xml);
+    assert!(
+        xml.body.contains("generatedBy=\"Discovery discovery\""),
+        "{}",
+        xml.body
+    );
+}

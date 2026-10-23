@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO playlists (id, owner_user_id, name, comment, is_public, is_temporary, expires_at, source_instance_id, source_ref, created_at, updated_at) VALUES (?, ?, ?, ?, 0, 1, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "26d8f2d4f46dc285d0a16e5d1ccc4fae04d078424fff96406efa22ee47823c6c"
+}

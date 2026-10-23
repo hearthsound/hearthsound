@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, owner_user_id, name, comment, is_public, is_temporary, expires_at, created_at, updated_at FROM playlists WHERE (owner_user_id = ?1 OR is_public = 1) AND (?2 IS NULL OR owner_user_id = ?2) ORDER BY name, id",
+  "query": "SELECT p.id, p.owner_user_id, p.name, p.comment, p.is_public, p.is_temporary, p.expires_at, p.source_instance_id, p.source_ref, p.created_at, p.updated_at, pi.display_name AS source_instance_name FROM playlists p LEFT JOIN provider_instances pi ON pi.id = p.source_instance_id WHERE p.id = ?",
   "describe": {
     "columns": [
       {
@@ -81,8 +81,30 @@
         }
       },
       {
-        "name": "created_at",
+        "name": "source_instance_id",
         "ordinal": 7,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "playlists",
+            "name": "source_instance_id"
+          }
+        }
+      },
+      {
+        "name": "source_ref",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "playlists",
+            "name": "source_ref"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 9,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -93,7 +115,7 @@
       },
       {
         "name": "updated_at",
-        "ordinal": 8,
+        "ordinal": 10,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -101,10 +123,21 @@
             "name": "updated_at"
           }
         }
+      },
+      {
+        "name": "source_instance_name",
+        "ordinal": 11,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "provider_instances",
+            "name": "display_name"
+          }
+        }
       }
     ],
     "parameters": {
-      "Right": 2
+      "Right": 1
     },
     "nullable": [
       false,
@@ -114,9 +147,12 @@
       false,
       false,
       true,
+      true,
+      true,
       false,
-      false
+      false,
+      true
     ]
   },
-  "hash": "c3ae93aeacb9a6f4f5d01db284c7712a27dbd32fab1aab95bdcda9e49713cbac"
+  "hash": "c1efc898e6f990b86d3a897c437d8d2adb3fb99ec7a0257e2c714dd8ed9db3ad"
 }

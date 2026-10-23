@@ -1,8 +1,9 @@
 //! Errors of the activity layer.
 //!
-//! [`ActivityError`] covers the two things that can go wrong while recording or
-//! querying activity: the database rejecting the statement, and the library
-//! layer refusing a pin or an availability write.
+//! [`ActivityError`] covers what can go wrong while recording or querying
+//! activity: the database rejecting a statement, the library layer refusing a
+//! pin or an availability write, the catalog layer refusing a lookup, and the
+//! per-user provider links failing to read.
 
 /// An error from recording or querying activity.
 #[derive(Debug, thiserror::Error)]
@@ -18,6 +19,10 @@ pub enum ActivityError {
     /// A listener's link to the provider instance could not be read or written.
     #[error(transparent)]
     ProviderConfig(#[from] hearthsound_plugin_host::UserConfigError),
+
+    /// The catalog or discovery layer refused a lookup.
+    #[error(transparent)]
+    Catalog(#[from] hearthsound_catalog::CatalogError),
 
     /// A 16-byte identifier stored as a BLOB did not decode as a UUID.
     #[error("stored identifier is not a UUID: {0}")]

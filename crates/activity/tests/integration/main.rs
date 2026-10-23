@@ -7,6 +7,7 @@
 mod annotations;
 mod bookmarks;
 mod common;
+mod discovery_sync;
 mod dislikes;
 mod feedback;
 mod library;

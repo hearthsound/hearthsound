@@ -26,6 +26,14 @@
 //! whose normalized title and primary artist are the suggestion's; a suggestion
 //! no provider can name is dropped rather than shown as something unplayable.
 //!
+//! Recommendations and generated playlists are the listener's own: an instance
+//! is only asked when they linked it, and a playlists answer is the union over
+//! every linked discovery instance rather than the first answer, because each
+//! service contributes the playlists it generated for that listener. The album
+//! helpers on top of them - recommended albums and the albums of the artists
+//! similar to what the listener last played - keep the order the services
+//! answered in and drop repeated albums.
+//!
 //! Answers are kept in an in-memory cache for an hour, keyed by the instance,
 //! the operation, the arguments and the listener, so a client redrawing a panel
 //! does not spend the service's quota again.
@@ -56,24 +64,28 @@
 //! # }
 //! ```
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use hearthsound_core::providers::{
-    ArtistSeed, CatalogQuery, SuggestedArtist, SuggestedTrack, TrackSeed, UserContext,
+    ArtistSeed, CatalogQuery, GeneratedPlaylist, SuggestedArtist, SuggestedTrack, TrackSeed,
+    UserContext,
 };
-use hearthsound_core::{EntityKind, Layer};
+use hearthsound_core::{CatalogId, EntityKind, Layer};
 use hearthsound_db::Database;
-use hearthsound_library::Artist;
 use hearthsound_library::query::Scope;
-use hearthsound_plugin_host::ProviderRegistry;
+use hearthsound_library::{Album, Artist};
+use hearthsound_plugin_host::{ProviderRegistry, UserConfigService};
 use moka::future::Cache as MemoryCache;
 use uuid::Uuid;
 
 use crate::dedupe::normalize;
 use crate::error::CatalogError;
-use crate::service::{CatalogService, CatalogTrackResult};
+use crate::service::{
+    CatalogAlbumRefResult, CatalogArtistResult, CatalogService, CatalogTrackResult,
+};
 
 /// How long one discovery answer stays fresh.
 ///
@@ -104,6 +116,24 @@ const ARTIST_RESOLUTION_LIMIT: u32 = 3;
 
 /// How many library artists an artist resolution reads.
 const ARTIST_SEARCH_LIMIT: i64 = 5;
+
+/// How many recommended tracks an album listing resolves.
+///
+/// The album list is what the recommendations say, so a page of albums is
+/// derived from more tracks than it shows: two tracks of one album count once,
+/// and a suggestion the catalog cannot name contributes nothing.
+const RECOMMENDED_TRACK_LIMIT: u32 = 100;
+
+/// How many similar artists seed the similar-artist album listing.
+const SIMILAR_ALBUM_ARTISTS: u32 = 10;
+
+/// How many albums a similar artist contributes from the catalog.
+///
+/// A listener's personal library is worth more than the provider's full
+/// discography here: the section exists to help them play something they have,
+/// so two albums per artist keep one prolific similar artist from filling the
+/// whole list.
+const SIMILAR_ALBUM_CATALOG_LIMIT: u32 = 2;
 
 /// Supplies the per-user configuration an instance should be called with.
 ///
@@ -204,6 +234,91 @@ where
     }
 }
 
+/// A [`UserContextSource`] over the listener's stored provider links.
+///
+/// The account-linking service stores one sealed configuration per
+/// (instance, listener) pair; this adapter opens it and reports the context a
+/// plugin call is made with. A listener who has not linked the instance is
+/// reported as `None`, which is what makes the recommendation and playlist
+/// queries skip it. A link that cannot be read is logged and treated the same
+/// way: an unreadable link is not a reason to fail a suggestion panel.
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use hearthsound_catalog::{DiscoveryService, LinkedUserContexts};
+/// use hearthsound_plugin_host::UserConfigService;
+///
+/// # async fn example(
+/// #     registry: Arc<hearthsound_plugin_host::ProviderRegistry>,
+/// #     catalog: Arc<hearthsound_catalog::CatalogService>,
+/// #     database: &hearthsound_db::Database,
+/// #     secrets: hearthsound_config::secret::SecretBox,
+/// # ) {
+/// let links = LinkedUserContexts::new(UserConfigService::new(database, secrets));
+/// let discovery = DiscoveryService::new(registry, catalog, Arc::new(links));
+/// # let _ = discovery;
+/// # }
+/// ```
+#[derive(Clone)]
+pub struct LinkedUserContexts {
+    /// The stored links this adapter opens.
+    configs: UserConfigService,
+}
+
+impl std::fmt::Debug for LinkedUserContexts {
+    /// Reports the adapter without the stored links, whose values are sealed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LinkedUserContexts")
+    }
+}
+
+impl LinkedUserContexts {
+    /// Builds the adapter over the account-linking service.
+    ///
+    /// # Parameters
+    ///
+    /// - `configs`: the service that reads `provider_user_configs`.
+    ///
+    /// # Returns
+    ///
+    /// The adapter.
+    pub fn new(configs: UserConfigService) -> LinkedUserContexts {
+        LinkedUserContexts { configs }
+    }
+}
+
+#[async_trait]
+impl UserContextSource for LinkedUserContexts {
+    /// Returns the listener's configuration when they linked the instance.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance`: the provider instance the call is about.
+    /// - `user`: the listener the call is made for.
+    ///
+    /// # Returns
+    ///
+    /// The context the plugin call is made with, or `None` when the listener
+    /// has not linked the instance or the stored link cannot be opened.
+    async fn user_context(&self, instance: Uuid, user: Uuid) -> Option<UserContext> {
+        match self.configs.get(instance, user).await {
+            Ok(link) => link.map(|link| link.context(user)),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    %instance,
+                    %user,
+                    "a stored provider link could not be opened"
+                );
+                None
+            }
+        }
+    }
+}
+
 /// An artist a suggestion resolved to.
 ///
 /// A suggestion the caller can see in their library resolves to the stored
@@ -216,6 +331,45 @@ pub enum ResolvedArtist {
     Stored(Artist),
     /// An artist the catalog layer knows.
     Catalog(crate::service::CatalogArtistResult),
+}
+
+/// One generated playlist, with the instance that generated it.
+///
+/// The sync job stores the instance id beside the playlist so a refresh
+/// replaces the playlist the same instance generated rather than creating a
+/// second one under the same reference.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstancePlaylist {
+    /// The instance that generated the playlist.
+    pub instance: Uuid,
+    /// The playlist and its tracks.
+    pub playlist: GeneratedPlaylist,
+}
+
+/// An album a recommendation resolved to.
+///
+/// A similar artist's albums can come from two places: the listener's personal
+/// library, which the caller renders from the stored rows, or the catalog, which
+/// it renders from the provider's album reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedAlbum {
+    /// An album of the listener's personal library.
+    Stored(Album),
+    /// An album the catalog layer knows.
+    Catalog(CatalogAlbumRefResult),
+}
+
+/// The seed artist and the albums its similar artists contributed.
+///
+/// The seed is the artist of the listener's most recent play, when they have
+/// played anything; the albums are interleaved by artist in the order the
+/// discovery layer suggested them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimilarArtistAlbums {
+    /// The artist the similar artists were found from.
+    pub seed: Option<Artist>,
+    /// The albums, one artist at a time.
+    pub albums: Vec<ResolvedAlbum>,
 }
 
 /// The discovery layer over the provider registry.
@@ -256,10 +410,12 @@ struct DiscoveryKey {
 /// What one cached discovery answer holds.
 #[derive(Debug, Clone)]
 enum DiscoveryAnswer {
-    /// A similar-track or top-track answer.
+    /// A similar-track, top-track or recommended-track answer.
     Tracks(Vec<SuggestedTrack>),
     /// A similar-artist answer.
     Artists(Vec<SuggestedArtist>),
+    /// A generated-playlist answer.
+    Playlists(Vec<GeneratedPlaylist>),
 }
 
 impl DiscoveryService {
@@ -510,6 +666,379 @@ impl DiscoveryService {
             }
         }
         Ok(Vec::new())
+    }
+
+    /// Suggests tracks recommended for a listener.
+    ///
+    /// Only instances the listener linked are asked, because a recommendation
+    /// is personal: the service has to know whose taste it is describing. The
+    /// first such instance, in the administrator's order, that answers a
+    /// non-empty list wins; an instance that fails is logged and skipped.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the listener the recommendations are for.
+    /// - `limit`: the maximum number of suggestions.
+    ///
+    /// # Returns
+    ///
+    /// The suggestions, in the answering instance's order. An empty vector
+    /// means no linked instance had anything to say.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] only when a listener's configuration cannot be
+    /// read. A provider failure is logged and skipped.
+    pub async fn recommended_tracks(
+        &self,
+        user: Uuid,
+        limit: u32,
+    ) -> Result<Vec<SuggestedTrack>, CatalogError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let arguments = format!("limit={limit}");
+        for instance in self.inner.registry.layers(Layer::Discovery) {
+            let Some(provider) = instance.discovery() else {
+                continue;
+            };
+            let Some(context) = self.inner.users.user_context(instance.id(), user).await else {
+                continue;
+            };
+            let key = DiscoveryKey {
+                instance: instance.id(),
+                operation: "recommended-tracks",
+                arguments: arguments.clone(),
+                user,
+            };
+            if let Some(DiscoveryAnswer::Tracks(cached)) = self.inner.cache.get(&key).await {
+                if cached.is_empty() {
+                    continue;
+                }
+                return Ok(cached);
+            }
+            match provider.recommended_tracks(&context, limit).await {
+                Ok(tracks) => {
+                    self.inner
+                        .cache
+                        .insert(key, DiscoveryAnswer::Tracks(tracks.clone()))
+                        .await;
+                    if !tracks.is_empty() {
+                        return Ok(tracks);
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        instance = instance.slug().as_str(),
+                        %error,
+                        "a discovery instance could not answer a recommendations query"
+                    );
+                }
+            }
+        }
+        Ok(Vec::new())
+    }
+
+    /// Lists the playlists the listener's linked discovery services generated.
+    ///
+    /// Every linked instance contributes its playlists, in the administrator's
+    /// order: a service that generated nothing for this listener contributes
+    /// nothing, and the others are not skipped because one was empty. An
+    /// instance that fails is logged and skipped.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the listener the playlists were generated for.
+    ///
+    /// # Returns
+    ///
+    /// One entry per generated playlist, carrying the instance that generated
+    /// it so a refresh can replace it in place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] only when a listener's configuration cannot be
+    /// read. A provider failure is logged and skipped.
+    pub async fn playlists(&self, user: Uuid) -> Result<Vec<InstancePlaylist>, CatalogError> {
+        let mut playlists = Vec::new();
+        for instance in self.inner.registry.layers(Layer::Discovery) {
+            let Some(provider) = instance.discovery() else {
+                continue;
+            };
+            let Some(context) = self.inner.users.user_context(instance.id(), user).await else {
+                continue;
+            };
+            let key = DiscoveryKey {
+                instance: instance.id(),
+                operation: "playlists",
+                arguments: String::new(),
+                user,
+            };
+            if let Some(DiscoveryAnswer::Playlists(cached)) = self.inner.cache.get(&key).await {
+                playlists.extend(cached.into_iter().map(|playlist| InstancePlaylist {
+                    instance: instance.id(),
+                    playlist,
+                }));
+                continue;
+            }
+            match provider.playlists(&context).await {
+                Ok(generated) => {
+                    self.inner
+                        .cache
+                        .insert(key, DiscoveryAnswer::Playlists(generated.clone()))
+                        .await;
+                    playlists.extend(generated.into_iter().map(|playlist| InstancePlaylist {
+                        instance: instance.id(),
+                        playlist,
+                    }));
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        instance = instance.slug().as_str(),
+                        %error,
+                        "a discovery instance could not list its generated playlists"
+                    );
+                }
+            }
+        }
+        Ok(playlists)
+    }
+
+    /// Lists the distinct albums of the listener's recommended tracks.
+    ///
+    /// The recommendations are resolved like any other suggestion, and the
+    /// albums of the resolved tracks are kept in the order the recommendations
+    /// named them, one album per provider album id. A track whose provider
+    /// reported no album contributes nothing.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the listener the recommendations are for.
+    /// - `limit`: the maximum number of albums.
+    ///
+    /// # Returns
+    ///
+    /// The albums, in recommendation order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when a recommendation or a catalog search
+    /// cannot be read.
+    pub async fn recommended_albums(
+        &self,
+        user: Uuid,
+        limit: u32,
+    ) -> Result<Vec<CatalogAlbumRefResult>, CatalogError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let suggestions = self
+            .recommended_tracks(user, RECOMMENDED_TRACK_LIMIT)
+            .await?;
+        let resolved = self
+            .resolve_tracks(&suggestions, RECOMMENDED_TRACK_LIMIT)
+            .await?;
+        let mut albums = Vec::new();
+        let mut seen = HashSet::new();
+        for result in resolved {
+            let Some(album) = result.track.album else {
+                continue;
+            };
+            let Ok(id) = CatalogId::new(
+                result.id.slug().clone(),
+                EntityKind::Album,
+                album.id.clone(),
+            ) else {
+                continue;
+            };
+            if !seen.insert(id.to_string()) {
+                continue;
+            }
+            albums.push(CatalogAlbumRefResult { id, album });
+            if albums.len() >= usize::try_from(limit).unwrap_or(usize::MAX) {
+                break;
+            }
+        }
+        Ok(albums)
+    }
+
+    /// Lists the albums of the artists similar to the listener's last play.
+    ///
+    /// The seed is the artist credited first on the listener's most recent
+    /// play, so the section describes what they are listening to now. Each of
+    /// the similar artists contributes the albums it has in the listener's
+    /// personal library, and otherwise up to two albums from the catalog; the
+    /// lists are interleaved one artist at a time and repeated albums are
+    /// dropped.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the listener the section is for.
+    /// - `scopes`: the scopes the caller can see, in the order a similar artist
+    ///   is preferred.
+    /// - `size`: the maximum number of albums.
+    ///
+    /// # Returns
+    ///
+    /// The seed artist, when the listener has played something, and the
+    /// albums.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when a discovery query, a library read or a
+    /// catalog lookup fails.
+    pub async fn similar_artist_albums(
+        &self,
+        user: Uuid,
+        scopes: &[Scope],
+        size: u32,
+    ) -> Result<SimilarArtistAlbums, CatalogError> {
+        if size == 0 {
+            return Ok(SimilarArtistAlbums {
+                seed: None,
+                albums: Vec::new(),
+            });
+        }
+        let database = self.inner.catalog.database();
+        let seed = {
+            let mut conn = database.readers().acquire().await?;
+            hearthsound_library::query::most_recent_played_artist(&mut conn, user).await?
+        };
+        let Some(seed) = seed else {
+            return Ok(SimilarArtistAlbums {
+                seed: None,
+                albums: Vec::new(),
+            });
+        };
+        let suggestions = self
+            .similar_artists(user, &artist_seed(&seed), SIMILAR_ALBUM_ARTISTS)
+            .await?;
+        let resolved = self
+            .resolve_artists(scopes, &suggestions, SIMILAR_ALBUM_ARTISTS)
+            .await?;
+        let personal = Scope::Personal { user_id: user };
+        let mut lists = Vec::new();
+        for artist in resolved {
+            let albums = match artist {
+                ResolvedArtist::Stored(artist) => {
+                    let stored = {
+                        let mut conn = database.readers().acquire().await?;
+                        hearthsound_library::query::list_albums_for_artist(
+                            &mut conn, personal, artist.id,
+                        )
+                        .await?
+                    };
+                    if stored.is_empty() {
+                        match self.catalog_artist(&artist.name).await? {
+                            Some(catalog) => self.catalog_albums(&catalog).await?,
+                            None => Vec::new(),
+                        }
+                    } else {
+                        stored.into_iter().map(ResolvedAlbum::Stored).collect()
+                    }
+                }
+                ResolvedArtist::Catalog(catalog) => self.catalog_albums(&catalog).await?,
+            };
+            if !albums.is_empty() {
+                lists.push(albums);
+            }
+        }
+        Ok(SimilarArtistAlbums {
+            seed: Some(seed),
+            albums: interleave_albums(lists, size),
+        })
+    }
+
+    /// Finds the catalog artist one name names.
+    ///
+    /// This is the fallback for a similar artist the listener has in their
+    /// library but whose albums they do not: the catalog can still name what
+    /// that artist released.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: the artist's name.
+    ///
+    /// # Returns
+    ///
+    /// The catalog artist whose normalized name is equal, when one exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when the catalog search reports a failure the
+    /// layer raises; a failure the provider answers is logged and reported as
+    /// `None`.
+    async fn catalog_artist(
+        &self,
+        name: &str,
+    ) -> Result<Option<CatalogArtistResult>, CatalogError> {
+        let wanted = normalize(name);
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+        let query = CatalogQuery {
+            text: name.to_owned(),
+            kinds: vec![EntityKind::Artist],
+            limit: ARTIST_RESOLUTION_LIMIT,
+            offset: 0,
+        };
+        match self.inner.catalog.search(&query).await {
+            Ok(found) => Ok(found
+                .artists
+                .into_iter()
+                .find(|result| normalize(&result.artist.name) == wanted)),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    name,
+                    "a similar artist could not be found in the catalog"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Lists up to [`SIMILAR_ALBUM_CATALOG_LIMIT`] catalog albums of an artist.
+    ///
+    /// A failure is logged and reported as no albums: an artist the catalog
+    /// cannot list is not a reason to fail the whole section.
+    ///
+    /// # Parameters
+    ///
+    /// - `artist`: the catalog artist.
+    ///
+    /// # Returns
+    ///
+    /// The albums, in the provider's order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when the catalog lookup fails in a way the
+    /// layer raises; a failure the provider answers is logged and reported as
+    /// an empty list.
+    async fn catalog_albums(
+        &self,
+        artist: &CatalogArtistResult,
+    ) -> Result<Vec<ResolvedAlbum>, CatalogError> {
+        match self
+            .inner
+            .catalog
+            .artist_albums(&artist.id, SIMILAR_ALBUM_CATALOG_LIMIT, 0)
+            .await
+        {
+            Ok(albums) => Ok(albums
+                .into_iter()
+                .map(ResolvedAlbum::Catalog)
+                .collect::<Vec<_>>()),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    artist = artist.artist.name.as_str(),
+                    "a similar artist's albums could not be listed"
+                );
+                Ok(Vec::new())
+            }
+        }
     }
 
     /// Resolves suggested tracks to catalog entities.
@@ -828,6 +1357,99 @@ fn artist_arguments(seed: &ArtistSeed, limit: u32) -> String {
     out
 }
 
+/// Builds the seed a similar-artist query is made with from a stored artist.
+///
+/// # Parameters
+///
+/// - `artist`: the stored artist.
+///
+/// # Returns
+///
+/// The artist's name and its MusicBrainz artist id, when the row carries one.
+fn artist_seed(artist: &Artist) -> ArtistSeed {
+    ArtistSeed {
+        name: artist.name.clone(),
+        ids: artist
+            .mb_artist_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(|value| hearthsound_core::providers::ExternalId {
+                namespace: hearthsound_core::providers::MB_ARTIST.to_owned(),
+                value: value.to_owned(),
+            })
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// Interleaves one list of albums per artist and drops repeated albums.
+///
+/// # Parameters
+///
+/// - `lists`: the per-artist lists, in the order the artists were suggested.
+/// - `size`: the maximum number of albums.
+///
+/// # Returns
+///
+/// The first album of every artist, then the second of every artist, and so
+/// on, up to `size` distinct albums. Two albums are the same when their
+/// normalized title and primary artist agree, whether they came from the
+/// library or the catalog.
+fn interleave_albums(lists: Vec<Vec<ResolvedAlbum>>, size: u32) -> Vec<ResolvedAlbum> {
+    let limit = usize::try_from(size).unwrap_or(usize::MAX);
+    let mut albums = Vec::new();
+    let mut seen = HashSet::new();
+    let mut index = 0;
+    loop {
+        let mut advanced = false;
+        for list in &lists {
+            if let Some(album) = list.get(index) {
+                advanced = true;
+                if seen.insert(album_key(album)) {
+                    albums.push(album.clone());
+                    if albums.len() >= limit {
+                        return albums;
+                    }
+                }
+            }
+        }
+        if !advanced {
+            break;
+        }
+        index += 1;
+    }
+    albums
+}
+
+/// Returns the normalized identity two album lists are deduplicated by.
+///
+/// # Parameters
+///
+/// - `album`: the album.
+///
+/// # Returns
+///
+/// The normalized title and primary artist.
+fn album_key(album: &ResolvedAlbum) -> (String, String) {
+    match album {
+        ResolvedAlbum::Stored(album) => (
+            normalize(&album.title),
+            normalize(album.display_artist.as_deref().unwrap_or_default()),
+        ),
+        ResolvedAlbum::Catalog(result) => (
+            normalize(&result.album.title),
+            normalize(
+                result
+                    .album
+                    .artists
+                    .first()
+                    .map(|credit| credit.name.as_str())
+                    .unwrap_or_default(),
+            ),
+        ),
+    }
+}
+
 /// Length-prefixes one free-form argument.
 ///
 /// # Parameters
@@ -887,5 +1509,77 @@ mod tests {
             artist_arguments(&seed, 5),
             "limit=5|name=9:Radiohead|id=9:mb-artist=8:artist-1"
         );
+    }
+
+    /// Builds a stored album for the interleave tests.
+    ///
+    /// # Parameters
+    ///
+    /// - `title`: the album title.
+    /// - `artist`: the album's display artist.
+    fn stored_album(title: &str, artist: &str) -> ResolvedAlbum {
+        ResolvedAlbum::Stored(Album {
+            id: hearthsound_core::EntityId::new(hearthsound_core::IdPrefix::Album),
+            title: title.to_owned(),
+            sort_title: title.to_lowercase(),
+            display_artist: Some(artist.to_owned()),
+            year: None,
+            release_date: None,
+            album_type: None,
+            mb_release_id: None,
+            mb_release_group_id: None,
+            upc: None,
+            origin: hearthsound_library::Origin::Catalog,
+            created_at: 0,
+            updated_at: 0,
+        })
+    }
+
+    /// Returns the titles of a resolved album list.
+    ///
+    /// # Parameters
+    ///
+    /// - `albums`: the albums to name.
+    fn titles(albums: &[ResolvedAlbum]) -> Vec<&str> {
+        albums
+            .iter()
+            .map(|album| match album {
+                ResolvedAlbum::Stored(album) => album.title.as_str(),
+                ResolvedAlbum::Catalog(result) => result.album.title.as_str(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn albums_are_interleaved_one_artist_at_a_time() {
+        let lists = vec![
+            vec![stored_album("First", "One"), stored_album("Third", "One")],
+            vec![stored_album("Second", "Two")],
+        ];
+
+        assert_eq!(
+            titles(&interleave_albums(lists, 10)),
+            ["First", "Second", "Third"]
+        );
+    }
+
+    #[test]
+    fn a_repeated_album_is_listed_once() {
+        let lists = vec![
+            vec![stored_album("Same", "One")],
+            vec![stored_album("same", "one")],
+        ];
+
+        assert_eq!(titles(&interleave_albums(lists, 10)), ["Same"]);
+    }
+
+    #[test]
+    fn the_album_list_stops_at_the_requested_size() {
+        let lists = vec![
+            vec![stored_album("First", "One"), stored_album("Third", "One")],
+            vec![stored_album("Second", "Two")],
+        ];
+
+        assert_eq!(titles(&interleave_albums(lists, 2)), ["First", "Second"]);
     }
 }

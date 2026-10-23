@@ -104,9 +104,11 @@ pub(crate) async fn decorate_with_scores(
 
 /// Builds the `hearthsound` member of every playlist object in the payload.
 ///
-/// A playlist's member reports its lifetime: whether it is temporary, and when
-/// it expires. The read goes through the same visibility rule the playlist
-/// endpoints use, so only a playlist the caller may see is decorated.
+/// A playlist's member reports its lifetime: whether it is temporary, when it
+/// expires, and, for a playlist a discovery service generated, the display
+/// name of the instance that generated it. The read goes through the same
+/// visibility rule the playlist endpoints use, so only a playlist the caller
+/// may see is decorated.
 ///
 /// # Parameters
 ///
@@ -147,6 +149,9 @@ async fn playlist_members(
         let mut member = Object::new().set("temporary", playlist.is_temporary);
         if let Some(expires_at) = playlist.expires_at {
             member = member.set("expiresAt", expires_at);
+        }
+        if let Some(name) = playlist.source_instance_name {
+            member = member.set("generatedBy", name);
         }
         members.insert(raw.clone(), member);
     }

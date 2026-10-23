@@ -460,6 +460,46 @@ pub async fn artist_detail_any(
     Ok(Some(ArtistDetail { artist, albums }))
 }
 
+/// Reads the artist credited first on a user's most recent play.
+///
+/// A discovery panel often needs one seed the listener chose themselves, and
+/// the last thing they played describes their current taste best. The primary
+/// credit - `track_artists` position 0 - is the artist such a seed stands for.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `user_id`: the account whose play history is read.
+///
+/// # Returns
+///
+/// The artist of the most recent play, or `None` when the account has played
+/// nothing or the track carries no credit.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails or a stored id does not decode.
+pub async fn most_recent_played_artist(
+    conn: &mut SqliteConnection,
+    user_id: Uuid,
+) -> Result<Option<Artist>, LibraryError> {
+    let row = sqlx::query_as!(
+        artists::ArtistRow,
+        "SELECT ar.id, ar.name, ar.sort_name, ar.mb_artist_id, ar.origin, ar.created_at, \
+                ar.updated_at \
+         FROM plays p \
+         JOIN track_artists ta ON ta.track_id = p.track_id AND ta.position = 0 \
+         JOIN artists ar ON ar.id = ta.artist_id \
+         WHERE p.user_id = ? \
+         ORDER BY p.started_at DESC, p.id DESC \
+         LIMIT 1",
+        user_id.as_bytes().as_slice(),
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    row.map(artists::ArtistRow::into_artist).transpose()
+}
+
 /// Reads one track, whatever its availability.
 ///
 /// A starred listing reports the entities a user liked however they are stored,

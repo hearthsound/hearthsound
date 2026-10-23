@@ -73,6 +73,7 @@
 
 mod annotations;
 mod bookmarks;
+mod discovery_sync;
 mod error;
 mod feedback;
 mod now_playing;
@@ -87,6 +88,9 @@ mod session;
 
 pub use annotations::{Annotation, MAX_IDS_PER_QUERY, disliked_ids, load as load_annotations};
 pub use bookmarks::{Bookmark, Bookmarks};
+pub use discovery_sync::{
+    DISCOVERY_SYNC_JOB_KIND, DISCOVERY_SYNC_SCHEDULE, DiscoverySyncJobHandler, DiscoverySyncPayload,
+};
 pub use error::ActivityError;
 pub use feedback::{clear, dislike, like, refresh_user_library_pin, unlike};
 pub use now_playing::{
@@ -96,7 +100,7 @@ pub use play::Plays;
 pub use play_queues::{PlayQueues, SavedQueue};
 pub use playlists::{
     EXPIRE_JOB_KIND, EXPIRE_SCHEDULE, ExpireJobHandler, MAX_PLAYLIST_NAME, Playlist, PlaylistEntry,
-    PlaylistUpdate, Playlists, refresh_playlist_pin,
+    PlaylistUpdate, Playlists, SyncedPlaylist, refresh_playlist_pin,
 };
 pub use ratings::{MAX_RATING, set_rating};
 pub use reports::{

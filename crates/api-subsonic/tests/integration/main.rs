@@ -18,6 +18,7 @@ mod endpoints;
 mod envelope;
 mod genres;
 mod hs_acquisitions;
+mod hs_discovery;
 mod hs_library;
 mod hs_queue;
 mod hs_server;

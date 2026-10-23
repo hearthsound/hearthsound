@@ -19,7 +19,7 @@ use hearthsound_acquire::prefetch::PrefetchScheduler;
 use hearthsound_activity::ActivityService;
 use hearthsound_api_subsonic::{PendingSource, SubsonicState};
 use hearthsound_auth::{ApiKeys, AppPasswords, Authenticator, NewUser, Users};
-use hearthsound_catalog::{CatalogService, DiscoveryService, NoUserContexts};
+use hearthsound_catalog::{CatalogService, DiscoveryService, LinkedUserContexts};
 use hearthsound_config::secret::SecretBox;
 use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingSources, SettingValue, SettingsRegistry, keys};
@@ -35,6 +35,7 @@ use hearthsound_library::{
 use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::{
     InstanceService, InstanceSpec, PluginHost, PluginRepository, PluginSource, ProviderRegistry,
+    UserConfigService,
 };
 use hearthsound_test_support::{
     ALBUM_CATALOG, ARTWORK_FIXTURE, HELLO_CATALOG, METADATA_FIXTURE, SCROBBLE_FIXTURE,
@@ -109,6 +110,8 @@ pub struct Fixture {
     repository: PluginRepository,
     /// The secret box instance configurations are sealed with.
     secrets: SecretBox,
+    /// The stored per-user provider links.
+    user_configs: UserConfigService,
     /// The provider registry the catalog layer resolves instances through.
     registry: Arc<ProviderRegistry>,
     /// The library scanner the scan endpoints report.
@@ -197,10 +200,11 @@ impl Fixture {
             settings.clone(),
             artwork.clone(),
         ));
+        let user_configs = UserConfigService::new(&database, secret_box.clone());
         let discovery = Arc::new(DiscoveryService::new(
             Arc::clone(&registry),
             Arc::clone(&catalog),
-            Arc::new(NoUserContexts),
+            Arc::new(LinkedUserContexts::new(user_configs.clone())),
         ));
         let activity = Arc::new(ActivityService::new(&database));
         let roots = StorageRoots::new(dir.path().join("library"), dir.path().join("cache"));
@@ -262,6 +266,7 @@ impl Fixture {
             host,
             repository,
             secrets: secret_box,
+            user_configs,
             registry,
             scanner,
             jobs,
@@ -646,6 +651,51 @@ impl Fixture {
             .unwrap();
         self.registry.rebuild().await.unwrap();
         ARTWORK_IMAGE.to_vec()
+    }
+
+    /// Returns the stored per-user provider links.
+    pub fn user_configs(&self) -> &UserConfigService {
+        &self.user_configs
+    }
+
+    /// Returns the id of one configured provider instance.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the instance slug.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no built instance carries the slug.
+    pub fn instance_id(&self, slug: &str) -> uuid::Uuid {
+        self.registry
+            .instance(slug)
+            .unwrap_or_else(|| panic!("no instance is configured as {slug}"))
+            .id()
+    }
+
+    /// Links the test account to one discovery instance.
+    ///
+    /// The recommendation and playlist queries only ask an instance the
+    /// listener linked, so a test that exercises them links the instance here.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the discovery instance the account links.
+    pub async fn link_discovery(&self, slug: &str) {
+        let instance = self
+            .registry
+            .instance(slug)
+            .unwrap_or_else(|| panic!("no instance is configured as {slug}"));
+        self.user_configs
+            .put(
+                instance.id(),
+                self.user_id.uuid(),
+                Some("fixture-user".to_owned()),
+                &serde_json::json!({ "token": "good" }),
+            )
+            .await
+            .unwrap();
     }
 
     /// Returns the managed storage roots the state resolves files against.

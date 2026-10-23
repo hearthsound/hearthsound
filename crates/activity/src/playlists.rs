@@ -65,6 +65,22 @@ pub struct Playlist {
     /// without one never expires by itself. [`Playlists::delete_expired`]
     /// removes the temporary playlists whose expiry has passed.
     pub expires_at: Option<i64>,
+    /// The instance a generated playlist came from.
+    ///
+    /// It is set when the playlist was imported from a discovery service and
+    /// cleared when that instance is removed.
+    pub source_instance_id: Option<Uuid>,
+    /// The service's stable reference for a generated playlist.
+    ///
+    /// The pair of this reference and [`Playlist::source_instance_id`] is what
+    /// a refresh matches, so a second sync replaces the playlist in place.
+    pub source_ref: Option<String>,
+    /// The display name of the instance a generated playlist came from.
+    ///
+    /// It is read with the playlist so a client can say which service generated
+    /// it without a second lookup; it is `None` for a playlist no service
+    /// generated and for one whose instance has been removed.
+    pub source_instance_name: Option<String>,
     /// When it was created, in unix milliseconds.
     pub created_at: i64,
     /// When it last changed, in unix milliseconds.
@@ -123,6 +139,47 @@ pub struct PlaylistUpdate {
     pub remove_indexes: Vec<usize>,
 }
 
+/// One generated playlist the sync job writes.
+///
+/// The owner, the generating instance and the service's reference identify the
+/// playlist, so writing the same slot twice replaces its name, description,
+/// expiry and tracks instead of creating a second playlist.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_activity::SyncedPlaylist;
+/// use uuid::Uuid;
+///
+/// let write = SyncedPlaylist {
+///     owner_user_id: Uuid::nil(),
+///     source_instance_id: Uuid::nil(),
+///     source_ref: "weekly-jams",
+///     name: "Weekly Jams",
+///     comment: None,
+///     expires_at: 4_000,
+///     tracks: &[],
+/// };
+/// assert_eq!(write.name, "Weekly Jams");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncedPlaylist<'a> {
+    /// The account the playlist belongs to.
+    pub owner_user_id: Uuid,
+    /// The discovery instance that generated it.
+    pub source_instance_id: Uuid,
+    /// The service's stable reference for the playlist slot.
+    pub source_ref: &'a str,
+    /// The name the service gave it.
+    pub name: &'a str,
+    /// The description the service gave it, when it gave one.
+    pub comment: Option<&'a str>,
+    /// When the playlist expires, in unix milliseconds.
+    pub expires_at: i64,
+    /// The tracks it holds afterwards, in order.
+    pub tracks: &'a [EntityId],
+}
+
 /// One stored entry of a playlist.
 #[derive(sqlx::FromRow)]
 struct EntryRow {
@@ -151,6 +208,12 @@ struct PlaylistRow {
     is_temporary: i64,
     /// The expiry instant.
     expires_at: Option<i64>,
+    /// The generating instance, when the playlist came from one.
+    source_instance_id: Option<Vec<u8>>,
+    /// The service's reference for the generated playlist.
+    source_ref: Option<String>,
+    /// The display name of the generating instance.
+    source_instance_name: Option<String>,
     /// The creation instant.
     created_at: i64,
     /// The last-change instant.
@@ -262,7 +325,124 @@ impl Playlists {
             is_public: public,
             is_temporary: false,
             expires_at: None,
+            source_instance_id: None,
+            source_ref: None,
+            source_instance_name: None,
             created_at: now,
+            updated_at: now,
+            entries,
+        })
+    }
+
+    /// Writes one generated playlist, replacing the slot it names.
+    ///
+    /// The playlist is identified by its owner, the generating instance and the
+    /// service's reference, so a second sync of the same slot keeps the
+    /// playlist's id and rewrites its name, description, expiry and tracks.
+    /// The playlist is temporary, which is what a generated playlist is: it
+    /// pins none of its tracks, so they stay evictable until a listener makes
+    /// the playlist permanent.
+    ///
+    /// The name, the expiry and every entry are written in one transaction, so
+    /// a reader never sees a playlist that is half refreshed.
+    ///
+    /// # Parameters
+    ///
+    /// - `write`: the playlist slots and the tracks it holds afterwards.
+    /// - `now`: the instant of the sync, in unix milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// The playlist as it was written, with its entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActivityError::InvalidName`] when the name is empty or too
+    /// long, and [`ActivityError::Database`] or [`ActivityError::Library`] when
+    /// a read or write fails.
+    pub async fn upsert_generated(
+        &self,
+        write: &SyncedPlaylist<'_>,
+        now: i64,
+    ) -> Result<Playlist, ActivityError> {
+        let name = checked_name(write.name)?;
+        let mut tx = self.writer.begin_with(crate::READ_THEN_WRITE).await?;
+        let existing = sqlx::query_scalar!(
+            "SELECT id FROM playlists \
+             WHERE owner_user_id = ? AND source_instance_id = ? AND source_ref = ?",
+            write.owner_user_id.as_bytes().as_slice(),
+            write.source_instance_id.as_bytes().as_slice(),
+            write.source_ref,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        let id = match &existing {
+            Some(id) => EntityId::from_uuid(IdPrefix::Playlist, Uuid::from_slice(id)?),
+            None => EntityId::new(IdPrefix::Playlist),
+        };
+        let before = match existing {
+            Some(_) => Some(load_or_unknown(&mut tx, id).await?),
+            None => None,
+        };
+        let affected = before
+            .as_ref()
+            .map(|playlist| affected_tracks(&playlist.entries, write.tracks))
+            .unwrap_or_default();
+        match &before {
+            Some(_) => {
+                sqlx::query!(
+                    "UPDATE playlists \
+                     SET name = ?, comment = ?, is_temporary = 1, expires_at = ?, updated_at = ? \
+                     WHERE id = ?",
+                    name,
+                    write.comment,
+                    write.expires_at,
+                    now,
+                    entity_key(id),
+                )
+                .execute(&mut *tx)
+                .await?;
+            }
+            None => {
+                sqlx::query!(
+                    "INSERT INTO playlists (id, owner_user_id, name, comment, is_public, \
+                                            is_temporary, expires_at, source_instance_id, \
+                                            source_ref, created_at, updated_at) \
+                     VALUES (?, ?, ?, ?, 0, 1, ?, ?, ?, ?, ?)",
+                    entity_key(id),
+                    write.owner_user_id.as_bytes().as_slice(),
+                    name,
+                    write.comment,
+                    write.expires_at,
+                    write.source_instance_id.as_bytes().as_slice(),
+                    write.source_ref,
+                    now,
+                    now,
+                )
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        let entries = replace_entries(&mut tx, id, write.tracks, now).await?;
+        for track in affected {
+            refresh_playlist_pin(&mut tx, track).await?;
+        }
+        tx.commit().await?;
+        self.signal.notify();
+        Ok(Playlist {
+            id,
+            owner_user_id: write.owner_user_id,
+            name: name.to_owned(),
+            comment: write.comment.map(str::to_owned),
+            is_public: before.as_ref().is_some_and(|playlist| playlist.is_public),
+            is_temporary: true,
+            expires_at: Some(write.expires_at),
+            source_instance_id: Some(write.source_instance_id),
+            source_ref: Some(write.source_ref.to_owned()),
+            source_instance_name: before
+                .as_ref()
+                .and_then(|playlist| playlist.source_instance_name.clone()),
+            created_at: before.as_ref().map_or(now, |playlist| playlist.created_at),
             updated_at: now,
             entries,
         })
@@ -661,12 +841,14 @@ impl Playlists {
         let mut conn = self.readers.acquire().await?;
         let rows = sqlx::query_as!(
             PlaylistRow,
-            "SELECT id, owner_user_id, name, comment, is_public, is_temporary, expires_at, \
-                    created_at, updated_at \
-             FROM playlists \
-             WHERE (owner_user_id = ?1 OR is_public = 1) \
-               AND (?2 IS NULL OR owner_user_id = ?2) \
-             ORDER BY name, id",
+            "SELECT p.id, p.owner_user_id, p.name, p.comment, p.is_public, p.is_temporary, \
+                    p.expires_at, p.source_instance_id, p.source_ref, p.created_at, \
+                    p.updated_at, pi.display_name AS source_instance_name \
+             FROM playlists p \
+             LEFT JOIN provider_instances pi ON pi.id = p.source_instance_id \
+             WHERE (p.owner_user_id = ?1 OR p.is_public = 1) \
+               AND (?2 IS NULL OR p.owner_user_id = ?2) \
+             ORDER BY p.name, p.id",
             viewer.as_bytes().as_slice(),
             owner_filter.map(|owner| owner.as_bytes().to_vec()),
         )
@@ -714,6 +896,12 @@ async fn decode_row(row: PlaylistRow) -> Result<Playlist, ActivityError> {
         is_public: row.is_public != 0,
         is_temporary: row.is_temporary != 0,
         expires_at: row.expires_at,
+        source_instance_id: row
+            .source_instance_id
+            .map(|id| Uuid::from_slice(&id))
+            .transpose()?,
+        source_ref: row.source_ref,
+        source_instance_name: row.source_instance_name,
         created_at: row.created_at,
         updated_at: row.updated_at,
         entries: Vec::new(),
@@ -759,9 +947,12 @@ async fn load(
 ) -> Result<Option<Playlist>, ActivityError> {
     let row = sqlx::query_as!(
         PlaylistRow,
-        "SELECT id, owner_user_id, name, comment, is_public, is_temporary, expires_at, \
-                created_at, updated_at \
-         FROM playlists WHERE id = ?",
+        "SELECT p.id, p.owner_user_id, p.name, p.comment, p.is_public, p.is_temporary, \
+                p.expires_at, p.source_instance_id, p.source_ref, p.created_at, \
+                p.updated_at, pi.display_name AS source_instance_name \
+         FROM playlists p \
+         LEFT JOIN provider_instances pi ON pi.id = p.source_instance_id \
+         WHERE p.id = ?",
         entity_key(id),
     )
     .fetch_optional(&mut *conn)
