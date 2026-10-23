@@ -171,6 +171,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now name up to eight process tools under `permissions.process.tools`, each a
   lowercase name resolved through a `tools.<name>.path` setting.
 
+- The server bundles Deezer 0.3.0, MusicBrainz 0.3.0 and slskd 0.2.0, the
+  releases built for that API. slskd 0.2.0 also offers whole album folders to
+  album acquisitions.
+
 - A plugin that an earlier release left waiting for approval is granted the
   permissions its stored manifest requests and enabled when the database
   upgrades.

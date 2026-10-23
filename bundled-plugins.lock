@@ -19,18 +19,18 @@
 
 [[plugin]]
 id = "app.hearthsound.deezer"
-version = "0.2.0"
-url = "https://github.com/hearthsound/plugin-deezer/releases/download/v0.2.0/app.hearthsound.deezer-0.2.0.hsplugin"
-sha256 = "832fd36e4c6c2bf24af7c4cae3dca65950a388931c65c422f4cccde1f63addda"
+version = "0.3.0"
+url = "https://github.com/hearthsound/plugin-deezer/releases/download/v0.3.0/app.hearthsound.deezer-0.3.0.hsplugin"
+sha256 = "d2f2986cb10c26a6d05f713d248c453b637a94b4ba2da43047328f3551dbf178"
 
 [[plugin]]
 id = "app.hearthsound.musicbrainz"
-version = "0.2.0"
-url = "https://github.com/hearthsound/plugin-musicbrainz/releases/download/v0.2.0/app.hearthsound.musicbrainz-0.2.0.hsplugin"
-sha256 = "63bf047744ca040811fc31fbaba95bbc0b545cfcbf50bce964c6540961c6b6bb"
+version = "0.3.0"
+url = "https://github.com/hearthsound/plugin-musicbrainz/releases/download/v0.3.0/app.hearthsound.musicbrainz-0.3.0.hsplugin"
+sha256 = "727dc1db6f4d0cd37d724d25553bd62c1aab24b607d4ed7a885b549db7d6871d"
 
 [[plugin]]
 id = "app.hearthsound.slskd"
-version = "0.1.1"
-url = "https://github.com/hearthsound/plugin-slskd/releases/download/v0.1.1/app.hearthsound.slskd-0.1.1.hsplugin"
-sha256 = "75faf4cf439b1dbcdb0c83da5f679843383ef1fcd4bc12b6e0416c7794e3ad04"
+version = "0.2.0"
+url = "https://github.com/hearthsound/plugin-slskd/releases/download/v0.2.0/app.hearthsound.slskd-0.2.0.hsplugin"
+sha256 = "db6a51ed92183aa29d123aa8feb8bda17c8df9659b7ac0f19fef5e1b9b92304c"
