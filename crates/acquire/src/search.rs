@@ -39,7 +39,7 @@ use crate::error::AcquireError;
 use crate::orchestrator::AcquisitionOrchestrator;
 use crate::profile::QualityProfile;
 use crate::repo::{self, AcquisitionRow};
-use crate::score::MatchTarget;
+use crate::score::{MatchTarget, candidate_name};
 use crate::select::{
     AlbumAttemptPlan, AlbumSelectionRequest, AttemptPlan, CandidateSlot, RequestClass,
     SelectionRequest, select_album_candidates, select_candidates,
@@ -457,11 +457,11 @@ impl AcquisitionOrchestrator {
             SearchPlan::Track(plan) => plan
                 .attempts
                 .first()
-                .map(|attempt| attempt.candidate.path.as_str()),
+                .map(|attempt| candidate_name(&attempt.candidate)),
             SearchPlan::Album(plan) => plan
                 .attempts
                 .first()
-                .map(|attempt| attempt.candidate.path.as_str()),
+                .map(|attempt| candidate_name(&attempt.candidate)),
         }
         .unwrap_or_default();
         let message = format!(
@@ -774,7 +774,7 @@ impl LayerSearch<'_> {
                 if offered > 0 && candidate.files.is_empty() {
                     tracing::info!(
                         source = candidate.source.key.as_str(),
-                        candidate = candidate.path.as_str(),
+                        candidate = candidate_name(&candidate),
                         "dropped a candidate whose every file is quarantined"
                     );
                     continue;

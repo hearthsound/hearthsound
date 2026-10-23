@@ -269,6 +269,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The acquisition log names a candidate that has no directory. A backend that
+  downloads one file at a time reports an empty candidate path, which left the
+  search result, the download message and both log lines with an empty name;
+  they now use the backend's title and then the first file's name.
+
 - `hsGetRecommendedAlbums` names the artist of a catalog album. A
   recommendation often names its album with only an id and a title, which left
   the shelf entry without `artist`, `artistId`, `artists`, `displayArtist`, the

@@ -46,6 +46,7 @@ use crate::error::AcquireError;
 use crate::import::HandoffOutcome;
 use crate::orchestrator::AcquisitionOrchestrator;
 use crate::repo::AcquisitionRow;
+use crate::score::candidate_name;
 use crate::search::SearchOutcome;
 use crate::select::{
     AlbumAttemptPlan, AlbumCandidate, AlbumFileMapping, AttemptPlan, RequestClass,
@@ -578,7 +579,10 @@ impl AcquisitionOrchestrator {
                     .transition(
                         row.id,
                         AcquisitionState::Downloading,
-                        Some(&format!("downloading `{}`", attempt.candidate.path)),
+                        Some(&format!(
+                            "downloading `{}`",
+                            candidate_name(&attempt.candidate)
+                        )),
                     )
                     .await?;
             }
@@ -587,7 +591,7 @@ impl AcquisitionOrchestrator {
             tracing::info!(
                 acquisition = %row.id,
                 instance = instance.slug().as_str(),
-                candidate = attempt.candidate.path.as_str(),
+                candidate = candidate_name(&attempt.candidate),
                 attempt = attempts,
                 "starting a candidate download"
             );
@@ -1024,7 +1028,7 @@ impl AcquisitionOrchestrator {
                         AcquisitionState::Downloading,
                         Some(&format!(
                             "downloading the album folder `{}`",
-                            attempt.candidate.path
+                            candidate_name(&attempt.candidate)
                         )),
                     )
                     .await?;
@@ -1034,7 +1038,7 @@ impl AcquisitionOrchestrator {
             tracing::info!(
                 acquisition = %row.id,
                 instance = instance.slug().as_str(),
-                candidate = attempt.candidate.path.as_str(),
+                candidate = candidate_name(&attempt.candidate),
                 files = attempt.mappings.len(),
                 attempt = attempts,
                 "starting an album folder download"

@@ -551,6 +551,65 @@ pub fn candidate_fields(candidate: &Candidate) -> CandidateFields {
     }
 }
 
+/// Returns the name a log line or a ledger message calls a candidate by.
+///
+/// A backend that downloads one file at a time has no directory to name, so it
+/// reports its candidates with an empty path. Those candidates are named by the
+/// backend's title instead, and by the first file's name when the backend named
+/// no title either.
+///
+/// # Parameters
+///
+/// - `candidate`: the candidate as the acquisition provider reported it.
+///
+/// # Returns
+///
+/// The candidate's path, its title, or its first file's name; an empty string
+/// when the provider named none of them.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_acquire::score::candidate_name;
+/// use hearthsound_core::providers::{Candidate, CandidateFile, SourceInfo};
+///
+/// let candidate = Candidate {
+///     token: "token".to_owned(),
+///     title: "Creep".to_owned(),
+///     path: String::new(),
+///     files: vec![CandidateFile {
+///         name: "2f1c.opus".to_owned(),
+///         size: None,
+///         format: Some("opus".to_owned()),
+///         bitrate_kbps: None,
+///         sample_rate: None,
+///         bit_depth: None,
+///         duration_ms: None,
+///         track_index: None,
+///     }],
+///     source: SourceInfo {
+///         key: "yt-dlp".to_owned(),
+///         speed_bps: None,
+///         queue_length: None,
+///         free_slot: None,
+///     },
+/// };
+/// assert_eq!(candidate_name(&candidate), "Creep");
+/// ```
+pub fn candidate_name(candidate: &Candidate) -> &str {
+    if !candidate.path.trim().is_empty() {
+        return candidate.path.as_str();
+    }
+    if !candidate.title.trim().is_empty() {
+        return candidate.title.as_str();
+    }
+    candidate
+        .files
+        .first()
+        .map(|file| file.name.as_str())
+        .unwrap_or_default()
+}
+
 /// Returns the alternate-version qualifiers a candidate carries.
 ///
 /// The candidate's title, its path and each of its file names are scanned.
@@ -956,6 +1015,23 @@ mod tests {
         let fields = candidate_fields(&empty);
         assert_eq!(fields.artist.as_deref(), Some("Air"));
         assert_eq!(fields.title, "La Femme d'Argent");
+    }
+
+    #[test]
+    fn a_candidate_without_a_path_is_named_by_its_title_or_file() {
+        let mut unnamed = candidate("", None);
+        unnamed.title = "Air - La Femme d'Argent".to_owned();
+        unnamed.files[0].name = "2f1c.opus".to_owned();
+        assert_eq!(candidate_name(&unnamed), "Air - La Femme d'Argent");
+
+        unnamed.title.clear();
+        assert_eq!(candidate_name(&unnamed), "2f1c.opus");
+
+        unnamed.files.clear();
+        assert_eq!(candidate_name(&unnamed), "");
+
+        let named = candidate("Air/Moon Safari/01.flac", None);
+        assert_eq!(candidate_name(&named), "Air/Moon Safari/01.flac");
     }
 
     #[test]
