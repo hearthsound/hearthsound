@@ -107,10 +107,82 @@ pub(crate) mod acquisition {
     });
 }
 
+/// The verification provider world.
+pub(crate) mod verification {
+    wasmtime::component::bindgen!({
+        path: "../../wit",
+        world: "hearthsound:plugin/verification-provider",
+        imports: { default: async | trappable },
+        exports: { default: async },
+        with: {
+            "hearthsound:plugin/types@0.3.0": crate::bindings::imports::hearthsound::plugin::types,
+            "hearthsound:plugin/host-log@0.3.0": crate::bindings::imports::hearthsound::plugin::host_log,
+            "hearthsound:plugin/host-http@0.3.0": crate::bindings::imports::hearthsound::plugin::host_http,
+            "hearthsound:plugin/host-kv@0.3.0": crate::bindings::imports::hearthsound::plugin::host_kv,
+            "hearthsound:plugin/host-config@0.3.0": crate::bindings::imports::hearthsound::plugin::host_config,
+        },
+    });
+}
+
+/// The scrobble provider world.
+pub(crate) mod scrobble {
+    wasmtime::component::bindgen!({
+        path: "../../wit",
+        world: "hearthsound:plugin/scrobble-provider",
+        imports: { default: async | trappable },
+        exports: { default: async },
+        with: {
+            "hearthsound:plugin/types@0.3.0": crate::bindings::imports::hearthsound::plugin::types,
+            "hearthsound:plugin/host-log@0.3.0": crate::bindings::imports::hearthsound::plugin::host_log,
+            "hearthsound:plugin/host-http@0.3.0": crate::bindings::imports::hearthsound::plugin::host_http,
+            "hearthsound:plugin/host-kv@0.3.0": crate::bindings::imports::hearthsound::plugin::host_kv,
+            "hearthsound:plugin/host-config@0.3.0": crate::bindings::imports::hearthsound::plugin::host_config,
+        },
+    });
+}
+
+/// The discovery provider world.
+pub(crate) mod discovery {
+    wasmtime::component::bindgen!({
+        path: "../../wit",
+        world: "hearthsound:plugin/discovery-provider",
+        imports: { default: async | trappable },
+        exports: { default: async },
+        with: {
+            "hearthsound:plugin/types@0.3.0": crate::bindings::imports::hearthsound::plugin::types,
+            "hearthsound:plugin/host-log@0.3.0": crate::bindings::imports::hearthsound::plugin::host_log,
+            "hearthsound:plugin/host-http@0.3.0": crate::bindings::imports::hearthsound::plugin::host_http,
+            "hearthsound:plugin/host-kv@0.3.0": crate::bindings::imports::hearthsound::plugin::host_kv,
+            "hearthsound:plugin/host-config@0.3.0": crate::bindings::imports::hearthsound::plugin::host_config,
+        },
+    });
+}
+
+/// The account-link provider world.
+pub(crate) mod account_link {
+    wasmtime::component::bindgen!({
+        path: "../../wit",
+        world: "hearthsound:plugin/account-link-provider",
+        imports: { default: async | trappable },
+        exports: { default: async },
+        with: {
+            "hearthsound:plugin/types@0.3.0": crate::bindings::imports::hearthsound::plugin::types,
+            "hearthsound:plugin/host-log@0.3.0": crate::bindings::imports::hearthsound::plugin::host_log,
+            "hearthsound:plugin/host-http@0.3.0": crate::bindings::imports::hearthsound::plugin::host_http,
+            "hearthsound:plugin/host-kv@0.3.0": crate::bindings::imports::hearthsound::plugin::host_kv,
+            "hearthsound:plugin/host-config@0.3.0": crate::bindings::imports::hearthsound::plugin::host_config,
+        },
+    });
+}
+
+pub(crate) use account_link::{AccountLinkProvider, AccountLinkProviderPre};
 pub(crate) use acquisition::{AcquisitionProvider, AcquisitionProviderPre};
 pub(crate) use artwork::{ArtworkProvider, ArtworkProviderPre};
 pub(crate) use catalog::{CatalogProvider, CatalogProviderPre};
+pub(crate) use discovery::{DiscoveryProvider, DiscoveryProviderPre};
 pub(crate) use metadata::{MetadataProvider, MetadataProviderPre};
+pub(crate) use scrobble::{ScrobbleProvider, ScrobbleProviderPre};
+pub(crate) use verification::{VerificationProvider, VerificationProviderPre};
 
 /// The `hearthsound:plugin` interface tree of the host import layer.
 pub(crate) use imports::hearthsound;

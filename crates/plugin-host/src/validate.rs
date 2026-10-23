@@ -34,12 +34,51 @@ pub const LIFECYCLE_INTERFACE: &str = "hearthsound:plugin/lifecycle@0.3.0";
 ///
 /// Every other layer's manifest validates but its component is refused, because
 /// the host has no adapter to call it through.
-pub const HOSTED_LAYERS: [Layer; 4] = [
+pub const HOSTED_LAYERS: [Layer; 7] = [
     Layer::Catalog,
     Layer::Metadata,
     Layer::Acquisition,
     Layer::Artwork,
+    Layer::Verification,
+    Layer::Scrobble,
+    Layer::Discovery,
 ];
+
+/// The interface a plugin examines for account linking.
+const ACCOUNT_LINK_INTERFACE: &str = "hearthsound:plugin/account-link";
+
+/// Returns whether the component exports the `account-link` interface.
+///
+/// `account-link` is a capability rather than a layer: a plugin declares it
+/// alongside its `scrobble` or `discovery` layer, so the host discovers it from
+/// the component instead of from the manifest's `provides`.
+///
+/// # Parameters
+///
+/// - `component`: the compiled component.
+///
+/// # Returns
+///
+/// `true` when the component exports `hearthsound:plugin/account-link@0.3.0`.
+///
+/// # Example
+///
+/// ```ignore
+/// let component = Component::new(&engine, bytes)?;
+/// if exports_account_link(&component) {
+///     // the instance can link accounts
+/// }
+/// ```
+pub fn exports_account_link(component: &Component) -> bool {
+    let engine = component.engine();
+    component
+        .component_type()
+        .exports(engine)
+        .any(|(name, _item)| {
+            let (interface, version) = split_version(name);
+            interface == ACCOUNT_LINK_INTERFACE && version == API_VERSION
+        })
+}
 
 /// Validates a compiled component against the host's rules.
 ///
@@ -70,6 +109,7 @@ pub fn validate(component: &Component, manifest: &Manifest) -> Result<(), Instal
     }
 
     let mut exports_lifecycle = false;
+    let mut exports_account_link = false;
     let mut exported_layers = Vec::new();
     for (name, _item) in component_type.exports(engine) {
         let (interface, version) = split_version(name);
@@ -85,6 +125,10 @@ pub fn validate(component: &Component, manifest: &Manifest) -> Result<(), Instal
             "metadata" => exported_layers.push(Layer::Metadata),
             "acquisition" => exported_layers.push(Layer::Acquisition),
             "artwork" => exported_layers.push(Layer::Artwork),
+            "verification" => exported_layers.push(Layer::Verification),
+            "scrobble" => exported_layers.push(Layer::Scrobble),
+            "discovery" => exported_layers.push(Layer::Discovery),
+            "account-link" => exports_account_link = true,
             _ => return Err(InstallError::UndeclaredExport(name.to_owned())),
         }
     }
@@ -93,6 +137,19 @@ pub fn validate(component: &Component, manifest: &Manifest) -> Result<(), Instal
         return Err(InstallError::MissingExport {
             interface: LIFECYCLE_INTERFACE.to_owned(),
         });
+    }
+    // `account-link` is checked first because it is a capability rather than a
+    // layer: a manifest that declares no layer it belongs to is refused for the
+    // export itself, not for a layer it names.
+    if exports_account_link
+        && !manifest
+            .provides()
+            .iter()
+            .any(|layer| matches!(layer, Layer::Scrobble | Layer::Discovery))
+    {
+        return Err(InstallError::UndeclaredExport(format!(
+            "{ACCOUNT_LINK_INTERFACE}@{API_VERSION}"
+        )));
     }
     for layer in manifest.provides() {
         if !exported_layers.contains(layer) {

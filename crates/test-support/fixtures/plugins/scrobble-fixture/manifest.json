@@ -1,0 +1,148 @@
+{
+  "manifestVersion": 1,
+  "id": "com.example.scrobble-fixture",
+  "name": "Scrobble fixture",
+  "version": "0.1.0",
+  "description": "A plugin that scrobbles to a mock service, answers configured suggestions and links listener accounts.",
+  "authors": ["Hearthsound contributors"],
+  "license": "MIT OR Apache-2.0",
+  "homepage": "https://github.com/hearthsound/hearthsound",
+  "api": "hearthsound:plugin@0.3.0",
+  "provides": ["scrobble", "discovery"],
+  "permissions": {
+    "http": {
+      "hosts": ["$config:endpoint"],
+      "maxBodyBytes": 1048576
+    }
+  },
+  "config": {
+    "server": {
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": ["endpoint"],
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "format": "uri",
+            "title": "Service URL",
+            "description": "Bodies are posted under this URL, and the browser link flow starts from it."
+          },
+          "linkMethod": {
+            "type": "string",
+            "enum": ["config", "browser"],
+            "default": "config",
+            "title": "Link method"
+          },
+          "maxBatch": { "type": "integer", "minimum": 1, "default": 50, "title": "Maximum batch size" },
+          "minIntervalMs": { "type": "integer", "minimum": 0, "default": 0, "title": "Minimum interval in milliseconds" },
+          "feedback": { "type": "boolean", "default": true, "title": "Send feedback" },
+          "similarTracks": {
+            "type": "array",
+            "title": "Similar tracks",
+            "items": {
+              "type": "object",
+              "required": ["title"],
+              "properties": {
+                "title": { "type": "string", "title": "Title" },
+                "artists": { "type": "array", "items": { "type": "string" }, "title": "Artists" }
+              }
+            }
+          },
+          "similarArtists": {
+            "type": "array",
+            "title": "Similar artists",
+            "items": {
+              "type": "object",
+              "required": ["name"],
+              "properties": { "name": { "type": "string", "title": "Name" } }
+            }
+          },
+          "topTracks": {
+            "type": "array",
+            "title": "Popular tracks",
+            "items": {
+              "type": "object",
+              "required": ["title"],
+              "properties": {
+                "title": { "type": "string", "title": "Title" },
+                "artists": { "type": "array", "items": { "type": "string" }, "title": "Artists" }
+              }
+            }
+          },
+          "recommended": {
+            "type": "array",
+            "title": "Recommended tracks",
+            "items": {
+              "type": "object",
+              "required": ["title"],
+              "properties": {
+                "title": { "type": "string", "title": "Title" },
+                "artists": { "type": "array", "items": { "type": "string" }, "title": "Artists" }
+              }
+            }
+          },
+          "playlists": {
+            "type": "array",
+            "title": "Generated playlists",
+            "items": {
+              "type": "object",
+              "required": ["reference", "name"],
+              "properties": {
+                "reference": { "type": "string", "title": "Reference" },
+                "name": { "type": "string", "title": "Name" },
+                "expiresAt": { "type": "integer", "title": "Expires at" },
+                "tracks": {
+                  "type": "array",
+                  "title": "Tracks",
+                  "items": {
+                    "type": "object",
+                    "required": ["title"],
+                    "properties": {
+                      "title": { "type": "string", "title": "Title" },
+                      "artists": { "type": "array", "items": { "type": "string" }, "title": "Artists" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "uiSchema": {
+        "type": "VerticalLayout",
+        "elements": [
+          { "type": "Control", "scope": "#/properties/endpoint" },
+          { "type": "Control", "scope": "#/properties/linkMethod" },
+          { "type": "Control", "scope": "#/properties/maxBatch" },
+          { "type": "Control", "scope": "#/properties/minIntervalMs" },
+          { "type": "Control", "scope": "#/properties/feedback" },
+          { "type": "Control", "scope": "#/properties/similarTracks" },
+          { "type": "Control", "scope": "#/properties/similarArtists" },
+          { "type": "Control", "scope": "#/properties/topTracks" },
+          { "type": "Control", "scope": "#/properties/recommended" },
+          { "type": "Control", "scope": "#/properties/playlists" }
+        ]
+      }
+    },
+    "user": {
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": ["token"],
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token",
+            "writeOnly": true
+          }
+        }
+      },
+      "uiSchema": {
+        "type": "VerticalLayout",
+        "elements": [{ "type": "Control", "scope": "#/properties/token" }]
+      }
+    }
+  },
+  "resources": { "memoryMb": 64, "callTimeoutMs": 5000, "maxInstances": 2 }
+}

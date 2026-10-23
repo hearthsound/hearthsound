@@ -75,6 +75,12 @@ pub const ACQUISITION_FIXTURE: &str = "com.example.acquisition-fixture-0.1.0.hsp
 /// The archive file name of the process fixture.
 pub const PROCESS_FIXTURE: &str = "com.example.process-fixture-0.1.0.hsplugin";
 
+/// The archive file name of the scrobble fixture.
+pub const SCROBBLE_FIXTURE: &str = "com.example.scrobble-fixture-0.1.0.hsplugin";
+
+/// The archive file name of the verification fixture.
+pub const VERIFICATION_FIXTURE: &str = "com.example.verification-fixture-0.1.0.hsplugin";
+
 /// Returns the path of a fixture tool.
 ///
 /// # Parameters

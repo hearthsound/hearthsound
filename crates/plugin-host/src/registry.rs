@@ -17,7 +17,8 @@ use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 
 use hearthsound_config::secret::SecretBox;
 use hearthsound_core::providers::{
-    AcquisitionProvider, ArtworkProvider, CatalogProvider, MetadataProvider,
+    AccountLinkProvider, AcquisitionProvider, ArtworkProvider, CatalogProvider, DiscoveryProvider,
+    MetadataProvider, ScrobbleProvider, VerificationProvider,
 };
 use hearthsound_core::{Layer, ProviderError, Slug};
 
@@ -46,6 +47,10 @@ pub struct RegistryInstance {
     metadata: Option<Arc<dyn MetadataProvider>>,
     acquisition: Option<Arc<dyn AcquisitionProvider>>,
     artwork: Option<Arc<dyn ArtworkProvider>>,
+    verification: Option<Arc<dyn VerificationProvider>>,
+    scrobble: Option<Arc<dyn ScrobbleProvider>>,
+    discovery: Option<Arc<dyn DiscoveryProvider>>,
+    account_link: Option<Arc<dyn AccountLinkProvider>>,
 }
 
 impl RegistryInstance {
@@ -110,6 +115,33 @@ impl RegistryInstance {
     /// Returns the artwork provider of this instance, when it provides artwork.
     pub fn artwork(&self) -> Option<&Arc<dyn ArtworkProvider>> {
         self.artwork.as_ref()
+    }
+
+    /// Returns the verification provider of this instance, when it provides
+    /// verification.
+    pub fn verification(&self) -> Option<&Arc<dyn VerificationProvider>> {
+        self.verification.as_ref()
+    }
+
+    /// Returns the scrobble provider of this instance, when it provides
+    /// scrobbling.
+    pub fn scrobble(&self) -> Option<&Arc<dyn ScrobbleProvider>> {
+        self.scrobble.as_ref()
+    }
+
+    /// Returns the discovery provider of this instance, when it provides
+    /// discovery.
+    pub fn discovery(&self) -> Option<&Arc<dyn DiscoveryProvider>> {
+        self.discovery.as_ref()
+    }
+
+    /// Returns the account-link provider of this instance, when its component
+    /// exports `account-link`.
+    ///
+    /// Account linking is a capability rather than a layer, so an instance
+    /// assigned only to `scrobble` or `discovery` can still link accounts.
+    pub fn account_link(&self) -> Option<&Arc<dyn AccountLinkProvider>> {
+        self.account_link.as_ref()
     }
 
     /// Fetches one image under the instance's HTTP permissions.
@@ -215,6 +247,11 @@ impl std::fmt::Debug for RegistryInstance {
                     self.catalog.is_some(),
                     self.metadata.is_some(),
                     self.acquisition.is_some(),
+                    self.artwork.is_some(),
+                    self.verification.is_some(),
+                    self.scrobble.is_some(),
+                    self.discovery.is_some(),
+                    self.account_link.is_some(),
                 ),
             )
             .finish()
@@ -448,10 +485,11 @@ impl ProviderRegistry {
     /// Runs one instance's `lifecycle.health` probe.
     ///
     /// The probe runs through the first provider the instance holds, in layer
-    /// order: catalog, metadata, acquisition, artwork. Every one of them is the
-    /// plugin's own `lifecycle.health`, so one probe answers for the instance,
-    /// and an instance in service always holds at least one provider, because
-    /// the registry only serves instances an administrator assigned to a layer.
+    /// order: catalog, metadata, acquisition, artwork, verification, scrobble,
+    /// discovery, then account link. Every one of them is the plugin's own
+    /// `lifecycle.health`, so one probe answers for the instance, and an
+    /// instance in service always holds at least one provider, because the
+    /// registry only serves instances an administrator assigned to a layer.
     ///
     /// # Parameters
     ///
@@ -474,6 +512,18 @@ impl ProviderRegistry {
             return Some(provider.health().await);
         }
         if let Some(provider) = instance.artwork() {
+            return Some(provider.health().await);
+        }
+        if let Some(provider) = instance.verification() {
+            return Some(provider.health().await);
+        }
+        if let Some(provider) = instance.scrobble() {
+            return Some(provider.health().await);
+        }
+        if let Some(provider) = instance.discovery() {
+            return Some(provider.health().await);
+        }
+        if let Some(provider) = instance.account_link() {
             return Some(provider.health().await);
         }
         // No provider is held, so nothing can serve a request for this
@@ -512,6 +562,9 @@ impl ProviderRegistry {
         let mut metadata = None;
         let mut acquisition = None;
         let mut artwork = None;
+        let mut verification = None;
+        let mut scrobble = None;
+        let mut discovery = None;
         for layer in layers {
             match layer {
                 Layer::Catalog => {
@@ -542,11 +595,42 @@ impl ProviderRegistry {
                             .map_err(|error| error.to_string())?,
                     );
                 }
+                Layer::Verification => {
+                    verification = Some(
+                        self.host
+                            .verification_provider(&component, instance.clone())
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
+                Layer::Scrobble => {
+                    scrobble = Some(
+                        self.host
+                            .scrobble_provider(&component, instance.clone())
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
+                Layer::Discovery => {
+                    discovery = Some(
+                        self.host
+                            .discovery_provider(&component, instance.clone())
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
                 other => {
                     return Err(format!("this server cannot host `{other}` plugins yet"));
                 }
             }
         }
+
+        let account_link = if crate::validate::exports_account_link(component.component()) {
+            Some(
+                self.host
+                    .account_link_provider(&component, instance.clone())
+                    .map_err(|error| error.to_string())?,
+            )
+        } else {
+            None
+        };
 
         Ok(RegistryInstance {
             id: row.id,
@@ -560,6 +644,10 @@ impl ProviderRegistry {
             metadata,
             acquisition,
             artwork,
+            verification,
+            scrobble,
+            discovery,
+            account_link,
         })
     }
 

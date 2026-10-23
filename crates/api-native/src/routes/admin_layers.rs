@@ -253,8 +253,17 @@ mod tests {
 
     #[test]
     fn only_the_layers_this_server_drives_are_accepted() {
-        assert_eq!(hostable_layer("catalog").unwrap(), Layer::Catalog);
-        assert_eq!(hostable_layer("artwork").unwrap(), Layer::Artwork);
+        for (name, layer) in [
+            ("catalog", Layer::Catalog),
+            ("metadata", Layer::Metadata),
+            ("acquisition", Layer::Acquisition),
+            ("artwork", Layer::Artwork),
+            ("verification", Layer::Verification),
+            ("scrobble", Layer::Scrobble),
+            ("discovery", Layer::Discovery),
+        ] {
+            assert_eq!(hostable_layer(name).unwrap(), layer);
+        }
 
         let problem = hostable_layer("nonsense").unwrap_err();
         assert_eq!(problem.status, 422);
@@ -262,9 +271,9 @@ mod tests {
 
         // A layer of the architecture the host has no adapter for is refused
         // with the same answer.
-        let problem = hostable_layer("scrobble").unwrap_err();
+        let problem = hostable_layer("lyrics").unwrap_err();
         assert_eq!(problem.status, 422);
-        assert!(problem.detail.unwrap().contains("scrobble"));
+        assert!(problem.detail.unwrap().contains("lyrics"));
     }
 
     #[test]

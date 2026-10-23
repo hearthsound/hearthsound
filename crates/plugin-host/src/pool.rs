@@ -7,9 +7,9 @@
 //! trapped may be in an unknown state, and enough traps inside a window disable
 //! the instance entirely.
 //!
-//! A pool is generic over the [`World`] it drives, so the catalog, metadata and
-//! acquisition adapters share this one implementation while each still gets its
-//! own world handle back from the store.
+//! A pool is generic over the [`World`] it drives, so every provider adapter
+//! shares this one implementation while each still gets its own world handle
+//! back from the store.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -24,8 +24,10 @@ use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
 use crate::bindings::{
-    AcquisitionProvider, AcquisitionProviderPre, ArtworkProvider, ArtworkProviderPre,
-    CatalogProvider, CatalogProviderPre, MetadataProvider, MetadataProviderPre,
+    AccountLinkProvider, AccountLinkProviderPre, AcquisitionProvider, AcquisitionProviderPre,
+    ArtworkProvider, ArtworkProviderPre, CatalogProvider, CatalogProviderPre, DiscoveryProvider,
+    DiscoveryProviderPre, MetadataProvider, MetadataProviderPre, ScrobbleProvider,
+    ScrobbleProviderPre, VerificationProvider, VerificationProviderPre,
 };
 use crate::files::FileAccess;
 use crate::http::HttpClient;
@@ -144,6 +146,82 @@ impl World for AcquisitionProvider {
         component: &Component,
     ) -> Result<Self::Pre, wasmtime::Error> {
         AcquisitionProviderPre::new(linker.instantiate_pre(component)?)
+    }
+
+    async fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> Result<Self::Instance, wasmtime::Error> {
+        pre.instantiate_async(store).await
+    }
+}
+
+impl World for VerificationProvider {
+    type Pre = VerificationProviderPre<InstanceState>;
+    type Instance = VerificationProvider;
+
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error> {
+        VerificationProviderPre::new(linker.instantiate_pre(component)?)
+    }
+
+    async fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> Result<Self::Instance, wasmtime::Error> {
+        pre.instantiate_async(store).await
+    }
+}
+
+impl World for ScrobbleProvider {
+    type Pre = ScrobbleProviderPre<InstanceState>;
+    type Instance = ScrobbleProvider;
+
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error> {
+        ScrobbleProviderPre::new(linker.instantiate_pre(component)?)
+    }
+
+    async fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> Result<Self::Instance, wasmtime::Error> {
+        pre.instantiate_async(store).await
+    }
+}
+
+impl World for DiscoveryProvider {
+    type Pre = DiscoveryProviderPre<InstanceState>;
+    type Instance = DiscoveryProvider;
+
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error> {
+        DiscoveryProviderPre::new(linker.instantiate_pre(component)?)
+    }
+
+    async fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> Result<Self::Instance, wasmtime::Error> {
+        pre.instantiate_async(store).await
+    }
+}
+
+impl World for AccountLinkProvider {
+    type Pre = AccountLinkProviderPre<InstanceState>;
+    type Instance = AccountLinkProvider;
+
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error> {
+        AccountLinkProviderPre::new(linker.instantiate_pre(component)?)
     }
 
     async fn instantiate(

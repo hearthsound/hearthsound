@@ -9,7 +9,7 @@ use std::sync::Arc;
 use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_plugin_host::{InstallError, PluginHost};
-use hearthsound_test_support::{HELLO_CATALOG, fixture_plugin, workspace_root};
+use hearthsound_test_support::{HELLO_CATALOG, SCROBBLE_FIXTURE, fixture_plugin, workspace_root};
 
 /// The id the hello fixture declares.
 const HELLO_ID: &str = "com.example.hello-catalog";
@@ -59,15 +59,19 @@ fn write_archive(archive: &Path, manifest: &[u8], wasm: Option<&[u8]>) {
     writer.finish().unwrap();
 }
 
-/// Rewrites the hello fixture's manifest and component into a new archive.
-fn archive_with_manifest(archive: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
-    let source = fixture_plugin(HELLO_CATALOG);
+/// Rewrites one fixture's manifest and component into a new archive.
+fn archive_with_source(source: &Path, archive: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
     let mut manifest: serde_json::Value =
-        serde_json::from_slice(&read_entry(&source, "manifest.json")).unwrap();
+        serde_json::from_slice(&read_entry(source, "manifest.json")).unwrap();
     edit(&mut manifest);
     let manifest = serde_json::to_vec_pretty(&manifest).unwrap();
-    let wasm = read_entry(&source, "plugin.wasm");
+    let wasm = read_entry(source, "plugin.wasm");
     write_archive(archive, &manifest, Some(&wasm));
+}
+
+/// Rewrites the hello fixture's manifest and component into a new archive.
+fn archive_with_manifest(archive: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    archive_with_source(&fixture_plugin(HELLO_CATALOG), archive, edit);
 }
 
 #[tokio::test]
@@ -134,6 +138,24 @@ async fn a_manifest_promising_metadata_is_rejected() {
         }
         other => panic!("unexpected error: {other}"),
     }
+}
+
+#[tokio::test]
+async fn an_account_link_export_needs_a_scrobble_or_discovery_layer() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = host(dir.path()).await;
+    let archive = dir.path().join("catalog-account-link.hsplugin");
+    archive_with_source(&fixture_plugin(SCROBBLE_FIXTURE), &archive, |manifest| {
+        manifest["provides"] = serde_json::json!(["catalog"]);
+    });
+
+    let error = host.install(&archive).await.unwrap_err();
+
+    assert!(
+        matches!(error, InstallError::UndeclaredExport(ref interface)
+            if interface == "hearthsound:plugin/account-link@0.3.0"),
+        "unexpected error: {error}"
+    );
 }
 
 #[tokio::test]

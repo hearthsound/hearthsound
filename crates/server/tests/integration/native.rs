@@ -3190,6 +3190,9 @@ mod provider_admin {
                 { "layer": "metadata", "instances": [] },
                 { "layer": "acquisition", "instances": [] },
                 { "layer": "artwork", "instances": [] },
+                { "layer": "verification", "instances": [] },
+                { "layer": "scrobble", "instances": [] },
+                { "layer": "discovery", "instances": [] },
             ])
         );
         assert!(served(&fixture, Layer::Catalog).is_empty());
@@ -3300,7 +3303,7 @@ mod provider_admin {
         assert_problem(taken, StatusCode::CONFLICT, "conflict").await;
 
         // A layer this server cannot drive, and one it does not know.
-        for layer in ["scrobble", "nonsense"] {
+        for layer in ["lyrics", "nonsense"] {
             let refused = bearer(
                 &fixture,
                 reqwest::Method::PUT,

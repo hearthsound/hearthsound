@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The plugin host drives plugins that report listening history, suggest music,
+  verify downloads and link listener accounts. A `scrobble` plugin answers its
+  batch and pacing limits and receives now-playing reports, finished listens and
+  love, hate or clear feedback. A `discovery` plugin answers similar tracks and
+  artists, an artist's popular tracks, a listener's recommendations and the
+  playlists it generated for them. A `verification` plugin decides from a
+  fingerprint whether a downloaded file is the recording the server asked for.
+  Scrobble and discovery plugins may also export `account-link`, which names its
+  link method, checks the configuration a listener entered, or starts and
+  finishes a browser flow; it is a capability rather than a layer, so it does
+  not appear in `provides`. The provider registry serves every one of these
+  instances with the accessor its layer uses.
+
 - An acquisition plugin can run a tool the administrator configured: the
   `host-process` import starts `yt-dlp` (or another tool the manifest lists
   under `permissions.process.tools`) inside the job's staging directory, with a

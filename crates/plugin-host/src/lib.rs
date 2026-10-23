@@ -26,6 +26,7 @@
 #![deny(unsafe_code)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 
+mod account_link;
 mod acquisition;
 mod admin;
 pub mod archive;
@@ -33,6 +34,7 @@ mod artwork;
 mod bindings;
 mod catalog;
 mod defaults;
+mod discovery;
 mod engine;
 mod error;
 pub mod files;
@@ -51,9 +53,11 @@ mod pool;
 mod process;
 pub mod registry;
 mod repo;
+mod scrobble;
 mod state;
 mod updates;
 mod validate;
+mod verification;
 
 pub use admin::{AdminError, PluginAdmin};
 pub use archive::PluginArchive;

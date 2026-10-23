@@ -15,7 +15,8 @@ use hearthsound_config::settings::Settings;
 use hearthsound_core::Layer;
 use hearthsound_core::events::EventBus;
 use hearthsound_core::providers::{
-    AcquisitionProvider, ArtworkProvider, CatalogProvider, MetadataProvider,
+    AccountLinkProvider, AcquisitionProvider, ArtworkProvider, CatalogProvider, DiscoveryProvider,
+    MetadataProvider, ScrobbleProvider, VerificationProvider,
 };
 use hearthsound_db::Database;
 use sha2::{Digest, Sha256};
@@ -23,14 +24,17 @@ use uuid::Uuid;
 use wasmtime::Engine;
 use wasmtime::component::{Component, HasSelf, Linker};
 
+use crate::account_link::WasmAccountLinkProvider;
 use crate::acquisition::WasmAcquisitionProvider;
 use crate::archive::PluginArchive;
 use crate::artwork::WasmArtworkProvider;
 use crate::bindings::{
-    self, AcquisitionProviderPre, ArtworkProviderPre, CatalogProviderPre, MetadataProviderPre,
+    self, AccountLinkProviderPre, AcquisitionProviderPre, ArtworkProviderPre, CatalogProviderPre,
+    DiscoveryProviderPre, MetadataProviderPre, ScrobbleProviderPre, VerificationProviderPre,
     imports,
 };
 use crate::catalog::WasmCatalogProvider;
+use crate::discovery::WasmDiscoveryProvider;
 use crate::engine::PluginEngine;
 use crate::error::{HostError, InstallError};
 use crate::files::FileAccess;
@@ -43,8 +47,10 @@ use crate::metadata::WasmMetadataProvider;
 use crate::pool::{self, PoolConfig, StorePool};
 use crate::process::ProcessTable;
 use crate::repo::InstanceDisabler;
+use crate::scrobble::WasmScrobbleProvider;
 use crate::state::InstanceState;
 use crate::validate;
+use crate::verification::WasmVerificationProvider;
 
 /// An installed plugin, ready to be instantiated.
 #[derive(Debug)]
@@ -461,6 +467,118 @@ impl PluginHost {
         )))
     }
 
+    /// Wraps an installed plugin as a verification provider.
+    ///
+    /// # Parameters
+    ///
+    /// - `plugin`: the installed plugin to drive.
+    /// - `instance`: the instance's configuration.
+    ///
+    /// # Returns
+    ///
+    /// The provider, as the core trait object the rest of the server uses.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`PluginHost::catalog_provider`].
+    pub fn verification_provider(
+        &self,
+        plugin: &InstalledPlugin,
+        instance: InstanceConfig,
+    ) -> Result<Arc<dyn VerificationProvider>, HostError> {
+        let (pool, _process) =
+            self.store_pool::<bindings::VerificationProvider>(plugin, &instance)?;
+        Ok(Arc::new(WasmVerificationProvider::new(
+            pool,
+            plugin.manifest().id.clone(),
+            instance.slug,
+        )))
+    }
+
+    /// Wraps an installed plugin as a scrobble provider.
+    ///
+    /// # Parameters
+    ///
+    /// - `plugin`: the installed plugin to drive.
+    /// - `instance`: the instance's configuration.
+    ///
+    /// # Returns
+    ///
+    /// The provider, as the core trait object the rest of the server uses.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`PluginHost::catalog_provider`].
+    pub fn scrobble_provider(
+        &self,
+        plugin: &InstalledPlugin,
+        instance: InstanceConfig,
+    ) -> Result<Arc<dyn ScrobbleProvider>, HostError> {
+        let (pool, _process) = self.store_pool::<bindings::ScrobbleProvider>(plugin, &instance)?;
+        Ok(Arc::new(WasmScrobbleProvider::new(
+            pool,
+            plugin.manifest().id.clone(),
+            instance.slug,
+        )))
+    }
+
+    /// Wraps an installed plugin as a discovery provider.
+    ///
+    /// # Parameters
+    ///
+    /// - `plugin`: the installed plugin to drive.
+    /// - `instance`: the instance's configuration.
+    ///
+    /// # Returns
+    ///
+    /// The provider, as the core trait object the rest of the server uses.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`PluginHost::catalog_provider`].
+    pub fn discovery_provider(
+        &self,
+        plugin: &InstalledPlugin,
+        instance: InstanceConfig,
+    ) -> Result<Arc<dyn DiscoveryProvider>, HostError> {
+        let (pool, _process) = self.store_pool::<bindings::DiscoveryProvider>(plugin, &instance)?;
+        Ok(Arc::new(WasmDiscoveryProvider::new(
+            pool,
+            plugin.manifest().id.clone(),
+            instance.slug,
+        )))
+    }
+
+    /// Wraps an installed plugin as an account-link provider.
+    ///
+    /// # Parameters
+    ///
+    /// - `plugin`: the installed plugin to drive.
+    /// - `instance`: the instance's configuration.
+    ///
+    /// # Returns
+    ///
+    /// The provider, as the core trait object the rest of the server uses.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`PluginHost::catalog_provider`], and
+    /// [`HostError::Incompatible`] when the component exports no `account-link`
+    /// interface.
+    pub fn account_link_provider(
+        &self,
+        plugin: &InstalledPlugin,
+        instance: InstanceConfig,
+    ) -> Result<Arc<dyn AccountLinkProvider>, HostError> {
+        let (pool, _process) =
+            self.store_pool::<bindings::AccountLinkProvider>(plugin, &instance)?;
+        Ok(Arc::new(WasmAccountLinkProvider::new(
+            pool,
+            plugin.manifest().id.clone(),
+            instance.slug,
+        )))
+    }
+
     /// Builds the store pool of one instance for one provider world.
     ///
     /// Every world shares this setup, so an instance's log sink, HTTP client,
@@ -778,18 +896,16 @@ fn load_blocking(
 ///
 /// This is the strongest validation available without running the guest: the
 /// linker resolves every import and each world's types must match exactly. Every
-/// layer the manifest provides must be instantiable.
+/// layer the manifest provides must be instantiable, and so must the
+/// `account-link` interface when the component exports it.
 fn ensure_instantiable(
     linker: &Linker<InstanceState>,
     component: &Component,
     manifest: &Manifest,
 ) -> Result<(), InstallError> {
+    let incompatible = |error: wasmtime::Error| InstallError::Incompatible(format!("{error:#}"));
     for layer in manifest.provides() {
-        let pre = linker
-            .instantiate_pre(component)
-            .map_err(|error| InstallError::Incompatible(format!("{error:#}")))?;
-        let incompatible =
-            |error: wasmtime::Error| InstallError::Incompatible(format!("{error:#}"));
+        let pre = linker.instantiate_pre(component).map_err(incompatible)?;
         match layer {
             Layer::Catalog => {
                 CatalogProviderPre::new(pre).map_err(incompatible)?;
@@ -803,8 +919,22 @@ fn ensure_instantiable(
             Layer::Artwork => {
                 ArtworkProviderPre::new(pre).map_err(incompatible)?;
             }
+            Layer::Verification => {
+                VerificationProviderPre::new(pre).map_err(incompatible)?;
+            }
+            Layer::Scrobble => {
+                ScrobbleProviderPre::new(pre).map_err(incompatible)?;
+            }
+            Layer::Discovery => {
+                DiscoveryProviderPre::new(pre).map_err(incompatible)?;
+            }
             other => return Err(InstallError::UnsupportedCapability(*other)),
         }
+    }
+
+    if validate::exports_account_link(component) {
+        let pre = linker.instantiate_pre(component).map_err(incompatible)?;
+        AccountLinkProviderPre::new(pre).map_err(incompatible)?;
     }
     Ok(())
 }

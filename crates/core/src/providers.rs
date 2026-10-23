@@ -7,7 +7,8 @@
 //! is how the registry hands callers provider handles without exposing
 //! WebAssembly anywhere outside the plugin host.
 //!
-//! The mirror covers the `catalog`, `metadata` and `acquisition` interfaces of
+//! The mirror covers the `catalog`, `metadata`, `artwork`, `acquisition`,
+//! `verification`, `scrobble`, `discovery` and `account-link` interfaces of
 //! `hearthsound:plugin@0.3.0`. Acquisition is the only layer whose calls need
 //! host state beyond the provider's own configuration: its downloads land in a
 //! per-job staging directory, so every call carries an [`AcquisitionContext`].
@@ -898,6 +899,452 @@ pub trait AcquisitionProvider: ProviderLifecycle {
     ///
     /// - `staging_root`: the acquisition's staging directory.
     async fn release_staging(&self, _staging_root: &Path) {}
+}
+
+/// The listener a call is made for.
+///
+/// Every layer that acts on a person's behalf carries this: scrobbling reports
+/// that person's listens, discovery suggests music for them, and account link
+/// stores their credentials. It exists so a plugin never has to guess whose
+/// account it is acting on, and so the host can hand it the account's decrypted
+/// configuration without the plugin knowing where that came from.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_core::providers::UserContext;
+///
+/// let user = UserContext {
+///     user_id: "0194f3b0-2b3c-7d4e-8f00-000000000001".to_owned(),
+///     config: None,
+/// };
+/// assert!(user.config.is_none());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserContext {
+    /// The user's UUID, lowercase and hyphenated.
+    pub user_id: String,
+    /// The user's configuration for the instance as JSON text, when they have
+    /// one.
+    ///
+    /// This is the inner `config` object of their stored envelope, decrypted,
+    /// so it holds exactly the fields the plugin declared in its user schema.
+    pub config: Option<String>,
+}
+
+/// One listen of one track.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listen {
+    /// The track title.
+    pub title: String,
+    /// The artist names in credit order; the first is the primary artist.
+    pub artists: Vec<String>,
+    /// The album title, when known.
+    pub album: Option<String>,
+    /// The album artist, when known.
+    pub album_artist: Option<String>,
+    /// The track duration in milliseconds, when known.
+    pub duration_ms: Option<u32>,
+    /// The track number within its disc, when known.
+    pub track_number: Option<u16>,
+    /// The canonical identifiers the server knows for the recording and its
+    /// entities.
+    pub ids: Vec<ExternalId>,
+    /// When playback started, in unix milliseconds UTC.
+    pub listened_at: u64,
+    /// The client application that played the track, when known.
+    pub client: Option<String>,
+}
+
+/// A listener's opinion of a track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedbackValue {
+    /// The listener likes the track.
+    Love,
+    /// The listener dislikes the track.
+    Hate,
+    /// The listener withdrew an earlier opinion.
+    Clear,
+}
+
+/// How the host paces and batches deliveries to a scrobbling service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrobbleLimits {
+    /// Most listens one submit call may carry; at least one.
+    pub max_batch: u32,
+    /// Least time between two calls to the service, in milliseconds.
+    pub min_interval_ms: u32,
+    /// Whether the service supports feedback.
+    pub feedback: bool,
+}
+
+/// A track a discovery service suggests.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SuggestedTrack {
+    /// The track title.
+    pub title: String,
+    /// The artist names in credit order.
+    pub artists: Vec<String>,
+    /// The album title, when the service reports one.
+    pub album: Option<String>,
+    /// The track duration in milliseconds, when the service reports one.
+    pub duration_ms: Option<u32>,
+    /// The identifiers the service knows for the recording.
+    pub ids: Vec<ExternalId>,
+    /// The service's confidence, when it reports one.
+    pub score: Option<f32>,
+}
+
+/// An artist a discovery service suggests.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SuggestedArtist {
+    /// The artist's name.
+    pub name: String,
+    /// The identifiers the service knows for the artist.
+    pub ids: Vec<ExternalId>,
+    /// The service's confidence, when it reports one.
+    pub score: Option<f32>,
+}
+
+/// The track a similarity or popularity query is seeded with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackSeed {
+    /// The track title.
+    pub title: String,
+    /// The artist names in credit order.
+    pub artists: Vec<String>,
+    /// The canonical identifiers the server knows for the track.
+    pub ids: Vec<ExternalId>,
+}
+
+/// The artist a similarity query is seeded with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtistSeed {
+    /// The artist's name.
+    pub name: String,
+    /// The canonical identifiers the server knows for the artist.
+    pub ids: Vec<ExternalId>,
+}
+
+/// A playlist a discovery service generated for the listener.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaylistSummary {
+    /// The service's stable reference for this playlist slot, so a refresh
+    /// replaces it in place.
+    pub reference: String,
+    /// The playlist name.
+    pub name: String,
+    /// The playlist description, when the service supplies one.
+    pub description: Option<String>,
+    /// When the service retires the playlist, in unix milliseconds UTC.
+    pub expires_at: Option<u64>,
+}
+
+/// A generated playlist with its tracks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeneratedPlaylist {
+    /// The playlist's identity and display fields.
+    pub summary: PlaylistSummary,
+    /// The tracks the playlist holds.
+    pub tracks: Vec<SuggestedTrack>,
+}
+
+/// The recording a downloaded file is expected to be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedTrack {
+    /// The track title.
+    pub title: String,
+    /// The artist names in credit order.
+    pub artists: Vec<String>,
+    /// The album title, when known.
+    pub album: Option<String>,
+    /// The track duration in milliseconds, when known.
+    pub duration_ms: Option<u32>,
+    /// The canonical identifiers the server knows for the recording.
+    pub ids: Vec<ExternalId>,
+}
+
+/// A Chromaprint fingerprint the host computed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fingerprint {
+    /// The compressed fingerprint, URL-safe base64 without padding, exactly as
+    /// `fpcalc` prints it.
+    pub value: String,
+    /// The file's full duration in whole seconds.
+    pub duration_secs: u32,
+}
+
+/// What a verification service decided about a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// The file is the expected recording.
+    Match,
+    /// The file is a different recording.
+    Mismatch,
+    /// The service cannot tell.
+    Unknown,
+}
+
+/// A verification service's answer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerificationResult {
+    /// What the service decided.
+    pub verdict: Verdict,
+    /// The confidence of the verdict, from 0 to 1.
+    pub score: f32,
+    /// A short reason for the acquisition log.
+    pub detail: Option<String>,
+    /// The identifiers of the recording the fingerprint identified.
+    pub identified: Vec<ExternalId>,
+}
+
+/// How a listener links their account on a service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkMethod {
+    /// The listener enters the fields of the plugin's user config schema.
+    Config,
+    /// The listener approves access on the service's own site.
+    Browser,
+}
+
+/// A linked account: the name to show and the configuration to store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedAccount {
+    /// The name of the account on the service.
+    pub name: String,
+    /// The user configuration to store for later calls, as JSON text.
+    pub config: String,
+}
+
+/// Reporting plays to a scrobbling service.
+#[async_trait]
+pub trait ScrobbleProvider: ProviderLifecycle {
+    /// Reports the service's pacing and batch limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when the plugin could not be asked.
+    async fn get_limits(&self) -> Result<ScrobbleLimits, ProviderError>;
+
+    /// Reports that the listener started playing a track.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the listener the play belongs to.
+    /// - `track`: the track being played.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::RateLimited`] when the service asked to slow
+    /// down, and other [`ProviderError`] values when the report failed.
+    async fn now_playing(&self, user: &UserContext, track: &Listen) -> Result<(), ProviderError>;
+
+    /// Reports finished listens.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the listener the listens belong to.
+    /// - `listens`: the listens to submit, in the order they happened.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::RateLimited`] when the service asked to slow
+    /// down, and other [`ProviderError`] values when the submission failed.
+    async fn submit_listens(
+        &self,
+        user: &UserContext,
+        listens: &[Listen],
+    ) -> Result<(), ProviderError>;
+
+    /// Reports the listener's opinion of a track.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the listener the opinion belongs to.
+    /// - `track`: the track the opinion is about.
+    /// - `value`: the opinion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when the report failed.
+    async fn send_feedback(
+        &self,
+        user: &UserContext,
+        track: &Listen,
+        value: FeedbackValue,
+    ) -> Result<(), ProviderError>;
+}
+
+/// Suggestions: similar tracks and artists, popular tracks, recommendations and
+/// generated playlists.
+///
+/// A query whose answer is an empty list means the service has nothing to say;
+/// the caller then asks the next instance in the layer, which is why an empty
+/// list is never an error.
+#[async_trait]
+pub trait DiscoveryProvider: ProviderLifecycle {
+    /// Suggests tracks similar to a seed track.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the listener, when they linked this instance; a suggestion
+    ///   that does not depend on the listener is asked without one.
+    /// - `seed`: the track to find similar tracks for.
+    /// - `limit`: the maximum number of suggestions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when the lookup failed.
+    async fn similar_tracks(
+        &self,
+        user: Option<&UserContext>,
+        seed: &TrackSeed,
+        limit: u32,
+    ) -> Result<Vec<SuggestedTrack>, ProviderError>;
+
+    /// Suggests artists similar to a seed artist.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the listener, when they linked this instance.
+    /// - `seed`: the artist to find similar artists for.
+    /// - `limit`: the maximum number of suggestions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when the lookup failed.
+    async fn similar_artists(
+        &self,
+        user: Option<&UserContext>,
+        seed: &ArtistSeed,
+        limit: u32,
+    ) -> Result<Vec<SuggestedArtist>, ProviderError>;
+
+    /// Lists an artist's most popular tracks.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the listener, when they linked this instance.
+    /// - `artist`: the artist whose popular tracks are wanted.
+    /// - `limit`: the maximum number of tracks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when the lookup failed.
+    async fn artist_top_tracks(
+        &self,
+        user: Option<&UserContext>,
+        artist: &ArtistSeed,
+        limit: u32,
+    ) -> Result<Vec<SuggestedTrack>, ProviderError>;
+
+    /// Suggests tracks for a listener.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the listener.
+    /// - `limit`: the maximum number of suggestions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when the lookup failed.
+    async fn recommended_tracks(
+        &self,
+        user: &UserContext,
+        limit: u32,
+    ) -> Result<Vec<SuggestedTrack>, ProviderError>;
+
+    /// Lists the playlists the service generated for a listener.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the listener.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when the lookup failed.
+    async fn playlists(&self, user: &UserContext) -> Result<Vec<GeneratedPlaylist>, ProviderError>;
+}
+
+/// Checking that a downloaded file is the recording the server asked for.
+#[async_trait]
+pub trait VerificationProvider: ProviderLifecycle {
+    /// Verifies a fingerprint against the expected recording.
+    ///
+    /// # Parameters
+    ///
+    /// - `expected`: the recording the server asked for.
+    /// - `print`: the fingerprint the host computed from the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when the lookup failed. A file the service
+    /// cannot identify is [`Verdict::Unknown`], not an error.
+    async fn verify(
+        &self,
+        expected: &ExpectedTrack,
+        print: &Fingerprint,
+    ) -> Result<VerificationResult, ProviderError>;
+}
+
+/// Linking a listener's account on a service to their Hearthsound account.
+#[async_trait]
+pub trait AccountLinkProvider: ProviderLifecycle {
+    /// Reports how a listener links an account with this plugin.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when the plugin could not be asked.
+    async fn get_link_method(&self) -> Result<LinkMethod, ProviderError>;
+
+    /// Checks a user configuration and names the account it belongs to.
+    ///
+    /// This is the `config` method: the listener has entered the fields of the
+    /// plugin's user schema, and the service either accepts them or not.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the listener, carrying the configuration to check.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Unauthorized`] when the service rejects the
+    /// credentials, and other [`ProviderError`] values when the check failed.
+    async fn verify_account(&self, user: &UserContext) -> Result<LinkedAccount, ProviderError>;
+
+    /// Starts a browser link flow and returns the URL to open.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the listener linking their account.
+    /// - `callback_url`: where the service must send the listener back.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when the flow could not be started.
+    async fn begin_link(
+        &self,
+        user: &UserContext,
+        callback_url: &str,
+    ) -> Result<String, ProviderError>;
+
+    /// Finishes a browser link flow from the callback's query parameters.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the listener linking their account.
+    /// - `query`: every query parameter the callback received, except the
+    ///   host's own `state`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Unauthorized`] when the service refused the
+    /// flow, and other [`ProviderError`] values when it could not be finished.
+    async fn complete_link(
+        &self,
+        user: &UserContext,
+        query: &[(String, String)],
+    ) -> Result<LinkedAccount, ProviderError>;
 }
 
 #[cfg(test)]

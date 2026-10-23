@@ -581,6 +581,18 @@ impl InstanceService {
                 let provider = self.host.artwork_provider(plugin, instance.clone())?;
                 provider.validate_config(config).await
             }
+            Layer::Verification => {
+                let provider = self.host.verification_provider(plugin, instance.clone())?;
+                provider.validate_config(config).await
+            }
+            Layer::Scrobble => {
+                let provider = self.host.scrobble_provider(plugin, instance.clone())?;
+                provider.validate_config(config).await
+            }
+            Layer::Discovery => {
+                let provider = self.host.discovery_provider(plugin, instance.clone())?;
+                provider.validate_config(config).await
+            }
             other => return Err(InstanceError::UnsupportedCapability(other)),
         };
 
