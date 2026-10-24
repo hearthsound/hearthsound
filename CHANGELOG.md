@@ -175,10 +175,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   releases built for that API. slskd 0.2.0 also offers whole album folders to
   album acquisitions, and Deezer 0.3.1 stays within Deezer's request quota.
 
-- Release builds embed web client 0.2.0: Connected Services in the account
-  menu, Home shelves for recommendations and generated playlists, playlist
-  reordering, adding a whole album to a playlist, relevance-ranked top search
-  results, and album and artist links on every queued song.
+- Release builds embed web client 0.2.1: Connected Services in the account
+  menu, Home shelves for recommendations and generated playlists that each
+  appear as soon as their own data arrives, playlist reordering, adding a whole
+  album to a playlist, relevance-ranked top search results, album and artist
+  links on every queued song, covers that show at once when already loaded,
+  and a broken cover that keeps its placeholder instead of being retried.
 
 - A plugin that an earlier release left waiting for approval is granted the
   permissions its stored manifest requests and enabled when the database
