@@ -19,9 +19,9 @@
 
 [[plugin]]
 id = "app.hearthsound.deezer"
-version = "0.3.0"
-url = "https://github.com/hearthsound/plugin-deezer/releases/download/v0.3.0/app.hearthsound.deezer-0.3.0.hsplugin"
-sha256 = "d2f2986cb10c26a6d05f713d248c453b637a94b4ba2da43047328f3551dbf178"
+version = "0.3.1"
+url = "https://github.com/hearthsound/plugin-deezer/releases/download/v0.3.1/app.hearthsound.deezer-0.3.1.hsplugin"
+sha256 = "1773f082c1c78e5cd518340bf272d0bdcdd6158c5662331c0c3f69e9092c0935"
 
 [[plugin]]
 id = "app.hearthsound.musicbrainz"
