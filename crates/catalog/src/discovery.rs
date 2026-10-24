@@ -393,6 +393,16 @@ struct Inner {
     users: Arc<dyn UserContextSource>,
     /// The in-memory cache of provider answers.
     cache: MemoryCache<DiscoveryKey, DiscoveryAnswer>,
+    /// The catalog entity a suggestion resolved to.
+    ///
+    /// Resolution is a catalog search per suggestion, and a panel that is
+    /// redrawn asks for the same suggestions again; remembering the answer
+    /// keeps a recommendation from spending the catalog's quota twice. Only a
+    /// found entity is stored: a miss is worth asking again, because a search
+    /// that failed may have failed for a transient reason.
+    track_resolutions: MemoryCache<String, CatalogTrackResult>,
+    /// The catalog artist a normalized name resolved to.
+    artist_resolutions: MemoryCache<String, CatalogId>,
 }
 
 /// The key of one cached discovery answer.
@@ -441,12 +451,22 @@ impl DiscoveryService {
             .max_capacity(DISCOVERY_CACHE_CAPACITY)
             .time_to_live(DISCOVERY_CACHE_TTL)
             .build();
+        let track_resolutions = MemoryCache::builder()
+            .max_capacity(DISCOVERY_CACHE_CAPACITY)
+            .time_to_live(DISCOVERY_CACHE_TTL)
+            .build();
+        let artist_resolutions = MemoryCache::builder()
+            .max_capacity(DISCOVERY_CACHE_CAPACITY)
+            .time_to_live(DISCOVERY_CACHE_TTL)
+            .build();
         DiscoveryService {
             inner: Arc::new(Inner {
                 registry,
                 catalog,
                 users,
                 cache,
+                track_resolutions,
+                artist_resolutions,
             }),
         }
     }
@@ -842,29 +862,36 @@ impl DiscoveryService {
         let suggestions = self
             .recommended_tracks(user, RECOMMENDED_TRACK_LIMIT)
             .await?;
-        let resolved = self
-            .resolve_tracks(&suggestions, RECOMMENDED_TRACK_LIMIT)
-            .await?;
+        let wanted = usize::try_from(limit).unwrap_or(usize::MAX);
         let mut albums = Vec::new();
         let mut seen = HashSet::new();
-        for result in resolved {
-            let Some(album) = result.track.album.clone() else {
-                continue;
-            };
-            let Ok(id) = CatalogId::new(
-                result.id.slug().clone(),
-                EntityKind::Album,
-                album.id.clone(),
-            ) else {
-                continue;
-            };
-            if !seen.insert(id.to_string()) {
-                continue;
-            }
-            let album = self.completed_album(&result.track, album, &id).await;
-            albums.push(CatalogAlbumRefResult { id, album });
-            if albums.len() >= usize::try_from(limit).unwrap_or(usize::MAX) {
-                break;
+        // Only as many suggestions are resolved as the shelf needs: tracks of
+        // one album count once, and a suggestion no provider names contributes
+        // nothing, so resolving all hundred would spend the catalog's quota on
+        // entries the answer never shows.
+        for chunk in suggestions.chunks(RESOLVE_PARALLELISM) {
+            let resolved = self
+                .resolve_tracks(chunk, u32::try_from(chunk.len()).unwrap_or(u32::MAX))
+                .await?;
+            for result in resolved {
+                let Some(album) = result.track.album.clone() else {
+                    continue;
+                };
+                let Ok(id) = CatalogId::new(
+                    result.id.slug().clone(),
+                    EntityKind::Album,
+                    album.id.clone(),
+                ) else {
+                    continue;
+                };
+                if !seen.insert(id.to_string()) {
+                    continue;
+                }
+                let album = self.completed_album(&result.track, album, &id).await;
+                albums.push(CatalogAlbumRefResult { id, album });
+                if albums.len() >= wanted {
+                    return Ok(albums);
+                }
             }
         }
         Ok(albums)
@@ -901,7 +928,12 @@ impl DiscoveryService {
         {
             album.artists = vec![primary.clone()];
         }
-        if album.artists.is_empty() || album.year.is_none() || album.images.is_empty() {
+        // The resolved track already names the artist the album is filed under,
+        // so a lookup is only needed when the reference names no credit at all.
+        // Missing year and cover entries do not justify one: the catalog album
+        // id the entry carries serves the cover, and a shelf that resolves ten
+        // albums should cost ten searches, not ten more album lookups.
+        if album.artists.is_empty() {
             match self.inner.catalog.album(id).await {
                 Ok(full) => {
                     if album.artists.is_empty() {
@@ -982,6 +1014,7 @@ impl DiscoveryService {
             .resolve_artists(scopes, &suggestions, SIMILAR_ALBUM_ARTISTS)
             .await?;
         let personal = Scope::Personal { user_id: user };
+        let wanted = usize::try_from(size).unwrap_or(usize::MAX);
         let mut lists = Vec::new();
         for artist in resolved {
             let albums = match artist {
@@ -1006,6 +1039,12 @@ impl DiscoveryService {
             };
             if !albums.is_empty() {
                 lists.push(albums);
+            }
+            // The interleave cannot shrink when another artist joins it, so the
+            // artists that could not contribute to a full shelf are never asked
+            // for their albums.
+            if interleave_albums(lists.clone(), size).len() >= wanted {
+                break;
             }
         }
         Ok(SimilarArtistAlbums {
@@ -1041,6 +1080,18 @@ impl DiscoveryService {
         if wanted.is_empty() {
             return Ok(None);
         }
+        if let Some(cached) = self.inner.artist_resolutions.get(&wanted).await {
+            match self.inner.catalog.artist(&cached).await {
+                Ok(artist) => return Ok(Some(artist)),
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        name,
+                        "a cached artist resolution could not be read back"
+                    );
+                }
+            }
+        }
         let query = CatalogQuery {
             text: name.to_owned(),
             kinds: vec![EntityKind::Artist],
@@ -1048,10 +1099,19 @@ impl DiscoveryService {
             offset: 0,
         };
         match self.inner.catalog.search(&query).await {
-            Ok(found) => Ok(found
-                .artists
-                .into_iter()
-                .find(|result| normalize(&result.artist.name) == wanted)),
+            Ok(found) => {
+                let resolved = found
+                    .artists
+                    .into_iter()
+                    .find(|result| normalize(&result.artist.name) == wanted);
+                if let Some(resolved) = &resolved {
+                    self.inner
+                        .artist_resolutions
+                        .insert(wanted, resolved.id.clone())
+                        .await;
+                }
+                Ok(resolved)
+            }
             Err(error) => {
                 tracing::debug!(
                     %error,
@@ -1203,6 +1263,10 @@ impl DiscoveryService {
     /// The catalog entity the suggestion names, or `None` when the search did
     /// not name it.
     async fn resolve_track(&self, suggestion: &SuggestedTrack) -> Option<CatalogTrackResult> {
+        let key = track_resolution_key(suggestion);
+        if let Some(cached) = self.inner.track_resolutions.get(&key).await {
+            return Some(cached);
+        }
         let primary = suggestion
             .artists
             .first()
@@ -1231,7 +1295,7 @@ impl DiscoveryService {
             }
         };
         let title = normalize(&suggestion.title);
-        found.tracks.into_iter().find(|result| {
+        let resolved = found.tracks.into_iter().find(|result| {
             if normalize(&result.track.title) != title {
                 return false;
             }
@@ -1242,7 +1306,14 @@ impl DiscoveryService {
                     .first()
                     .map(|credit| normalize(&credit.name) == normalize(primary))
                     .unwrap_or(false)
-        })
+        });
+        if let Some(resolved) = &resolved {
+            self.inner
+                .track_resolutions
+                .insert(key, resolved.clone())
+                .await;
+        }
+        resolved
     }
 
     /// Resolves one suggested artist to a visible stored artist or a catalog
@@ -1368,6 +1439,38 @@ async fn visible_in(
         }
     }
     Ok(false)
+}
+
+/// Builds the cache key of one resolved suggestion.
+///
+/// The key names the suggestion the way the resolution decides it: the title,
+/// the artist names, and the identifiers the service attached. Two suggestions
+/// that differ in any of them are different questions and get different keys.
+///
+/// # Parameters
+///
+/// - `suggestion`: the suggestion to key.
+///
+/// # Returns
+///
+/// The canonical key.
+fn track_resolution_key(suggestion: &SuggestedTrack) -> String {
+    let mut key = format!(
+        "title={}|artists={}",
+        encode(&suggestion.title),
+        suggestion.artists.len()
+    );
+    for artist in &suggestion.artists {
+        key.push_str("|artist=");
+        key.push_str(&encode(artist));
+    }
+    for id in &suggestion.ids {
+        key.push_str("|id=");
+        key.push_str(&encode(&id.namespace));
+        key.push('=');
+        key.push_str(&encode(&id.value));
+    }
+    key
 }
 
 /// Builds the canonical argument string of a track query.

@@ -281,6 +281,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   uses for the caller, and an entity outside every scope is answered from the
   catalog view of its provider alias instead of failing with error 70.
 
+- The recommendation shelves spend far less catalog quota. Only as many
+  suggestions are resolved as the requested number of distinct albums needs,
+  a resolved suggestion is remembered for an hour, an album reference that
+  already carries its artist no longer triggers a second catalog lookup, and
+  the similar-artist list stops once its shelf is full.
+
 ### Security
 
 - Updated tokio to 1.54.1 and ctutils to 0.4.5, fixing RUSTSEC-2026-0386 and

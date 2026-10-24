@@ -112,8 +112,8 @@ async fn recommended_albums_are_distinct_and_ordered() {
     insta::assert_snapshot!("recommended-albums-xml", xml_answer.body);
 }
 
-/// A recommended album the catalog knows names its artist and year even when
-/// the service that recommended it named only the album.
+/// A recommended album whose reference is bare names the artist of the resolved
+/// track without a second catalog album lookup.
 #[tokio::test]
 async fn recommended_albums_name_the_artist_of_a_catalog_album() {
     let fixture = Fixture::new().await;
@@ -161,7 +161,10 @@ async fn recommended_albums_name_the_artist_of_a_catalog_album() {
     )
     .unwrap();
     assert_eq!(album["artistId"], artist_id.to_string(), "{}", answer.body);
-    assert_eq!(album["year"], 2026, "{}", answer.body);
+    // A bare album reference carries no year, and the resolved track already
+    // names the artist, so the shelf entry is not completed from a second
+    // catalog lookup.
+    assert_eq!(album["year"], 0, "{}", answer.body);
 }
 
 /// The recommended-albums endpoint answers error 70 without the flag.
@@ -346,4 +349,75 @@ async fn similar_artist_albums_need_the_vendor_flag() {
     .await;
 
     assert_error(&refused, 70);
+}
+
+/// Answers a catalog search with one track named after the query.
+struct SearchResponder;
+
+impl wiremock::Respond for SearchResponder {
+    fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+        let query = request
+            .url
+            .query_pairs()
+            .find(|(name, _)| name == "q")
+            .map(|(_, value)| value.into_owned())
+            .unwrap_or_default();
+        let body = serde_json::json!([{
+            "id": "remote-1",
+            "title": query,
+            "artists": ["Fixture Artist"],
+        }]);
+        wiremock::ResponseTemplate::new(200).set_body_string(body.to_string())
+    }
+}
+
+#[tokio::test]
+async fn recommended_albums_resolve_only_what_they_show_and_remember_it() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/search"))
+        .respond_with(SearchResponder)
+        .mount(&server)
+        .await;
+
+    let fixture = Fixture::new().await;
+    fixture
+        .install_catalog_instance(
+            "httpcat",
+            hearthsound_test_support::HTTP_CATALOG,
+            json!({ "url": format!("{}/search", server.uri()) }),
+        )
+        .await;
+    fixture
+        .assign_layer(hearthsound_core::Layer::Catalog, &["httpcat"])
+        .await;
+    let recommended: Vec<serde_json::Value> = (1..=100)
+        .map(|number| json!({ "title": format!("song {number}"), "artists": [] }))
+        .collect();
+    fixture
+        .install_discovery_layer(&[("discovery", json!({ "recommended": recommended }))])
+        .await;
+    fixture.link_discovery("discovery").await;
+    let app = fixture.app();
+    let uri = format!(
+        "/rest/hsGetRecommendedAlbums?apiKey={}&hearthsound=1&f=json&size=1",
+        fixture.api_key
+    );
+
+    let first = get(&app, &uri).await;
+    assert_ok(&first);
+    assert_eq!(album_count(&first.body), 1, "{}", first.body);
+    let after_first = server.received_requests().await.unwrap().len();
+    assert!(
+        after_first <= 4,
+        "resolved {after_first} suggestions for one album"
+    );
+
+    let second = get(&app, &uri).await;
+    assert_ok(&second);
+    let after_second = server.received_requests().await.unwrap().len();
+    assert_eq!(
+        after_second, after_first,
+        "a repeated call must reuse the resolved suggestions"
+    );
 }
