@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE albums SET display_artist = COALESCE(display_artist, ?), updated_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "d02ee8aaf5e6edc41454cee18bcf12fe22ec553eeb16eb337988a85a7782fdae"
+}

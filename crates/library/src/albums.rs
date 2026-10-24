@@ -194,6 +194,66 @@ pub async fn upsert_album(
     Ok(EntityId::from_uuid(IdPrefix::Album, id))
 }
 
+/// Adds an album's artist credits when it has none.
+///
+/// An album materialized from the album reference of a single track can arrive
+/// without credits when the provider left the reference's artist list empty.
+/// The track's own credits are then the best evidence of who the album is by,
+/// and this writes them so the album is listed under those artists.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `album_id`: the album's client id.
+/// - `credits`: the credits to write when the album has none.
+/// - `display_artist`: the display artist to fill in when the row has none.
+///
+/// # Returns
+///
+/// `true` when credits were written, `false` when the album already had some or
+/// none were supplied.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when a statement fails.
+pub async fn add_album_credits_if_missing(
+    conn: &mut SqliteConnection,
+    album_id: EntityId,
+    credits: &[ArtistCredit],
+    display_artist: Option<&str>,
+) -> Result<bool, LibraryError> {
+    if credits.is_empty() {
+        return Ok(false);
+    }
+    let album_key = entity_key(album_id);
+    let existing: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM album_artists WHERE album_id = ?",
+        album_key,
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    if existing > 0 {
+        return Ok(false);
+    }
+    let mut artist_ids = Vec::with_capacity(credits.len());
+    for credit in credits {
+        artist_ids.push(upsert_artist(conn, &credit.artist).await?);
+    }
+    write_album_credits(conn, album_id.uuid(), credits, &artist_ids).await?;
+    if let Some(display_artist) = display_artist {
+        sqlx::query!(
+            "UPDATE albums SET display_artist = COALESCE(display_artist, ?), updated_at = ? \
+             WHERE id = ?",
+            display_artist,
+            now_millis(),
+            album_key,
+        )
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(true)
+}
+
 /// Replaces an album's artist credits.
 ///
 /// # Parameters

@@ -481,6 +481,12 @@ async fn store_album(
     if let Some(stored) =
         aliases::entity_by_alias_conn(conn, &namespace, EntityKind::Album, &album.id).await?
     {
+        let fallback = album
+            .tracks
+            .first()
+            .map(|track| track.artists.as_slice())
+            .unwrap_or_default();
+        ensure_album_credits(conn, slug, stored, &album.artists, fallback).await?;
         let mut tracks_stored = Vec::with_capacity(album.tracks.len());
         for track in &album.tracks {
             tracks_stored
@@ -511,6 +517,12 @@ async fn store_album(
     )
     .await?;
     record_credit_aliases(conn, slug, &album.artists).await?;
+    let fallback = album
+        .tracks
+        .first()
+        .map(|track| track.artists.as_slice())
+        .unwrap_or_default();
+    ensure_album_credits(conn, slug, stored, &album.artists, fallback).await?;
 
     let mut tracks_stored = Vec::with_capacity(album.tracks.len());
     for track in &album.tracks {
@@ -532,6 +544,54 @@ enum TrackAlbum<'a> {
     Stored(EntityId),
     /// The album is known only by the reference the provider returned.
     Reference(&'a CatalogAlbumRef),
+}
+
+/// Fills in an album's credits from the track when the reference carried none.
+///
+/// A provider may name a track's album with no artists, which leaves the album
+/// row with no credit and therefore invisible in an artist's album list even
+/// though its tracks credit that artist. The track's own credits are used, and
+/// the fallback artists' provider ids are recorded the same way the reference's
+/// would have been.
+///
+/// # Parameters
+///
+/// - `conn`: the transaction to write on.
+/// - `slug`: the instance that issued the entities.
+/// - `album`: the stored album.
+/// - `preferred`: the credits the album reference carried.
+/// - `fallback`: the credits of the track that named the album.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::Database`] or [`CatalogError::Library`] when a row
+/// cannot be written.
+async fn ensure_album_credits(
+    conn: &mut SqliteConnection,
+    slug: &Slug,
+    album: EntityId,
+    preferred: &[ProviderCredit],
+    fallback: &[ProviderCredit],
+) -> Result<(), CatalogError> {
+    let source = if preferred.is_empty() {
+        fallback
+    } else {
+        preferred
+    };
+    if source.is_empty() {
+        return Ok(());
+    }
+    let written = albums::add_album_credits_if_missing(
+        conn,
+        album,
+        &credits(source),
+        display_artist(source).as_deref(),
+    )
+    .await?;
+    if written && preferred.is_empty() {
+        record_credit_aliases(conn, slug, fallback).await?;
+    }
+    Ok(())
 }
 
 /// Stores the album a materialized track belongs to.
@@ -573,11 +633,13 @@ async fn store_album_ref(
     conn: &mut SqliteConnection,
     slug: &Slug,
     album: &CatalogAlbumRef,
+    track: &CatalogTrack,
 ) -> Result<EntityId, CatalogError> {
     let namespace = aliases::provider_namespace(slug);
     if let Some(stored) =
         aliases::entity_by_alias_conn(conn, &namespace, EntityKind::Album, &album.id).await?
     {
+        ensure_album_credits(conn, slug, stored, &album.artists, &track.artists).await?;
         return Ok(stored);
     }
 
@@ -589,6 +651,7 @@ async fn store_album_ref(
     let stored = albums::upsert_album(conn, &input, &credits).await?;
     let stored = claim_alias(conn, &namespace, EntityKind::Album, &album.id, stored).await?;
     record_credit_aliases(conn, slug, &album.artists).await?;
+    ensure_album_credits(conn, slug, stored, &album.artists, &track.artists).await?;
     Ok(stored)
 }
 
@@ -644,7 +707,7 @@ async fn store_track(
     let album_id = match album {
         Some(TrackAlbum::Stored(album)) => Some(album),
         Some(TrackAlbum::Reference(reference)) => {
-            Some(store_album_ref(conn, slug, reference).await?)
+            Some(store_album_ref(conn, slug, reference, track).await?)
         }
         None => None,
     };

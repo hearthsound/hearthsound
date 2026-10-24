@@ -295,6 +295,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   catalog track without an album image no longer hands out a `coverArt` id that
   cannot resolve.
 
+- An artist page lists the albums whose tracks credit the artist. A provider
+  can name a track's album with an empty artist list, which left the album row
+  uncredited even though its track credited the artist; the album now takes the
+  track's credits when its reference carries none, and an album already stored
+  without credits gains them the next time it is materialized.
+
 ### Security
 
 - Updated tokio to 1.54.1 and ctutils to 0.4.5, fixing RUSTSEC-2026-0386 and

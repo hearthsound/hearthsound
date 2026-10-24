@@ -755,3 +755,38 @@ async fn a_scanned_track_with_the_same_title_artist_and_album_is_reused() {
     );
     assert_eq!(count_rows(&env.database, "tracks").await, 1);
 }
+
+#[tokio::test]
+async fn a_track_with_a_bare_album_reference_credits_its_album_artist() {
+    let env = Env::new().await;
+    env.instance(
+        "album",
+        ALBUM_CATALOG,
+        "com.example.album-catalog",
+        json!({ "bareAlbumRefs": true }),
+    )
+    .await;
+    env.assign(Layer::Catalog, &["album"]).await;
+    let track = env
+        .service()
+        .materialize_track(&catalog_id(
+            "album",
+            EntityKind::Track,
+            "album-catalog-track-1",
+        ))
+        .await
+        .unwrap();
+
+    let library = hearthsound_library::LibraryRepository::new(&env.database);
+    let stored = library.get_track(track).await.unwrap().unwrap();
+    let album = stored.album_id.unwrap();
+    let album_credit = library.list_album_credits(album).await.unwrap();
+    let track_credit = library.list_track_credits(track).await.unwrap();
+
+    assert_eq!(
+        album_credit.len(),
+        1,
+        "the album is credited by its track's artist"
+    );
+    assert_eq!(album_credit[0].artist_id, track_credit[0].artist_id);
+}
