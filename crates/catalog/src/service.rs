@@ -33,6 +33,7 @@ use tokio::time::error::Elapsed;
 
 use crate::artwork::REFUSED_IMAGE_TTL;
 use crate::cache::{Cache, ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
+use crate::dedupe::normalize;
 use crate::error::CatalogError;
 use crate::wire::{WireAlbum, WireAlbumRefs, WireArtist, WireResults, WireTrack, WireTracks};
 
@@ -174,6 +175,13 @@ struct Inner {
     /// asked again until its entry expires. A tile grid of a hundred covers
     /// therefore costs one refusal per image, not one per visit.
     refused_images: MemoryCache<String, ()>,
+    /// The catalog artist a normalized name resolved to.
+    ///
+    /// Resolving a name is a catalog search, and a browse page asks for the same
+    /// name on every visit, so the answer is remembered. Only a found artist is
+    /// stored: a miss is worth asking again, because a search that failed may
+    /// have failed for a transient reason.
+    artist_resolutions: MemoryCache<String, CatalogId>,
 }
 
 /// How many image URLs the refusal window remembers.
@@ -181,6 +189,22 @@ struct Inner {
 /// A bound, not a target: the window only has to hold the images one grid asks
 /// for at a time, and an evicted entry costs one request.
 const REFUSED_IMAGE_CAPACITY: u64 = 4_096;
+
+/// How many catalog results an artist name resolution reads.
+const ARTIST_RESOLUTION_LIMIT: u32 = 3;
+
+/// How many artist name resolutions the service remembers.
+///
+/// A bound, not a target: the cache exists to answer the visits a browse page
+/// repeats rather than to be a store.
+const ARTIST_RESOLUTION_CAPACITY: u64 = 1_024;
+
+/// How long one artist name resolution stays fresh.
+///
+/// A day. The artist behind a name changes only when the provider's catalog
+/// does, and a browse page is read far more often than the catalog should be
+/// searched.
+const ARTIST_RESOLUTION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 impl CatalogService {
     /// Builds the service.
@@ -210,6 +234,10 @@ impl CatalogService {
             .max_capacity(REFUSED_IMAGE_CAPACITY)
             .time_to_live(REFUSED_IMAGE_TTL)
             .build();
+        let artist_resolutions = MemoryCache::builder()
+            .max_capacity(ARTIST_RESOLUTION_CAPACITY)
+            .time_to_live(ARTIST_RESOLUTION_TTL)
+            .build();
         CatalogService {
             inner: Arc::new(Inner {
                 registry,
@@ -219,6 +247,7 @@ impl CatalogService {
                 artwork_dir: artwork_dir.into(),
                 missing_images,
                 refused_images,
+                artist_resolutions,
             }),
         }
     }
@@ -394,6 +423,93 @@ impl CatalogService {
             id: catalog_id(id.slug(), EntityKind::Artist, &artist.id)?,
             artist,
         })
+    }
+
+    /// Finds the catalog artist one name names.
+    ///
+    /// A browse page that holds a stored artist but no recorded provider alias
+    /// still has a name to search by, and the catalog is what can name the rest
+    /// of that artist's work.
+    ///
+    /// The first search of one name is remembered for a day; a remembered
+    /// resolution that can no longer be read back is forgotten and searched
+    /// again.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: the artist's name.
+    ///
+    /// # Returns
+    ///
+    /// The catalog artist whose normalized name is equal, when one exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when a remembered resolution reports a failure
+    /// the layer raises; a search failure is logged and reported as `None`, so a
+    /// provider that cannot answer does not fail the page that asked.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use hearthsound_catalog::CatalogService;
+    /// # async fn example(catalog: CatalogService) -> Result<(), Box<dyn std::error::Error>> {
+    /// if let Some(found) = catalog.artist_by_name("The Beatles").await? {
+    ///     println!("{}", found.artist.name);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn artist_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<CatalogArtistResult>, CatalogError> {
+        let wanted = normalize(name);
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+        if let Some(cached) = self.inner.artist_resolutions.get(&wanted).await {
+            match self.artist(&cached).await {
+                Ok(artist) => return Ok(Some(artist)),
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        name,
+                        "a cached artist resolution could not be read back"
+                    );
+                }
+            }
+        }
+        let query = CatalogQuery {
+            text: name.to_owned(),
+            kinds: vec![EntityKind::Artist],
+            limit: ARTIST_RESOLUTION_LIMIT,
+            offset: 0,
+        };
+        match self.search(&query).await {
+            Ok(found) => {
+                let resolved = found
+                    .artists
+                    .into_iter()
+                    .find(|result| normalize(&result.artist.name) == wanted);
+                if let Some(resolved) = &resolved {
+                    self.inner
+                        .artist_resolutions
+                        .insert(wanted, resolved.id.clone())
+                        .await;
+                }
+                Ok(resolved)
+            }
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    name,
+                    "an artist could not be found in the catalog by name"
+                );
+                Ok(None)
+            }
+        }
     }
 
     /// Lists an artist's albums.
@@ -830,7 +946,11 @@ fn album_ref_result(
 /// # Errors
 ///
 /// Returns [`CatalogError::InvalidEntity`] when `provider_id` is empty.
-fn catalog_id(slug: &Slug, kind: EntityKind, provider_id: &str) -> Result<CatalogId, CatalogError> {
+pub(crate) fn catalog_id(
+    slug: &Slug,
+    kind: EntityKind,
+    provider_id: &str,
+) -> Result<CatalogId, CatalogError> {
     CatalogId::new(slug.clone(), kind, provider_id).map_err(|_| CatalogError::InvalidEntity {
         instance: slug.as_str().to_owned(),
     })

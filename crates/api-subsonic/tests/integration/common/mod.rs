@@ -38,8 +38,8 @@ use hearthsound_plugin_host::{
     UserConfigService,
 };
 use hearthsound_test_support::{
-    ALBUM_CATALOG, ARTWORK_FIXTURE, HELLO_CATALOG, METADATA_FIXTURE, SCROBBLE_FIXTURE,
-    fixture_plugin,
+    ALBUM_CATALOG, ARTWORK_FIXTURE, DISCOGRAPHY_CATALOG, HELLO_CATALOG, METADATA_FIXTURE,
+    SCROBBLE_FIXTURE, fixture_plugin,
 };
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -334,6 +334,33 @@ impl Fixture {
             .unwrap();
         self.instance_service()
             .set_layer(Layer::Catalog, &["album".to_owned()])
+            .await
+            .unwrap();
+        self.registry.rebuild().await.unwrap();
+    }
+
+    /// Installs the discography catalog fixture as the catalog layer.
+    ///
+    /// The instance's artist released three albums, one of them a remaster whose
+    /// title and track titles carry an edition suffix. The provider ids are
+    /// stable, so a test can build an `x_disco_a_...` id from them.
+    pub async fn install_discography_catalog(&self) {
+        let plugin_id = self
+            .install(DISCOGRAPHY_CATALOG, "com.example.discography-catalog")
+            .await;
+        let service = self.instance_service();
+        service
+            .create(&InstanceSpec {
+                slug: "disco".to_owned(),
+                plugin_id,
+                display_name: "Discography catalog".to_owned(),
+                server_config: serde_json::json!({}),
+                host_config: serde_json::Value::Null,
+            })
+            .await
+            .unwrap();
+        service
+            .set_layer(Layer::Catalog, &["disco".to_owned()])
             .await
             .unwrap();
         self.registry.rebuild().await.unwrap();

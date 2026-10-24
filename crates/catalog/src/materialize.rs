@@ -436,7 +436,7 @@ pub(crate) async fn insert_alias(
 ///
 /// Returns [`CatalogError::Database`] when a statement fails and
 /// [`CatalogError::CorruptAlias`] when a stored id does not decode.
-async fn claim_alias(
+pub(crate) async fn claim_alias(
     conn: &mut SqliteConnection,
     namespace: &str,
     kind: EntityKind,

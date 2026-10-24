@@ -409,8 +409,6 @@ struct Inner {
     /// found entity is stored: a miss is worth asking again, because a search
     /// that failed may have failed for a transient reason.
     track_resolutions: MemoryCache<String, CatalogTrackResult>,
-    /// The catalog artist a normalized name resolved to.
-    artist_resolutions: MemoryCache<String, CatalogId>,
 }
 
 /// The key of one cached discovery answer.
@@ -463,10 +461,6 @@ impl DiscoveryService {
             .max_capacity(DISCOVERY_CACHE_CAPACITY)
             .time_to_live(RESOLUTION_CACHE_TTL)
             .build();
-        let artist_resolutions = MemoryCache::builder()
-            .max_capacity(DISCOVERY_CACHE_CAPACITY)
-            .time_to_live(RESOLUTION_CACHE_TTL)
-            .build();
         DiscoveryService {
             inner: Arc::new(Inner {
                 registry,
@@ -474,7 +468,6 @@ impl DiscoveryService {
                 users,
                 cache,
                 track_resolutions,
-                artist_resolutions,
             }),
         }
     }
@@ -1037,7 +1030,7 @@ impl DiscoveryService {
                         .await?
                     };
                     if stored.is_empty() {
-                        match self.catalog_artist(&artist.name).await? {
+                        match self.inner.catalog.artist_by_name(&artist.name).await? {
                             Some(catalog) => self.catalog_albums(&catalog).await?,
                             None => Vec::new(),
                         }
@@ -1061,76 +1054,6 @@ impl DiscoveryService {
             seed: Some(seed),
             albums: interleave_albums(lists, size),
         })
-    }
-
-    /// Finds the catalog artist one name names.
-    ///
-    /// This is the fallback for a similar artist the listener has in their
-    /// library but whose albums they do not: the catalog can still name what
-    /// that artist released.
-    ///
-    /// # Parameters
-    ///
-    /// - `name`: the artist's name.
-    ///
-    /// # Returns
-    ///
-    /// The catalog artist whose normalized name is equal, when one exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CatalogError`] when the catalog search reports a failure the
-    /// layer raises; a failure the provider answers is logged and reported as
-    /// `None`.
-    async fn catalog_artist(
-        &self,
-        name: &str,
-    ) -> Result<Option<CatalogArtistResult>, CatalogError> {
-        let wanted = normalize(name);
-        if wanted.is_empty() {
-            return Ok(None);
-        }
-        if let Some(cached) = self.inner.artist_resolutions.get(&wanted).await {
-            match self.inner.catalog.artist(&cached).await {
-                Ok(artist) => return Ok(Some(artist)),
-                Err(error) => {
-                    tracing::debug!(
-                        %error,
-                        name,
-                        "a cached artist resolution could not be read back"
-                    );
-                }
-            }
-        }
-        let query = CatalogQuery {
-            text: name.to_owned(),
-            kinds: vec![EntityKind::Artist],
-            limit: ARTIST_RESOLUTION_LIMIT,
-            offset: 0,
-        };
-        match self.inner.catalog.search(&query).await {
-            Ok(found) => {
-                let resolved = found
-                    .artists
-                    .into_iter()
-                    .find(|result| normalize(&result.artist.name) == wanted);
-                if let Some(resolved) = &resolved {
-                    self.inner
-                        .artist_resolutions
-                        .insert(wanted, resolved.id.clone())
-                        .await;
-                }
-                Ok(resolved)
-            }
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    name,
-                    "a similar artist could not be found in the catalog"
-                );
-                Ok(None)
-            }
-        }
     }
 
     /// Lists up to [`SIMILAR_ALBUM_CATALOG_LIMIT`] catalog albums of an artist.

@@ -1899,11 +1899,9 @@ pub struct QueueItem {
 /// The collection a queue is read for.
 ///
 /// Every variant names the caller's own view: the personal library, the
-/// caller's likes and uploads, a playlist the caller may see, or an album and
-/// an artist inside the caller's library. The server scope is not offered here,
-/// so a queue can never include a track the caller's library does not hold
-/// (except the remaining tracks of an album the caller's library contains,
-/// which every client may already stream).
+/// caller's likes and uploads, a playlist the caller may see, or an artist
+/// inside the caller's library. The server scope is not offered here, so a
+/// queue can never include a track the caller's library does not hold.
 ///
 /// # Examples
 ///
@@ -1911,8 +1909,8 @@ pub struct QueueItem {
 /// use hearthsound_core::{EntityId, IdPrefix};
 /// use hearthsound_library::query::QueueCollection;
 ///
-/// let album = EntityId::new(IdPrefix::Album);
-/// assert_ne!(QueueCollection::Album(album), QueueCollection::Artist(album));
+/// let artist = EntityId::new(IdPrefix::Artist);
+/// assert_ne!(QueueCollection::Artist(artist), QueueCollection::ArtistTop(artist));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueCollection {
@@ -1924,8 +1922,6 @@ pub enum QueueCollection {
     Uploads,
     /// One playlist the caller owns or that is public, in its own order.
     Playlist(EntityId),
-    /// One album inside the caller's library, in disc and track order.
-    Album(EntityId),
     /// One artist's tracks: the tracks with plays first, by play count, then
     /// the rest in album order.
     Artist(EntityId),
@@ -1936,7 +1932,7 @@ pub enum QueueCollection {
 /// Lists every track of one collection, in the collection's own order.
 ///
 /// The rows are read in one statement, after a one-row visibility check for a
-/// playlist, album or artist: they carry the album, the artist, the
+/// playlist or an artist: they carry the album, the artist, the
 /// availability and the caller's annotations, so a queue never costs a query
 /// per track. The scope is the caller's personal library, exactly as
 /// [`list_tracks`] defines it, so another user's playlist and unowned folder
@@ -1967,7 +1963,6 @@ pub async fn queue(
     let visible = match collection {
         QueueCollection::Songs | QueueCollection::Liked | QueueCollection::Uploads => true,
         QueueCollection::Playlist(id) => playlist_visible(conn, user_id, id).await?,
-        QueueCollection::Album(id) => album_in_scope(conn, Scope::Personal { user_id }, id).await?,
         QueueCollection::Artist(id) | QueueCollection::ArtistTop(id) => {
             artist_in_scope(conn, Scope::Personal { user_id }, id).await?
         }
@@ -2029,19 +2024,6 @@ pub async fn queue(
                 )
                 .push_bind(entity_key(playlist_id))
                 .push(" ORDER BY pt.position");
-        }
-        QueueCollection::Album(album_id) => {
-            push_queue_projection(&mut builder, &user);
-            builder
-                .push(
-                    " FROM tracks t LEFT JOIN albums al ON al.id = t.album_id \
-                     WHERE t.album_id = ",
-                )
-                .push_bind(entity_key(album_id))
-                .push(
-                    " ORDER BY t.disc_number IS NULL, t.disc_number, \
-                     t.track_number IS NULL, t.track_number, t.sort_title, t.id",
-                );
         }
         QueueCollection::Artist(artist_id) | QueueCollection::ArtistTop(artist_id) => {
             push_personal_scope(&mut builder, &user);
@@ -2620,6 +2602,11 @@ async fn search_kind(
 
 /// Reports whether a track is inside a scope.
 ///
+/// A track is inside the personal scope when the caller's library holds it,
+/// when the caller liked it, when it sits in one of the caller's playlists, or
+/// when a folder the caller owns scanned it. It is inside the server scope when
+/// the view's availability admits it.
+///
 /// # Parameters
 ///
 /// - `conn`: the connection or transaction to read on.
@@ -2633,7 +2620,21 @@ async fn search_kind(
 /// # Errors
 ///
 /// Returns [`LibraryError`] when a query fails.
-async fn track_in_scope(
+///
+/// # Examples
+///
+/// ```no_run
+/// # use hearthsound_core::{EntityId, IdPrefix};
+/// # use hearthsound_library::query::{self, Scope};
+/// # async fn check(
+/// #     conn: &mut sqlx::SqliteConnection,
+/// #     scope: Scope,
+/// #     track_id: EntityId,
+/// # ) -> Result<bool, hearthsound_library::LibraryError> {
+/// query::track_in_scope(conn, scope, track_id).await
+/// # }
+/// ```
+pub async fn track_in_scope(
     conn: &mut SqliteConnection,
     scope: Scope,
     track_id: EntityId,
@@ -2681,6 +2682,11 @@ async fn track_in_scope(
 
 /// Reports whether an album is inside a scope.
 ///
+/// An album is inside the personal scope when it holds a track of the caller's
+/// library, when the caller liked the album, or when the caller saved it. It is
+/// inside the server scope when the view's availability admits one of its
+/// tracks.
+///
 /// # Parameters
 ///
 /// - `conn`: the connection or transaction to read on.
@@ -2694,7 +2700,21 @@ async fn track_in_scope(
 /// # Errors
 ///
 /// Returns [`LibraryError`] when a query fails.
-async fn album_in_scope(
+///
+/// # Examples
+///
+/// ```no_run
+/// # use hearthsound_core::{EntityId, IdPrefix};
+/// # use hearthsound_library::query::{self, Scope};
+/// # async fn check(
+/// #     conn: &mut sqlx::SqliteConnection,
+/// #     scope: Scope,
+/// #     album_id: EntityId,
+/// # ) -> Result<bool, hearthsound_library::LibraryError> {
+/// query::album_in_scope(conn, scope, album_id).await
+/// # }
+/// ```
+pub async fn album_in_scope(
     conn: &mut SqliteConnection,
     scope: Scope,
     album_id: EntityId,
@@ -2751,6 +2771,11 @@ async fn album_in_scope(
 
 /// Reports whether an artist is inside a scope.
 ///
+/// An artist is inside the personal scope when it is credited on a track of the
+/// caller's library, on an album that holds one, or when the caller liked or
+/// saved the artist. It is inside the server scope when the view's availability
+/// admits a track they are credited on.
+///
 /// # Parameters
 ///
 /// - `conn`: the connection or transaction to read on.
@@ -2764,7 +2789,21 @@ async fn album_in_scope(
 /// # Errors
 ///
 /// Returns [`LibraryError`] when a query fails.
-async fn artist_in_scope(
+///
+/// # Examples
+///
+/// ```no_run
+/// # use hearthsound_core::{EntityId, IdPrefix};
+/// # use hearthsound_library::query::{self, Scope};
+/// # async fn check(
+/// #     conn: &mut sqlx::SqliteConnection,
+/// #     scope: Scope,
+/// #     artist_id: EntityId,
+/// # ) -> Result<bool, hearthsound_library::LibraryError> {
+/// query::artist_in_scope(conn, scope, artist_id).await
+/// # }
+/// ```
+pub async fn artist_in_scope(
     conn: &mut SqliteConnection,
     scope: Scope,
     artist_id: EntityId,

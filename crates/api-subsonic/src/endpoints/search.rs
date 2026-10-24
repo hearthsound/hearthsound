@@ -875,19 +875,15 @@ async fn album_object(
     };
     let score = score_of(
         query,
-        &loaded.detail.album.title,
-        loaded
-            .detail
-            .artists
-            .first()
-            .map(|artist| artist.name.as_str()),
+        &loaded.album.title,
+        loaded.artists.first().map(|artist| artist.name.as_str()),
     );
     Ok(Some((
         projection::album_id3(
-            &loaded.detail.album,
-            &loaded.detail.artists,
-            &loaded.detail.tracks,
-            &annotations.album(loaded.detail.album.id),
+            &loaded.album,
+            &loaded.artists,
+            &loaded.tracks,
+            &annotations.album(loaded.album.id),
         ),
         score,
     )))
@@ -923,19 +919,15 @@ async fn album_dir_object(
     };
     let score = score_of(
         query,
-        &loaded.detail.album.title,
-        loaded
-            .detail
-            .artists
-            .first()
-            .map(|artist| artist.name.as_str()),
+        &loaded.album.title,
+        loaded.artists.first().map(|artist| artist.name.as_str()),
     );
     Ok(Some((
         projection::album_dir(
-            &loaded.detail.album,
-            &loaded.detail.artists,
-            &loaded.detail.tracks,
-            &annotations.album(loaded.detail.album.id),
+            &loaded.album,
+            &loaded.artists,
+            &loaded.tracks,
+            &annotations.album(loaded.album.id),
         ),
         score,
     )))

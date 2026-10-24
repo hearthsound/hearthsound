@@ -286,8 +286,6 @@ struct Seeded {
     alpha_album: EntityId,
     /// The artist of the first album.
     alpha_artist: EntityId,
-    /// An album only another user's library holds.
-    other_album: EntityId,
 }
 
 /// Builds the shared library.
@@ -381,7 +379,6 @@ async fn seed(dir: &Path) -> Seeded {
         public_mix,
         alpha_album,
         alpha_artist,
-        other_album,
     }
 }
 
@@ -541,46 +538,6 @@ async fn the_playlist_queue_uses_playlist_order_and_visibility() {
     .await
     .unwrap();
     assert!(unknown.is_none(), "an unknown playlist is missing");
-}
-
-/// An album queues in disc and track order when the caller's library holds it,
-/// and is missing when it does not.
-#[tokio::test]
-async fn the_album_queue_uses_album_order_and_library_membership() {
-    let dir = tempfile::tempdir().unwrap();
-    let seeded = seed(dir.path()).await;
-    let mut conn = seeded.db.readers().acquire().await.unwrap();
-
-    let items = queue(
-        &mut conn,
-        seeded.user,
-        QueueCollection::Album(seeded.alpha_album),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(ids(&items), vec![seeded.alpha_one, seeded.alpha_two]);
-
-    let missing = queue(
-        &mut conn,
-        seeded.user,
-        QueueCollection::Album(seeded.other_album),
-    )
-    .await
-    .unwrap();
-    assert!(
-        missing.is_none(),
-        "an album only another account's library holds is missing"
-    );
-
-    let unknown = queue(
-        &mut conn,
-        seeded.user,
-        QueueCollection::Album(EntityId::new(IdPrefix::Album)),
-    )
-    .await
-    .unwrap();
-    assert!(unknown.is_none());
 }
 
 /// An artist's queue puts the played tracks first, by play count, then the

@@ -36,19 +36,6 @@ pub(crate) struct LoadedTrack {
     pub(crate) album_artists: Vec<Artist>,
 }
 
-/// An album detail with its tracks' preferred files.
-#[derive(Debug, Clone)]
-pub(crate) struct LoadedAlbum {
-    /// The album with its credited artists and its tracks.
-    pub(crate) detail: AlbumDetail,
-    /// The preferred media file of each track, aligned with `detail.tracks`.
-    ///
-    /// The files are not consulted for a projection: an album and its songs
-    /// always name their own cover art and the endpoint that serves the image
-    /// resolves whether there is one.
-    pub(crate) files: Vec<Option<MediaFile>>,
-}
-
 /// Reads one track, if the scope contains it.
 ///
 /// # Parameters
@@ -96,8 +83,8 @@ pub(crate) async fn track(
 ///
 /// # Returns
 ///
-/// The album with its tracks and their preferred files, or `None` when the
-/// album does not exist or is outside the scope.
+/// The album with its artists and tracks, or `None` when the album does not
+/// exist or is outside the scope.
 ///
 /// # Errors
 ///
@@ -106,16 +93,9 @@ pub(crate) async fn album(
     database: &Database,
     scope: Scope,
     album_id: EntityId,
-) -> Result<Option<LoadedAlbum>, LibraryError> {
+) -> Result<Option<AlbumDetail>, LibraryError> {
     let mut conn = database.readers().acquire().await?;
-    let Some(detail) = query::album_detail(&mut conn, scope, album_id).await? else {
-        return Ok(None);
-    };
-    let mut files = Vec::with_capacity(detail.tracks.len());
-    for view in &detail.tracks {
-        files.push(media_files::preferred_media_file(&mut conn, view.track.id).await?);
-    }
-    Ok(Some(LoadedAlbum { detail, files }))
+    query::album_detail(&mut conn, scope, album_id).await
 }
 
 /// Reads one track from the first scope that contains it.
@@ -142,64 +122,6 @@ pub(crate) async fn track_in_scopes(
     for scope in scopes {
         if let Some(loaded) = track(database, *scope, track_id).await? {
             return Ok(Some((*scope, loaded)));
-        }
-    }
-    Ok(None)
-}
-
-/// Reads one album from the first scope that contains it.
-///
-/// # Parameters
-///
-/// - `database`: the open database.
-/// - `scopes`: the scopes to try, in preference order.
-/// - `album_id`: the album to read.
-///
-/// # Returns
-///
-/// The album and the scope it was found in, or `None` when no scope contains
-/// it.
-///
-/// # Errors
-///
-/// Returns [`LibraryError`] when a query fails.
-pub(crate) async fn album_in_scopes(
-    database: &Database,
-    scopes: &[Scope],
-    album_id: EntityId,
-) -> Result<Option<(Scope, LoadedAlbum)>, LibraryError> {
-    for scope in scopes {
-        if let Some(loaded) = album(database, *scope, album_id).await? {
-            return Ok(Some((*scope, loaded)));
-        }
-    }
-    Ok(None)
-}
-
-/// Reads one artist from the first scope that contains it.
-///
-/// # Parameters
-///
-/// - `database`: the open database.
-/// - `scopes`: the scopes to try, in preference order.
-/// - `artist_id`: the artist to read.
-///
-/// # Returns
-///
-/// The artist and the scope it was found in, or `None` when no scope contains
-/// it.
-///
-/// # Errors
-///
-/// Returns [`LibraryError`] when a query fails.
-pub(crate) async fn artist_in_scopes(
-    database: &Database,
-    scopes: &[Scope],
-    artist_id: EntityId,
-) -> Result<Option<(Scope, ArtistDetail)>, LibraryError> {
-    for scope in scopes {
-        if let Some(detail) = artist(database, *scope, artist_id).await? {
-            return Ok(Some((*scope, detail)));
         }
     }
     Ok(None)
@@ -249,8 +171,8 @@ pub(crate) async fn album_summary(
 ///
 /// # Returns
 ///
-/// The album with its tracks and their preferred files, or `None` when the
-/// album does not exist.
+/// The album with its artists and tracks, or `None` when the album does not
+/// exist.
 ///
 /// # Errors
 ///
@@ -258,16 +180,37 @@ pub(crate) async fn album_summary(
 pub(crate) async fn album_any(
     database: &Database,
     album_id: EntityId,
-) -> Result<Option<LoadedAlbum>, LibraryError> {
+) -> Result<Option<AlbumDetail>, LibraryError> {
     let mut conn = database.readers().acquire().await?;
-    let Some(detail) = query::album_detail_any(&mut conn, album_id).await? else {
-        return Ok(None);
-    };
-    let mut files = Vec::with_capacity(detail.tracks.len());
-    for view in &detail.tracks {
-        files.push(media_files::preferred_media_file(&mut conn, view.track.id).await?);
-    }
-    Ok(Some(LoadedAlbum { detail, files }))
+    query::album_detail_any(&mut conn, album_id).await
+}
+
+/// Reads one album without an availability filter, for a listing.
+///
+/// A page that already decided which albums the caller may see reads each
+/// stored album by its id: the artist page filters its listing through the
+/// caller's scopes once, and re-filtering each album per scope would repeat that
+/// work for every row.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `album_id`: the album to read.
+///
+/// # Returns
+///
+/// The album with its artists and tracks, or `None` when the album does not
+/// exist.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub(crate) async fn album_summary_any(
+    database: &Database,
+    album_id: EntityId,
+) -> Result<Option<AlbumDetail>, LibraryError> {
+    let mut conn = database.readers().acquire().await?;
+    query::album_detail_any(&mut conn, album_id).await
 }
 
 /// Reads one artist without an availability filter.

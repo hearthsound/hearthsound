@@ -63,6 +63,7 @@ pub mod discovery;
 mod error;
 mod identity;
 mod materialize;
+pub mod pages;
 pub mod relevance;
 mod service;
 mod wire;
@@ -77,6 +78,9 @@ pub use discovery::{
 pub use error::CatalogError;
 pub use identity::{IDENTITY_MATCH_THRESHOLD, IdentityRequest, ResolvedRecording};
 pub use materialize::{MaterializedAlbum, ProviderAlias, materialize_entity};
+pub use pages::{
+    AlbumHead, AlbumPage, ArtistHead, ArtistPage, MAX_PAGE_ALBUMS, PageAlbum, PageDepth, PageTrack,
+};
 pub use service::{
     CatalogAlbumRefResult, CatalogAlbumResult, CatalogArtistResult, CatalogSearch, CatalogService,
     CatalogTrackResult,

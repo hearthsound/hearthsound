@@ -13,11 +13,11 @@ use hearthsound_acquire::adopt::acquire_saved;
 use hearthsound_activity::Annotation;
 use hearthsound_config::keys;
 use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, IdPrefix};
+use hearthsound_library::query::AlbumDetail;
 use hearthsound_library::{Artist, LibraryRepository};
 use uuid::Uuid;
 
 use crate::auth::Call;
-use crate::browse::LoadedAlbum;
 use crate::response::{Encoded, Response, SubsonicError, codes};
 use crate::value::{Array, Object};
 use crate::{browse, catalog, projection};
@@ -440,10 +440,10 @@ pub async fn get_starred(call: Call) -> Encoded {
         .iter()
         .map(|album| {
             projection::album_dir(
-                &album.detail.album,
-                &album.detail.artists,
-                &album.detail.tracks,
-                &listed.annotations.album(album.detail.album.id),
+                &album.album,
+                &album.artists,
+                &album.tracks,
+                &listed.annotations.album(album.album.id),
             )
         })
         .collect();
@@ -499,10 +499,10 @@ pub async fn get_starred2(call: Call) -> Encoded {
         .iter()
         .map(|album| {
             projection::album_id3(
-                &album.detail.album,
-                &album.detail.artists,
-                &album.detail.tracks,
-                &listed.annotations.album(album.detail.album.id),
+                &album.album,
+                &album.artists,
+                &album.tracks,
+                &listed.annotations.album(album.album.id),
             )
         })
         .collect();
@@ -532,7 +532,7 @@ struct Starred {
     /// The liked artists, with the album count their listings report.
     artists: Vec<(Artist, i64)>,
     /// The liked albums, with their artists and tracks.
-    albums: Vec<LoadedAlbum>,
+    albums: Vec<AlbumDetail>,
     /// The liked songs, with their files and album artists.
     tracks: Vec<browse::LoadedTrack>,
     /// The user's annotations for every listed entity.
@@ -647,7 +647,7 @@ async fn starred(call: &Call) -> Result<Starred, SubsonicError> {
     }
 
     let artist_ids: Vec<EntityId> = artists.iter().map(|(artist, _)| artist.id).collect();
-    let album_ids: Vec<EntityId> = albums.iter().map(|album| album.detail.album.id).collect();
+    let album_ids: Vec<EntityId> = albums.iter().map(|album| album.album.id).collect();
     let track_ids: Vec<EntityId> = tracks.iter().map(|track| track.view.track.id).collect();
     let annotations = match annotations_for(call, &artist_ids, &album_ids, &track_ids).await {
         Ok(annotations) => annotations,

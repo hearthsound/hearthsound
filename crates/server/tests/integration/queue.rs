@@ -497,20 +497,13 @@ async fn the_playlist_queue_follows_playlist_order() {
     assert_problem_media_type(&content_type);
 }
 
-/// The album and artist queues use their own orders, and each is limited to the
-/// account's library.
+/// The artist queue uses its own order, and is limited to the account's
+/// library.
 #[tokio::test]
-async fn the_album_and_artist_queues_use_their_own_orders() {
+async fn the_artist_queue_uses_its_own_order() {
     let fixture = Fixture::new().await;
     let dir = tempfile::tempdir().unwrap();
     let seeded = seed(&fixture, dir.path()).await;
-
-    let (status, body) = get_queue(&fixture, &format!("source=album:{}", seeded.alpha_album)).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        item_ids(&body),
-        vec![seeded.alpha_one.to_string(), seeded.alpha_two.to_string()]
-    );
 
     let (status, body) =
         get_queue(&fixture, &format!("source=artist:{}", seeded.alpha_artist)).await;
@@ -559,18 +552,6 @@ async fn the_error_cases_are_problem_documents() {
         &format!("source=playlist:{}", EntityId::new(IdPrefix::Playlist)),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_problem(status, &body, StatusCode::NOT_FOUND, "not-found");
-
-    let (status, body) = get_queue(
-        &fixture,
-        &format!("source=album:{}", EntityId::new(IdPrefix::Album)),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_problem(status, &body, StatusCode::NOT_FOUND, "not-found");
-
-    let (status, body) = get_queue(&fixture, "source=album:not-an-id").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_problem(status, &body, StatusCode::NOT_FOUND, "not-found");
 

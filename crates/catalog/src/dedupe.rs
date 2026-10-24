@@ -64,6 +64,100 @@ use crate::service::{
 /// Three seconds, in milliseconds.
 pub const DURATION_TOLERANCE_MS: i64 = 3_000;
 
+/// The words that name an edition of a release rather than a title.
+///
+/// A scanned album and the provider's album of it often differ by the edition
+/// in a bracket or after a dash: "Abbey Road" against "Abbey Road (Remastered
+/// 2009)". A bracket or a trailing segment that contains one of these words is
+/// edition information, and [`base_title`] drops it to compare the titles.
+///
+/// The list is deliberately short: a word that appears in real titles would
+/// fold two different releases together. "Live", "Acoustic" and "Version"
+/// therefore stay out, because "Live at Leeds" and "Live at Wembley" are two
+/// albums.
+pub const EDITION_WORDS: [&str; 8] = [
+    "remaster",
+    "deluxe",
+    "edition",
+    "anniversary",
+    "mono",
+    "stereo",
+    "expanded",
+    "bonus",
+];
+
+/// Folds a title down to the part that names the work rather than its edition.
+///
+/// The edition suffixes a provider and a scanner disagree about are dropped
+/// before the text is folded: a trailing bracket group whose content contains
+/// one of [`EDITION_WORDS`], and a trailing ` - ` segment whose remainder does
+/// so. The rest of the folded text is returned, normalized by [`normalize`].
+///
+/// # Parameters
+///
+/// - `text`: the display title.
+///
+/// # Returns
+///
+/// The normalized title without its edition suffixes, which is what
+/// [`normalize`] returns when the title carries none.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_catalog::dedupe::base_title;
+///
+/// assert_eq!(base_title("Abbey Road (Remastered 2009)"), "abbey road");
+/// assert_eq!(base_title("Come Together - Remastered 2009"), "come together");
+/// assert_eq!(base_title("Song (Live)"), "song live");
+/// ```
+pub fn base_title(text: &str) -> String {
+    let mut current = text.to_owned();
+    loop {
+        let trimmed = current.trim_end().to_owned();
+        let mut shortened: Option<String> = None;
+        if let Some(last) = trimmed.chars().last() {
+            let opener = match last {
+                ')' => Some('('),
+                ']' => Some('['),
+                _ => None,
+            };
+            if let Some(open) = opener
+                && let Some(position) = trimmed.rfind(open)
+            {
+                let content = &trimmed[position + open.len_utf8()..trimmed.len() - last.len_utf8()];
+                if carries_edition_word(content) {
+                    shortened = Some(trimmed[..position].to_owned());
+                }
+            }
+        }
+        if shortened.is_none()
+            && let Some(position) = trimmed.rfind(" - ")
+            && carries_edition_word(&trimmed[position + 3..])
+        {
+            shortened = Some(trimmed[..position].to_owned());
+        }
+        match shortened {
+            Some(candidate) => current = candidate,
+            None => return normalize(&trimmed),
+        }
+    }
+}
+
+/// Reports whether a piece of text names an edition.
+///
+/// # Parameters
+///
+/// - `text`: the bracket content or the trailing segment of a title.
+///
+/// # Returns
+///
+/// `true` when the lowercased text contains one of [`EDITION_WORDS`].
+fn carries_edition_word(text: &str) -> bool {
+    let folded = text.to_lowercase();
+    EDITION_WORDS.iter().any(|word| folded.contains(word))
+}
+
 /// One local track, reduced to the fields deduplication compares.
 ///
 /// The caller builds one per local search hit from the track view the library

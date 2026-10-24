@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT value, entity_id FROM external_ids WHERE namespace = ? AND entity_kind = ? AND hex(entity_id) IN (SELECT value FROM json_each(?))",
+  "describe": {
+    "columns": [
+      {
+        "name": "value",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "external_ids",
+            "name": "value"
+          }
+        }
+      },
+      {
+        "name": "entity_id",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "external_ids",
+            "name": "entity_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "04b80aa94442e1c613dc65e9e8a314e8e0a63c0a1875d45548fb1ec9be71a7fd"
+}

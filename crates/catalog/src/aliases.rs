@@ -12,7 +12,7 @@
 //! duplicate. The read side is here; the write side is
 //! [`crate::materialize`] and [`crate::identity`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use hearthsound_core::{EntityId, EntityKind, IdPrefix, Slug};
 use hearthsound_db::Database;
@@ -152,6 +152,60 @@ async fn lookup(
     let mut found = BTreeMap::new();
     for row in rows {
         found.insert(row.value, entity_id(kind, &row.entity_id)?);
+    }
+    Ok(found)
+}
+
+/// Reads the alias a namespace gives each of a set of stored rows.
+///
+/// This is the direction a page needs: it holds the stored rows an artist has
+/// and asks which of them one instance already claims, so two rows are never
+/// paired with the same provider id.
+///
+/// # Parameters
+///
+/// - `database`: the database to read.
+/// - `namespace`: the alias namespace.
+/// - `kind`: the entity kind the aliases name.
+/// - `entities`: the stored rows.
+///
+/// # Returns
+///
+/// The rows that have an alias in the namespace, mapped to its value.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::Database`] when the query fails and
+/// [`CatalogError::CorruptAlias`] when a stored id does not decode.
+pub(crate) async fn aliases_of_entities(
+    database: &Database,
+    namespace: &str,
+    kind: EntityKind,
+    entities: &[EntityId],
+) -> Result<HashMap<EntityId, String>, CatalogError> {
+    let mut found = HashMap::new();
+    if entities.is_empty() {
+        return Ok(found);
+    }
+    let keys: Vec<String> = entities
+        .iter()
+        .map(|entity| entity.uuid().simple().to_string().to_uppercase())
+        .collect();
+    for chunk in keys.chunks(ALIAS_CHUNK) {
+        let encoded = serde_json::to_string(chunk)?;
+        let rows = sqlx::query!(
+            "SELECT value, entity_id FROM external_ids \
+             WHERE namespace = ? AND entity_kind = ? \
+               AND hex(entity_id) IN (SELECT value FROM json_each(?))",
+            namespace,
+            kind_literal(kind),
+            encoded,
+        )
+        .fetch_all(database.readers())
+        .await?;
+        for row in rows {
+            found.insert(entity_id(kind, &row.entity_id)?, row.value);
+        }
     }
     Ok(found)
 }
