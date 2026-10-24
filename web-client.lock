@@ -17,6 +17,6 @@
 # the published asset.
 
 [web_client]
-version = "0.2.1"
-url = "https://github.com/hearthsound/hearthsound-web/releases/download/v0.2.1/hearthsound-web-0.2.1.zip"
-sha256 = "83d041ba8c0cb116cb4f199b9bcc60adb79159c45ca7a9e283200cd30b2c52ae"
+version = "0.2.2"
+url = "https://github.com/hearthsound/hearthsound-web/releases/download/v0.2.2/hearthsound-web-0.2.2.zip"
+sha256 = "d4f515037dfcd51f7e7feb6b76368903c3c66de4c1e33bc9fd4bba39458fdae0"
