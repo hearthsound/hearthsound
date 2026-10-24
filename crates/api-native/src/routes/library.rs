@@ -9,9 +9,9 @@
 //! feedback.
 //!
 //! Every source is read through the caller's personal library, never the server
-//! scope: `songs` and `liked` mean that caller's library, and a playlist, album
-//! or artist outside it answers `not-found`, so one account cannot queue
-//! another account's collection.
+//! scope: `songs` and `liked` mean that caller's library, and a playlist or an
+//! artist outside it answers `not-found`, so one account cannot queue another
+//! account's collection.
 
 use axum::Json;
 use axum::extract::State;
@@ -38,9 +38,6 @@ const SOURCE_UPLOADS: &str = "uploads";
 /// The prefix of the source that queues a playlist.
 const SOURCE_PLAYLIST: &str = "playlist";
 
-/// The prefix of the source that queues an album.
-const SOURCE_ALBUM: &str = "album";
-
 /// The prefix of the source that queues an artist's top songs and the rest.
 const SOURCE_ARTIST: &str = "artist";
 
@@ -52,7 +49,7 @@ const SOURCE_ARTIST_TOP: &str = "artist-top";
 #[serde(rename_all = "camelCase")]
 pub struct QueueQuery {
     /// The collection to queue: `songs`, `liked`, `uploads`,
-    /// `playlist:<id>`, `album:<id>`, `artist:<id>` or `artist-top:<id>`.
+    /// `playlist:<id>`, `artist:<id>` or `artist-top:<id>`.
     pub source: String,
     /// The track the player starts at; absent starts at the first item.
     #[serde(default)]
@@ -165,7 +162,6 @@ pub(crate) fn collection_of(source: &str) -> Result<QueueCollection, Problem> {
                     value,
                     IdPrefix::Playlist,
                 )?)),
-                SOURCE_ALBUM => Ok(QueueCollection::Album(entity(value, IdPrefix::Album)?)),
                 SOURCE_ARTIST => Ok(QueueCollection::Artist(entity(value, IdPrefix::Artist)?)),
                 SOURCE_ARTIST_TOP => {
                     Ok(QueueCollection::ArtistTop(entity(value, IdPrefix::Artist)?))
@@ -206,7 +202,7 @@ fn entity(value: &str, prefix: IdPrefix) -> Result<EntityId, Problem> {
 pub(crate) fn unknown_source(source: &str) -> Problem {
     Problem::unknown_source(format!(
         "`{source}` is not a queue source; expected `songs`, `liked`, `uploads`, \
-         `playlist:<id>`, `album:<id>`, `artist:<id>` or `artist-top:<id>`."
+         `playlist:<id>`, `artist:<id>` or `artist-top:<id>`."
     ))
 }
 
@@ -224,9 +220,6 @@ pub(crate) fn missing(collection: QueueCollection) -> Problem {
         QueueCollection::Playlist(_) => {
             Problem::not_found("No playlist with that id is visible to this account.")
         }
-        QueueCollection::Album(_) => {
-            Problem::not_found("No album with that id is in this account's library.")
-        }
         QueueCollection::Artist(_) | QueueCollection::ArtistTop(_) => {
             Problem::not_found("No artist with that id is in this account's library.")
         }
@@ -240,9 +233,8 @@ pub(crate) fn missing(collection: QueueCollection) -> Problem {
 ///
 /// One request answers every track of the collection, in the collection's own
 /// order: the library's sort order for `songs`, the like order for `liked`, the
-/// upload order for `uploads`, the playlist's own order, the album's disc and
-/// track order, and the artist's play count order. Nothing is paged and nothing
-/// is truncated.
+/// upload order for `uploads`, the playlist's own order, and the artist's play
+/// count order. Nothing is paged and nothing is truncated.
 ///
 /// # Parameters
 ///
@@ -258,8 +250,8 @@ pub(crate) fn missing(collection: QueueCollection) -> Problem {
 /// # Errors
 ///
 /// Answers `unauthenticated` without credentials, `unknown-source` (400) for a
-/// source this server does not offer, `not-found` (404) when the playlist,
-/// album or artist is unknown or outside the caller's library, `not-in-source`
+/// source this server does not offer, `not-found` (404) when the playlist or
+/// artist is unknown or outside the caller's library, `not-in-source`
 /// (404) when `from` is not one of the collection's tracks, and `internal` when
 /// the read fails.
 #[utoipa::path(
@@ -267,14 +259,14 @@ pub(crate) fn missing(collection: QueueCollection) -> Problem {
     path = "/api/v1/library/queue",
     tag = "library",
     params(
-        ("source" = String, Query, description = "The collection: `songs`, `liked`, `uploads`, `playlist:<id>`, `album:<id>`, `artist:<id>` or `artist-top:<id>`"),
+        ("source" = String, Query, description = "The collection: `songs`, `liked`, `uploads`, `playlist:<id>`, `artist:<id>` or `artist-top:<id>`"),
         ("from" = Option<String>, Query, description = "The track id the player starts at; absent starts at the first item"),
     ),
     responses(
         (status = 200, description = "The whole collection, in its own order", body = QueueView),
         (status = 400, description = "The source is unknown", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "No valid credential", body = Problem, content_type = "application/problem+json"),
-        (status = 404, description = "The playlist, album or artist is unknown, or `from` is not in the collection", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "The playlist or artist is unknown, or `from` is not in the collection", body = Problem, content_type = "application/problem+json"),
     ),
     security(("bearer" = []), ("session" = []))
 )]

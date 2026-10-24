@@ -2493,13 +2493,13 @@
           "library"
         ],
         "summary": "Queues a whole collection for the caller's player.",
-        "description": "One request answers every track of the collection, in the collection's own\norder: the library's sort order for `songs`, the like order for `liked`, the\nupload order for `uploads`, the playlist's own order, the album's disc and\ntrack order, and the artist's play count order. Nothing is paged and nothing\nis truncated.\n\n# Parameters\n\n- `authed`: the caller, whose library the collection is read from.\n- `state`: the shared services.\n- `query`: the source and, optionally, the track to start at.\n\n# Returns\n\nThe collection's items, the position of `from` in them (`0` when absent),\nand the source.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `unknown-source` (400) for a\nsource this server does not offer, `not-found` (404) when the playlist,\nalbum or artist is unknown or outside the caller's library, `not-in-source`\n(404) when `from` is not one of the collection's tracks, and `internal` when\nthe read fails.",
+        "description": "One request answers every track of the collection, in the collection's own\norder: the library's sort order for `songs`, the like order for `liked`, the\nupload order for `uploads`, the playlist's own order, and the artist's play\ncount order. Nothing is paged and nothing is truncated.\n\n# Parameters\n\n- `authed`: the caller, whose library the collection is read from.\n- `state`: the shared services.\n- `query`: the source and, optionally, the track to start at.\n\n# Returns\n\nThe collection's items, the position of `from` in them (`0` when absent),\nand the source.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `unknown-source` (400) for a\nsource this server does not offer, `not-found` (404) when the playlist or\nartist is unknown or outside the caller's library, `not-in-source`\n(404) when `from` is not one of the collection's tracks, and `internal` when\nthe read fails.",
         "operationId": "collection_queue",
         "parameters": [
           {
             "name": "source",
             "in": "query",
-            "description": "The collection: `songs`, `liked`, `uploads`, `playlist:<id>`, `album:<id>`, `artist:<id>` or `artist-top:<id>`",
+            "description": "The collection: `songs`, `liked`, `uploads`, `playlist:<id>`, `artist:<id>` or `artist-top:<id>`",
             "required": true,
             "schema": {
               "type": "string"
@@ -2547,7 +2547,7 @@
             }
           },
           "404": {
-            "description": "The playlist, album or artist is unknown, or `from` is not in the collection",
+            "description": "The playlist or artist is unknown, or `from` is not in the collection",
             "content": {
               "application/problem+json": {
                 "schema": {

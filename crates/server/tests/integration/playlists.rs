@@ -301,6 +301,64 @@ async fn adding_a_partially_stored_catalog_album_adds_every_track() {
     fixture.stop().await;
 }
 
+/// A stored album the library holds only part of is completed: the album
+/// source appends the provider's whole tracklist, and the stored tracks keep
+/// their rows and their places.
+#[tokio::test]
+async fn adding_a_stored_album_adds_its_whole_tracklist() {
+    let fixture = Fixture::new().await;
+    install_catalog(&fixture.services).await;
+    fixture.services.registry().rebuild().await.unwrap();
+
+    let first = materialize(fixture.services.catalog(), 1).await;
+    let third = materialize(fixture.services.catalog(), 3).await;
+    let library = LibraryRepository::new(fixture.services.database());
+    let album = library
+        .get_track(first)
+        .await
+        .unwrap()
+        .unwrap()
+        .album_id
+        .unwrap();
+    save(&fixture, first).await;
+
+    let playlist = create_playlist(&fixture, &[]).await;
+    let response = add_tracks(
+        &fixture,
+        &fixture.api_key,
+        &playlist,
+        &format!("album:{album}"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = read_json(response).await;
+    assert_eq!(body["added"], 5, "{body}");
+    assert_eq!(body["trackCount"], 5, "{body}");
+
+    let response = fixture
+        .get(&format!(
+            "/rest/getPlaylist?id={playlist}&apiKey={}&f=json",
+            fixture.api_key
+        ))
+        .await;
+    let body: Value = read_json(response).await;
+    let entries = body["subsonic-response"]["playlist"]["entry"]
+        .as_array()
+        .unwrap();
+    let ids: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 5);
+    assert_eq!(ids[0], first.to_string(), "the stored track keeps its row");
+    assert_eq!(
+        ids[2],
+        third.to_string(),
+        "the stored track keeps its place in the album"
+    );
+    fixture.stop().await;
+}
+
 /// An album source appends every track of the album in album order.
 #[tokio::test]
 async fn adding_an_album_appends_every_track_in_album_order() {
