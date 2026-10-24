@@ -700,3 +700,58 @@ async fn an_id_of_the_wrong_kind_is_not_found() {
 
     assert_eq!(count_rows(&env.database, "tracks").await, 0);
 }
+
+#[tokio::test]
+async fn a_track_whose_recording_id_is_already_stored_is_reused() {
+    let env = hello_env(json!({})).await;
+    let local = crate::common::insert_stored_recording(
+        &env.database,
+        "Hello, world",
+        "Hello Artist",
+        "Hello Album",
+        180_000,
+        Some("hello-recording-1"),
+        None,
+    )
+    .await;
+
+    let stored = env
+        .service()
+        .materialize_track(&catalog_id("hello", EntityKind::Track, "hello-track-1"))
+        .await
+        .unwrap();
+
+    assert_eq!(stored, local);
+    assert_eq!(count_rows(&env.database, "tracks").await, 1);
+    assert_eq!(
+        alias_target(&env.database, "p:hello", EntityKind::Track, "hello-track-1").await,
+        Some(local.uuid().as_bytes().to_vec())
+    );
+}
+
+#[tokio::test]
+async fn a_scanned_track_with_the_same_title_artist_and_album_is_reused() {
+    let env = hello_env(json!({})).await;
+    let local = crate::common::insert_stored_recording(
+        &env.database,
+        "Hello, world",
+        "Hello Artist",
+        "Hello Album",
+        181_000,
+        None,
+        None,
+    )
+    .await;
+
+    let stored = env
+        .service()
+        .materialize_track(&catalog_id("hello", EntityKind::Track, "hello-track-1"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        stored, local,
+        "a recording the server already stores must not be duplicated"
+    );
+    assert_eq!(count_rows(&env.database, "tracks").await, 1);
+}

@@ -748,3 +748,56 @@ pub async fn stored_artwork(
     .await
     .unwrap()
 }
+
+/// Inserts a stored recording with an album and a display artist.
+///
+/// A scanned file carries its album and artist in the rows a materialization
+/// compares against, so a test that exercises the title-and-artist rule needs
+/// them.
+///
+/// # Parameters
+///
+/// - `database`: the database to write.
+/// - `title`: the track title.
+/// - `artist`: the display artist.
+/// - `album`: the album title.
+/// - `duration_ms`: the track duration.
+/// - `mb_recording_id`: the MusicBrainz recording id, when known.
+/// - `isrc`: the ISRC, when known.
+///
+/// # Returns
+///
+/// The client id of the inserted track.
+pub async fn insert_stored_recording(
+    database: &Database,
+    title: &str,
+    artist: &str,
+    album: &str,
+    duration_ms: i64,
+    mb_recording_id: Option<&str>,
+    isrc: Option<&str>,
+) -> hearthsound_core::EntityId {
+    let album_id = insert_local_album(database, album).await;
+    let id = uuid::Uuid::now_v7();
+    let now = now_millis();
+    sqlx::query(
+        "INSERT INTO tracks (id, album_id, title, sort_title, display_artist, disc_number, \
+                             track_number, duration_ms, isrc, mb_recording_id, explicit, origin, \
+                             availability, unavailable_until, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?, ?, 0, 'local', 'local', NULL, ?, ?)",
+    )
+    .bind(id.as_bytes().as_slice())
+    .bind(album_id.uuid().as_bytes().as_slice())
+    .bind(title)
+    .bind(title.to_lowercase())
+    .bind(artist)
+    .bind(duration_ms)
+    .bind(isrc)
+    .bind(mb_recording_id)
+    .bind(now)
+    .bind(now)
+    .execute(database.writer())
+    .await
+    .unwrap();
+    hearthsound_core::EntityId::from_uuid(hearthsound_core::IdPrefix::Track, id)
+}

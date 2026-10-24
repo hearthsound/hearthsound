@@ -44,12 +44,16 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use hearthsound_core::providers::CatalogTrack;
 use hearthsound_core::{CatalogId, EntityId, EntityKind, Slug};
+use hearthsound_library::tracks;
+use sqlx::SqliteConnection;
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
 
 use crate::aliases;
 use crate::error::CatalogError;
+use crate::materialize::{ISRC, MB_RECORDING, canonical_id};
 use crate::service::{
     CatalogAlbumRefResult, CatalogArtistResult, CatalogSearch, CatalogService, CatalogTrackResult,
 };
@@ -237,6 +241,41 @@ impl CatalogService {
         Ok(deduped)
     }
 
+    /// Finds the stored recording each catalog track names, if any.
+    ///
+    /// A browse view uses this to show a catalog album or song as the row the
+    /// server already holds: an entity whose recording is stored is not offered
+    /// as a remote duplicate. The rules are the ones [`CatalogService::deduplicate`]
+    /// applies to a search, extended with the stored album title and the
+    /// MusicBrainz recording id so a scanned file without an ISRC still matches.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the instance that issued the tracks.
+    /// - `tracks`: the catalog tracks to look up.
+    ///
+    /// # Returns
+    ///
+    /// One entry per track, in order: the stored row that already holds the
+    /// recording, or `None` when the server has no row for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::Database`] when a read fails and
+    /// [`CatalogError::CorruptAlias`] when a stored id does not decode.
+    pub async fn stored_recordings(
+        &self,
+        slug: &Slug,
+        tracks: &[CatalogTrack],
+    ) -> Result<Vec<Option<EntityId>>, CatalogError> {
+        let mut conn = self.database().readers().acquire().await?;
+        let mut found = Vec::with_capacity(tracks.len());
+        for track in tracks {
+            found.push(stored_recording(&mut conn, slug, track).await?);
+        }
+        Ok(found)
+    }
+
     /// Reads the provider aliases of every entity one search returned.
     ///
     /// # Parameters
@@ -282,6 +321,145 @@ impl CatalogService {
         }
         Ok(index)
     }
+}
+
+/// Finds the stored recording a catalog track names.
+///
+/// The rules are checked in order of strength: the provider alias of an
+/// already materialized entity, the ISRC (through the alias table and the
+/// `tracks` column, which is what a scanned file carries), the MusicBrainz
+/// recording id (the same two ways), and finally the same normalized title,
+/// display artist and album with a duration within
+/// [`DURATION_TOLERANCE_MS`]. The last rule is what lets a scanned file without
+/// an ISRC or a recording id be reused instead of duplicated.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `slug`: the instance that issued the track.
+/// - `track`: the catalog track.
+///
+/// # Returns
+///
+/// The stored row, or `None` when no row holds the recording.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::Database`] when a read fails and
+/// [`CatalogError::CorruptAlias`] when a stored id does not decode.
+pub(crate) async fn stored_recording(
+    conn: &mut SqliteConnection,
+    slug: &Slug,
+    track: &CatalogTrack,
+) -> Result<Option<EntityId>, CatalogError> {
+    let namespace = aliases::provider_namespace(slug);
+    if let Some(stored) =
+        aliases::entity_by_alias_conn(conn, &namespace, EntityKind::Track, &track.id).await?
+    {
+        return Ok(Some(stored));
+    }
+    if let Some(isrc) = normalize_isrc(track.isrc.as_deref()) {
+        if let Some(stored) =
+            aliases::entity_by_alias_conn(conn, ISRC, EntityKind::Track, &isrc).await?
+        {
+            return Ok(Some(stored));
+        }
+        if let Some(stored) = tracks::find_track_by_isrc(conn, &isrc).await? {
+            return Ok(Some(stored.id));
+        }
+    }
+    if let Some(mbid) = canonical_id(&track.ids, MB_RECORDING) {
+        if let Some(stored) =
+            aliases::entity_by_alias_conn(conn, MB_RECORDING, EntityKind::Track, mbid).await?
+        {
+            return Ok(Some(stored));
+        }
+        if let Some(stored) = tracks::find_track_by_mb_recording_id(conn, mbid).await? {
+            return Ok(Some(stored.id));
+        }
+    }
+    matching_stored_track(conn, track).await
+}
+
+/// Finds a stored track with the same title, artist and album as a catalog
+/// track, within a few seconds of its duration.
+///
+/// The candidate set is the rows whose sort title is the catalog title's, which
+/// a case-folding and whitespace-collapsing key narrows without a table scan;
+/// the normalized comparison then decides.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `track`: the catalog track.
+///
+/// # Returns
+///
+/// The stored track, or `None` when no row is the same recording.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::Database`] when a read fails and
+/// [`CatalogError::CorruptAlias`] when a stored id does not decode.
+async fn matching_stored_track(
+    conn: &mut SqliteConnection,
+    track: &CatalogTrack,
+) -> Result<Option<EntityId>, CatalogError> {
+    let title = normalize(&track.title);
+    if title.is_empty() {
+        return Ok(None);
+    }
+    let joined = track
+        .artists
+        .iter()
+        .map(|credit| credit.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let artist = normalize(&joined);
+    let primary = track.artists.first().map(|credit| normalize(&credit.name));
+    let album = track
+        .album
+        .as_ref()
+        .map(|album| normalize(&album.title))
+        .filter(|album| !album.is_empty());
+    let duration = track.duration_ms.map(i64::from);
+
+    let candidates =
+        tracks::find_tracks_by_sort_title(conn, &hearthsound_library::sort_key(&track.title))
+            .await?;
+    for candidate in candidates {
+        if normalize(&candidate.track.title) != title {
+            continue;
+        }
+        let stored_artist = normalize(
+            candidate
+                .track
+                .display_artist
+                .as_deref()
+                .unwrap_or_default(),
+        );
+        if stored_artist != artist && Some(&stored_artist) != primary.as_ref() {
+            continue;
+        }
+        if let Some(wanted) = &album {
+            let stored = candidate
+                .album_title
+                .as_deref()
+                .map(normalize)
+                .unwrap_or_default();
+            if &stored != wanted {
+                continue;
+            }
+        }
+        let close = match (duration, candidate.track.duration_ms) {
+            (Some(catalog), Some(stored)) => (catalog - stored).abs() <= DURATION_TOLERANCE_MS,
+            _ => true,
+        };
+        if close {
+            return Ok(Some(candidate.track.id));
+        }
+    }
+    Ok(None)
 }
 
 /// Returns the normalized ISRCs of every track in a search result.

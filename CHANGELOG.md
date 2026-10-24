@@ -269,47 +269,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- The acquisition log names a candidate that has no directory. A backend that
-  downloads one file at a time reports an empty candidate path, which left the
-  search result, the download message and both log lines with an empty name;
-  they now use the backend's title and then the first file's name.
+- A catalog album or song view shows a recording the server already stores as
+  the stored track. A scanned file without an ISRC now matches by MusicBrainz
+  recording id or by the same normalized title, display artist and album within
+  three seconds, and materializing a catalog id, streaming it or adding it to a
+  playlist reuses that row instead of creating a duplicate and acquiring a
+  second file.
 
-- `hsGetRecommendedAlbums` names the artist of a catalog album. A
-  recommendation often names its album with only an id and a title, which left
-  the shelf entry without `artist`, `artistId`, `artists`, `displayArtist`, the
-  release year or the cover; the album now takes the credit from the resolved
-  track and, when that is not enough, the album artist, release year and cover
-  from the catalog's album lookup.
-
-- `getSimilarSongs`, `getSimilarSongs2` and `getTopSongs` list each song once.
-  A discovery service can name one recording twice, under two spellings or
-  through two similar artists, and two catalog entities can both be the stored
-  track; the later occurrence is dropped and the song keeps its first position.
-
-- A generated playlist the discovery service already retired is no longer
-  stored again. The sync ignored the service's `expires-at`, so a service that
-  keeps listing a retired playlist made every run recreate the playlist the
-  expiry job had just deleted; the sync now leaves such a slot to the expiry
-  job.
-
-- Adding a catalog album to a playlist appends its whole tracklist even when
-  some of its tracks were already stored. Materializing an album now fetches
-  the provider's tracklist for a stored album too and creates every track that
-  has no row yet, instead of reporting only the tracks that happened to exist.
-  A stored track keeps its row and every track keeps the provider's order, so a
-  fully stored album reports the same ids and writes no duplicate rows. The
-  provider is asked even when the album is fully stored, because only its
-  answer says what is missing; a provider failure is reported with the same
-  error a never-seen album reports and the stored tracks are left untouched.
-
-- An artist whose portrait cannot be fetched is served the first cover image
-  of its albums instead of a `503`. The artwork layer's failure no longer
-  hides the local art an artist already has, and the stand-in is sent with
-  `no-cache` so the portrait takes over as soon as the layer can deliver it.
-
-- `getCoverArt` answers an entity with no image with
-  `Cache-Control: private, max-age=3600`. Without a cache header the browser
-  asked again on every visit, for every card.
+- A browse id any response handed out opens. `getArtist`, `getAlbum`, `getSong`
+  and `getMusicDirectory` resolve a stored entity through the scopes a search
+  uses for the caller, and an entity outside every scope is answered from the
+  catalog view of its provider alias instead of failing with error 70.
 
 ### Security
 

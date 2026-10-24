@@ -118,6 +118,93 @@ pub(crate) async fn album(
     Ok(Some(LoadedAlbum { detail, files }))
 }
 
+/// Reads one track from the first scope that contains it.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `scopes`: the scopes to try, in preference order.
+/// - `track_id`: the track to read.
+///
+/// # Returns
+///
+/// The track and the scope it was found in, or `None` when no scope contains
+/// it.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub(crate) async fn track_in_scopes(
+    database: &Database,
+    scopes: &[Scope],
+    track_id: EntityId,
+) -> Result<Option<(Scope, LoadedTrack)>, LibraryError> {
+    for scope in scopes {
+        if let Some(loaded) = track(database, *scope, track_id).await? {
+            return Ok(Some((*scope, loaded)));
+        }
+    }
+    Ok(None)
+}
+
+/// Reads one album from the first scope that contains it.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `scopes`: the scopes to try, in preference order.
+/// - `album_id`: the album to read.
+///
+/// # Returns
+///
+/// The album and the scope it was found in, or `None` when no scope contains
+/// it.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub(crate) async fn album_in_scopes(
+    database: &Database,
+    scopes: &[Scope],
+    album_id: EntityId,
+) -> Result<Option<(Scope, LoadedAlbum)>, LibraryError> {
+    for scope in scopes {
+        if let Some(loaded) = album(database, *scope, album_id).await? {
+            return Ok(Some((*scope, loaded)));
+        }
+    }
+    Ok(None)
+}
+
+/// Reads one artist from the first scope that contains it.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `scopes`: the scopes to try, in preference order.
+/// - `artist_id`: the artist to read.
+///
+/// # Returns
+///
+/// The artist and the scope it was found in, or `None` when no scope contains
+/// it.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails.
+pub(crate) async fn artist_in_scopes(
+    database: &Database,
+    scopes: &[Scope],
+    artist_id: EntityId,
+) -> Result<Option<(Scope, ArtistDetail)>, LibraryError> {
+    for scope in scopes {
+        if let Some(detail) = artist(database, *scope, artist_id).await? {
+            return Ok(Some((*scope, detail)));
+        }
+    }
+    Ok(None)
+}
+
 /// Reads one album for a listing that does not project its files.
 ///
 /// A listing that reports an album - the artist detail, the album list - builds

@@ -623,7 +623,7 @@ async fn store_track(
     }
 
     let isrc = normalize_isrc(track.isrc.as_deref());
-    if let Some(stored) = stored_recording(conn, isrc.as_deref()).await? {
+    if let Some(stored) = crate::dedupe::stored_recording(conn, slug, track).await? {
         claim_alias(conn, &namespace, EntityKind::Track, &track.id, stored).await?;
         record_aliases(
             conn,
@@ -723,41 +723,6 @@ async fn store_artist(
     let stored = claim_alias(conn, &namespace, EntityKind::Artist, &artist.id, created).await?;
     record_aliases(conn, EntityKind::Artist, stored, &artist.ids, None, None).await?;
     Ok(stored)
-}
-
-/// Finds a stored recording by the ISRC it is known under.
-///
-/// The alias table is asked first, because that is where a materialized
-/// recording records its ISRC; a scanned file carries its ISRC in the `tracks`
-/// column instead, so that lookup follows.
-///
-/// # Parameters
-///
-/// - `conn`: the transaction to read on.
-/// - `isrc`: the normalized ISRC, when the catalog track has one.
-///
-/// # Returns
-///
-/// The stored track, or `None` when no row is known under that ISRC.
-///
-/// # Errors
-///
-/// Returns [`CatalogError::Database`] when a query fails and
-/// [`CatalogError::CorruptAlias`] when a stored id does not decode.
-async fn stored_recording(
-    conn: &mut SqliteConnection,
-    isrc: Option<&str>,
-) -> Result<Option<EntityId>, CatalogError> {
-    let Some(isrc) = isrc else {
-        return Ok(None);
-    };
-    if let Some(stored) = aliases::entity_by_alias_conn(conn, ISRC, EntityKind::Track, isrc).await?
-    {
-        return Ok(Some(stored));
-    }
-    Ok(tracks::find_track_by_isrc(conn, isrc)
-        .await?
-        .map(|track| track.id))
 }
 
 /// Records the canonical identifiers of an entity as aliases.

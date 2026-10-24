@@ -1207,3 +1207,74 @@ async fn get_music_directory_browses_an_artist_and_an_album() {
     .await;
     assert_error(&missing, 10);
 }
+
+#[tokio::test]
+async fn a_catalog_album_shows_a_stored_recording_as_the_stored_track() {
+    let fixture = Fixture::new().await;
+    fixture.install_album_catalog(serde_json::json!({})).await;
+    let (track, _album, _artist) = fixture
+        .seed_track("Fixture Album", "Fixture Artist", "Fixture Song 1", 180_000)
+        .await;
+    let album_id = hearthsound_core::CatalogId::new(
+        hearthsound_core::Slug::new("album").unwrap(),
+        hearthsound_core::EntityKind::Album,
+        "album-catalog-album-1",
+    )
+    .unwrap();
+
+    let answer = get(
+        &fixture.app(),
+        &format!(
+            "/rest/getAlbum?id={album_id}&apiKey={}&f=json&hearthsound=1",
+            fixture.api_key
+        ),
+    )
+    .await;
+
+    assert_ok(&answer);
+    let value: serde_json::Value = serde_json::from_str(&answer.body).unwrap();
+    let song = &value["subsonic-response"]["album"]["song"][0];
+    assert_eq!(song["id"], track.to_string(), "{}", answer.body);
+    assert_eq!(
+        song["hearthsound"]["availability"], "local",
+        "{}",
+        answer.body
+    );
+}
+
+#[tokio::test]
+async fn an_artist_outside_the_personal_library_opens_for_an_administrator() {
+    let fixture = Fixture::new().await;
+    let (_track, _album, artist) = fixture
+        .seed_server_track("Server Album", "Server Artist", "Server Song", 180_000)
+        .await;
+
+    let answer = get(
+        &fixture.app(),
+        &format!(
+            "/rest/getArtist?id={artist}&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+
+    assert_ok(&answer);
+    assert!(answer.body.contains("Server Artist"), "{}", answer.body);
+}
+
+#[tokio::test]
+async fn an_artist_outside_the_personal_library_stays_closed_for_others() {
+    let fixture = Fixture::new().await;
+    let (_track, _album, artist) = fixture
+        .seed_server_track("Server Album", "Server Artist", "Server Song", 180_000)
+        .await;
+    let key = fixture.account_with(&[]).await;
+
+    let answer = get(
+        &fixture.app(),
+        &format!("/rest/getArtist?id={artist}&apiKey={key}&f=json"),
+    )
+    .await;
+
+    assert_error(&answer, 70);
+}

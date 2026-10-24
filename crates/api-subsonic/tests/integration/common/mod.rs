@@ -561,6 +561,77 @@ impl Fixture {
         (track_id, album_id, artist_id)
     }
 
+    /// Stores an album and one track in a folder no account owns.
+    ///
+    /// The track is stored server-wide but outside every personal library,
+    /// which is the row a search can return to an administrator and a
+    /// non-administrator cannot see.
+    ///
+    /// # Parameters
+    ///
+    /// - `album`: the album title.
+    /// - `artist`: the artist name.
+    /// - `title`: the track title.
+    /// - `duration_ms`: the track duration in milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// The track, album and artist ids.
+    pub async fn seed_server_track(
+        &self,
+        album: &str,
+        artist: &str,
+        title: &str,
+        duration_ms: i64,
+    ) -> (EntityId, EntityId, EntityId) {
+        let library = LibraryRepository::new(&self.database);
+        let folder = library
+            .add_library_folder(&self.subdir("server"), None)
+            .await
+            .unwrap();
+        let album_id = library
+            .upsert_album(
+                &AlbumInput::new(album, Origin::Local),
+                &[ArtistCredit::new(artist, "main")],
+            )
+            .await
+            .unwrap();
+        let artist_id = library.list_album_artists(album_id).await.unwrap()[0].id;
+        let mut input = TrackInput::new(title, Origin::Local, Availability::Local);
+        input.album_id = Some(album_id);
+        input.display_artist = Some(artist.to_owned());
+        input.track_number = Some(1);
+        input.disc_number = Some(1);
+        input.duration_ms = Some(duration_ms);
+        let track_id = library
+            .insert_track(&input, &[ArtistCredit::new(artist, "main")], &[])
+            .await
+            .unwrap();
+        library
+            .upsert_folder_media_file(
+                track_id,
+                &ScannedMediaFile {
+                    folder_id: folder.id,
+                    rel_path: format!("{title}.mp3"),
+                    size: 1_024,
+                    mtime_ms: 0,
+                    format: Some("mp3".to_owned()),
+                    codec: Some("mp3".to_owned()),
+                    bitrate_kbps: Some(320),
+                    sample_rate: Some(44_100),
+                    bit_depth: None,
+                    channels: Some(2),
+                    duration_ms: Some(duration_ms),
+                    lossless: Some(false),
+                    replaygain: None,
+                    has_embedded_art: Some(false),
+                },
+            )
+            .await
+            .unwrap();
+        (track_id, album_id, artist_id)
+    }
+
     /// Installs the artwork fixture as the artwork layer and serves one image.
     ///
     /// The fixture answers a portrait for any artist whose name is `Hello

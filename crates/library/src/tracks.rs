@@ -435,6 +435,81 @@ pub async fn find_track_by_isrc(
     row.map(TrackRow::into_track).transpose()
 }
 
+/// A stored track with the title of the album it belongs to.
+///
+/// The catalog layer compares a track it wants to materialize against the rows
+/// the server already holds, and the album title is part of that comparison.
+/// One query returns both, so a candidate read does not need a second lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackCandidate {
+    /// The stored track.
+    pub track: Track,
+    /// The title of the track's album, or `None` when it has no album.
+    pub album_title: Option<String>,
+}
+
+/// Reads the stored tracks whose sort title is `sort_title`.
+///
+/// The catalog layer uses this as a bounded candidate set before it compares
+/// normalized titles: a sort title folds case and whitespace, so this returns
+/// the rows worth comparing without scanning the whole table.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `sort_title`: the folder key of the title, as [`crate::sort_key`] builds it.
+///
+/// # Returns
+///
+/// One candidate per matching row, oldest first.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when the query fails.
+pub async fn find_tracks_by_sort_title(
+    conn: &mut SqliteConnection,
+    sort_title: &str,
+) -> Result<Vec<TrackCandidate>, LibraryError> {
+    let rows = sqlx::query!(
+        "SELECT t.id, t.album_id, t.title, t.sort_title, t.display_artist, t.disc_number, \
+                t.track_number, t.duration_ms, t.isrc, t.mb_recording_id, t.explicit, \
+                t.origin, t.availability, t.unavailable_until, t.created_at, t.updated_at, \
+                a.title AS album_title \
+         FROM tracks t LEFT JOIN albums a ON a.id = t.album_id \
+         WHERE t.sort_title = ? ORDER BY t.created_at, t.id",
+        sort_title,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut candidates = Vec::with_capacity(rows.len());
+    for row in rows {
+        let track = TrackRow {
+            id: row.id,
+            album_id: row.album_id,
+            title: row.title,
+            sort_title: row.sort_title,
+            display_artist: row.display_artist,
+            disc_number: row.disc_number,
+            track_number: row.track_number,
+            duration_ms: row.duration_ms,
+            isrc: row.isrc,
+            mb_recording_id: row.mb_recording_id,
+            explicit: row.explicit,
+            origin: row.origin,
+            availability: row.availability,
+            unavailable_until: row.unavailable_until,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+        .into_track()?;
+        candidates.push(TrackCandidate {
+            track,
+            album_title: row.album_title,
+        });
+    }
+    Ok(candidates)
+}
+
 /// Lists an album's tracks in playing order.
 ///
 /// # Parameters

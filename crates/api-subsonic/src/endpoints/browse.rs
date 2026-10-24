@@ -8,7 +8,7 @@
 
 use futures_util::stream::{self, StreamExt, TryStreamExt};
 use hearthsound_activity::Annotation;
-use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, IdPrefix};
+use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, IdPrefix, Slug};
 use hearthsound_library::query::{AlbumDetail, AlbumSort, Scope};
 use uuid::Uuid;
 
@@ -108,8 +108,8 @@ pub async fn get_artists(call: Call) -> Encoded {
 /// catalog id names an entity the catalog does not have, and a generic error
 /// when a read fails or the catalog instance cannot answer.
 pub async fn get_artist(call: Call) -> Encoded {
-    let scope = match scope::resolve(&call).await {
-        Ok(scope) => scope,
+    let scopes = match scope::search_scopes(&call).await {
+        Ok(scopes) => scopes,
         Err(error) => return call.encode(Response::failed(error)),
     };
     let artist_id = match requested(&call, IdPrefix::Artist) {
@@ -118,12 +118,18 @@ pub async fn get_artist(call: Call) -> Encoded {
         Err(error) => return call.encode(Response::failed(error)),
     };
     let database = call.state().database();
-    let detail = match browse::artist(database, scope, artist_id).await {
-        Ok(Some(detail)) => detail,
-        Ok(None) => return call.encode(Response::failed(SubsonicError::not_found())),
+    let Some((scope, detail)) = (match browse::artist_in_scopes(database, &scopes, artist_id).await
+    {
+        Ok(found) => found,
         Err(error) => {
             return call.encode(Response::failed(browse::failure("getArtist", &error)));
         }
+    }) else {
+        return match catalog_alias(&call, artist_id).await {
+            Ok(Some(id)) => catalog_artist(&call, id).await,
+            Ok(None) => call.encode(Response::failed(SubsonicError::not_found())),
+            Err(error) => call.encode(Response::failed(error)),
+        };
     };
 
     // The artist and its albums carry the user's own stars, ratings, and play
@@ -212,8 +218,8 @@ pub async fn get_artist(call: Call) -> Encoded {
 /// catalog id names an entity the catalog does not have, and a generic error
 /// when a read fails or the catalog instance cannot answer.
 pub async fn get_album(call: Call) -> Encoded {
-    let scope = match scope::resolve(&call).await {
-        Ok(scope) => scope,
+    let scopes = match scope::search_scopes(&call).await {
+        Ok(scopes) => scopes,
         Err(error) => return call.encode(Response::failed(error)),
     };
     let album_id = match requested(&call, IdPrefix::Album) {
@@ -221,12 +227,19 @@ pub async fn get_album(call: Call) -> Encoded {
         Ok(Requested::Catalog(id)) => return catalog_album(&call, id).await,
         Err(error) => return call.encode(Response::failed(error)),
     };
-    let loaded = match browse::album(call.state().database(), scope, album_id).await {
-        Ok(Some(loaded)) => loaded,
-        Ok(None) => return call.encode(Response::failed(SubsonicError::not_found())),
-        Err(error) => {
-            return call.encode(Response::failed(browse::failure("getAlbum", &error)));
-        }
+    let Some((_scope, loaded)) =
+        (match browse::album_in_scopes(call.state().database(), &scopes, album_id).await {
+            Ok(found) => found,
+            Err(error) => {
+                return call.encode(Response::failed(browse::failure("getAlbum", &error)));
+            }
+        })
+    else {
+        return match catalog_alias(&call, album_id).await {
+            Ok(Some(id)) => catalog_album(&call, id).await,
+            Ok(None) => call.encode(Response::failed(SubsonicError::not_found())),
+            Err(error) => call.encode(Response::failed(error)),
+        };
     };
 
     let user_id = call.principal().user_id.uuid();
@@ -307,8 +320,8 @@ pub async fn get_album(call: Call) -> Encoded {
 /// catalog id names an entity the catalog does not have, and a generic error
 /// when a read fails or the catalog instance cannot answer.
 pub async fn get_song(call: Call) -> Encoded {
-    let scope = match scope::resolve(&call).await {
-        Ok(scope) => scope,
+    let scopes = match scope::search_scopes(&call).await {
+        Ok(scopes) => scopes,
         Err(error) => return call.encode(Response::failed(error)),
     };
     let track_id = match requested(&call, IdPrefix::Track) {
@@ -316,12 +329,19 @@ pub async fn get_song(call: Call) -> Encoded {
         Ok(Requested::Catalog(id)) => return catalog_song(&call, id).await,
         Err(error) => return call.encode(Response::failed(error)),
     };
-    let loaded = match browse::track(call.state().database(), scope, track_id).await {
-        Ok(Some(loaded)) => loaded,
-        Ok(None) => return call.encode(Response::failed(SubsonicError::not_found())),
-        Err(error) => {
-            return call.encode(Response::failed(browse::failure("getSong", &error)));
-        }
+    let Some((_scope, loaded)) =
+        (match browse::track_in_scopes(call.state().database(), &scopes, track_id).await {
+            Ok(found) => found,
+            Err(error) => {
+                return call.encode(Response::failed(browse::failure("getSong", &error)));
+            }
+        })
+    else {
+        return match catalog_alias(&call, track_id).await {
+            Ok(Some(id)) => catalog_song(&call, id).await,
+            Ok(None) => call.encode(Response::failed(SubsonicError::not_found())),
+            Err(error) => call.encode(Response::failed(error)),
+        };
     };
 
     let song_annotation = match browse::annotation(
@@ -508,8 +528,8 @@ pub async fn get_indexes(call: Call) -> Encoded {
 /// neither an artist nor an album, is not in scope, or names a catalog entity
 /// the catalog does not have, and a generic error when a read fails.
 pub async fn get_music_directory(call: Call) -> Encoded {
-    let scope = match scope::resolve(&call).await {
-        Ok(scope) => scope,
+    let scopes = match scope::search_scopes(&call).await {
+        Ok(scopes) => scopes,
         Err(error) => return call.encode(Response::failed(error)),
     };
     let Some(value) = call.get("id") else {
@@ -519,8 +539,8 @@ pub async fn get_music_directory(call: Call) -> Encoded {
     // its stored id or by a catalog id; anything else is answered as unknown.
     match ClientId::parse(value) {
         Ok(ClientId::Entity(id)) => match id.kind() {
-            IdPrefix::Artist => artist_directory(&call, scope, ClientId::Entity(id)).await,
-            IdPrefix::Album => album_directory(&call, scope, ClientId::Entity(id)).await,
+            IdPrefix::Artist => artist_directory(&call, &scopes, ClientId::Entity(id)).await,
+            IdPrefix::Album => album_directory(&call, &scopes, ClientId::Entity(id)).await,
             _ => call.encode(Response::failed(SubsonicError::not_found())),
         },
         Ok(ClientId::Catalog(id)) => match id.kind() {
@@ -539,27 +559,32 @@ pub async fn get_music_directory(call: Call) -> Encoded {
 /// # Parameters
 ///
 /// - `call`: the authenticated call.
-/// - `scope`: the scope to resolve the artist in.
+/// - `scopes`: the scopes to resolve the artist in, in preference order.
 /// - `id`: the artist's client id.
 ///
 /// # Errors
 ///
-/// Answers Subsonic error 70 when the artist is not in scope, and a generic
-/// error when a read fails.
-async fn artist_directory(call: &Call, scope: Scope, id: ClientId) -> Encoded {
+/// Answers Subsonic error 70 when the artist is in no scope and has no catalog
+/// alias, and a generic error when a read fails.
+async fn artist_directory(call: &Call, scopes: &[Scope], id: ClientId) -> Encoded {
     let Some(artist_id) = entity_id(&id) else {
         return call.encode(Response::failed(SubsonicError::not_found()));
     };
     let database = call.state().database();
-    let detail = match browse::artist(database, scope, artist_id).await {
-        Ok(Some(detail)) => detail,
-        Ok(None) => return call.encode(Response::failed(SubsonicError::not_found())),
+    let Some((scope, detail)) = (match browse::artist_in_scopes(database, scopes, artist_id).await {
+        Ok(found) => found,
         Err(error) => {
             return call.encode(Response::failed(browse::failure(
                 "getMusicDirectory",
                 &error,
             )));
         }
+    }) else {
+        return match catalog_alias(call, artist_id).await {
+            Ok(Some(id)) => catalog_directory(call, id).await,
+            Ok(None) => call.encode(Response::failed(SubsonicError::not_found())),
+            Err(error) => call.encode(Response::failed(error)),
+        };
     };
     let album_ids: Vec<Uuid> = detail.albums.iter().map(|album| album.id.uuid()).collect();
     let annotations = match browse::annotations(
@@ -631,26 +656,33 @@ async fn artist_directory(call: &Call, scope: Scope, id: ClientId) -> Encoded {
 /// # Parameters
 ///
 /// - `call`: the authenticated call.
-/// - `scope`: the scope to resolve the album in.
+/// - `scopes`: the scopes to resolve the album in, in preference order.
 /// - `id`: the album's client id.
 ///
 /// # Errors
 ///
-/// Answers Subsonic error 70 when the album is not in scope, and a generic error
-/// when a read fails.
-async fn album_directory(call: &Call, scope: Scope, id: ClientId) -> Encoded {
+/// Answers Subsonic error 70 when the album is in no scope and has no catalog
+/// alias, and a generic error when a read fails.
+async fn album_directory(call: &Call, scopes: &[Scope], id: ClientId) -> Encoded {
     let Some(album_id) = entity_id(&id) else {
         return call.encode(Response::failed(SubsonicError::not_found()));
     };
-    let loaded = match browse::album(call.state().database(), scope, album_id).await {
-        Ok(Some(loaded)) => loaded,
-        Ok(None) => return call.encode(Response::failed(SubsonicError::not_found())),
-        Err(error) => {
-            return call.encode(Response::failed(browse::failure(
-                "getMusicDirectory",
-                &error,
-            )));
-        }
+    let Some(loaded) =
+        (match browse::album_in_scopes(call.state().database(), scopes, album_id).await {
+            Ok(found) => found.map(|(_scope, loaded)| loaded),
+            Err(error) => {
+                return call.encode(Response::failed(browse::failure(
+                    "getMusicDirectory",
+                    &error,
+                )));
+            }
+        })
+    else {
+        return match catalog_alias(call, album_id).await {
+            Ok(Some(id)) => catalog_directory(call, id).await,
+            Ok(None) => call.encode(Response::failed(SubsonicError::not_found())),
+            Err(error) => call.encode(Response::failed(error)),
+        };
     };
     let annotation = match browse::annotation(
         call.state(),
@@ -772,23 +804,163 @@ async fn catalog_directory(call: &Call, id: CatalogId) -> Encoded {
                 Ok(album) => album,
                 Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
             };
-            let songs: Vec<Object> = album
-                .album
-                .tracks
-                .iter()
-                .filter_map(|track| {
-                    let track_id =
-                        CatalogId::new(id.slug().clone(), EntityKind::Track, track.id.clone())
-                            .ok()?;
-                    Some(projection::catalog_child(&track_id, track, &suffix))
-                })
-                .collect();
+            let scopes = match scope::search_scopes(call).await {
+                Ok(scopes) => scopes,
+                Err(error) => return call.encode(Response::failed(error)),
+            };
+            let songs: Vec<Object> =
+                match catalog_songs(call, &scopes, id.slug(), &album.album.tracks, &suffix).await {
+                    Ok(songs) => songs.into_iter().map(|song| song.object).collect(),
+                    Err(error) => return call.encode(Response::failed(error)),
+                };
             let name = projection::catalog_album_name(&album, &suffix);
             let directory = projection::directory(&id.to_string(), "", &name, None, songs);
             call.respond(Response::ok().member("directory", directory))
                 .await
         }
         _ => call.encode(Response::failed(SubsonicError::not_found())),
+    }
+}
+
+/// One song of a catalog view, with the id a client should use for it.
+struct CatalogSong {
+    /// The projected child.
+    object: Object,
+    /// The id the child answers to: the stored track's id when the recording is
+    /// already stored, the catalog id otherwise.
+    id: ClientId,
+}
+
+/// Renders the songs of a catalog album, or one catalog track, as the rows the
+/// server already holds when their recording is stored.
+///
+/// A catalog view is built from the provider's answer, but a recording the
+/// server stores is the same recording: it is projected as the stored track,
+/// with its `tr_` id and its availability, instead of as a remote duplicate.
+/// A stored track the caller's scopes do not contain stays a catalog entry, so
+/// a non-administrator never sees content outside their library.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `scopes`: the scopes the stored rows are looked for in.
+/// - `slug`: the instance that issued the tracks.
+/// - `tracks`: the catalog tracks to render.
+/// - `suffix`: the suffix a catalog title carries.
+///
+/// # Returns
+///
+/// One rendered song per catalog track, in order.
+///
+/// # Errors
+///
+/// Answers a generic error when a stored row or an annotation cannot be read.
+async fn catalog_songs(
+    call: &Call,
+    scopes: &[Scope],
+    slug: &Slug,
+    tracks: &[hearthsound_core::providers::CatalogTrack],
+    suffix: &str,
+) -> Result<Vec<CatalogSong>, SubsonicError> {
+    let database = call.state().database();
+    let stored = call
+        .state()
+        .catalog()
+        .stored_recordings(slug, tracks)
+        .await
+        .map_err(|error| catalog::failure(&error))?;
+    let mut loaded = Vec::with_capacity(tracks.len());
+    for stored_id in &stored {
+        let Some(stored_id) = stored_id else {
+            loaded.push(None);
+            continue;
+        };
+        match browse::track_in_scopes(database, scopes, *stored_id).await {
+            Ok(Some((_scope, row))) => loaded.push(Some(row)),
+            Ok(None) => loaded.push(None),
+            Err(error) => return Err(browse::failure("a catalog view", &error)),
+        }
+    }
+    let ids: Vec<Uuid> = loaded
+        .iter()
+        .flatten()
+        .map(|loaded| loaded.view.track.id.uuid())
+        .collect();
+    let annotations = browse::annotations(
+        call.state(),
+        call.principal().user_id.uuid(),
+        EntityKind::Track,
+        &ids,
+    )
+    .await
+    .map_err(|error| browse::failure("a catalog view", &error))?;
+
+    let mut songs = Vec::with_capacity(tracks.len());
+    for (index, track) in tracks.iter().enumerate() {
+        if let Some(loaded) = &loaded[index] {
+            songs.push(CatalogSong {
+                object: projection::child(
+                    &loaded.view,
+                    loaded.file.as_ref(),
+                    &loaded.album_artists,
+                    annotations
+                        .get(&loaded.view.track.id.uuid())
+                        .unwrap_or(&Annotation::default()),
+                ),
+                id: ClientId::Entity(loaded.view.track.id),
+            });
+            continue;
+        }
+        let Ok(track_id) = CatalogId::new(slug.clone(), EntityKind::Track, track.id.clone()) else {
+            continue;
+        };
+        songs.push(CatalogSong {
+            object: projection::catalog_child(&track_id, track, suffix),
+            id: ClientId::Catalog(track_id),
+        });
+    }
+    Ok(songs)
+}
+
+/// The catalog id through which a stored entity can also be read.
+///
+/// A browse request may name a stored entity the caller's scope does not
+/// contain. Materialization records the provider id of the instance that
+/// issued the entity, so the same entity can be answered from that instance's
+/// catalog view instead of failing: the id a response handed out still opens.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, whose state holds the catalog layer.
+/// - `entity`: the stored entity.
+///
+/// # Returns
+///
+/// The catalog id naming the issuing instance's copy, or `None` when no
+/// instance issued the entity.
+///
+/// # Errors
+///
+/// Answers a generic error when the alias lookup fails.
+async fn catalog_alias(call: &Call, entity: EntityId) -> Result<Option<CatalogId>, SubsonicError> {
+    let Some(kind) = entity.kind().entity_kind() else {
+        return Ok(None);
+    };
+    let aliases = call
+        .state()
+        .catalog()
+        .provider_aliases(entity)
+        .await
+        .map_err(|error| catalog::failure(&error))?;
+    let Some(alias) = aliases.into_iter().next() else {
+        return Ok(None);
+    };
+    match CatalogId::new(alias.slug, kind, alias.provider_id) {
+        Ok(id) => Ok(Some(id)),
+        Err(error) => {
+            tracing::debug!(%error, entity = %entity, "a stored entity's catalog alias is unusable");
+            Ok(None)
+        }
     }
 }
 
@@ -1067,12 +1239,24 @@ async fn catalog_song(call: &Call, id: CatalogId) -> Encoded {
         Ok(suffix) => suffix,
         Err(error) => return call.encode(Response::failed(error)),
     };
+    let scopes = match scope::search_scopes(call).await {
+        Ok(scopes) => scopes,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
     let track = match call.state().catalog().track(&id).await {
         Ok(track) => track,
         Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
     };
-    let song = projection::catalog_child(&track.id, &track.track, &suffix);
-    call.respond(Response::ok().member("song", song)).await
+    let songs = match catalog_songs(call, &scopes, id.slug(), &[track.track], &suffix).await {
+        Ok(songs) => songs,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
+    let Some(song) = songs.into_iter().next() else {
+        return call.encode(Response::failed(SubsonicError::not_found()));
+    };
+    record_listing(call, [song.id]);
+    call.respond(Response::ok().member("song", song.object))
+        .await
 }
 
 /// Answers `getAlbum` for an unmaterialized catalog id.
@@ -1097,22 +1281,21 @@ async fn catalog_album(call: &Call, id: CatalogId) -> Encoded {
         Ok(suffix) => suffix,
         Err(error) => return call.encode(Response::failed(error)),
     };
+    let scopes = match scope::search_scopes(call).await {
+        Ok(scopes) => scopes,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
     let album = match call.state().catalog().album(&id).await {
         Ok(album) => album,
         Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
     };
-    let mut songs = Vec::new();
-    let mut listing = Vec::new();
-    for track in &album.album.tracks {
-        let Some(track_id) =
-            CatalogId::new(album.id.slug().clone(), EntityKind::Track, track.id.clone()).ok()
-        else {
-            continue;
+    let songs =
+        match catalog_songs(call, &scopes, album.id.slug(), &album.album.tracks, &suffix).await {
+            Ok(songs) => songs,
+            Err(error) => return call.encode(Response::failed(error)),
         };
-        songs.push(projection::catalog_child(&track_id, track, &suffix));
-        listing.push(ClientId::Catalog(track_id));
-    }
-    record_listing(call, listing);
+    record_listing(call, songs.iter().map(|song| song.id.clone()));
+    let songs: Vec<Object> = songs.into_iter().map(|song| song.object).collect();
     let album = projection::catalog_album(&album, &suffix).set("song", Array::new(songs));
     call.respond(Response::ok().member("album", album)).await
 }
