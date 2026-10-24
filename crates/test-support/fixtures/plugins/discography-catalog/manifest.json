@@ -1,0 +1,29 @@
+{
+  "manifestVersion": 1,
+  "id": "com.example.discography-catalog",
+  "name": "Discography catalog",
+  "version": "0.1.0",
+  "description": "A catalog plugin whose artist released three albums, for artist page tests.",
+  "authors": ["Hearthsound contributors"],
+  "license": "MIT OR Apache-2.0",
+  "homepage": "https://github.com/hearthsound/hearthsound",
+  "api": "hearthsound:plugin@0.3.0",
+  "provides": ["catalog"],
+  "permissions": {},
+  "config": {
+    "server": {
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {}
+      },
+      "uiSchema": {
+        "type": "VerticalLayout",
+        "elements": []
+      }
+    },
+    "user": null
+  },
+  "resources": { "memoryMb": 64, "callTimeoutMs": 5000, "maxInstances": 2 },
+  "catalog": { "imageCachePolicy": "no-store" }
+}

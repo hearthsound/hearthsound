@@ -57,6 +57,9 @@ pub const HELLO_CATALOG: &str = "com.example.hello-catalog-0.1.0.hsplugin";
 /// The archive file name of the album catalog fixture.
 pub const ALBUM_CATALOG: &str = "com.example.album-catalog-0.1.0.hsplugin";
 
+/// The archive file name of the discography catalog fixture.
+pub const DISCOGRAPHY_CATALOG: &str = "com.example.discography-catalog-0.1.0.hsplugin";
+
 /// The archive file name of the spin catalog fixture.
 pub const SPIN_CATALOG: &str = "com.example.spin-catalog-0.1.0.hsplugin";
 
