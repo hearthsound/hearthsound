@@ -161,6 +161,12 @@ struct Inner {
     cache: Cache,
     /// The directory cached cover images are written to.
     artwork_dir: PathBuf,
+    /// The image URLs an image host answered as missing, and when to retry.
+    ///
+    /// A missing picture is not a transient refusal: the provider described an
+    /// image it cannot deliver. The URL is answered with not-found without
+    /// being asked again within the same window.
+    missing_images: MemoryCache<String, ()>,
     /// The image URLs an image host refused, and when the refusal expires.
     ///
     /// An image host that answers a burst with a refusal answers the next
@@ -196,6 +202,10 @@ impl CatalogService {
         artwork_dir: impl Into<PathBuf>,
     ) -> CatalogService {
         let cache = Cache::new(Arc::clone(&database));
+        let missing_images = MemoryCache::builder()
+            .max_capacity(REFUSED_IMAGE_CAPACITY)
+            .time_to_live(REFUSED_IMAGE_TTL)
+            .build();
         let refused_images = MemoryCache::builder()
             .max_capacity(REFUSED_IMAGE_CAPACITY)
             .time_to_live(REFUSED_IMAGE_TTL)
@@ -207,6 +217,7 @@ impl CatalogService {
                 settings,
                 cache,
                 artwork_dir: artwork_dir.into(),
+                missing_images,
                 refused_images,
             }),
         }
@@ -256,6 +267,15 @@ impl CatalogService {
     /// cover requests does not ask a throttling host a hundred times.
     pub(crate) fn refused_images(&self) -> &MemoryCache<String, ()> {
         &self.inner.refused_images
+    }
+
+    /// Returns the image URLs a host answered as missing, with their expiry.
+    ///
+    /// A URL in this window is answered with not-found without asking the host
+    /// again, which keeps a page of cards from repeating a request the provider
+    /// already said it cannot satisfy.
+    pub(crate) fn missing_images(&self) -> &MemoryCache<String, ()> {
+        &self.inner.missing_images
     }
 
     /// Looks up one track.

@@ -440,8 +440,8 @@ async fn an_artist_whose_portrait_host_refuses_is_served_its_local_art() {
     assert_eq!(artist.bytes, picture);
     assert_eq!(
         artist.header(CACHE_CONTROL),
-        Some("no-cache"),
-        "the portrait may arrive later, so the client revalidates the stand-in"
+        Some("public, max-age=86400"),
+        "a picture the host says it does not have is not retried soon"
     );
 }
 

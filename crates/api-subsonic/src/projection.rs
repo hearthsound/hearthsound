@@ -881,7 +881,17 @@ pub(crate) fn catalog_child(id: &CatalogId, track: &CatalogTrack, title_suffix: 
                 .unwrap_or(0),
         )
         .set("genre", "")
-        .set("coverArt", id.to_string())
+        // A track's picture is its album's. The entity id is only handed out
+        // when the provider described one, because an id `getCoverArt` cannot
+        // resolve is worse than an empty field a client already handles.
+        .set(
+            "coverArt",
+            if album.is_some_and(|album| !album.images.is_empty()) {
+                id.to_string()
+            } else {
+                String::new()
+            },
+        )
         .set("size", 0)
         .set("contentType", "")
         .set("suffix", "")

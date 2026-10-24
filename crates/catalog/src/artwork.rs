@@ -354,6 +354,15 @@ impl CatalogService {
             return Ok(cached);
         }
 
+        if self.image_missing(&slug, &image.url).await {
+            tracing::debug!(
+                instance = slug.as_str(),
+                url = image.url.as_str(),
+                "an image host has no image at this URL; not asking again yet"
+            );
+            return Err(CatalogError::NotFound);
+        }
+
         if self.image_refused(&slug, &image.url).await {
             tracing::debug!(
                 instance = slug.as_str(),
@@ -370,12 +379,14 @@ impl CatalogService {
             .fetch_image(slug.as_str(), &image.url)
             .await
             .map_err(|error| fetch_failure(&slug, &image.url, error))?;
-        if fetched.status == 404 {
+        if is_missing_image(fetched.status) {
             tracing::debug!(
                 instance = slug.as_str(),
                 url = image.url.as_str(),
+                status = fetched.status,
                 "the catalog instance has no image at that URL"
             );
+            self.mark_image_missing(&slug, &image.url).await;
             return Err(CatalogError::NotFound);
         }
         if !(200..300).contains(&fetched.status) {
@@ -782,6 +793,36 @@ impl CatalogService {
             .await;
     }
 
+    /// Returns whether an image host recently answered a URL as missing.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the instance that described the image.
+    /// - `url`: the image's URL.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the host answered 403, 404 or 410 for it within
+    /// [`REFUSED_IMAGE_TTL`].
+    async fn image_missing(&self, slug: &Slug, url: &str) -> bool {
+        self.missing_images()
+            .get(&missing_image_key(slug, url))
+            .await
+            .is_some()
+    }
+
+    /// Remembers that an image host answered a URL as missing.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the instance that described the image.
+    /// - `url`: the image's URL.
+    async fn mark_image_missing(&self, slug: &Slug, url: &str) {
+        self.missing_images()
+            .insert(missing_image_key(slug, url), ())
+            .await;
+    }
+
     /// Fetches one image an artwork instance described.
     ///
     /// The fetch goes through the instance's own HTTP grant, so an image host the
@@ -818,6 +859,15 @@ impl CatalogService {
             return Ok(cached);
         }
 
+        if self.image_missing(&slug, &image.url).await {
+            tracing::debug!(
+                instance = slug.as_str(),
+                url = image.url.as_str(),
+                "an image host has no image at this URL; not asking again yet"
+            );
+            return Err(CatalogError::NotFound);
+        }
+
         if self.image_refused(&slug, &image.url).await {
             tracing::debug!(
                 instance = slug.as_str(),
@@ -834,12 +884,14 @@ impl CatalogService {
             .fetch_image(slug.as_str(), &image.url)
             .await
             .map_err(|error| fetch_failure(&slug, &image.url, error))?;
-        if fetched.status == 404 {
+        if is_missing_image(fetched.status) {
             tracing::debug!(
                 instance = slug.as_str(),
                 url = image.url.as_str(),
+                status = fetched.status,
                 "an artwork instance has no image at that URL"
             );
+            self.mark_image_missing(&slug, &image.url).await;
             return Err(CatalogError::NotFound);
         }
         if !(200..300).contains(&fetched.status) {
@@ -1035,6 +1087,39 @@ fn pick_image(images: &[Image], size: Option<u32>) -> Option<&Image> {
 /// - `image`: the image.
 fn dimension(image: &Image) -> Option<u32> {
     image.width.max(image.height)
+}
+
+/// Returns whether an image fetch's status means the image does not exist.
+///
+/// A refusal (403), a not-found (404) and a gone resource (410) are all
+/// permanent for the URL: the provider described a picture it cannot deliver,
+/// and asking again will not bring it back. They are reported as
+/// [`CatalogError::NotFound`] rather than as transient unavailability, so a
+/// caller tries the next source or falls back to local art instead of telling
+/// the client to retry a request that will fail the same way.
+///
+/// # Parameters
+///
+/// - `status`: the HTTP status the image host answered with.
+///
+/// # Returns
+///
+/// `true` for 403, 404 and 410.
+fn is_missing_image(status: u16) -> bool {
+    matches!(status, 403 | 404 | 410)
+}
+
+/// Returns the missing-image window's key for an image URL.
+///
+/// The instance is part of the key for the same reason the refusal key names
+/// it: two instances may describe one URL under different grants.
+///
+/// # Parameters
+///
+/// - `slug`: the instance that described the image.
+/// - `url`: the image's URL.
+fn missing_image_key(slug: &Slug, url: &str) -> String {
+    format!("missing {} {url}", slug.as_str())
 }
 
 /// Returns the refusal window's key for an image URL.
@@ -1343,5 +1428,24 @@ mod tests {
             image_url_name("https://cdn/cover.png#frag"),
             "https://cdn/cover.png"
         );
+    }
+}
+
+#[cfg(test)]
+mod missing_image_tests {
+    use super::is_missing_image;
+
+    #[test]
+    fn a_refused_or_gone_image_is_missing() {
+        assert!(is_missing_image(403));
+        assert!(is_missing_image(404));
+        assert!(is_missing_image(410));
+    }
+
+    #[test]
+    fn a_server_failure_stays_transient() {
+        assert!(!is_missing_image(500));
+        assert!(!is_missing_image(503));
+        assert!(!is_missing_image(200));
     }
 }

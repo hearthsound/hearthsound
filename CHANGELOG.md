@@ -287,6 +287,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already carries its artist no longer triggers a second catalog lookup, and
   the similar-artist list stops once its shelf is full.
 
+- `getCoverArt` treats an image host's `403`, `404` and `410` as a missing
+  picture instead of a transient failure, so a provider that describes an image
+  it cannot deliver no longer answers `503` and the next source is tried. A
+  catalog track without an album image no longer hands out a `coverArt` id that
+  cannot resolve.
+
 ### Security
 
 - Updated tokio to 1.54.1 and ctutils to 0.4.5, fixing RUSTSEC-2026-0386 and
