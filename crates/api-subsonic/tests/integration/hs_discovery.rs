@@ -421,3 +421,50 @@ async fn recommended_albums_resolve_only_what_they_show_and_remember_it() {
         "a repeated call must reuse the resolved suggestions"
     );
 }
+
+#[tokio::test]
+async fn recommended_albums_resolve_at_most_their_size_in_suggestions() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/search"))
+        .respond_with(SearchResponder)
+        .mount(&server)
+        .await;
+
+    let fixture = Fixture::new().await;
+    fixture
+        .install_catalog_instance(
+            "httpcat",
+            hearthsound_test_support::HTTP_CATALOG,
+            json!({ "url": format!("{}/search", server.uri()) }),
+        )
+        .await;
+    fixture
+        .assign_layer(hearthsound_core::Layer::Catalog, &["httpcat"])
+        .await;
+    let recommended: Vec<serde_json::Value> = (1..=100)
+        .map(|number| json!({ "title": format!("song {number}"), "artists": [] }))
+        .collect();
+    fixture
+        .install_discovery_layer(&[("discovery", json!({ "recommended": recommended }))])
+        .await;
+    fixture.link_discovery("discovery").await;
+    let app = fixture.app();
+    let uri = format!(
+        "/rest/hsGetRecommendedAlbums?apiKey={}&hearthsound=1&f=json&size=20",
+        fixture.api_key
+    );
+
+    let first = get(&app, &uri).await;
+    assert_ok(&first);
+    let after_first = server.received_requests().await.unwrap().len();
+    assert!(
+        after_first <= 20,
+        "resolved {after_first} suggestions for a shelf of 20"
+    );
+
+    let second = get(&app, &uri).await;
+    assert_ok(&second);
+    let after_second = server.received_requests().await.unwrap().len();
+    assert_eq!(after_second, after_first);
+}

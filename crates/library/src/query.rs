@@ -1658,8 +1658,11 @@ pub async fn list_albums_for_artist(
                  SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
                         al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, \
                         al.created_at, al.updated_at \
-                 FROM albums al JOIN album_artists aa ON aa.album_id = al.id \
-                 WHERE aa.artist_id = ? \
+                 FROM albums al \
+                 WHERE (EXISTS (SELECT 1 FROM album_artists aa \
+                                WHERE aa.album_id = al.id AND aa.artist_id = ?) \
+                     OR EXISTS (SELECT 1 FROM tracks t JOIN track_artists ta ON ta.track_id = t.id \
+                                WHERE t.album_id = al.id AND ta.artist_id = ?)) \
                    AND (al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id) \
                      OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ? AND entity_kind = 'album' AND entity_id = al.id) \
                      OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' \
@@ -1669,6 +1672,7 @@ pub async fn list_albums_for_artist(
                 user,
                 user,
                 user,
+                entity_key(artist_id),
                 entity_key(artist_id),
                 user,
                 user,
@@ -1687,12 +1691,16 @@ pub async fn list_albums_for_artist(
                  SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
                         al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, \
                         al.created_at, al.updated_at \
-                 FROM albums al JOIN album_artists aa ON aa.album_id = al.id \
-                 WHERE aa.artist_id = ? \
+                 FROM albums al \
+                 WHERE (EXISTS (SELECT 1 FROM album_artists aa \
+                                WHERE aa.album_id = al.id AND aa.artist_id = ?) \
+                     OR EXISTS (SELECT 1 FROM tracks t JOIN track_artists ta ON ta.track_id = t.id \
+                                WHERE t.album_id = al.id AND ta.artist_id = ?)) \
                    AND al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id) \
                  ORDER BY al.year IS NULL, al.year, al.sort_title, al.id",
                 available,
                 cached,
+                entity_key(artist_id),
                 entity_key(artist_id),
             )
             .fetch_all(&mut *conn)

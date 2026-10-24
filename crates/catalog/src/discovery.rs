@@ -102,6 +102,14 @@ const DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 /// answer the requests one session repeats rather than to be a store.
 const DISCOVERY_CACHE_CAPACITY: u64 = 1_024;
 
+/// How long one resolved suggestion stays fresh.
+///
+/// A day. The resolved entity behind a recommendation changes only when the
+/// provider's catalog does, and the Home shelf is read far more often than the
+/// catalog should be searched, so the resolution outlives the provider answer
+/// it came from.
+const RESOLUTION_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// How many suggestions are resolved at the same time.
 ///
 /// Four, which is the number of reader connections the database pool holds and
@@ -453,11 +461,11 @@ impl DiscoveryService {
             .build();
         let track_resolutions = MemoryCache::builder()
             .max_capacity(DISCOVERY_CACHE_CAPACITY)
-            .time_to_live(DISCOVERY_CACHE_TTL)
+            .time_to_live(RESOLUTION_CACHE_TTL)
             .build();
         let artist_resolutions = MemoryCache::builder()
             .max_capacity(DISCOVERY_CACHE_CAPACITY)
-            .time_to_live(DISCOVERY_CACHE_TTL)
+            .time_to_live(RESOLUTION_CACHE_TTL)
             .build();
         DiscoveryService {
             inner: Arc::new(Inner {
@@ -863,12 +871,14 @@ impl DiscoveryService {
             .recommended_tracks(user, RECOMMENDED_TRACK_LIMIT)
             .await?;
         let wanted = usize::try_from(limit).unwrap_or(usize::MAX);
+        // A shelf of `size` albums is built from at most `size` suggestions.
+        // A suggestion no provider names, or one of an album already shown,
+        // therefore shortens the shelf instead of making the call spend an
+        // unbounded number of catalog searches looking for replacements: the
+        // first Home read must stay fast even when the catalog is throttled.
+        let suggestions = &suggestions[..suggestions.len().min(wanted)];
         let mut albums = Vec::new();
         let mut seen = HashSet::new();
-        // Only as many suggestions are resolved as the shelf needs: tracks of
-        // one album count once, and a suggestion no provider names contributes
-        // nothing, so resolving all hundred would spend the catalog's quota on
-        // entries the answer never shows.
         for chunk in suggestions.chunks(RESOLVE_PARALLELISM) {
             let resolved = self
                 .resolve_tracks(chunk, u32::try_from(chunk.len()).unwrap_or(u32::MAX))

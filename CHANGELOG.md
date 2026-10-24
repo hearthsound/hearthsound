@@ -297,9 +297,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - An artist page lists the albums whose tracks credit the artist. A provider
   can name a track's album with an empty artist list, which left the album row
-  uncredited even though its track credited the artist; the album now takes the
+  uncredited even though its track credited the artist; an artist's album list
+  now also follows the credits of the album's tracks, the album takes the
   track's credits when its reference carries none, and an album already stored
   without credits gains them the next time it is materialized.
+
+- The recommended-albums shelf resolves at most as many suggestions as albums
+  it was asked for, remembers each resolved suggestion for a day instead of an
+  hour, and is warmed by the discovery sync that already runs when an account
+  links a service, so the first Home read of a throttled catalog no longer
+  waits on an unbounded search fallthrough.
 
 ### Security
 

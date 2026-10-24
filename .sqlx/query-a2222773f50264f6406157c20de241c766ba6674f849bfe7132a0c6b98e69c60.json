@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, al.created_at, al.updated_at FROM albums al JOIN album_artists aa ON aa.album_id = al.id WHERE aa.artist_id = ? ORDER BY al.year IS NULL, al.year, al.sort_title, al.id",
+  "query": "SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, al.created_at, al.updated_at FROM albums al WHERE (EXISTS (SELECT 1 FROM album_artists aa WHERE aa.album_id = al.id AND aa.artist_id = ?) OR EXISTS (SELECT 1 FROM tracks t JOIN track_artists ta ON ta.track_id = t.id WHERE t.album_id = al.id AND ta.artist_id = ?)) ORDER BY al.year IS NULL, al.year, al.sort_title, al.id",
   "describe": {
     "columns": [
       {
@@ -148,7 +148,7 @@
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 2
     },
     "nullable": [
       false,
@@ -166,5 +166,5 @@
       false
     ]
   },
-  "hash": "bd30671c7ca03ef0c401d8aa458cf27ab951fed6cf34d237ce9b719b6bb72e11"
+  "hash": "a2222773f50264f6406157c20de241c766ba6674f849bfe7132a0c6b98e69c60"
 }

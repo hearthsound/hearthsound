@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "WITH scope_tracks(track_id) AS (SELECT id FROM tracks WHERE availability IN (?, ?)) SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, al.created_at, al.updated_at FROM albums al JOIN album_artists aa ON aa.album_id = al.id WHERE aa.artist_id = ? AND al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id) ORDER BY al.year IS NULL, al.year, al.sort_title, al.id",
+  "query": "WITH scope_tracks(track_id) AS (SELECT id FROM tracks WHERE availability IN (?, ?)) SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, al.created_at, al.updated_at FROM albums al WHERE (EXISTS (SELECT 1 FROM album_artists aa WHERE aa.album_id = al.id AND aa.artist_id = ?) OR EXISTS (SELECT 1 FROM tracks t JOIN track_artists ta ON ta.track_id = t.id WHERE t.album_id = al.id AND ta.artist_id = ?)) AND al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id) ORDER BY al.year IS NULL, al.year, al.sort_title, al.id",
   "describe": {
     "columns": [
       {
@@ -148,7 +148,7 @@
       }
     ],
     "parameters": {
-      "Right": 3
+      "Right": 4
     },
     "nullable": [
       false,
@@ -166,5 +166,5 @@
       false
     ]
   },
-  "hash": "3a1fb25e648176bd14c633e90b0e14d12d17421242f23f347a3ffee604821042"
+  "hash": "b89dd440750057c7e6e1f9268c66b6a4671ecf18747f553ea2c12a844fd392aa"
 }

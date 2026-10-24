@@ -63,6 +63,12 @@ pub const DISCOVERY_SYNC_SCHEDULE: &str = "0 4 * * *";
 /// its own instead of staying in the listener's list forever.
 const DEFAULT_PLAYLIST_LIFETIME_MS: i64 = 8 * 24 * 60 * 60 * 1_000;
 
+/// How many recommended albums the sync resolves ahead of a Home read.
+///
+/// Twenty, the shelf's default size: the same work the endpoint does, moved
+/// into the background job that already runs when a discovery link is stored.
+const WARM_ALBUMS: u32 = 20;
+
 /// The payload of a `discovery.sync` job.
 ///
 /// A job without a listener syncs every linked listener, which is what the
@@ -261,6 +267,17 @@ impl DiscoverySyncJobHandler {
                 }),
             );
             written += 1;
+        }
+        // Warm the Home shelf with the work the endpoint would do anyway. The
+        // sync runs in the background and on link, so a listener's first Home
+        // read finds the resolution cache populated instead of waiting on a
+        // throttled catalog.
+        if let Err(error) = self.discovery.recommended_albums(user, WARM_ALBUMS).await {
+            tracing::debug!(
+                %error,
+                user = %user,
+                "could not warm the recommended albums"
+            );
         }
         Ok(written)
     }

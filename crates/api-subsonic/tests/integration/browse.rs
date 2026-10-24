@@ -1278,3 +1278,43 @@ async fn an_artist_outside_the_personal_library_stays_closed_for_others() {
 
     assert_error(&answer, 70);
 }
+
+#[tokio::test]
+async fn an_artist_lists_an_album_whose_tracks_credit_it() {
+    let fixture = Fixture::new().await;
+    let (_track, album, artist) = fixture
+        .seed_server_track_with_bare_album(
+            "Uncredited Album",
+            "Server Artist",
+            "Server Song",
+            180_000,
+        )
+        .await;
+    let app = fixture.app();
+
+    let answer = get(
+        &app,
+        &format!(
+            "/rest/getArtist?id={artist}&apiKey={}&f=json&musicFolderId=2",
+            fixture.api_key
+        ),
+    )
+    .await;
+
+    assert_ok(&answer);
+    let value: serde_json::Value = serde_json::from_str(&answer.body).unwrap();
+    let albums = &value["subsonic-response"]["artist"]["album"];
+    assert_eq!(albums.as_array().map_or(0, Vec::len), 1, "{}", answer.body);
+    let album_id = albums[0]["id"].as_str().unwrap();
+    assert_eq!(album_id, album.to_string(), "{}", answer.body);
+
+    let opened = get(
+        &app,
+        &format!(
+            "/rest/getAlbum?id={album_id}&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&opened);
+}
