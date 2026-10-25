@@ -27,18 +27,21 @@
 //! switched that setting off gets [`InstallError::RepositoriesDisabled`] rather
 //! than a new row.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use hearthsound_config::SettingsStore;
 use hearthsound_config::keys;
 use hearthsound_core::new_uuid_v7;
+use reqwest::Url;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::admin::{PluginAdmin, to_hex};
 use crate::error::InstallError;
+use crate::http::{HopPolicy, HttpRequest, is_public, literal_host, pinned_client, send_with_hops};
 use crate::index::{Index, IndexClient, IndexPlugin, IndexVersion, Unavailable};
 use crate::install::{PluginRegistration, RequestedPermission, requested_permissions_of};
 use crate::manifest::{SUPPORTED_APIS, SUPPORTED_APIS_LIST};
@@ -79,8 +82,6 @@ pub struct PluginInstaller {
     repository: PluginRepository,
     /// The client that downloads and verifies index documents.
     index: IndexClient,
-    /// The client archives are downloaded with.
-    http: reqwest::Client,
     /// The directory installs live in; downloads are staged inside it.
     plugins_dir: PathBuf,
 }
@@ -93,22 +94,23 @@ impl PluginInstaller {
     /// - `admin`: the administrative install path every archive goes through.
     /// - `repository`: the plugin repository rows.
     /// - `index`: the client that downloads and verifies index documents.
-    /// - `http`: the client archives are downloaded with.
     /// - `plugins_dir`: the directory installed plugins live under. Downloads
     ///   are staged in it as `<plugins_dir>/.download-<uuid>` before they are
     ///   installed, and removed from it again.
+    ///
+    /// Archives are downloaded through the host's own HTTP machinery, so they
+    /// are held to the address policy the index was read under; nothing here
+    /// holds a general-purpose client.
     pub fn new(
         admin: Arc<PluginAdmin>,
         repository: PluginRepository,
         index: IndexClient,
-        http: reqwest::Client,
         plugins_dir: PathBuf,
     ) -> PluginInstaller {
         PluginInstaller {
             admin,
             repository,
             index,
-            http,
             plugins_dir,
         }
     }
@@ -180,7 +182,7 @@ impl PluginInstaller {
                 index: source.url.clone(),
             })?;
 
-        let bytes = self.download(&version.url).await?;
+        let bytes = self.download(&version.url, &source.url).await?;
         if bytes.len() as u64 != version.size {
             return Err(InstallError::SizeMismatch {
                 declared: version.size,
@@ -454,11 +456,14 @@ impl PluginInstaller {
         })
     }
 
-    /// Downloads one archive.
+    /// Downloads one archive under the same address policy the index was read
+    /// with.
     ///
     /// # Parameters
     ///
     /// - `url`: the URL the index declares for the version.
+    /// - `index_url`: the URL of the index that declared it, which decides
+    ///   whether a non-public address is acceptable.
     ///
     /// # Returns
     ///
@@ -466,47 +471,122 @@ impl PluginInstaller {
     ///
     /// # Errors
     ///
-    /// Returns [`InstallError::Download`] when the request fails, the server
-    /// answers anything but a success, or the archive is larger than
-    /// [`MAX_ARCHIVE_BYTES`].
-    async fn download(&self, url: &str) -> Result<Vec<u8>, InstallError> {
+    /// Returns [`InstallError::Download`] when the URL's scheme is not http or
+    /// https, when the download fails or resolves to an address the index could
+    /// not have pointed at, when the server answers anything but a success, or
+    /// when the archive is larger than [`MAX_ARCHIVE_BYTES`].
+    async fn download(&self, url: &str, index_url: &str) -> Result<Vec<u8>, InstallError> {
         let failure = |reason: String| InstallError::Download {
             url: url.to_owned(),
             reason,
         };
-        let mut response = self
-            .http
-            .get(url)
-            .timeout(DOWNLOAD_TIMEOUT)
-            .send()
-            .await
-            .map_err(|error| failure(error.to_string()))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(failure(format!("the server answered {status}")));
+        let parsed = checked_archive_url(url).map_err(failure)?;
+
+        // An archive may only resolve to addresses as public as the index that
+        // named it, so an unsigned third-party index cannot point a download at
+        // the server's own network. A local mirror the administrator registered
+        // keeps working, because its index is local too.
+        let allow_anywhere = archive_may_be_private(index_url);
+        let pins = Arc::new(Mutex::new(HashMap::new()));
+        let client = pinned_client(
+            Arc::clone(&pins),
+            format!(
+                "Hearthsound/{} (+https://hearthsound.app)",
+                env!("CARGO_PKG_VERSION")
+            ),
+            None,
+        )
+        .map_err(|error| failure(error.to_string()))?;
+        let request = HttpRequest {
+            method: "GET".to_owned(),
+            url: parsed.to_string(),
+            headers: Vec::new(),
+            body: None,
+            timeout_ms: None,
+        };
+        let response = send_with_hops(
+            &client,
+            &request,
+            Some(Instant::now() + DOWNLOAD_TIMEOUT),
+            HopPolicy {
+                grant: None,
+                pins: &pins,
+                allow_anywhere,
+                rate: None,
+            },
+            MAX_ARCHIVE_BYTES,
+        )
+        .await
+        .map_err(|error| failure(error.to_string()))?;
+
+        if !(200..300).contains(&response.status) {
+            return Err(failure(format!("the server answered {}", response.status)));
         }
-        if let Some(length) = response.content_length()
-            && length > MAX_ARCHIVE_BYTES
-        {
+        if response.body.len() as u64 > MAX_ARCHIVE_BYTES {
             return Err(failure(format!(
-                "the archive declares {length} bytes, above the {MAX_ARCHIVE_BYTES} byte limit"
+                "the archive is larger than the {MAX_ARCHIVE_BYTES} byte limit"
             )));
         }
+        Ok(response.body)
+    }
+}
 
-        let mut body = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|error| failure(error.to_string()))?
-        {
-            if body.len() as u64 + chunk.len() as u64 > MAX_ARCHIVE_BYTES {
-                return Err(failure(format!(
-                    "the archive is larger than the {MAX_ARCHIVE_BYTES} byte limit"
-                )));
-            }
-            body.extend_from_slice(&chunk);
+/// Checks that an archive URL may be fetched at all.
+///
+/// # Parameters
+///
+/// - `url`: the URL the index declares for a version.
+///
+/// # Returns
+///
+/// The parsed URL.
+///
+/// # Errors
+///
+/// Returns a reason when the URL is not parseable or its scheme is not http or
+/// https.
+fn checked_archive_url(url: &str) -> Result<Url, String> {
+    let parsed = Url::parse(url).map_err(|error| format!("`{url}` is not a URL: {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!(
+            "the scheme `{}` is not allowed; an archive is fetched over http or https",
+            parsed.scheme()
+        ));
+    }
+    Ok(parsed)
+}
+
+/// Returns whether an index is local enough that its archives may name a
+/// non-public address.
+///
+/// An archive may only resolve to addresses as public as the index that named
+/// it. A public index - the compiled-in one, or a third-party URL an
+/// administrator typed - must therefore point its archives at public addresses,
+/// and an unsigned index cannot use the server's own network as a plugin
+/// source. An index the administrator runs locally (a private IP literal, a
+/// loopback address, `localhost`, or a single-label name that only resolves on
+/// the local network) may keep pointing at itself.
+///
+/// # Parameters
+///
+/// - `index_url`: the URL of the index document the archive came from.
+///
+/// # Returns
+///
+/// Whether a non-public archive address is acceptable.
+fn archive_may_be_private(index_url: &str) -> bool {
+    let Ok(url) = Url::parse(index_url) else {
+        return false;
+    };
+    if let Some(address) = literal_host(&url) {
+        return !is_public(address);
+    }
+    match url.host_str() {
+        Some(domain) => {
+            let domain = domain.to_ascii_lowercase();
+            domain == "localhost" || domain.ends_with(".localhost") || !domain.contains('.')
         }
-        Ok(body)
+        None => false,
     }
 }
 
@@ -770,5 +850,38 @@ fn incompatible(entry: &IndexPlugin) -> Unavailable {
             .iter()
             .map(|version| version.api.clone())
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_archive_may_only_be_as_private_as_its_index() {
+        // A public index may not point a download at the server's own network.
+        assert!(!archive_may_be_private(
+            "https://plugins.example.org/v1/index.json"
+        ));
+        // A local mirror the administrator registered keeps working.
+        assert!(archive_may_be_private("http://127.0.0.1:8080/index.json"));
+        assert!(archive_may_be_private("http://[::1]:8080/index.json"));
+        assert!(archive_may_be_private("http://localhost:8080/index.json"));
+        assert!(archive_may_be_private("http://10.0.0.5/index.json"));
+        assert!(archive_may_be_private("http://mirror/index.json"));
+        assert!(archive_may_be_private(
+            "http://192.168.1.10:8080/v1/index.json"
+        ));
+        assert!(!archive_may_be_private("not a url"));
+    }
+
+    #[test]
+    fn an_archive_url_must_be_http() {
+        assert!(checked_archive_url("https://cdn.example.org/x.hsplugin").is_ok());
+        assert!(checked_archive_url("http://cdn.example.org/x.hsplugin").is_ok());
+        let error = checked_archive_url("ftp://cdn.example.org/x.hsplugin").unwrap_err();
+        assert!(error.contains("ftp"), "{error}");
+        let error = checked_archive_url("not a url").unwrap_err();
+        assert!(error.contains("not a URL"), "{error}");
     }
 }

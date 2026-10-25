@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `library.reidentity` job and the `library_maintenance` marker.
 - `GET /api/v1/admin/folders` answers `lastScanError`, the reason a folder's last
   scan failed or ended with a warning.
+- Provider instance health is checked when an instance is created or enabled and
+  periodically on the new `plugins.health_check_minutes` interval (default 15,
+  `0` disables the periodic checks), through the new `plugin.health` job, which
+  records exactly what the manual Check Health route records.
 
 ### Changed
 
@@ -79,6 +83,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scans follow symlinks inside a folder, including links out of it, and skip a
   directory the walk already visited so a link cycle cannot loop. A file whose
   name is not valid UTF-8 is skipped instead of being stored lossily.
+- A provider configuration `PATCH` merges instead of replacing: a field the
+  request omits keeps its stored value, secrets included, `[sealed]` keeps it,
+  and an explicit empty string removes a write-only field.
+- A redirect to another origin no longer carries a plugin's credential headers
+  (`authorization`, `proxy-authorization`, `cookie`) or its body, and a 301, 302
+  or 303 rewrites the method to GET without the body.
+- An IPv6 literal host is pinned as the address it names instead of failing DNS
+  resolution, and the address policy also rejects IPv4-compatible, NAT64, 6to4
+  and site-local IPv6 ranges.
+- A busy plugin instance is no longer auto-disabled: waiting for a free store and
+  a failed instantiation answer `unavailable` without counting as a trap, and the
+  guest call keeps its full budget from the moment it starts.
+- An instance the host auto-disables leaves its layers within one event instead
+  of at the next admin write.
+- A failed registry rebuild after a committed write answers `503 unavailable`
+  and is retried on its own instead of leaving the registry stale.
+
+### Fixed
+
+- A stored provider secret is never printed by a validation error: the message
+  names the field and the keyword, never the restored value or, for a plugin's
+  own complaint, the secret it quoted.
+- A plugin that starts marking a field `writeOnly` has the stored plaintext
+  sealed on the next registry rebuild, so a plugin upgrade needs no operator
+  step.
+- A plugin repository with an unusable URL or minisign key is refused with
+  `400 invalid-request` when it is created or changed, instead of failing at the
+  next fetch.
+- The reserved import-root id `staging` is refused, so a root the guest can never
+  reach is not accepted.
+- A tool's stdout file is created without following a symlink, and no directory
+  is created outside the staging directory.
+- A plugin archive may only resolve to addresses as public as the index that
+  named it, so an unsigned public index cannot point a download at the server's
+  own network; a local mirror keeps working.
+- A plugin instance that hits the live-process cap is refused before any file is
+  created, and concurrent spawns can no longer pass the cap together.
 
 ## [0.1.6] - 2026-10-24
 

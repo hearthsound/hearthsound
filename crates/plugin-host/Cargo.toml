@@ -21,6 +21,7 @@ hearthsound-jobs = { path = "../jobs" }
 jsonschema.workspace = true
 minisign-verify.workspace = true
 reqwest.workspace = true
+rustix.workspace = true
 rustls.workspace = true
 semver = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }

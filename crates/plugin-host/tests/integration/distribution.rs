@@ -145,7 +145,6 @@ impl Env {
             Arc::clone(&admin),
             repository.clone(),
             index,
-            http(),
             dir.path().join("plugins"),
         ));
         Env {

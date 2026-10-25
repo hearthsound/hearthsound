@@ -256,9 +256,7 @@ impl Context {
         Ok(PluginInstaller::new(
             self.plugin_admin()?,
             PluginRepository::new(&self.database),
-            IndexClient::official(http.clone())
-                .context("could not read the official plugin index key")?,
-            http,
+            IndexClient::official(http).context("could not read the official plugin index key")?,
             self.plugins_dir().to_path_buf(),
         ))
     }

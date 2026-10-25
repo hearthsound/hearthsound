@@ -56,6 +56,16 @@ impl Services {
             .await;
         let mut commits = watcher.subscribe();
         let mut settings_changes = self.settings().subscribe();
+        // An instance the host switches off is written straight to the database
+        // by the server's own connection, which `data_version` does not move for,
+        // so the host signals it in-process instead.
+        let mut disabled = self.plugins().subscribe_instance_disabled();
+        // A rebuild that failed after a write committed leaves the registry
+        // serving the previous entries; this arm retries it without waiting for
+        // another admin write. A sleep rather than an interval, because an
+        // interval's first tick is immediate and would rebuild a second time
+        // beside the write that just ran.
+        let retry_period = DATA_VERSION_POLL_INTERVAL;
 
         loop {
             tokio::select! {
@@ -71,6 +81,29 @@ impl Services {
                     }
                     self.apply_cached_settings();
                     self.reconcile_watchers().await;
+                }
+                received = disabled.recv() => {
+                    match received {
+                        Ok(slug) => {
+                            tracing::info!(
+                                instance = %slug,
+                                "an instance was switched off, so the registry is rebuilt"
+                            );
+                            self.reload().await;
+                        }
+                        // A lagging receiver missed events; the rebuild below
+                        // covers all of them.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            self.reload().await;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                () = tokio::time::sleep(retry_period) => {
+                    if self.registry().is_stale() {
+                        tracing::info!("retrying a provider registry rebuild that failed");
+                        self.reload().await;
+                    }
                 }
                 () = shutdown.wait() => break,
             }
@@ -94,7 +127,7 @@ impl Services {
             Ok(()) => {}
             Err(error) => tracing::error!(%error, "could not reload the runtime settings"),
         }
-        match self.registry().rebuild().await {
+        match self.registry().rebuild_or_mark_stale().await {
             Ok(report) => log_rebuild(&report),
             Err(error) => tracing::error!(%error, "could not rebuild the provider registry"),
         }

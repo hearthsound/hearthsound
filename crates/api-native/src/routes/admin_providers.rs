@@ -28,7 +28,6 @@ use crate::auth::AdminAuthed;
 use crate::extract::JsonBody;
 use crate::problem::{self, Problem};
 use crate::state::NativeState;
-use crate::views::now_millis;
 
 /// The outcome of one health check.
 ///
@@ -215,6 +214,9 @@ pub async fn create_provider(
         .await
         .map_err(|error| instance_problem(&error))?;
     rebuild(&state).await?;
+    // A new instance must not show "Not checked yet": the probe runs beside the
+    // request and its result is recorded on the instance.
+    check_health_in_background(&state, view.slug.clone());
     Ok((StatusCode::CREATED, Json(provider_view(view, None))))
 }
 
@@ -253,15 +255,23 @@ pub async fn get_provider(
 /// Changes a provider instance.
 ///
 /// The configuration is validated and sealed exactly as it is on creation, and
-/// the registry is rebuilt so the change is in service before the answer is
-/// sent. An update that echoes the sealed placeholder back keeps the stored
-/// secret; a write-only field the update leaves out is gone.
+/// it is applied as a patch: a server-config field the request leaves out keeps
+/// its stored value, secrets included, a write-only field sent as `[sealed]`
+/// also keeps it, and a write-only field sent as an empty string removes it.
+/// A configuration that does not satisfy the plugin's schema is answered with
+/// `invalid-provider`, and the detail names the field without ever printing a
+/// stored secret.
+///
+/// The registry is rebuilt so the change is in service before the answer is
+/// sent. Enabling an instance also runs its health check, so a switched-on
+/// instance never shows a result from before it was switched off.
 ///
 /// # Errors
 ///
 /// Answers `invalid-request` for a malformed body, `not-found` for an unknown
 /// instance, `invalid-provider` when the plugin rejects the configuration or
-/// cannot serve it, and `internal` when the row cannot be written.
+/// cannot serve it, and `unavailable` when the change was saved but the registry
+/// could not be rebuilt yet.
 #[utoipa::path(
     patch,
     path = "/api/v1/admin/providers/{slug}",
@@ -273,6 +283,7 @@ pub async fn get_provider(
         (status = 400, description = "The request body is malformed", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such instance", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The configuration cannot be used", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "The change was saved but not applied yet", body = Problem, content_type = "application/problem+json"),
     ),
     security(("bearer" = []), ("session" = []))
 )]
@@ -300,9 +311,9 @@ pub async fn patch_provider(
                 .unwrap_or_else(|| current.display_name.clone()),
             slug: current.slug.clone(),
             plugin_id: current.plugin_id.clone(),
-            server_config: body
-                .server_config
-                .unwrap_or_else(|| current.server_config.clone()),
+            // A configuration field the request leaves out keeps its stored
+            // value; the service merges the patch onto what the instance holds.
+            server_config: body.server_config.unwrap_or_else(|| serde_json::json!({})),
             host_config,
         };
         current = instances
@@ -311,16 +322,31 @@ pub async fn patch_provider(
             .map_err(|error| instance_problem(&error))?;
     }
 
-    if let Some(enabled) = body.enabled
-        && enabled != current.enabled
-    {
-        current = instances
-            .set_enabled(&slug, enabled)
-            .await
-            .map_err(|error| instance_problem(&error))?;
+    // The enable write is not allowed to skip the rebuild: a failure of either
+    // is reported, but the registry is always brought in line with what was
+    // written.
+    let enabled_result = match body.enabled {
+        Some(enabled) if enabled != current.enabled => Some(
+            instances
+                .set_enabled(&slug, enabled)
+                .await
+                .map_err(|error| instance_problem(&error))?,
+        ),
+        _ => None,
+    };
+    if let Some(view) = enabled_result {
+        current = view;
     }
-
-    rebuild(&state).await?;
+    let rebuild_result = rebuild(&state).await;
+    // Both writes are committed now; the answer reports the first failure, and
+    // a failed rebuild has already marked the registry stale for the retry.
+    if let Some(enabled) = body.enabled
+        && enabled
+        && current.enabled
+    {
+        check_health_in_background(&state, current.slug.clone());
+    }
+    rebuild_result?;
     let health = instance_health(&state).await?.remove(&slug);
     Ok(Json(provider_view(current, health)))
 }
@@ -388,49 +414,39 @@ pub async fn provider_health(
     State(state): State<NativeState>,
     UrlPath(slug): UrlPath<String>,
 ) -> Result<Json<HealthView>, Problem> {
-    let row = state
+    state
         .services()
         .plugin_repository
         .instance_by_slug(&slug)
         .await
         .map_err(|error| problem::internal("reading a provider instance", &error))?
         .ok_or_else(|| Problem::not_found("No such provider instance."))?;
-    let report = state
+    let outcome = state
         .services()
         .registry
-        .health(&slug)
+        .check_health(&slug)
         .await
+        .map_err(|error| problem::internal("recording a health result", &error))?
         .ok_or_else(|| {
             Problem::conflict(
                 "The provider instance is not in service; enable it and assign it to a layer.",
             )
         })?;
-
-    let (ok, detail) = match report {
-        Ok(detail) => (true, detail),
-        Err(error) => (false, error.to_string()),
-    };
-    let health = HealthView {
-        slug,
-        ok,
-        detail,
-        checked_at: now_millis(),
-    };
-    let text = serde_json::to_string(&health)
-        .map_err(|error| problem::internal("encoding a health result", &error))?;
-    state
-        .services()
-        .plugin_repository
-        .set_instance_health(row.id, Some(&text))
-        .await
-        .map_err(|error| problem::internal("recording a health result", &error))?;
-    Ok(Json(health))
+    Ok(Json(HealthView {
+        slug: outcome.slug,
+        ok: outcome.ok,
+        detail: outcome.detail,
+        checked_at: outcome.checked_at,
+    }))
 }
 
 /// Rebuilds the provider registry so a change is in service.
 ///
 /// A skipped instance is a warning rather than a failure; only a table that
-/// cannot be read fails the rebuild.
+/// cannot be read makes the rebuild fail, and the write that preceded it has
+/// already committed. That is answered as `unavailable` rather than `internal`:
+/// the change is stored, the running server could not apply it yet, and the
+/// reload worker retries while the registry is marked stale.
 ///
 /// # Parameters
 ///
@@ -438,15 +454,45 @@ pub async fn provider_health(
 ///
 /// # Errors
 ///
-/// Answers `internal` when the plugin tables cannot be read.
+/// Answers `unavailable` when the plugin tables cannot be read.
 async fn rebuild(state: &NativeState) -> Result<(), Problem> {
     state
         .services()
         .registry
-        .rebuild()
+        .rebuild_or_mark_stale()
         .await
-        .map_err(|error| problem::internal("rebuilding the provider registry", &error))?;
+        .map_err(|error| {
+            tracing::error!(%error, "could not rebuild the provider registry");
+            Problem::unavailable(
+                "The change was saved, but the running server could not apply it yet; it retries automatically.",
+            )
+        })?;
     Ok(())
+}
+
+/// Runs one instance's health check in the background.
+///
+/// Creating and enabling an instance are answered before the plugin is asked
+/// anything, because a probe is an outbound request that can take the plugin's
+/// whole call timeout. The outcome is recorded on the instance, which the
+/// Providers and Layers pages read.
+///
+/// # Parameters
+///
+/// - `state`: the shared services.
+/// - `slug`: the instance to check.
+fn check_health_in_background(state: &NativeState, slug: String) {
+    let registry = std::sync::Arc::clone(&state.services().registry);
+    tokio::spawn(async move {
+        match registry.check_health(&slug).await {
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                instance = %slug,
+                %error,
+                "could not record a provider health result"
+            ),
+        }
+    });
 }
 
 /// Builds the view of one instance.

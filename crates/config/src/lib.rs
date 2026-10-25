@@ -546,6 +546,10 @@ pub mod keys {
     /// Hours between plugin update checks; 0 disables them.
     pub const PLUGINS_UPDATE_CHECK_HOURS: SettingKey<i64> =
         SettingKey::new("plugins.update_check_hours");
+    /// Minutes between automatic provider instance health checks; 0 disables the
+    /// periodic checks, and creating or enabling an instance still checks it.
+    pub const PLUGINS_HEALTH_CHECK_MINUTES: SettingKey<i64> =
+        SettingKey::new("plugins.health_check_minutes");
     /// Whether plugin updates are installed automatically.
     pub const PLUGINS_AUTO_UPDATE: SettingKey<bool> = SettingKey::new("plugins.auto_update");
     /// Whether the client asks for confirmation, with the plugin's permissions, before installing
@@ -1075,6 +1079,12 @@ impl SettingsRegistry {
                     SettingKind::Integer { min: 0, max: 8_760 },
                     SettingValue::Integer(24),
                     "Hours between plugin update checks; 0 disables them",
+                ),
+                def(
+                    keys::PLUGINS_HEALTH_CHECK_MINUTES,
+                    SettingKind::Integer { min: 0, max: 1_440 },
+                    SettingValue::Integer(15),
+                    "Minutes between provider instance health checks; 0 disables the periodic checks",
                 ),
                 def(
                     keys::PLUGINS_AUTO_UPDATE,

@@ -420,8 +420,9 @@ impl UpdateCheckJobHandler {
             && let Some(registry) = &self.registry
         {
             // A rebuild that fails leaves the previous entries in place, which
-            // is what the server keeps serving; it never fails the check.
-            match registry.rebuild().await {
+            // is what the server keeps serving; it never fails the check, and
+            // the stale mark makes the reload worker retry it.
+            match registry.rebuild_or_mark_stale().await {
                 Ok(report) => tracing::info!(
                     instances = report.instances,
                     "rebuilt the provider registry after plugin updates"

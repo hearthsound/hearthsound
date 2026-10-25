@@ -271,7 +271,7 @@ pub async fn patch_repository(
     let row = repository
         .update_repository(id, name.as_deref(), public_key.as_deref(), enabled)
         .await
-        .map_err(|error| problem::internal("changing a plugin repository", &error))?
+        .map_err(|error| repository_problem(&error))?
         .ok_or_else(|| Problem::not_found("No such plugin repository."))?;
     Ok(Json(RepositoryView::from(&row)))
 }
@@ -322,11 +322,12 @@ pub async fn delete_repository(
 ///
 /// # Returns
 ///
-/// `conflict` for a URL that is registered already, and `internal` for anything
-/// else.
+/// `conflict` for a URL that is registered already, `invalid-request` for a URL
+/// or a key that is not usable, and `internal` for anything else.
 fn repository_problem(error: &RepoError) -> Problem {
     match error {
         RepoError::DuplicateUrl(_) => Problem::conflict(error.to_string()),
+        RepoError::InvalidRepository { .. } => Problem::invalid_request(error.to_string()),
         _ => problem::internal("registering a plugin repository", error),
     }
 }

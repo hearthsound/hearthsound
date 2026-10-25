@@ -29,6 +29,7 @@
 //! | `invalid-layer` | 422 | the layer cannot take these instances |
 //! | `rate-limited` | 429 | too many failed sign-ins; `Retry-After` says when to retry |
 //! | `internal` | 500 | the server failed; the log has the details |
+//! | `unavailable` | 503 | the change was saved, but the server could not apply it yet; it retries automatically |
 //! | `signature-invalid` | 502 | a plugin index is unsigned or its signature does not verify |
 //! | `integrity-failed` | 502 | a plugin archive is not what the index declares |
 //! | `index-unavailable` | 502 | a plugin index or an archive could not be downloaded |
@@ -366,6 +367,20 @@ impl Problem {
             "",
         )
     }
+
+    /// The change was saved but the running server could not apply it yet.
+    ///
+    /// This is not a failed write: the row is committed and the server keeps
+    /// serving what it had while it retries the application on its own, so a
+    /// client should not repeat the request.
+    pub fn unavailable(detail: impl Into<String>) -> Problem {
+        Problem::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "Unavailable",
+            detail,
+        )
+    }
 }
 
 impl IntoResponse for Problem {
@@ -429,5 +444,16 @@ mod tests {
     fn an_internal_problem_carries_no_detail() {
         let json = serde_json::to_value(Problem::internal()).unwrap();
         assert!(json.get("detail").is_none());
+    }
+
+    #[test]
+    fn an_unapplied_change_is_a_503() {
+        let problem = Problem::unavailable(
+            "The change was saved, but the running server could not apply it yet; it retries automatically.",
+        );
+        assert_eq!(problem.status, 503);
+        assert_eq!(problem.code, "unavailable");
+        assert_eq!(problem.kind, "https://hearthsound.app/problems/unavailable");
+        assert_eq!(problem.title, "Unavailable");
     }
 }

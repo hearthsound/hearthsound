@@ -20,7 +20,10 @@
 //!    10 seconds and the ceiling is 60 seconds. The effective budget is also
 //!    clamped to whatever is left of the plugin call's deadline.
 //! 4. **Redirects.** At most five, every hop re-checked against the allowlist
-//!    and the address policy.
+//!    and the address policy. A hop to another origin drops the request's
+//!    credential headers (`authorization`, `proxy-authorization`, `cookie`) and
+//!    a 301, 302 or 303 rewrites the method to GET without the body, so a
+//!    redirect cannot carry a plugin's API key to a second host.
 //! 5. **Body cap.** The response body is capped (10 MiB by default, and at most
 //!    64 MiB when the manifest asked for more) while it streams, so an
 //!    oversized response fails instead of being copied into guest memory.
@@ -264,7 +267,6 @@ fn config_host(config: &serde_json::Value, field: &str) -> Option<String> {
 /// calls. A client is cheap to hold but not to build, so it is built once per
 /// instance and shared by the instance's stores.
 pub struct HttpClient {
-    plugin: String,
     slug: Slug,
     grant: HttpGrant,
     client: Client,
@@ -293,35 +295,19 @@ impl HttpClient {
         grant: HttpGrant,
     ) -> Result<HttpClient, HttpError> {
         let pins = Arc::new(Mutex::new(HashMap::new()));
-        let resolver = Arc::new(PinnedResolver {
-            pins: Arc::clone(&pins),
-            slug: slug.clone(),
-        });
-
         let user_agent = format!(
             "Hearthsound/{} (+https://hearthsound.app) plugin/{}/{}",
             env!("CARGO_PKG_VERSION"),
             plugin,
             plugin_version
         );
-
-        // reqwest is built without a bundled TLS provider; ring is installed as
-        // the process default the first time a client is built. Installing
-        // fails harmlessly when a default is already in place.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let client = Client::builder()
-            .user_agent(user_agent)
-            .redirect(reqwest::redirect::Policy::none())
-            .dns_resolver(resolver)
-            .build()
-            .map_err(|error| HttpError::Network(error.to_string()))?;
+        let client = pinned_client(Arc::clone(&pins), user_agent, Some(slug.clone()))?;
 
         let rate = grant.rate_limit.map(|(per_second, burst)| {
             RateLimiter::direct(Quota::per_second(per_second).allow_burst(burst))
         });
 
         Ok(HttpClient {
-            plugin,
             slug,
             grant,
             client,
@@ -364,70 +350,25 @@ impl HttpClient {
         request: &HttpRequest,
         deadline: Option<Instant>,
     ) -> Result<HttpResponse, HttpError> {
-        let method = Method::from_bytes(request.method.as_bytes())
-            .map_err(|error| HttpError::Network(format!("invalid method: {error}")))?;
-        let mut url = Url::parse(&request.url)
-            .map_err(|error| HttpError::Network(format!("invalid url: {error}")))?;
-        if !matches!(url.scheme(), "http" | "https") {
-            return Err(HttpError::Denied(format!(
-                "scheme `{}` is not allowed; only http and https are",
-                url.scheme()
-            )));
-        }
-
         let budget = Duration::from_millis(self.budget_ms(request.timeout_ms));
         let own_deadline = Instant::now() + budget;
         let deadline = Some(match deadline {
             Some(call) => call.min(own_deadline),
             None => own_deadline,
         });
-
-        let mut redirects = 0usize;
-        loop {
-            self.check_allowlist(&url)?;
-            self.pin(&url).await?;
-            self.acquire_token(deadline).await?;
-
-            let remaining = remaining_of(deadline)?;
-            let mut builder = self
-                .client
-                .request(method.clone(), url.clone())
-                .timeout(remaining);
-            for (name, value) in &request.headers {
-                builder = builder.header(name, value);
-            }
-            if let Some(body) = &request.body {
-                builder = builder.body(body.clone());
-            }
-
-            let response = builder.send().await.map_err(map_send_error)?;
-            if response.status().is_redirection() {
-                if redirects >= MAX_REDIRECTS {
-                    return Err(HttpError::Denied(format!(
-                        "the request exceeded {MAX_REDIRECTS} redirects"
-                    )));
-                }
-                let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
-                    return self.read_body(response).await;
-                };
-                let location = location.to_str().map_err(|_| {
-                    HttpError::Network("the redirect location is not valid text".to_owned())
-                })?;
-                url = url.join(location).map_err(|error| {
-                    HttpError::Network(format!("the redirect location is not a URL: {error}"))
-                })?;
-                if !matches!(url.scheme(), "http" | "https") {
-                    return Err(HttpError::Denied(format!(
-                        "the redirect target uses the `{}` scheme, which is not allowed",
-                        url.scheme()
-                    )));
-                }
-                redirects += 1;
-                continue;
-            }
-
-            return self.read_body(response).await;
-        }
+        send_with_hops(
+            &self.client,
+            request,
+            deadline,
+            HopPolicy {
+                grant: Some(&self.grant),
+                pins: &self.pins,
+                allow_anywhere: false,
+                rate: self.rate.as_ref(),
+            },
+            self.grant.max_body_bytes,
+        )
+        .await
     }
 
     /// Returns the effective timeout budget in milliseconds.
@@ -437,118 +378,346 @@ impl HttpClient {
     fn budget_ms(&self, requested: Option<u32>) -> u64 {
         u64::from(requested.unwrap_or(DEFAULT_TIMEOUT_MS as u32)).clamp(1, MAX_TIMEOUT_MS)
     }
+}
 
-    /// Checks the request's host against the allowlist.
-    fn check_allowlist(&self, url: &Url) -> Result<(), HttpError> {
-        let host = url
-            .host_str()
-            .ok_or_else(|| HttpError::Denied("the URL has no host".to_owned()))?
-            .to_ascii_lowercase();
-        if self.grant.allows(&host) {
-            Ok(())
-        } else {
-            Err(HttpError::Denied(self.grant.denial(&host)))
-        }
-    }
+/// What a hop loop applies besides the redirect rules.
+///
+/// The plugin's own client passes its grant, its pin map and its rate limiter;
+/// the installer passes no grant and an "allow anywhere" flag when the index it
+/// downloads from is a local one, so an archive URL is held to the same address
+/// policy as the index it came from.
+pub(crate) struct HopPolicy<'a> {
+    /// The instance's grant, whose allowlist every hop is checked against, or
+    /// `None` for a caller that fetches for the server itself.
+    pub grant: Option<&'a HttpGrant>,
+    /// The addresses the client's resolver hands to the connector, by host.
+    pub pins: &'a Mutex<HashMap<String, Vec<SocketAddr>>>,
+    /// Whether every host may resolve to non-public addresses.
+    pub allow_anywhere: bool,
+    /// The instance's rate limiter, when it has one.
+    pub rate: Option<&'a DefaultDirectRateLimiter>,
+}
 
-    /// Resolves the request's host and pins the accepted addresses.
-    ///
-    /// The pin is what the HTTP client's resolver hands to the connector, so the
-    /// address policy is enforced on the addresses the connection uses and the
-    /// name is never resolved a second time.
-    async fn pin(&self, url: &Url) -> Result<(), HttpError> {
-        let host = url
-            .host_str()
-            .ok_or_else(|| HttpError::Denied("the URL has no host".to_owned()))?
-            .to_ascii_lowercase();
-        let port = url.port_or_known_default().unwrap_or(80);
-        let anywhere = self.grant.may_resolve_anywhere(&host);
+/// Performs one request and its redirects under a policy.
+///
+/// Every hop is re-checked: the allowlist when the policy carries a grant, the
+/// address policy always, and the rate limiter when there is one. A hop to
+/// another origin drops the request's credential headers, and a redirect that
+/// means "fetch this instead" (301, 302, 303) rewrites the method to GET without
+/// the body, so a redirect cannot carry a plugin's API key to a second host.
+///
+/// # Parameters
+///
+/// - `client`: the HTTP client, built with a pinned resolver and
+///   `redirect(Policy::none())` so this loop sees every hop.
+/// - `request`: the request to send.
+/// - `deadline`: the instant the whole request must be finished by.
+/// - `policy`: the grant, pins, address exemption and rate limiter to apply.
+/// - `max_body_bytes`: the response body cap.
+///
+/// # Returns
+///
+/// The final response.
+///
+/// # Errors
+///
+/// The same errors [`HttpClient::send`] documents.
+pub(crate) async fn send_with_hops(
+    client: &Client,
+    request: &HttpRequest,
+    deadline: Option<Instant>,
+    policy: HopPolicy<'_>,
+    max_body_bytes: u64,
+) -> Result<HttpResponse, HttpError> {
+    let mut current = request.clone();
+    let mut url = Url::parse(&current.url)
+        .map_err(|error| HttpError::Network(format!("invalid url: {error}")))?;
 
-        let resolved = tokio::net::lookup_host((host.as_str(), port))
-            .await
-            .map_err(|error| HttpError::Network(format!("resolving `{host}` failed: {error}")))?;
-
-        let mut addresses = Vec::new();
-        for address in resolved {
-            if anywhere || is_public(address.ip()) {
-                addresses.push(address);
-            } else {
-                tracing::debug!(
-                    target: "hearthsound::plugin",
-                    plugin = %self.plugin,
-                    instance = %self.slug,
-                    host = %host,
-                    address = %address.ip(),
-                    "rejecting a non-public address",
-                );
-            }
-        }
-        if addresses.is_empty() {
+    let mut redirects = 0usize;
+    loop {
+        if !matches!(url.scheme(), "http" | "https") {
             return Err(HttpError::Denied(format!(
-                "host `{host}` resolves only to non-public addresses"
+                "scheme `{}` is not allowed; only http and https are",
+                url.scheme()
             )));
         }
+        let host = url
+            .host_str()
+            .ok_or_else(|| HttpError::Denied("the URL has no host".to_owned()))?
+            .to_ascii_lowercase();
+        if let Some(grant) = policy.grant
+            && !grant.allows(&host)
+        {
+            return Err(HttpError::Denied(grant.denial(&host)));
+        }
 
-        lock(&self.pins).insert(host, addresses);
-        Ok(())
-    }
+        let anywhere = policy.allow_anywhere
+            || policy
+                .grant
+                .is_some_and(|grant| grant.may_resolve_anywhere(&host));
+        let addresses = approved_addresses(&url, anywhere).await?;
+        // A literal address is never resolved, so it needs no pin; only a name
+        // is looked up by name by the connector.
+        if literal_host(&url).is_none() {
+            lock(policy.pins).insert(host, addresses);
+        }
 
-    /// Waits for a rate-limit token, giving up at the deadline.
-    async fn acquire_token(&self, deadline: Option<Instant>) -> Result<(), HttpError> {
-        let Some(limiter) = &self.rate else {
-            return Ok(());
+        if let Some(limiter) = policy.rate {
+            wait_for_token(limiter, deadline).await?;
+        }
+
+        let method = Method::from_bytes(current.method.as_bytes())
+            .map_err(|error| HttpError::Network(format!("invalid method: {error}")))?;
+        let remaining = remaining_of(deadline)?;
+        let mut builder = client.request(method, url.clone()).timeout(remaining);
+        for (name, value) in &current.headers {
+            builder = builder.header(name, value);
+        }
+        if let Some(body) = &current.body {
+            builder = builder.body(body.clone());
+        }
+
+        let response = builder.send().await.map_err(map_send_error)?;
+        if !response.status().is_redirection() {
+            return read_body(response, max_body_bytes).await;
+        }
+        if redirects >= MAX_REDIRECTS {
+            return Err(HttpError::Denied(format!(
+                "the request exceeded {MAX_REDIRECTS} redirects"
+            )));
+        }
+        let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
+            return read_body(response, max_body_bytes).await;
         };
-        match deadline {
-            Some(deadline) => {
-                let remaining = remaining_of(Some(deadline))?;
-                match tokio::time::timeout(remaining, limiter.until_ready()).await {
-                    Ok(_) => Ok(()),
-                    Err(_) => Err(HttpError::Timeout),
-                }
+        let location = location.to_str().map_err(|_| {
+            HttpError::Network("the redirect location is not valid text".to_owned())
+        })?;
+        let next = url.join(location).map_err(|error| {
+            HttpError::Network(format!("the redirect location is not a URL: {error}"))
+        })?;
+        if !matches!(next.scheme(), "http" | "https") {
+            return Err(HttpError::Denied(format!(
+                "the redirect target uses the `{}` scheme, which is not allowed",
+                next.scheme()
+            )));
+        }
+        current = next_request(&current, &url, &next, response.status().as_u16());
+        url = next;
+        redirects += 1;
+    }
+}
+
+/// Builds the request one redirect hop sends.
+///
+/// A hop to another origin drops the request's credential headers
+/// (`authorization`, `proxy-authorization`, `cookie`) and its body: both were
+/// meant for the origin that issued the redirect, and a redirect is not a
+/// reason to hand them to a second host. On such a hop a 301, 302 or 303 also
+/// rewrites the method to GET, and a 307 or 308 keeps the method with no body.
+/// A same-origin hop keeps the method and every header, which is what a plugin's
+/// own API expects from its own redirects.
+///
+/// # Parameters
+///
+/// - `current`: the request that received the redirect.
+/// - `from`: the URL that answered with it.
+/// - `to`: the URL the redirect points at.
+/// - `status`: the redirect's status code.
+///
+/// # Returns
+///
+/// The request to send next.
+fn next_request(current: &HttpRequest, from: &Url, to: &Url, status: u16) -> HttpRequest {
+    let mut next = current.clone();
+    next.url = to.to_string();
+    if same_origin(from, to) {
+        return next;
+    }
+    next.headers.retain(|(name, _)| !is_credential_header(name));
+    next.body = None;
+    let method = next.method.to_ascii_uppercase();
+    let keeps_method = method == "GET" || method == "HEAD";
+    match status {
+        303 => next.method = "GET".to_owned(),
+        301 | 302 if !keeps_method => next.method = "GET".to_owned(),
+        _ => {}
+    }
+    next
+}
+
+/// Returns whether two URLs have the same origin.
+///
+/// # Parameters
+///
+/// - `left`: one URL.
+/// - `right`: the other URL.
+///
+/// # Returns
+///
+/// Whether the scheme, host and port match.
+fn same_origin(left: &Url, right: &Url) -> bool {
+    left.scheme() == right.scheme()
+        && left
+            .host_str()
+            .map(str::to_ascii_lowercase)
+            .eq(&right.host_str().map(str::to_ascii_lowercase))
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
+/// Returns whether a header carries a credential.
+///
+/// # Parameters
+///
+/// - `name`: the header name, compared case-insensitively.
+///
+/// # Returns
+///
+/// Whether the header must not follow a redirect to another origin.
+fn is_credential_header(name: &str) -> bool {
+    ["authorization", "proxy-authorization", "cookie"]
+        .iter()
+        .any(|credential| name.eq_ignore_ascii_case(credential))
+}
+
+/// Returns the literal address a URL names, when its host is an IPv4 or IPv6
+/// literal.
+///
+/// The `url` crate keeps the brackets around an IPv6 literal, and a bracketed
+/// host cannot be resolved as a name, so the literal is taken apart here and
+/// never sent to the resolver.
+///
+/// # Parameters
+///
+/// - `url`: the URL to read.
+///
+/// # Returns
+///
+/// The address, or `None` for a named host.
+pub(crate) fn literal_host(url: &Url) -> Option<IpAddr> {
+    let host = url.host_str()?;
+    let text = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
+    text.parse::<IpAddr>().ok()
+}
+
+/// Resolves one URL and returns the addresses the address policy accepts.
+///
+/// A literal address is used as it is - the URL names it, so nothing is
+/// resolved - and an IPv6 literal keeps its brackets out of the address. A name
+/// is resolved once, here, and the result is what the client's resolver hands to
+/// the connector, so the policy is enforced on the addresses the connection uses.
+///
+/// # Parameters
+///
+/// - `url`: the URL to resolve.
+/// - `allow_anywhere`: whether a non-public address is acceptable, which is the
+///   case for a `$config:` host the administrator chose and for an archive a
+///   local index points at.
+///
+/// # Returns
+///
+/// The accepted addresses, at least one.
+///
+/// # Errors
+///
+/// Returns [`HttpError::Denied`] when the URL has no host or resolves only to
+/// non-public addresses, and [`HttpError::Network`] when the name cannot be
+/// resolved.
+pub(crate) async fn approved_addresses(
+    url: &Url,
+    allow_anywhere: bool,
+) -> Result<Vec<SocketAddr>, HttpError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| HttpError::Denied("the URL has no host".to_owned()))?
+        .to_ascii_lowercase();
+    let port = url.port_or_known_default().unwrap_or(80);
+
+    let candidates: Vec<SocketAddr> = match literal_host(url) {
+        Some(address) => vec![SocketAddr::new(address, port)],
+        None => tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map_err(|error| HttpError::Network(format!("resolving `{host}` failed: {error}")))?
+            .collect(),
+    };
+
+    let mut addresses = Vec::with_capacity(candidates.len());
+    for address in candidates {
+        if allow_anywhere || is_public(address.ip()) {
+            addresses.push(address);
+        } else {
+            tracing::debug!(
+                target: "hearthsound::plugin",
+                host = %host,
+                address = %address.ip(),
+                "rejecting a non-public address",
+            );
+        }
+    }
+    if addresses.is_empty() {
+        return Err(HttpError::Denied(format!(
+            "host `{host}` resolves only to non-public addresses"
+        )));
+    }
+    Ok(addresses)
+}
+
+/// Waits for a rate-limit token, giving up at the deadline.
+async fn wait_for_token(
+    limiter: &DefaultDirectRateLimiter,
+    deadline: Option<Instant>,
+) -> Result<(), HttpError> {
+    match deadline {
+        Some(deadline) => {
+            let remaining = remaining_of(Some(deadline))?;
+            match tokio::time::timeout(remaining, limiter.until_ready()).await {
+                Ok(_) => Ok(()),
+                Err(_) => Err(HttpError::Timeout),
             }
-            None => {
-                limiter.until_ready().await;
-                Ok(())
+        }
+        None => {
+            limiter.until_ready().await;
+            Ok(())
+        }
+    }
+}
+
+/// Reads a response into memory, enforcing a body cap while streaming.
+///
+/// # Errors
+///
+/// Returns [`HttpError::BodyTooLarge`] when the body exceeds `cap` and
+/// [`HttpError::Network`] when a chunk cannot be read.
+async fn read_body(mut response: reqwest::Response, cap: u64) -> Result<HttpResponse, HttpError> {
+    let status = response.status().as_u16();
+    let headers = header_pairs(response.headers());
+
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len() as u64 + chunk.len() as u64 > cap {
+                    return Err(HttpError::BodyTooLarge(cap));
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(error) => {
+                if error.is_timeout() {
+                    return Err(HttpError::Timeout);
+                }
+                return Err(HttpError::Network(error.to_string()));
             }
         }
     }
 
-    /// Reads a response into memory, enforcing the body cap while streaming.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`HttpError::BodyTooLarge`] when the body exceeds the instance's
-    /// cap and [`HttpError::Network`] when a chunk cannot be read.
-    async fn read_body(&self, mut response: reqwest::Response) -> Result<HttpResponse, HttpError> {
-        let status = response.status().as_u16();
-        let headers = header_pairs(response.headers());
-        let cap = self.grant.max_body_bytes;
-
-        let mut body = Vec::new();
-        loop {
-            match response.chunk().await {
-                Ok(Some(chunk)) => {
-                    if body.len() as u64 + chunk.len() as u64 > cap {
-                        return Err(HttpError::BodyTooLarge(cap));
-                    }
-                    body.extend_from_slice(&chunk);
-                }
-                Ok(None) => break,
-                Err(error) => {
-                    if error.is_timeout() {
-                        return Err(HttpError::Timeout);
-                    }
-                    return Err(HttpError::Network(error.to_string()));
-                }
-            }
-        }
-
-        Ok(HttpResponse {
-            status,
-            headers,
-            body,
-        })
-    }
+    Ok(HttpResponse {
+        status,
+        headers,
+        body,
+    })
 }
 
 /// Maps a transport error to the plugin's error vocabulary.
@@ -591,7 +760,7 @@ fn remaining_of(deadline: Option<Instant>) -> Result<Duration, HttpError> {
 /// resolve a host the policy never saw.
 struct PinnedResolver {
     pins: Arc<Mutex<HashMap<String, Vec<SocketAddr>>>>,
-    slug: Slug,
+    slug: Option<Slug>,
 }
 
 impl Resolve for PinnedResolver {
@@ -607,7 +776,7 @@ impl Resolve for PinnedResolver {
                 _ => {
                     tracing::debug!(
                         target: "hearthsound::plugin",
-                        instance = %slug,
+                        instance = slug.as_ref().map(Slug::as_str).unwrap_or("-"),
                         host = %host,
                         "refusing to resolve a host the address policy did not approve",
                     );
@@ -618,13 +787,58 @@ impl Resolve for PinnedResolver {
     }
 }
 
+/// Builds an HTTP client whose resolver only hands out pinned addresses.
+///
+/// The client follows no redirect by itself, so the caller's hop loop sees every
+/// hop and can re-check it. `slug` names the instance for the debug log; a
+/// caller that fetches for the server itself - the installer - passes `None`.
+///
+/// # Parameters
+///
+/// - `pins`: the map [`approved_addresses`] populates, shared with the client.
+/// - `user_agent`: the User-Agent the client sends.
+/// - `slug`: the instance the client belongs to, when it belongs to one.
+///
+/// # Returns
+///
+/// The client.
+///
+/// # Errors
+///
+/// Returns [`HttpError::Network`] when the client cannot be built.
+pub(crate) fn pinned_client(
+    pins: Arc<Mutex<HashMap<String, Vec<SocketAddr>>>>,
+    user_agent: String,
+    slug: Option<Slug>,
+) -> Result<Client, HttpError> {
+    let resolver = Arc::new(PinnedResolver { pins, slug });
+
+    // reqwest is built without a bundled TLS provider; ring is installed as the
+    // process default the first time a client is built. Installing fails
+    // harmlessly when a default is already in place.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    Client::builder()
+        .user_agent(user_agent)
+        .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(resolver)
+        .build()
+        .map_err(|error| HttpError::Network(error.to_string()))
+}
+
 /// Returns whether `ip` is a public address the address policy accepts.
 ///
 /// The rejected ranges are the non-routable, internal and documentation
 /// ranges: private, loopback, link-local, carrier-grade NAT, multicast,
 /// unspecified, broadcast, benchmarking, reserved and documentation (including
-/// the `192.0.0.0/24` block), unique-local and IPv6 link-local, plus every IPv4
-/// address mapped into IPv6.
+/// the `192.0.0.0/24` block), unique-local and IPv6 link-local, every IPv4
+/// address mapped into IPv6, and the IPv6 ranges that carry an IPv4 address or
+/// a private scope inside them - IPv4-compatible `::/96`, NAT64 `64:ff9b::/96`,
+/// 6to4 `2002::/16` and site-local `fec0::/10`.
+///
+/// Nothing checks the address again at connect time because there is no second
+/// check to make: [`approved_addresses`] is the only place a name becomes an
+/// address, and the client's resolver only hands the connector the addresses it
+/// returned, so the pin is the connect-time enforcement.
 pub fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(address) => is_public_v4(address),
@@ -657,6 +871,11 @@ fn is_public_v4(address: Ipv4Addr) -> bool {
 }
 
 /// Returns whether an IPv6 address is public.
+///
+/// Besides the standard library's own predicates, four ranges are matched by
+/// their leading segments: IPv4-compatible `::/96` (which also covers
+/// `::5efe:a.b.c.d`, an address `to_ipv4_mapped` does not map), NAT64
+/// `64:ff9b::/96`, 6to4 `2002::/16` and site-local `fec0::/10`.
 fn is_public_v6(address: Ipv6Addr) -> bool {
     let segments = address.segments();
     !(address.is_loopback()
@@ -664,7 +883,11 @@ fn is_public_v6(address: Ipv6Addr) -> bool {
         || address.is_multicast()
         || address.is_unique_local()
         || address.is_unicast_link_local()
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8))
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || segments[..6] == [0; 6]
+        || (segments[0] == 0x0064 && segments[1] == 0xff9b)
+        || segments[0] == 0x2002
+        || (segments[0] & 0xffc0) == 0xfec0)
 }
 
 /// Locks a mutex, ignoring poisoning.
@@ -737,6 +960,11 @@ mod tests {
             "fc00::1",
             "2001:db8::1",
             "::ffff:127.0.0.1",
+            "::127.0.0.1",
+            "::7f00:1",
+            "64:ff9b::7f00:1",
+            "2002:7f00:1::1",
+            "fec0::1",
         ] {
             let ip: IpAddr = address.parse().unwrap();
             assert!(!is_public(ip), "{address} must be rejected");
@@ -745,10 +973,99 @@ mod tests {
 
     #[test]
     fn accepts_public_addresses() {
-        for address in ["8.8.8.8", "1.1.1.1", "2606:4700::1111"] {
+        for address in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "2606:4700::1111",
+            "2a00:1450:4001:81b::200e",
+        ] {
             let ip: IpAddr = address.parse().unwrap();
             assert!(is_public(ip), "{address} must be accepted");
         }
+    }
+
+    #[tokio::test]
+    async fn an_ipv6_literal_is_pinned_without_a_lookup() {
+        let public = Url::parse("https://[2606:4700::1111]/x").unwrap();
+        let addresses = approved_addresses(&public, false).await.unwrap();
+        assert_eq!(
+            addresses,
+            vec!["[2606:4700::1111]:443".parse::<SocketAddr>().unwrap()]
+        );
+
+        // A documentation-range literal is denied by the address policy, not by
+        // a failed lookup.
+        let denied = Url::parse("https://[2001:db8::1]/x").unwrap();
+        let error = approved_addresses(&denied, false).await.unwrap_err();
+        assert!(
+            matches!(&error, HttpError::Denied(reason) if reason.contains("non-public")),
+            "{error}"
+        );
+
+        // A `$config:` host may name a non-public address.
+        assert!(approved_addresses(&denied, true).await.is_ok());
+    }
+
+    #[test]
+    fn a_cross_origin_redirect_drops_the_credential() {
+        let from = Url::parse("https://api.example.com/search").unwrap();
+        let to = Url::parse("https://other.example.org/collect").unwrap();
+        let request = HttpRequest {
+            method: "POST".to_owned(),
+            url: from.to_string(),
+            headers: vec![
+                ("Authorization".to_owned(), "Bearer key".to_owned()),
+                ("Cookie".to_owned(), "session=1".to_owned()),
+                ("X-Request-Id".to_owned(), "1".to_owned()),
+            ],
+            body: Some(b"{\"q\":\"x\"}".to_vec()),
+            timeout_ms: None,
+        };
+
+        let next = next_request(&request, &from, &to, 302);
+        assert_eq!(next.method, "GET");
+        assert_eq!(next.url, to.to_string());
+        assert!(next.body.is_none());
+        assert_eq!(
+            next.headers,
+            vec![("X-Request-Id".to_owned(), "1".to_owned())]
+        );
+
+        // A 307 keeps the method, and the body still goes: it was meant for the
+        // origin that issued the redirect.
+        let next = next_request(&request, &from, &to, 307);
+        assert_eq!(next.method, "POST");
+        assert!(next.body.is_none());
+        assert_eq!(next.headers.len(), 1);
+
+        // A 301 on a GET only drops the credentials.
+        let mut get = request.clone();
+        get.method = "GET".to_owned();
+        let next = next_request(&get, &from, &to, 301);
+        assert_eq!(next.method, "GET");
+        assert_eq!(next.headers.len(), 1);
+    }
+
+    #[test]
+    fn a_same_origin_redirect_is_unchanged() {
+        let from = Url::parse("https://api.example.com/search").unwrap();
+        let to = Url::parse("https://api.example.com/v2/search").unwrap();
+        let request = HttpRequest {
+            method: "POST".to_owned(),
+            url: from.to_string(),
+            headers: vec![
+                ("Authorization".to_owned(), "Bearer key".to_owned()),
+                ("Cookie".to_owned(), "session=1".to_owned()),
+            ],
+            body: Some(b"{\"q\":\"x\"}".to_vec()),
+            timeout_ms: None,
+        };
+
+        let next = next_request(&request, &from, &to, 302);
+        assert_eq!(next.method, "POST");
+        assert_eq!(next.body, request.body);
+        assert_eq!(next.headers, request.headers);
+        assert_eq!(next.url, to.to_string());
     }
 
     #[test]
@@ -960,6 +1277,98 @@ mod enforcement {
             .unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, b"arrived");
+    }
+
+    #[tokio::test]
+    async fn a_cross_origin_redirect_does_not_forward_the_authorization_header() {
+        let first = MockServer::start().await;
+        let second = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/start"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/end", second.uri())),
+            )
+            .mount(&first)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/end"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("arrived"))
+            .mount(&second)
+            .await;
+
+        // Both servers are on `127.0.0.1`, which the `$config` host allows, so
+        // the hop is the only thing that decides whether the credential travels.
+        let config = format!(r#"{{"baseUrl":"{}"}}"#, first.uri());
+        let mut state = state(&config, Some(config_permission(None)));
+        let request = host_http::Request {
+            method: "GET".to_owned(),
+            url: format!("{}/start", first.uri()),
+            headers: vec![("authorization".to_owned(), "Bearer secret".to_owned())],
+            body: None,
+            timeout_ms: None,
+        };
+        let status = match host_http::Host::send(&mut state, request).await.unwrap() {
+            Ok(response) => response.status,
+            Err(error) => panic!("the redirect should have been followed: {error:?}"),
+        };
+        assert_eq!(status, 200);
+
+        let requests = second.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].headers.get("authorization").is_none(),
+            "the credential followed a redirect to another origin"
+        );
+        let requests = first.received_requests().await.unwrap();
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("authorization")
+                .map(|value| value.to_str().unwrap()),
+            Some("Bearer secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_same_origin_redirect_keeps_the_authorization_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/start"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/end"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/end"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("arrived"))
+            .mount(&server)
+            .await;
+
+        let config = format!(r#"{{"baseUrl":"{}"}}"#, server.uri());
+        let mut state = state(&config, Some(config_permission(None)));
+        let request = host_http::Request {
+            method: "GET".to_owned(),
+            url: format!("{}/start", server.uri()),
+            headers: vec![("authorization".to_owned(), "Bearer secret".to_owned())],
+            body: None,
+            timeout_ms: None,
+        };
+        match host_http::Host::send(&mut state, request).await.unwrap() {
+            Ok(response) => assert_eq!(response.status, 200),
+            Err(error) => panic!("the redirect should have been followed: {error:?}"),
+        }
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            assert_eq!(
+                request
+                    .headers
+                    .get("authorization")
+                    .map(|value| value.to_str().unwrap()),
+                Some("Bearer secret")
+            );
+        }
     }
 
     #[tokio::test]

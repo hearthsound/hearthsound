@@ -92,7 +92,10 @@ use hearthsound_plugin_host::{
 use tower_http::cors::CorsLayer;
 
 use crate::error::ServerError;
-use crate::jobs::{KvSweepJobHandler, PLUGIN_KV_SWEEP_CRON, PLUGIN_KV_SWEEP_JOB_KIND};
+use crate::jobs::{
+    KvSweepJobHandler, PLUGIN_HEALTH_JOB_KIND, PLUGIN_HEALTH_SCHEDULE, PLUGIN_KV_SWEEP_CRON,
+    PLUGIN_KV_SWEEP_JOB_KIND, PluginHealthJobHandler,
+};
 use crate::web::WebAssets;
 
 /// Every long-lived service of one server process.
@@ -298,8 +301,7 @@ impl Services {
         let installer = Arc::new(PluginInstaller::new(
             Arc::clone(&admin),
             repository.clone(),
-            IndexClient::official(http.clone())?,
-            http,
+            IndexClient::official(http)?,
             config.paths.plugins.clone(),
         ));
         let update_checker = Arc::new(UpdateChecker::new(
@@ -428,6 +430,13 @@ impl Services {
         runner.register(DISCOVERY_SYNC_JOB_KIND, discovery_sync.clone());
         let update_handler: Arc<dyn JobHandler> = update_job.clone();
         runner.register(UPDATE_CHECK_JOB_KIND, update_handler);
+        runner.register(
+            PLUGIN_HEALTH_JOB_KIND,
+            Arc::new(PluginHealthJobHandler::new(
+                Arc::clone(&registry),
+                settings.clone(),
+            )),
+        );
         let runner = Arc::new(runner);
 
         let watcher = Arc::new(LibraryWatcher::new(
@@ -473,6 +482,12 @@ impl Services {
             .upsert(ScheduleSpec::system(
                 UPDATE_CHECK_JOB_KIND,
                 UPDATE_CHECK_SCHEDULE,
+            ))
+            .await?;
+        scheduler
+            .upsert(ScheduleSpec::system(
+                PLUGIN_HEALTH_JOB_KIND,
+                PLUGIN_HEALTH_SCHEDULE,
             ))
             .await?;
 
@@ -944,6 +959,12 @@ pub(crate) fn log_rebuild(report: &hearthsound_plugin_host::RegistryReport) {
         instances = report.instances,
         "rebuilt the provider registry"
     );
+    if report.resealed > 0 {
+        tracing::info!(
+            fields = report.resealed,
+            "sealed stored secrets a plugin left in the clear"
+        );
+    }
     for skipped in &report.skipped {
         tracing::warn!(
             instance = %skipped.slug,

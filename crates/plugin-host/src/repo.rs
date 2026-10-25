@@ -13,8 +13,9 @@ use std::str::FromStr;
 
 use crate::manifest::Permissions;
 use hearthsound_core::events::{Audience, EventBus, PluginStatus, ServerEvent};
-use hearthsound_core::{Layer, new_uuid_v7};
+use hearthsound_core::{Layer, Slug, new_uuid_v7};
 use hearthsound_db::Database;
+use reqwest::Url;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -241,6 +242,65 @@ pub enum RepoError {
     /// A repository with the same URL is registered already.
     #[error("a plugin repository for `{0}` is registered already")]
     DuplicateUrl(String),
+    /// A repository's URL or public key is not usable.
+    #[error("plugin repository: {reason}")]
+    InvalidRepository {
+        /// Why the repository cannot be accepted.
+        reason: String,
+    },
+}
+
+/// Checks a plugin repository's URL and public key.
+///
+/// The URL is fetched by the server itself, so it must be an absolute `http` or
+/// `https` URL with a host, without credentials in it and without a fragment:
+/// anything else either cannot be fetched or hides where the request goes. A
+/// public key must parse as a minisign public key, because a key that does not
+/// is only discovered when the index is fetched, long after the administrator
+/// left the dialog.
+///
+/// # Parameters
+///
+/// - `url`: the URL of the repository's index document.
+/// - `public_key`: the minisign public key text, or `None` for an unsigned
+///   repository.
+///
+/// # Returns
+///
+/// `Ok(())` when both are usable.
+///
+/// # Errors
+///
+/// Returns [`RepoError::InvalidRepository`] naming what is wrong.
+fn validate_repository(url: &str, public_key: Option<&str>) -> Result<(), RepoError> {
+    let invalid = |reason: String| RepoError::InvalidRepository { reason };
+    let parsed =
+        Url::parse(url).map_err(|error| invalid(format!("`{url}` is not a URL: {error}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(invalid(format!(
+            "the scheme `{}` is not allowed; a repository is fetched over http or https",
+            parsed.scheme()
+        )));
+    }
+    if parsed.host_str().is_none() {
+        return Err(invalid("the URL has no host".to_owned()));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(invalid(
+            "the URL must not carry a user name or password".to_owned(),
+        ));
+    }
+    if parsed.fragment().is_some() {
+        return Err(invalid("the URL must not carry a fragment".to_owned()));
+    }
+    if let Some(key) = public_key
+        && crate::index::parse_public_key(key).is_none()
+    {
+        return Err(invalid(
+            "the public key is not a minisign public key".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// The repositories of the plugin tables.
@@ -763,6 +823,40 @@ impl PluginRepository {
         Ok(())
     }
 
+    /// Replaces one instance's stored server-scoped configuration.
+    ///
+    /// Only the configuration column changes, which is what sealing a secret a
+    /// plugin left in the clear needs: the name, the host settings and the
+    /// layer position are untouched.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the instance id.
+    /// - `server_config`: the sealed server-scoped configuration, JSON text.
+    /// - `updated_at`: the change time in unix milliseconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError::Database`] when the write fails.
+    ///
+    /// The statement is runtime-checked rather than macro-checked because it was
+    /// added where `cargo sqlx prepare` could not run; the columns are the two
+    /// `update_instance` already writes.
+    pub async fn set_instance_server_config(
+        &self,
+        id: Uuid,
+        server_config: &str,
+        updated_at: i64,
+    ) -> Result<(), RepoError> {
+        sqlx::query("UPDATE provider_instances SET server_config = ?, updated_at = ? WHERE id = ?")
+            .bind(server_config)
+            .bind(updated_at)
+            .bind(id.as_bytes().as_slice())
+            .execute(&self.writer)
+            .await?;
+        Ok(())
+    }
+
     /// Records the outcome of one instance health check.
     ///
     /// The outcome is stored as the JSON text of what the check reported, so a
@@ -889,11 +983,13 @@ impl PluginRepository {
     /// # Parameters
     ///
     /// - `url`: the URL of the repository's index document. It identifies the
-    ///   repository and is unique across them.
+    ///   repository and is unique across them. It must be an absolute http or
+    ///   https URL without credentials and without a fragment.
     /// - `name`: the name to show for the repository, or `None` to let the URL
     ///   stand for it.
     /// - `public_key`: the minisign public key text the repository signs its
-    ///   index with, or `None` for a repository that is not signed.
+    ///   index with, or `None` for a repository that is not signed. When it is
+    ///   given it must parse as a minisign public key.
     /// - `enabled`: whether the repository is queried for its index.
     ///
     /// # Returns
@@ -903,7 +999,8 @@ impl PluginRepository {
     ///
     /// # Errors
     ///
-    /// Returns [`RepoError::DuplicateUrl`] when another repository is registered
+    /// Returns [`RepoError::InvalidRepository`] when the URL or the key is not
+    /// usable, [`RepoError::DuplicateUrl`] when another repository is registered
     /// under `url` already, and [`RepoError::Database`] when the write fails.
     pub async fn insert_repository(
         &self,
@@ -912,6 +1009,7 @@ impl PluginRepository {
         public_key: Option<&str>,
         enabled: bool,
     ) -> Result<RepositoryRow, RepoError> {
+        validate_repository(url, public_key)?;
         let id = new_uuid_v7();
         let inserted = sqlx::query!(
             "INSERT INTO plugin_repositories (id, url, name, public_key, enabled)
@@ -1055,7 +1153,8 @@ impl PluginRepository {
     /// - `id`: the repository id.
     /// - `name`: the name to show, `None` clearing the stored one.
     /// - `public_key`: the signing key to verify the repository's index with,
-    ///   `None` clearing it and making the repository unsigned.
+    ///   `None` or an empty string clearing it and making the repository
+    ///   unsigned. A key that is given must parse as a minisign public key.
     /// - `enabled`: whether the repository is queried for its index.
     ///
     /// # Returns
@@ -1064,7 +1163,9 @@ impl PluginRepository {
     ///
     /// # Errors
     ///
-    /// Returns [`RepoError::Database`] when the write or the read back fails.
+    /// Returns [`RepoError::InvalidRepository`] when the stored URL or the key
+    /// is not usable, [`RepoError::Database`] when the write or the read back
+    /// fails, and [`RepoError::Malformed`] when the stored id is not a UUID.
     pub async fn update_repository(
         &self,
         id: Uuid,
@@ -1072,6 +1173,14 @@ impl PluginRepository {
         public_key: Option<&str>,
         enabled: bool,
     ) -> Result<Option<RepositoryRow>, RepoError> {
+        let Some(existing) = self.repository(id).await? else {
+            return Ok(None);
+        };
+        // An empty string is how a caller removes a key: the stored row is
+        // checked against the same rules a new one is, so a key registered
+        // before the rules existed cannot keep a patch from working.
+        let public_key = public_key.filter(|key| !key.trim().is_empty());
+        validate_repository(&existing.url, public_key)?;
         sqlx::query!(
             "UPDATE plugin_repositories SET name = ?, public_key = ?, enabled = ? WHERE id = ?",
             name,
@@ -1245,15 +1354,18 @@ struct StoredPermissions {
 /// often enough to be switched off.
 ///
 /// The instance is disabled in the database so the next start does not bring it
-/// back, and a `plugin.status` event tells every connected client without
-/// polling.
+/// back, a `plugin.status` event tells every connected client without polling,
+/// and the host's in-process signal makes the composition root rebuild the
+/// registry, so the instance leaves the layers it served within one event
+/// instead of at the next admin write.
 #[derive(Clone)]
 pub(crate) struct InstanceDisabler {
     writer: SqlitePool,
     events: std::sync::Arc<EventBus>,
     instance_id: Uuid,
     plugin: String,
-    slug: String,
+    slug: Slug,
+    disabled: tokio::sync::broadcast::Sender<Slug>,
 }
 
 impl InstanceDisabler {
@@ -1266,12 +1378,14 @@ impl InstanceDisabler {
     /// - `instance_id`: the instance id to disable.
     /// - `plugin`: the plugin id, for the event payload.
     /// - `slug`: the instance slug, for the event payload.
+    /// - `disabled`: the host's signal that an instance was switched off.
     pub(crate) fn new(
         database: &Database,
         events: std::sync::Arc<EventBus>,
         instance_id: Uuid,
         plugin: String,
-        slug: String,
+        slug: Slug,
+        disabled: tokio::sync::broadcast::Sender<Slug>,
     ) -> InstanceDisabler {
         InstanceDisabler {
             writer: database.writer().clone(),
@@ -1279,6 +1393,7 @@ impl InstanceDisabler {
             instance_id,
             plugin,
             slug,
+            disabled,
         }
     }
 
@@ -1287,7 +1402,8 @@ impl InstanceDisabler {
     /// A write that fails is logged rather than propagated: the caller is a
     /// trap path that must not turn a database hiccup into a second failure, and
     /// the in-memory trap counter has already disabled the instance for this
-    /// run.
+    /// run. The signal is sent either way, because the in-memory state is what
+    /// the running process serves from.
     ///
     /// # Parameters
     ///
@@ -1312,11 +1428,15 @@ impl InstanceDisabler {
             );
         }
 
+        // A send error only means nobody is listening, which is the case in a
+        // process that serves no registry.
+        let _ = self.disabled.send(self.slug.clone());
+
         self.events.publish_for(
             Audience::Admins,
             ServerEvent::PluginStatus(PluginStatus {
                 plugin_id: self.plugin.clone(),
-                slug: Some(self.slug.clone()),
+                slug: Some(self.slug.to_string()),
                 state: "disabled".to_owned(),
                 detail: Some(detail.to_owned()),
             }),

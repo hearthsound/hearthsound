@@ -1876,6 +1876,7 @@ dependencies = [
  "minisign",
  "minisign-verify",
  "reqwest",
+ "rustix",
  "rustls",
  "semver",
  "serde",

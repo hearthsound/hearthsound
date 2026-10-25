@@ -14,7 +14,10 @@
 //! "nonce": <base64>}}`, the ciphertext being the AES-256-GCM seal of the
 //! field's JSON text. Reading a configuration back for display replaces every
 //! sealed object with [`SECRET_PLACEHOLDER`] without decrypting anything, and
-//! the only place plaintext is produced is the JSON handed to the plugin.
+//! the only place plaintext is produced is the JSON handed to the plugin. A
+//! validation failure names the field it came from and never prints a restored
+//! secret, and [`seal_plaintext_write_only`] upgrades a field an older plugin
+//! version left in the clear.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -27,6 +30,7 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use crate::error::{HostError, InstallError};
+use crate::files::STAGING_ROOT;
 use crate::host::{InstalledPlugin, PluginHost};
 use crate::instance::{ImportRoot, InstanceConfig, InstanceHostConfig};
 use crate::manifest::Manifest;
@@ -288,13 +292,15 @@ impl InstanceService {
     /// Replaces one instance's name and configuration.
     ///
     /// The configuration is validated exactly as it is on creation, against the
-    /// same plugin and the same schema. A read returns
-    /// [`SECRET_PLACEHOLDER`] in place of a secret, so an update may echo the
-    /// placeholder back: such a field keeps the secret the instance stores,
-    /// which is opened for the plugin and sealed again at rest. A field that
-    /// echoes the placeholder while nothing is stored for it is refused, and a
-    /// field the update leaves out is gone, so a caller that changes one field
-    /// of a configuration has to send the others back.
+    /// same plugin and the same schema, and it is applied as a patch: a field it
+    /// leaves out keeps the value the instance stores, so a caller changing one
+    /// setting does not have to send every other one back and cannot lose a
+    /// secret by forgetting it. A read returns [`SECRET_PLACEHOLDER`] in place of
+    /// a secret, so an update may echo the placeholder back: such a field keeps
+    /// the secret the instance stores, which is opened for the plugin and sealed
+    /// again at rest. An explicit empty string on such a field removes it. A
+    /// field that echoes the placeholder while nothing is stored for it is
+    /// refused.
     ///
     /// # Parameters
     ///
@@ -536,21 +542,31 @@ impl InstanceService {
         previous: &Value,
     ) -> Result<Prepared, InstanceError> {
         let manifest = plugin.manifest();
-        let (server_config, plain) =
-            seal_server_config(manifest, &spec.server_config, &self.secrets, previous)?;
+        let sealed = seal_server_config(manifest, &spec.server_config, &self.secrets, previous)?;
         let (host_config, host_config_json) = parse_host_config(&spec.host_config)?;
 
         let layer = hosted_layer(manifest)
             .ok_or_else(|| InstanceError::NoHostedLayer(manifest.id.clone()))?;
         let temporary = InstanceConfig::new(Slug::new(&spec.slug)?)
             .with_id(new_instance_id())
-            .with_server_config(plain)
+            .with_server_config(sealed.plain)
             .with_permissions(manifest.permissions.clone())
             .with_host_config(host_config.clone());
-        self.validate_config(plugin, &temporary, layer).await?;
+        // The plugin is handed the restored secrets, so its own complaints can
+        // quote them; every problem is scrubbed before it leaves this module.
+        match self.validate_config(plugin, &temporary, layer).await {
+            Ok(()) => {}
+            Err(InstanceError::ValidateConfig(mut problems)) => {
+                for problem in &mut problems {
+                    redact_secrets(problem, &sealed.restored);
+                }
+                return Err(InstanceError::ValidateConfig(problems));
+            }
+            Err(error) => return Err(error),
+        }
 
         Ok(Prepared {
-            server_config,
+            server_config: sealed.stored,
             host_config,
             host_config_json,
         })
@@ -669,7 +685,9 @@ fn stored_provides(plugin: &str, manifest: &str) -> Result<Vec<Layer>, InstanceE
 ///
 /// Import root paths must be absolute and must exist, because a root the
 /// administrator names must be a directory the server can hand to a plugin; ids
-/// must be unique, because the plugin names a root by id.
+/// must be unique and may not be the reserved [`STAGING_ROOT`], because the
+/// host resolves that id to the current call's staging directory before any
+/// import root is consulted, which would make a root with that id unreachable.
 fn parse_host_config(input: &Value) -> Result<(InstanceHostConfig, String), InstanceError> {
     let value = if input.is_null() {
         Value::Object(Map::new())
@@ -685,6 +703,12 @@ fn parse_host_config(input: &Value) -> Result<(InstanceHostConfig, String), Inst
             return Err(InstanceError::HostConfig(
                 "an import root has an empty id".to_owned(),
             ));
+        }
+        if root.id == STAGING_ROOT {
+            return Err(InstanceError::HostConfig(format!(
+                "import root id `{}` is reserved",
+                root.id
+            )));
         }
         if !ids.insert(root.id.as_str()) {
             return Err(InstanceError::HostConfig(format!(
@@ -732,12 +756,20 @@ fn parse_host_config_text(text: Option<&str>) -> Result<InstanceHostConfig, Inst
     serde_json::from_str(text).map_err(|error| InstanceError::HostConfig(error.to_string()))
 }
 
-/// Validates, defaults, and seals one instance's server-scoped configuration.
+/// Validates, merges, defaults, and seals one instance's server-scoped
+/// configuration.
 ///
-/// A write-only field that carries [`SECRET_PLACEHOLDER`] keeps the secret the
-/// previous configuration stores for it: a configuration that was read, edited
-/// and sent back carries the placeholder where a secret belongs, and storing
-/// the placeholder as the secret would destroy it.
+/// The configuration is a patch, not a replacement: a field the input leaves
+/// out keeps the value the stored configuration holds, so a caller that changes
+/// one setting does not have to send every other one back and cannot lose a
+/// secret by forgetting it. A write-only field that carries
+/// [`SECRET_PLACEHOLDER`] keeps the secret the stored configuration holds for
+/// it, and a write-only field whose input is an empty string is removed, which
+/// is how a caller clears a secret. Every other value replaces the stored one.
+///
+/// A validation failure names the field and never prints a restored secret: the
+/// schema's messages are scrubbed of every restored value, and a failure of the
+/// restored field itself is reported by its pointer and keyword only.
 ///
 /// # Parameters
 ///
@@ -750,8 +782,10 @@ fn parse_host_config_text(text: Option<&str>) -> Result<InstanceHostConfig, Inst
 ///
 /// # Returns
 ///
-/// The configuration to store, with write-only fields sealed, and the same
-/// configuration with those fields in plaintext, for `lifecycle.validate-config`.
+/// The configuration to store, with write-only fields sealed, the same
+/// configuration with those fields in plaintext for
+/// `lifecycle.validate-config`, and the values that were restored from the
+/// stored configuration by pointer.
 ///
 /// # Errors
 ///
@@ -766,10 +800,14 @@ fn seal_server_config(
     input: &Value,
     secrets: &SecretBox,
     previous: &Value,
-) -> Result<(String, String), InstanceError> {
+) -> Result<SealedConfig, InstanceError> {
     let Some(section) = manifest.config.server.as_ref() else {
         if input.as_object().is_some_and(Map::is_empty) {
-            return Ok(("{}".to_owned(), "{}".to_owned()));
+            return Ok(SealedConfig {
+                stored: "{}".to_owned(),
+                plain: "{}".to_owned(),
+                restored: Vec::new(),
+            });
         }
         return Err(InstanceError::ServerConfig(
             "the plugin declares no server-scoped configuration".to_owned(),
@@ -783,35 +821,57 @@ fn seal_server_config(
         ));
     }
 
-    let mut config = input.clone();
+    let mut config = merge_config(previous, input);
     apply_defaults(schema, &mut config);
 
     // A configuration that was read, edited and sent back carries the
     // placeholder where a secret belongs; those fields keep the secret the
     // instance stores, so validation sees the configuration as it will be used
     // and the plugin is handed the secret in the clear.
+    let mut restored: Vec<(String, Value)> = Vec::new();
+    let mut removed: Vec<String> = Vec::new();
     let mut failure = None;
     visit_write_only(schema, &mut config, &mut |path, value| {
-        if value.as_str() != Some(SECRET_PLACEHOLDER) {
+        if value.as_str() == Some("") {
+            // An explicit empty string removes the field, which is how a caller
+            // clears a secret it no longer wants stored.
+            removed.push(path.to_owned());
             return;
         }
-        let Some(sealed) = previous
-            .pointer(path)
-            .filter(|stored| sealed_value(stored))
-            .cloned()
-        else {
-            failure = Some(InstanceError::ServerConfig(format!(
-                "`{path}` is the sealed placeholder, but the instance stores no secret for it"
-            )));
+        // A field the patch left out arrives still sealed from the stored
+        // configuration, and one it sent as the placeholder has to be looked up
+        // there; both are opened for validation and for the plugin.
+        let sealed = if sealed_value(value) {
+            Some(value.clone())
+        } else if value.as_str() == Some(SECRET_PLACEHOLDER) {
+            previous
+                .pointer(path)
+                .filter(|stored| sealed_value(stored))
+                .cloned()
+        } else {
+            None
+        };
+        let Some(sealed) = sealed else {
+            if value.as_str() == Some(SECRET_PLACEHOLDER) {
+                failure = Some(InstanceError::ServerConfig(format!(
+                    "`{path}` is the sealed placeholder, but the instance stores no secret for it"
+                )));
+            }
             return;
         };
         match open_value(&sealed, secrets) {
-            Ok(opened) => *value = opened,
+            Ok(opened) => {
+                restored.push((path.to_owned(), opened.clone()));
+                *value = opened;
+            }
             Err(error) => failure = Some(error),
         }
     });
     if let Some(error) = failure {
         return Err(error);
+    }
+    for path in &removed {
+        remove_pointer(&mut config, path);
     }
 
     let validator = jsonschema::draft7::new(schema).map_err(|error| {
@@ -819,7 +879,7 @@ fn seal_server_config(
     })?;
     let problems: Vec<String> = validator
         .iter_errors(&config)
-        .map(|error| error.to_string())
+        .map(|error| describe_schema_problem(&error, &restored))
         .collect();
     if !problems.is_empty() {
         return Err(InstanceError::Schema(problems));
@@ -841,7 +901,204 @@ fn seal_server_config(
     }
 
     let stored = serde_json::to_string(&stored).map_err(RepoError::from)?;
-    Ok((stored, plain))
+    Ok(SealedConfig {
+        stored,
+        plain,
+        restored,
+    })
+}
+
+/// What sealing one configuration produced.
+#[derive(Debug)]
+struct SealedConfig {
+    /// The configuration to store, with write-only fields sealed.
+    stored: String,
+    /// The same configuration with those fields in plaintext, for the plugin.
+    plain: String,
+    /// The values restored from the stored configuration, by JSON pointer.
+    restored: Vec<(String, Value)>,
+}
+
+/// Merges a configuration patch onto the stored configuration.
+///
+/// Objects merge key by key, so a field the patch omits keeps its stored value;
+/// every other value - an array, a string, a number - replaces the stored one.
+/// A stored configuration that is not an object is ignored, so a patch for a new
+/// instance is taken as it stands.
+///
+/// # Parameters
+///
+/// - `previous`: the configuration the instance stores, or `null`.
+/// - `input`: the configuration the administrator sent.
+///
+/// # Returns
+///
+/// The merged configuration.
+fn merge_config(previous: &Value, input: &Value) -> Value {
+    match (previous.as_object(), input.as_object()) {
+        (Some(stored), Some(given)) => {
+            let mut merged = stored.clone();
+            for (name, value) in given {
+                let merged_value = match merged.get(name) {
+                    Some(previous) => merge_config(previous, value),
+                    None => value.clone(),
+                };
+                merged.insert(name.clone(), merged_value);
+            }
+            Value::Object(merged)
+        }
+        _ => input.clone(),
+    }
+}
+
+/// Removes the value one JSON pointer addresses.
+///
+/// A pointer that names the whole document, or one whose parent is not an
+/// object, removes nothing.
+///
+/// # Parameters
+///
+/// - `value`: the document to change.
+/// - `pointer`: the JSON pointer of the value to remove.
+fn remove_pointer(value: &mut Value, pointer: &str) {
+    let Some((parent, name)) = pointer.rsplit_once('/') else {
+        return;
+    };
+    let Some(object) = value.pointer_mut(parent).and_then(Value::as_object_mut) else {
+        return;
+    };
+    object.remove(&unescape_segment(name));
+}
+
+/// Reads one JSON pointer segment back into the property name it came from.
+///
+/// # Parameters
+///
+/// - `segment`: the escaped segment.
+///
+/// # Returns
+///
+/// The property name.
+fn unescape_segment(segment: &str) -> String {
+    segment.replace("~1", "/").replace("~0", "~")
+}
+
+/// Describes one schema violation without printing a restored secret.
+///
+/// A violation whose instance location is the restored field, or inside it, is
+/// reported by its pointer and keyword only, because the value the schema saw is
+/// the secret. Every other violation starts from the schema's own message and is
+/// scrubbed of every restored value, which covers a parent-object failure such
+/// as `oneOf` that embeds the whole object in its text.
+///
+/// # Parameters
+///
+/// - `error`: the violation.
+/// - `restored`: the values restored from the stored configuration.
+///
+/// # Returns
+///
+/// The message to report.
+fn describe_schema_problem(
+    error: &jsonschema::ValidationError<'_>,
+    restored: &[(String, Value)],
+) -> String {
+    let at = error.instance_path().as_str();
+    for (pointer, _) in restored {
+        let inside = at == pointer
+            || (at.len() > pointer.len()
+                && at.starts_with(pointer)
+                && at.as_bytes().get(pointer.len()) == Some(&b'/'));
+        if inside {
+            return format!(
+                "{pointer}: the stored secret does not satisfy the plugin's schema (`{}`), so re-enter the value instead of `{SECRET_PLACEHOLDER}`",
+                error.kind().keyword()
+            );
+        }
+    }
+    let mut text = error.to_string();
+    redact_secrets(&mut text, restored);
+    text
+}
+
+/// Replaces every occurrence of a restored secret in one message.
+///
+/// Both the JSON text of a value and the value's own display are replaced, and
+/// an empty needle is skipped so a restored empty string cannot blank a message.
+///
+/// # Parameters
+///
+/// - `text`: the message to scrub, in place.
+/// - `restored`: the values restored from the stored configuration.
+fn redact_secrets(text: &mut String, restored: &[(String, Value)]) {
+    for (_, value) in restored {
+        let mut needles: Vec<String> = serde_json::to_string(value).into_iter().collect();
+        needles.push(value.to_string());
+        if let Some(literal) = value.as_str() {
+            needles.push(literal.to_owned());
+        }
+        // Longest first, so a JSON-quoted needle is replaced before its bare text
+        // can split it.
+        needles.sort_by_key(|needle| std::cmp::Reverse(needle.len()));
+        for needle in needles {
+            if needle.is_empty() || needle == "\"\"" {
+                continue;
+            }
+            if text.contains(&needle) {
+                *text = text.replace(&needle, SECRET_PLACEHOLDER);
+            }
+        }
+    }
+}
+
+/// Seals every write-only field of a stored configuration that is still in the
+/// clear.
+///
+/// A plugin that starts marking a field `writeOnly` - or one that marked it only
+/// after an instance was configured - leaves the stored configuration holding
+/// the value as plain JSON. This walk upgrades such a field in place, so a
+/// rebuild after a plugin upgrade needs no operator step. It is idempotent: a
+/// field that is already the stored representation of a secret is left byte for
+/// byte as it is.
+///
+/// # Parameters
+///
+/// - `schema`: the plugin's server-scoped schema, which names the write-only
+///   fields.
+/// - `config`: the stored configuration, changed in place.
+/// - `secrets`: the box the fields are sealed with.
+///
+/// # Returns
+///
+/// How many fields were sealed.
+///
+/// # Errors
+///
+/// Returns [`InstanceError::Secret`] when a field cannot be sealed, and
+/// [`InstanceError::ServerConfig`] when the configuration cannot be serialized.
+pub(crate) fn seal_plaintext_write_only(
+    schema: &Value,
+    config: &mut Value,
+    secrets: &SecretBox,
+) -> Result<usize, InstanceError> {
+    let mut sealed = 0usize;
+    let mut failure = None;
+    visit_write_only(schema, config, &mut |_path, value| {
+        if sealed_value(value) || value.is_null() {
+            return;
+        }
+        match seal_value(value, secrets) {
+            Ok(wrapper) => {
+                *value = wrapper;
+                sealed += 1;
+            }
+            Err(error) => failure = Some(error),
+        }
+    });
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    Ok(sealed)
 }
 
 /// Seals one value into the stored representation of a secret.
@@ -1146,7 +1403,7 @@ mod tests {
     #[test]
     fn an_echoed_placeholder_keeps_the_stored_secret() {
         let secrets = boxed();
-        let (stored, _) = seal_server_config(
+        let sealed = seal_server_config(
             &manifest(),
             &json!({
                 "url": "http://example.com",
@@ -1157,7 +1414,7 @@ mod tests {
             &Value::Null,
         )
         .unwrap();
-        let previous: Value = serde_json::from_str(&stored).unwrap();
+        let previous: Value = serde_json::from_str(&sealed.stored).unwrap();
 
         // The configuration an administrator read and sent back carries the
         // placeholder where the secrets are.
@@ -1166,14 +1423,14 @@ mod tests {
             "apiKey": SECRET_PLACEHOLDER,
             "nested": {"token": SECRET_PLACEHOLDER}
         });
-        let (stored, plain) =
-            seal_server_config(&manifest(), &echoed, &secrets, &previous).unwrap();
+        let sealed = seal_server_config(&manifest(), &echoed, &secrets, &previous).unwrap();
 
         // The plugin is handed the secrets in the clear, and they are stored
         // sealed again rather than as the placeholder.
-        let plain: Value = serde_json::from_str(&plain).unwrap();
+        let plain: Value = serde_json::from_str(&sealed.plain).unwrap();
         assert_eq!(plain["apiKey"], json!("hunter2"));
         assert_eq!(plain["nested"]["token"], json!("abc"));
+        let stored = sealed.stored;
         let opened: Value =
             serde_json::from_str(&open_server_config(Some(&stored), &secrets).unwrap()).unwrap();
         assert_eq!(opened["apiKey"], json!("hunter2"));
@@ -1186,14 +1443,183 @@ mod tests {
             "apiKey": "hunter3",
             "nested": {"token": SECRET_PLACEHOLDER}
         });
-        let (stored, plain) =
-            seal_server_config(&manifest(), &changed, &secrets, &previous).unwrap();
-        let plain: Value = serde_json::from_str(&plain).unwrap();
+        let sealed = seal_server_config(&manifest(), &changed, &secrets, &previous).unwrap();
+        let plain: Value = serde_json::from_str(&sealed.plain).unwrap();
         assert_eq!(plain["apiKey"], json!("hunter3"));
         assert_eq!(plain["nested"]["token"], json!("abc"));
         let opened: Value =
-            serde_json::from_str(&open_server_config(Some(&stored), &secrets).unwrap()).unwrap();
+            serde_json::from_str(&open_server_config(Some(&sealed.stored), &secrets).unwrap())
+                .unwrap();
         assert_eq!(opened["apiKey"], json!("hunter3"));
+    }
+
+    #[test]
+    fn an_omitted_field_keeps_its_stored_value() {
+        let secrets = boxed();
+        let sealed = seal_server_config(
+            &manifest(),
+            &json!({
+                "url": "http://example.com/one",
+                "apiKey": "hunter2",
+                "nested": {"token": "abc"}
+            }),
+            &secrets,
+            &Value::Null,
+        )
+        .unwrap();
+        let previous: Value = serde_json::from_str(&sealed.stored).unwrap();
+
+        // A patch that changes one setting and says nothing about the secrets
+        // keeps them: forgetting a field cannot destroy a credential.
+        let patch = json!({"url": "http://example.com/two"});
+        let sealed = seal_server_config(&manifest(), &patch, &secrets, &previous).unwrap();
+        let plain: Value = serde_json::from_str(&sealed.plain).unwrap();
+        assert_eq!(plain["url"], json!("http://example.com/two"));
+        assert_eq!(plain["apiKey"], json!("hunter2"));
+        assert_eq!(plain["nested"]["token"], json!("abc"));
+        // A value the schema gives a default keeps the stored one too.
+        assert_eq!(plain["timeout"], json!(15000));
+        assert!(!sealed.stored.contains("hunter2"), "{}", sealed.stored);
+    }
+
+    #[test]
+    fn an_empty_string_removes_a_write_only_field() {
+        let secrets = boxed();
+        let sealed = seal_server_config(
+            &manifest(),
+            &json!({"url": "http://example.com", "apiKey": "hunter2"}),
+            &secrets,
+            &Value::Null,
+        )
+        .unwrap();
+        let previous: Value = serde_json::from_str(&sealed.stored).unwrap();
+
+        let patch = json!({"apiKey": ""});
+        let sealed = seal_server_config(&manifest(), &patch, &secrets, &previous).unwrap();
+        let plain: Value = serde_json::from_str(&sealed.plain).unwrap();
+        assert!(plain.get("apiKey").is_none(), "{plain}");
+        let opened: Value =
+            serde_json::from_str(&open_server_config(Some(&sealed.stored), &secrets).unwrap())
+                .unwrap();
+        assert!(opened.get("apiKey").is_none(), "{opened}");
+        assert_eq!(opened["url"], json!("http://example.com"));
+    }
+
+    #[test]
+    fn a_schema_failure_never_prints_a_restored_secret() {
+        let secrets = boxed();
+        let lenient = manifest_with(json!({
+            "type": "object",
+            "properties": {"apiKey": {"type": "string", "writeOnly": true}}
+        }));
+        let sealed = seal_server_config(
+            &lenient,
+            &json!({"apiKey": "short-secret"}),
+            &secrets,
+            &Value::Null,
+        )
+        .unwrap();
+        let previous: Value = serde_json::from_str(&sealed.stored).unwrap();
+
+        // The plugin's next version tightens the schema; the stored secret no
+        // longer satisfies it, and the plugin is handed the secret in the
+        // clear, so the schema's own message would quote it.
+        let strict = manifest_with(json!({
+            "type": "object",
+            "properties": {"apiKey": {"type": "string", "writeOnly": true, "minLength": 40}}
+        }));
+        let error = seal_server_config(
+            &strict,
+            &json!({"apiKey": SECRET_PLACEHOLDER}),
+            &secrets,
+            &previous,
+        )
+        .unwrap_err();
+        assert!(matches!(error, InstanceError::Schema(_)), "{error}");
+        let text = error.to_string();
+        assert!(text.contains("/apiKey"), "{text}");
+        assert!(text.contains(SECRET_PLACEHOLDER), "{text}");
+        assert!(!text.contains("short-secret"), "{text}");
+    }
+
+    #[test]
+    fn a_nested_schema_failure_never_prints_a_restored_secret() {
+        let secrets = boxed();
+        let lenient = manifest_with(json!({
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "properties": {"token": {"type": "string", "writeOnly": true}}
+                }
+            }
+        }));
+        let sealed = seal_server_config(
+            &lenient,
+            &json!({"nested": {"token": "plain-token"}}),
+            &secrets,
+            &Value::Null,
+        )
+        .unwrap();
+        let previous: Value = serde_json::from_str(&sealed.stored).unwrap();
+
+        let strict = manifest_with(json!({
+            "type": "object",
+            "properties": {
+                "nested": {
+                    "type": "object",
+                    "properties": {
+                        "token": {"type": "string", "writeOnly": true, "pattern": "^[0-9]+$"}
+                    }
+                }
+            }
+        }));
+        let error = seal_server_config(
+            &strict,
+            &json!({"nested": {"token": SECRET_PLACEHOLDER}}),
+            &secrets,
+            &previous,
+        )
+        .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("/nested/token"), "{text}");
+        assert!(!text.contains("plain-token"), "{text}");
+    }
+
+    #[test]
+    fn a_restored_secret_is_scrubbed_in_both_of_its_forms() {
+        let restored = vec![("/nested/token".to_owned(), json!("se\"cret"))];
+        let json_form = serde_json::to_string(&json!("se\"cret")).unwrap();
+        let mut text = format!("the value se\"cret and {json_form} are wrong");
+        redact_secrets(&mut text, &restored);
+        assert!(!text.contains("se\\\"cret"), "{text}");
+        assert!(!text.contains("se\"cret"), "{text}");
+        assert!(text.contains(SECRET_PLACEHOLDER), "{text}");
+    }
+
+    #[test]
+    fn plaintext_write_only_fields_are_sealed_once() {
+        let secrets = boxed();
+        let mut config = json!({
+            "url": "http://example.com",
+            "apiKey": "hunter2",
+            "nested": {"token": "abc"}
+        });
+        let sealed = seal_value(&json!("kept"), &secrets).unwrap();
+        config["nested"]["token"] = sealed.clone();
+
+        // One plaintext field and one already sealed: only the plaintext one is
+        // sealed, and the sealed wrapper is untouched byte for byte.
+        let count = seal_plaintext_write_only(&schema(), &mut config, &secrets).unwrap();
+        assert_eq!(count, 1);
+        assert!(sealed_value(&config["apiKey"]));
+        assert_eq!(config["nested"]["token"], sealed);
+        assert!(!config.to_string().contains("hunter2"), "{config}");
+
+        // Idempotent: a second pass finds nothing to seal.
+        let count = seal_plaintext_write_only(&schema(), &mut config, &secrets).unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(config["nested"]["token"], sealed);
     }
 
     #[test]
@@ -1207,6 +1633,23 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, InstanceError::ServerConfig(_)), "{error}");
         assert!(error.to_string().contains("/apiKey"), "{error}");
+    }
+
+    #[test]
+    fn the_staging_import_root_id_is_reserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let error = parse_host_config(&json!({
+            "importRoots": [{"id": "staging", "path": path, "mode": "copy", "readOnly": false}]
+        }))
+        .unwrap_err();
+        assert!(matches!(error, InstanceError::HostConfig(_)), "{error}");
+        assert!(error.to_string().contains("staging"), "{error}");
+
+        parse_host_config(&json!({
+            "importRoots": [{"id": "downloads", "path": path, "mode": "copy", "readOnly": false}]
+        }))
+        .unwrap();
     }
 
     #[test]
@@ -1250,6 +1693,11 @@ mod tests {
 
     /// The manifest the sealing tests validate against.
     fn manifest() -> Manifest {
+        manifest_with(schema())
+    }
+
+    /// The manifest the sealing tests validate against, over one schema.
+    fn manifest_with(schema: Value) -> Manifest {
         let json = json!({
             "manifestVersion": 1,
             "id": "com.example.plugin",
@@ -1261,7 +1709,7 @@ mod tests {
             "api": "hearthsound:plugin@0.4.0",
             "provides": ["catalog"],
             "permissions": {},
-            "config": {"server": {"schema": schema(), "uiSchema": {}}, "user": null},
+            "config": {"server": {"schema": schema, "uiSchema": {}}, "user": null},
             "resources": {"memoryMb": 128, "callTimeoutMs": 30000, "maxInstances": 2}
         });
         let settings = std::sync::Arc::new(

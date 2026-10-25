@@ -5,7 +5,9 @@
 //! under the instance's deadline, and returns the store to the pool when the
 //! guest answered. A trap or a timeout discards the store, because a store that
 //! trapped may be in an unknown state, and enough traps inside a window disable
-//! the instance entirely.
+//! the instance entirely. Only the guest call is the plugin's own work: waiting
+//! for a permit and instantiating a store are host-side, so neither counts
+//! toward that limit and a busy instance is not switched off.
 //!
 //! A pool is generic over the [`World`] it drives, so every provider adapter
 //! shares this one implementation while each still gets its own world handle
@@ -22,7 +24,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use hearthsound_core::{ProviderError, Slug};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
@@ -398,14 +400,94 @@ impl World for AccountLinkProvider3 {
     }
 }
 
-/// The result of one attempt, before trap accounting.
-enum Attempt<T, E> {
-    /// The guest answered with a value.
-    Value(T),
-    /// The guest answered with its own error.
-    Guest(E),
-    /// The call trapped, timed out, or could not be set up.
-    Trap(String),
+/// The admission state of one pool: its permits, its trap window and its call
+/// deadline.
+///
+/// Admission and the guest call have separate budgets. Waiting for a permit and
+/// failing to instantiate a store are host-side conditions rather than plugin
+/// misbehaviour, so neither reaches [`TRAP_LIMIT`]: a merely busy plugin keeps
+/// the full deadline for its own call instead of being switched off.
+struct CallGate {
+    /// The stores the pool may lease at once.
+    permits: Semaphore,
+    /// The traps that count toward [`TRAP_LIMIT`].
+    traps: TrapWindow,
+    /// The deadline of one call, reused as the bound on the queue wait.
+    call_timeout: Duration,
+}
+
+impl CallGate {
+    /// Builds the gate of one pool.
+    ///
+    /// # Parameters
+    ///
+    /// - `max_instances`: how many stores the pool may lease at once.
+    /// - `call_timeout`: the deadline of one call, also the bound on the queue
+    ///   wait.
+    fn new(max_instances: u8, call_timeout: Duration) -> CallGate {
+        CallGate {
+            permits: Semaphore::new(usize::from(max_instances)),
+            traps: TrapWindow::new(),
+            call_timeout,
+        }
+    }
+
+    /// Returns whether the instance has been disabled after repeated traps.
+    fn is_disabled(&self) -> bool {
+        self.traps.is_disabled()
+    }
+
+    /// Waits for a permit to lease one store, bounded by the call deadline.
+    ///
+    /// Queueing behind other calls is not the plugin's fault: a plugin that is
+    /// already serving as many calls as its pool allows is working, not
+    /// trapping. This wait therefore never records a trap and never counts
+    /// toward [`TRAP_LIMIT`]; it only reports the instance as unavailable for
+    /// this attempt.
+    ///
+    /// # Returns
+    ///
+    /// The permit, held for as long as the caller leases a store. Dropping it
+    /// admits the next waiting call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Unavailable`] when the wait exceeded the call
+    /// deadline or the pool was closed.
+    async fn enter(&self) -> Result<SemaphorePermit<'_>, ProviderError> {
+        match tokio::time::timeout(self.call_timeout, self.permits.acquire()).await {
+            Ok(Ok(permit)) => Ok(permit),
+            Ok(Err(_)) => {
+                // A closed pool means the host is shutting the instance down.
+                // This gate carries no plugin or instance identifiers, so the
+                // warning deliberately names neither.
+                tracing::warn!(
+                    target: "hearthsound::plugin",
+                    "the instance pool closed while a call waited"
+                );
+                Err(ProviderError::Unavailable)
+            }
+            Err(_) => {
+                // Waiting is host-side queueing, not a trap: no trap is
+                // recorded and the trap window stays untouched.
+                tracing::warn!(target: "hearthsound::plugin", "the instance stayed busy");
+                Err(ProviderError::Unavailable)
+            }
+        }
+    }
+
+    /// Records a trap and reports whether it disabled the instance.
+    ///
+    /// # Parameters
+    ///
+    /// - `now`: the instant the trap happened.
+    ///
+    /// # Returns
+    ///
+    /// `true` when this trap reached the limit and disabled the instance.
+    fn record_trap(&self, now: Instant) -> bool {
+        self.traps.record(now)
+    }
 }
 
 /// Everything one instance's pool needs to build stores.
@@ -445,10 +527,8 @@ pub(crate) struct StorePool<W: World> {
 struct PoolInner<W: World> {
     engine: Engine,
     pre: W::Pre,
-    permits: Semaphore,
+    gate: CallGate,
     idle: Mutex<Vec<Slot<W>>>,
-    traps: TrapWindow,
-    call_timeout: Duration,
     plugin: String,
     slug: Slug,
     server_config: Arc<str>,
@@ -490,10 +570,11 @@ impl<W: World> StorePool<W> {
             inner: Arc::new(PoolInner {
                 engine: engine.clone(),
                 pre,
-                permits: Semaphore::new(usize::from(config.max_instances)),
+                gate: CallGate::new(
+                    config.max_instances,
+                    Duration::from_millis(u64::from(config.call_timeout_ms)),
+                ),
                 idle: Mutex::new(Vec::new()),
-                traps: TrapWindow::new(),
-                call_timeout: Duration::from_millis(u64::from(config.call_timeout_ms)),
                 plugin: config.plugin,
                 slug: config.slug,
                 server_config: config.server_config,
@@ -510,6 +591,13 @@ impl<W: World> StorePool<W> {
 
     /// Runs one guest call under the instance's deadline.
     ///
+    /// Admission happens before the deadline starts. Waiting for a permit and
+    /// instantiating a store are host-side work, so neither is the plugin's
+    /// fault and neither counts toward [`TRAP_LIMIT`]; only a guest trap or a
+    /// guest call that runs past the deadline does. The guest call therefore
+    /// gets its whole budget from the moment it starts, however long the
+    /// queueing took.
+    ///
     /// # Parameters
     ///
     /// - `call`: a function producing the guest call future from a leased store
@@ -518,55 +606,64 @@ impl<W: World> StorePool<W> {
     /// # Returns
     ///
     /// `Ok(Ok(value))` when the guest answered, `Ok(Err(error))` when the guest
-    /// reported its own error, and `Err` when the instance is disabled, the call
-    /// trapped, or the deadline expired.
+    /// reported its own error, and `Err` when the instance is disabled, stayed
+    /// busy past the queue deadline, could not instantiate a store, trapped, or
+    /// ran past the deadline.
     ///
     /// # Errors
     ///
     /// Returns [`ProviderError::Unavailable`] when the instance has been
-    /// disabled, and [`ProviderError::Internal`] on a trap or timeout.
+    /// disabled, stayed busy past the queue deadline, or could not instantiate a
+    /// store, and [`ProviderError::Internal`] on a trap or timeout.
     pub(crate) async fn call<T, E, F>(&self, call: F) -> Result<Result<T, E>, ProviderError>
     where
         F: for<'a> FnOnce(&'a mut Store<InstanceState>, &'a W::Instance) -> CallFuture<'a, T, E>,
     {
         let inner = &self.inner;
-        if inner.traps.is_disabled() {
+        if inner.gate.is_disabled() {
             return Err(ProviderError::Unavailable);
         }
 
-        let attempt = tokio::time::timeout(inner.call_timeout, async {
-            let deadline = Instant::now() + inner.call_timeout;
-            let permit = match inner.permits.acquire().await {
-                Ok(permit) => permit,
-                Err(_) => return Attempt::Trap("the instance pool is closed".to_owned()),
-            };
+        // The permit bounds leased stores, not the guest call: it is released
+        // only once the store is back in the idle list, so the pool never holds
+        // more stores than `max_instances`.
+        let permit = inner.gate.enter().await?;
 
-            let (mut store, instance) = match self.take_or_instantiate().await {
-                Ok(slot) => slot,
-                Err(error) => return Attempt::Trap(format!("{error:#}")),
-            };
-
-            store.data_mut().begin_call(deadline);
-            match call(&mut store, &instance).await {
-                Ok(Ok(value)) => {
-                    drop(permit);
-                    inner.return_idle(store, instance);
-                    Attempt::Value(value)
-                }
-                Ok(Err(error)) => {
-                    drop(permit);
-                    inner.return_idle(store, instance);
-                    Attempt::Guest(error)
-                }
-                Err(error) => Attempt::Trap(format!("{error:#}")),
+        let (mut store, instance) = match self.take_or_instantiate().await {
+            Ok(slot) => slot,
+            Err(error) => {
+                tracing::error!(
+                    target: "hearthsound::plugin",
+                    plugin = %inner.plugin,
+                    instance = %inner.slug,
+                    error = %format!("{error:#}"),
+                    "plugin instance could not be instantiated"
+                );
+                drop(permit);
+                return Err(ProviderError::Unavailable);
             }
+        };
+
+        let outcome = tokio::time::timeout(inner.gate.call_timeout, async {
+            store
+                .data_mut()
+                .begin_call(Instant::now() + inner.gate.call_timeout);
+            call(&mut store, &instance).await
         })
         .await;
 
-        match attempt {
-            Ok(Attempt::Value(value)) => Ok(Ok(value)),
-            Ok(Attempt::Guest(error)) => Ok(Err(error)),
-            Ok(Attempt::Trap(reason)) => Err(inner.record_trap(&reason)),
+        match outcome {
+            Ok(Ok(Ok(value))) => {
+                inner.return_idle(store, instance);
+                drop(permit);
+                Ok(Ok(value))
+            }
+            Ok(Ok(Err(error))) => {
+                inner.return_idle(store, instance);
+                drop(permit);
+                Ok(Err(error))
+            }
+            Ok(Err(error)) => Err(inner.record_trap(&format!("{error:#}"))),
             Err(_) => Err(inner.record_trap("the call exceeded its deadline")),
         }
     }
@@ -636,7 +733,7 @@ impl<W: World> PoolInner<W> {
             error = reason,
             "plugin instance failed"
         );
-        if self.traps.record(Instant::now()) {
+        if self.gate.record_trap(Instant::now()) {
             tracing::error!(
                 target: "hearthsound::plugin",
                 plugin = %self.plugin,
@@ -707,5 +804,48 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Queueing behind other calls is the host's admission, not plugin
+    /// misbehaviour, so a busy gate must never reach the trap limit.
+    #[tokio::test]
+    async fn queue_timeouts_do_not_count_as_traps() {
+        let gate = CallGate::new(1, Duration::from_millis(20));
+        let held = gate
+            .permits
+            .try_acquire()
+            .expect("a fresh gate has its one permit free");
+
+        for attempt in 0..=TRAP_LIMIT {
+            let error = gate.enter().await.expect_err("the only permit is held");
+            assert_eq!(error, ProviderError::Unavailable);
+            assert!(
+                !gate.is_disabled(),
+                "queue timeout {attempt} must not disable the instance"
+            );
+        }
+
+        drop(held);
+        let _permit = gate.enter().await.expect("the released permit is free");
+    }
+
+    /// A guest trap still counts: the trap limit disables the instance.
+    #[test]
+    fn guest_traps_still_disable_the_instance() {
+        let gate = CallGate::new(1, Duration::from_millis(20));
+        let now = Instant::now();
+
+        // The first `TRAP_LIMIT - 1` traps count but do not disable.
+        for _ in 0..TRAP_LIMIT - 1 {
+            assert!(!gate.record_trap(now));
+            assert!(!gate.is_disabled());
+        }
+        assert!(gate.record_trap(now));
+        assert!(gate.is_disabled());
     }
 }

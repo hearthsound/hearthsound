@@ -28,8 +28,8 @@ use hearthsound_config::keys;
 use hearthsound_core::{IdPrefix, new_uuid_v7};
 use hearthsound_plugin_host::{
     AdminError, AvailablePlugin, AvailableReport, IndexError, InstallError, Manifest,
-    PluginRepository, PluginRow, PluginSource, PluginUpdate, RepositoryRef, RequestedPermission,
-    Unavailable, default_plugin_ids, new_permissions, requested_permissions,
+    PluginRepository, PluginRow, PluginSource, PluginUpdate, RepoError, RepositoryRef,
+    RequestedPermission, Unavailable, default_plugin_ids, new_permissions, requested_permissions,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -739,7 +739,10 @@ async fn set_enabled(
 /// Rebuilds the provider registry so a change is in service.
 ///
 /// A skipped instance is a warning rather than a failure; only a table that
-/// cannot be read fails the rebuild.
+/// cannot be read fails the rebuild, after the plugin write has already
+/// committed. That is answered as `unavailable`: the change is stored, the
+/// running server could not apply it yet, and the reload worker retries while
+/// the registry is marked stale.
 ///
 /// # Parameters
 ///
@@ -747,14 +750,19 @@ async fn set_enabled(
 ///
 /// # Errors
 ///
-/// Answers `internal` when the plugin tables cannot be read.
+/// Answers `unavailable` when the plugin tables cannot be read.
 async fn rebuild(state: &NativeState) -> Result<(), Problem> {
     state
         .services()
         .registry
-        .rebuild()
+        .rebuild_or_mark_stale()
         .await
-        .map_err(|error| problem::internal("rebuilding the provider registry", &error))?;
+        .map_err(|error| {
+            tracing::error!(%error, "could not rebuild the provider registry");
+            Problem::unavailable(
+                "The change was saved, but the running server could not apply it yet; it retries automatically.",
+            )
+        })?;
     Ok(())
 }
 
@@ -1110,6 +1118,12 @@ fn install_problem(error: &InstallError) -> Problem {
         }
         InstallError::Index(IndexError::Unreachable { .. } | IndexError::Malformed { .. })
         | InstallError::Download { .. } => Problem::index_unavailable(error.to_string()),
+        // A repository URL registered on the way in is checked against the same
+        // rules a create is, and a bad one is the caller's request, not a
+        // server failure.
+        InstallError::Record(RepoError::InvalidRepository { .. }) => {
+            Problem::invalid_request(error.to_string())
+        }
         InstallError::RepositoriesDisabled => Problem::repositories_disabled(error.to_string()),
         InstallError::UnknownRepository { .. } | InstallError::UnknownPlugin { .. } => {
             Problem::not_found(error.to_string())

@@ -549,6 +549,10 @@ impl IndexClient {
 
 /// Parses an administrator's minisign public key.
 ///
+/// The parser is the one the verifier uses, so a key a repository is registered
+/// with is a key an index can be verified with; a key that does not parse is
+/// refused when the repository is written instead of at the next fetch.
+///
 /// # Parameters
 ///
 /// - `text`: the base64 key line, or a whole `public.minisign` file whose second
@@ -557,7 +561,7 @@ impl IndexClient {
 /// # Returns
 ///
 /// The public key, or `None` when the text is neither.
-fn parse_public_key(text: &str) -> Option<PublicKey> {
+pub fn parse_public_key(text: &str) -> Option<PublicKey> {
     let text = text.trim();
     PublicKey::decode(text)
         .or_else(|_| PublicKey::from_base64(text))

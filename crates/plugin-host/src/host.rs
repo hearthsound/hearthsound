@@ -13,6 +13,7 @@ use std::sync::Arc;
 use hearthsound_config::SettingsStore;
 use hearthsound_config::settings::Settings;
 use hearthsound_core::Layer;
+use hearthsound_core::Slug;
 use hearthsound_core::events::EventBus;
 use hearthsound_core::providers::{
     AccountLinkProvider, AcquisitionProvider, ArtworkProvider, CatalogProvider, DiscoveryProvider,
@@ -100,6 +101,7 @@ pub struct PluginHost {
     live_settings: Option<Settings>,
     database: Arc<Database>,
     events: Arc<EventBus>,
+    disabled: tokio::sync::broadcast::Sender<Slug>,
 }
 
 impl PluginHost {
@@ -149,7 +151,24 @@ impl PluginHost {
             live_settings: None,
             database,
             events: Arc::new(EventBus::new()),
+            disabled: tokio::sync::broadcast::channel(64).0,
         })
+    }
+
+    /// Returns a receiver for the instances this host switches off itself.
+    ///
+    /// A host disables an instance that traps often enough to be unusable, and
+    /// the change is written straight to `provider_instances`. A registry is
+    /// only rebuilt when something asks it to, so the composition root
+    /// subscribes here and rebuilds: without that, the disabled instance keeps
+    /// serving its layers and reports "unavailable" from a layer that should
+    /// simply have no candidate left.
+    ///
+    /// The receiver sees every instance this host disables after the call; a
+    /// send with no receiver is ignored, so a host nobody subscribed to is not
+    /// an error.
+    pub fn subscribe_instance_disabled(&self) -> tokio::sync::broadcast::Receiver<Slug> {
+        self.disabled.subscribe()
     }
 
     /// Returns the directory plugin installs live under.
@@ -772,7 +791,8 @@ impl PluginHost {
                     Arc::clone(&self.events),
                     instance.id,
                     manifest.id.clone(),
-                    instance.slug.to_string(),
+                    instance.slug.clone(),
+                    self.disabled.clone(),
                 ),
             },
         )

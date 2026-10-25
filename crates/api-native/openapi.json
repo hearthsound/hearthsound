@@ -1707,7 +1707,7 @@
           "admin"
         ],
         "summary": "Changes a provider instance.",
-        "description": "The configuration is validated and sealed exactly as it is on creation, and\nthe registry is rebuilt so the change is in service before the answer is\nsent. An update that echoes the sealed placeholder back keeps the stored\nsecret; a write-only field the update leaves out is gone.\n\n# Errors\n\nAnswers `invalid-request` for a malformed body, `not-found` for an unknown\ninstance, `invalid-provider` when the plugin rejects the configuration or\ncannot serve it, and `internal` when the row cannot be written.",
+        "description": "The configuration is validated and sealed exactly as it is on creation, and\nit is applied as a patch: a server-config field the request leaves out keeps\nits stored value, secrets included, a write-only field sent as `[sealed]`\nalso keeps it, and a write-only field sent as an empty string removes it.\nA configuration that does not satisfy the plugin's schema is answered with\n`invalid-provider`, and the detail names the field without ever printing a\nstored secret.\n\nThe registry is rebuilt so the change is in service before the answer is\nsent. Enabling an instance also runs its health check, so a switched-on\ninstance never shows a result from before it was switched off.\n\n# Errors\n\nAnswers `invalid-request` for a malformed body, `not-found` for an unknown\ninstance, `invalid-provider` when the plugin rejects the configuration or\ncannot serve it, and `unavailable` when the change was saved but the registry\ncould not be rebuilt yet.",
         "operationId": "patch_provider",
         "parameters": [
           {
@@ -1763,6 +1763,16 @@
           },
           "422": {
             "description": "The configuration cannot be used",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The change was saved but not applied yet",
             "content": {
               "application/problem+json": {
                 "schema": {

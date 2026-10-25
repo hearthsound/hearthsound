@@ -77,7 +77,8 @@ pub use kv::KvStore;
 pub use log::{GuestOutput, LogSink};
 pub use manifest::{Manifest, ManifestError};
 pub use registry::{
-    FetchError, FetchedImage, ProviderRegistry, RegistryInstance, RegistryReport, SkippedInstance,
+    FetchError, FetchedImage, HealthOutcome, ProviderRegistry, RegistryInstance, RegistryReport,
+    SkippedInstance,
 };
 pub use repo::{
     Assignment, InstanceRow, PluginRepository, PluginRow, PluginSource, PluginState, RepoError,

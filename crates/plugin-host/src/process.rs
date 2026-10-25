@@ -125,13 +125,29 @@ enum SettingsSource {
     Live(Settings),
 }
 
-/// The handles and processes of one table.
+/// The handles, processes, and live-process budget of one table.
+///
+/// The budget is a semaphore with [`MAX_LIVE_PROCESSES`] permits. `spawn`
+/// reserves one permit before it awaits anything, and the running entry holds
+/// it until the process stops running or its handle is released.
 struct TableInner {
     next_handle: AtomicU64,
     processes: AsyncMutex<HashMap<ProcessHandle, Entry>>,
+    slots: Arc<tokio::sync::Semaphore>,
 }
 
-/// One process the instance started.
+impl TableInner {
+    /// Creates an empty table with every live-process slot free.
+    fn new() -> TableInner {
+        TableInner {
+            next_handle: AtomicU64::new(1),
+            processes: AsyncMutex::new(HashMap::new()),
+            slots: Arc::new(tokio::sync::Semaphore::new(MAX_LIVE_PROCESSES)),
+        }
+    }
+}
+
+/// One process the instance started and the slot it holds while running.
 struct Entry {
     child: Child,
     state: ProcessState,
@@ -141,6 +157,8 @@ struct Entry {
     staging: PathBuf,
     /// When the process stopped, used for the retention window.
     exited_at: Option<Instant>,
+    /// The live-process permit, held only while the process runs.
+    slot: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 /// A bounded, drainable capture of one stream.
@@ -203,10 +221,7 @@ impl ProcessTable {
             slug: slug.clone(),
             tools: tools.to_vec(),
             settings: SettingsSource::Snapshot(settings),
-            inner: Arc::new(TableInner {
-                next_handle: AtomicU64::new(1),
-                processes: AsyncMutex::new(HashMap::new()),
-            }),
+            inner: Arc::new(TableInner::new()),
         }
     }
 
@@ -233,10 +248,7 @@ impl ProcessTable {
             slug: slug.clone(),
             tools: tools.to_vec(),
             settings: SettingsSource::Live(settings),
-            inner: Arc::new(TableInner {
-                next_handle: AtomicU64::new(1),
-                processes: AsyncMutex::new(HashMap::new()),
-            }),
+            inner: Arc::new(TableInner::new()),
         }
     }
 
@@ -290,14 +302,16 @@ impl ProcessTable {
                 )
                 .expect("the built-in settings resolve"),
             )),
-            inner: Arc::new(TableInner {
-                next_handle: AtomicU64::new(1),
-                processes: AsyncMutex::new(HashMap::new()),
-            }),
+            inner: Arc::new(TableInner::new()),
         }
     }
 
     /// Starts one tool process inside the current staging directory.
+    ///
+    /// One of the instance's [`MAX_LIVE_PROCESSES`] slots is reserved before
+    /// the staging directory or the output file is touched, so concurrent
+    /// spawns cannot all pass the cap. The slot is released when the process
+    /// stops running, times out, or its handle is released.
     ///
     /// # Parameters
     ///
@@ -350,16 +364,9 @@ impl ProcessTable {
 
         self.reap().await;
 
-        {
-            let processes = self.inner.processes.lock().await;
-            let live = processes
-                .values()
-                .filter(|entry| matches!(entry.state, ProcessState::Running))
-                .count();
-            if live >= MAX_LIVE_PROCESSES {
-                return Err(ProcessError::Denied("too many processes".to_owned()));
-            }
-        }
+        let Ok(slot) = Arc::clone(&self.inner.slots).try_acquire_owned() else {
+            return Err(ProcessError::Denied("too many processes".to_owned()));
+        };
 
         let base = tokio::fs::canonicalize(staging).await.map_err(|error| {
             ProcessError::Denied(format!("the staging directory is unusable: {error}"))
@@ -383,21 +390,29 @@ impl ProcessTable {
                 Some(Arc::new(OutputBuffer::new()))
             }
             StdoutMode::File(path) => {
-                let path = base.join(checked_relative(&path)?);
-                if let Some(parent) = path.parent() {
-                    tokio::fs::create_dir_all(parent).await.map_err(|error| {
-                        ProcessError::Denied(format!("the output directory is unusable: {error}"))
-                    })?;
-                    let resolved = tokio::fs::canonicalize(parent).await.map_err(|error| {
-                        ProcessError::Denied(format!("the output directory is unusable: {error}"))
-                    })?;
-                    if !resolved.starts_with(&base) {
-                        return Err(ProcessError::Denied(
-                            "the output file leaves the staging directory".to_owned(),
-                        ));
-                    }
+                let relative = checked_relative(&path)?;
+                let parent = create_parent_inside(&base, relative).await?;
+                let resolved = tokio::fs::canonicalize(&parent).await.map_err(|error| {
+                    ProcessError::Denied(format!("the output directory is unusable: {error}"))
+                })?;
+                if !resolved.starts_with(&base) {
+                    return Err(ProcessError::Denied(
+                        "the output path leaves the staging directory".to_owned(),
+                    ));
                 }
-                let file = tokio::fs::File::create(&path).await.map_err(|error| {
+                let path = base.join(relative);
+                if let Ok(metadata) = tokio::fs::symlink_metadata(&path).await
+                    && metadata.file_type().is_symlink()
+                {
+                    return Err(ProcessError::Denied(
+                        "the output path leaves the staging directory".to_owned(),
+                    ));
+                }
+                let mut open = tokio::fs::OpenOptions::new();
+                open.write(true).create(true).truncate(true);
+                #[cfg(unix)]
+                open.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+                let file = open.open(&path).await.map_err(|error| {
                     ProcessError::Denied(format!("the output file cannot be created: {error}"))
                 })?;
                 command.stdout(std::process::Stdio::from(file.into_std().await));
@@ -452,6 +467,7 @@ impl ProcessTable {
                 stderr,
                 staging: staging.to_path_buf(),
                 exited_at: None,
+                slot: Some(slot),
             },
         );
 
@@ -498,6 +514,7 @@ impl ProcessTable {
                 Ok(Some(status)) => {
                     entry.state = ProcessState::Exited(status.code().unwrap_or(-1));
                     entry.exited_at = Some(Instant::now());
+                    drop(entry.slot.take());
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -511,6 +528,7 @@ impl ProcessTable {
                     );
                     entry.state = ProcessState::Killed;
                     entry.exited_at = Some(Instant::now());
+                    drop(entry.slot.take());
                 }
             }
         }
@@ -557,7 +575,7 @@ impl ProcessTable {
     ///
     /// Releasing the handle drops the process object, which also kills a
     /// process that is still running because every child is started with
-    /// `kill_on_drop`.
+    /// `kill_on_drop`, and drops the entry's live-process slot.
     ///
     /// # Parameters
     ///
@@ -574,7 +592,8 @@ impl ProcessTable {
     ///
     /// The orchestrator calls this when an acquisition reaches a terminal
     /// state, so a tool a plugin left running cannot keep writing into a
-    /// directory that is about to be removed.
+    /// directory that is about to be removed. Every removed entry releases its
+    /// live-process slot.
     ///
     /// # Parameters
     ///
@@ -628,6 +647,7 @@ async fn time_out(inner: &TableInner, handle: ProcessHandle) {
     let _ = entry.child.start_kill();
     entry.state = ProcessState::TimedOut;
     entry.exited_at = Some(Instant::now());
+    drop(entry.slot.take());
 }
 
 /// Checks that a plugin path may be resolved inside the staging directory.
@@ -660,6 +680,70 @@ fn checked_relative(path: &str) -> Result<&Path, ProcessError> {
         )));
     }
     Ok(relative)
+}
+
+/// Creates the parent directory of an output path inside the staging directory.
+///
+/// The components of the parent are walked one at a time from `base`, and each
+/// one is inspected with [`tokio::fs::symlink_metadata`] before it is entered.
+/// A symlink the plugin placed inside the staging directory therefore cannot
+/// redirect the creation elsewhere, and because only one level is created at a
+/// time, `create_dir` cannot descend a symlink either.
+///
+/// # Parameters
+///
+/// - `base`: the canonical staging directory.
+/// - `relative`: the plugin's relative output path.
+///
+/// # Returns
+///
+/// The parent directory of `relative`, created when it was missing.
+///
+/// # Errors
+///
+/// Returns [`ProcessError::Denied`] when a component is a symlink or is not a
+/// directory, or when the directory cannot be inspected or created.
+async fn create_parent_inside(base: &Path, relative: &Path) -> Result<PathBuf, ProcessError> {
+    let mut current = base.to_path_buf();
+    let Some(parent) = relative.parent() else {
+        return Ok(current);
+    };
+    for component in parent.components() {
+        let name = match component {
+            Component::Normal(name) => name,
+            Component::CurDir => continue,
+            _ => {
+                return Err(ProcessError::Denied(
+                    "the output path leaves the staging directory".to_owned(),
+                ));
+            }
+        };
+        current.push(name);
+        match tokio::fs::symlink_metadata(&current).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(ProcessError::Denied(
+                    "the output path leaves the staging directory".to_owned(),
+                ));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(ProcessError::Denied(
+                    "the output path leaves the staging directory".to_owned(),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tokio::fs::create_dir(&current).await.map_err(|error| {
+                    ProcessError::Denied(format!("the output directory is unusable: {error}"))
+                })?;
+            }
+            Err(error) => {
+                return Err(ProcessError::Denied(format!(
+                    "the output directory is unusable: {error}"
+                )));
+            }
+        }
+    }
+    Ok(current)
 }
 
 /// Resolves a working directory inside the staging directory.
@@ -930,6 +1014,11 @@ mod tests {
         let state = wait_exit(&table, handle).await;
 
         assert!(matches!(state, ProcessState::TimedOut));
+        assert_eq!(
+            table.inner.slots.available_permits(),
+            MAX_LIVE_PROCESSES,
+            "a timed-out process must release its slot"
+        );
     }
 
     #[tokio::test]
@@ -1018,6 +1107,219 @@ mod tests {
 
         assert_eq!(written, "written\n");
         assert!(table.read_stdout(handle).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_output_directory_symlinked_outside_the_staging_directory_is_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, staging.join("out")).unwrap();
+        let table = table(&script(
+            dir.path(),
+            "tool",
+            "#!/bin/sh\nprintf 'written\\n'\n",
+        ));
+        let mut options = options();
+        options.stdout = StdoutMode::File("out/x.log".to_owned());
+
+        let error = table
+            .spawn(Some(&staging), TOOL, Vec::new(), options)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            ProcessError::Denied("the output path leaves the staging directory".to_owned())
+        );
+        assert_eq!(
+            std::fs::read_dir(&outside).unwrap().count(),
+            0,
+            "the denied spawn must not write outside the staging directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_output_file_symlinked_outside_the_staging_directory_is_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+        std::fs::create_dir_all(staging.join("out")).unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(outside.join("missing.log"), staging.join("out/leaf.log"))
+            .unwrap();
+        let table = table(&script(
+            dir.path(),
+            "tool",
+            "#!/bin/sh\nprintf 'written\\n'\n",
+        ));
+        let mut options = options();
+        options.stdout = StdoutMode::File("out/leaf.log".to_owned());
+
+        let error = table
+            .spawn(Some(&staging), TOOL, Vec::new(), options)
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            ProcessError::Denied("the output path leaves the staging directory".to_owned())
+        );
+        assert_eq!(
+            std::fs::read_dir(&outside).unwrap().count(),
+            0,
+            "the symlink at the leaf must not be followed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_nested_output_directory_is_created_inside_the_staging_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let table = table(&script(
+            dir.path(),
+            "tool",
+            "#!/bin/sh\nprintf 'nested\\n'\n",
+        ));
+        let mut options = options();
+        options.stdout = StdoutMode::File("a/b/log.txt".to_owned());
+
+        let handle = table
+            .spawn(Some(&staging), TOOL, Vec::new(), options)
+            .await
+            .unwrap();
+        assert!(matches!(
+            wait_exit(&table, handle).await,
+            ProcessState::Exited(0)
+        ));
+
+        assert_eq!(
+            std::fs::read_to_string(staging.join("a/b/log.txt")).unwrap(),
+            "nested\n"
+        );
+        assert!(staging.join("a/b").is_dir());
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_table_grants_every_live_process_slot_once() {
+        let table = table(Path::new("/bin/sh"));
+        let mut held = Vec::new();
+        for _ in 0..MAX_LIVE_PROCESSES {
+            held.push(Arc::clone(&table.inner.slots).try_acquire_owned().unwrap());
+        }
+
+        assert!(
+            Arc::clone(&table.inner.slots).try_acquire_owned().is_err(),
+            "a fresh table must refuse one live-process slot more than the cap"
+        );
+        assert_eq!(held.len(), MAX_LIVE_PROCESSES);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_entry_releases_its_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = table(Path::new("/bin/sh"));
+        let handle = table
+            .spawn(
+                Some(dir.path()),
+                TOOL,
+                vec!["-c".to_owned(), "sleep 5".to_owned()],
+                options(),
+            )
+            .await
+            .unwrap();
+        let mut held = Vec::new();
+        for _ in 0..MAX_LIVE_PROCESSES - 1 {
+            held.push(Arc::clone(&table.inner.slots).try_acquire_owned().unwrap());
+        }
+        assert!(Arc::clone(&table.inner.slots).try_acquire_owned().is_err());
+
+        {
+            let mut processes = table.inner.processes.lock().await;
+            let entry = processes.get_mut(&handle).unwrap();
+            entry.state = ProcessState::Exited(0);
+            drop(entry.slot.take());
+        }
+
+        assert!(
+            Arc::clone(&table.inner.slots).try_acquire_owned().is_ok(),
+            "a slot must be available once the entry leaves Running"
+        );
+        table.kill(handle).await;
+    }
+
+    #[tokio::test]
+    async fn the_live_process_cap_refuses_the_next_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        let table = table(Path::new("/bin/sh"));
+        let mut handles = Vec::new();
+        for _ in 0..MAX_LIVE_PROCESSES {
+            handles.push(
+                table
+                    .spawn(
+                        Some(&staging),
+                        TOOL,
+                        vec!["-c".to_owned(), "sleep 30".to_owned()],
+                        options(),
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        for handle in &handles {
+            assert_eq!(
+                table.poll(*handle).await.unwrap(),
+                ProcessState::Running,
+                "the first {MAX_LIVE_PROCESSES} processes must all be live"
+            );
+        }
+
+        let error = table
+            .spawn(
+                Some(&staging),
+                TOOL,
+                vec!["-c".to_owned(), "sleep 30".to_owned()],
+                options(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error, ProcessError::Denied("too many processes".to_owned()));
+
+        for handle in handles {
+            table.kill(handle).await;
+        }
+        assert_eq!(
+            table.inner.slots.available_permits(),
+            MAX_LIVE_PROCESSES,
+            "releasing the handles must release their slots"
+        );
+
+        let handle = table
+            .spawn(
+                Some(&staging),
+                TOOL,
+                vec!["-c".to_owned(), "exit 0".to_owned()],
+                options(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            wait_exit(&table, handle).await,
+            ProcessState::Exited(0)
+        ));
+        assert_eq!(
+            table.inner.slots.available_permits(),
+            MAX_LIVE_PROCESSES,
+            "poll must release the slot once the process has exited"
+        );
     }
 
     #[tokio::test]

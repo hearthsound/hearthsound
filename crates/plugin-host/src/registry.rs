@@ -27,7 +27,7 @@ use crate::http::{HttpClient, HttpError, HttpRequest};
 use crate::instance::{InstanceConfig, InstanceHostConfig};
 use crate::instances::open_server_config;
 use crate::manifest::{ImageCachePolicy, Manifest, Permissions};
-use crate::repo::{InstanceRow, PluginRepository, PluginRow, RepoError};
+use crate::repo::{InstanceRow, PluginRepository, PluginRow, RepoError, now_millis};
 
 /// One configured instance, as the layers see it.
 ///
@@ -279,6 +279,27 @@ pub struct RegistryReport {
     pub instances: usize,
     /// The instances that could not be built, with the reason.
     pub skipped: Vec<SkippedInstance>,
+    /// How many stored secrets the rebuild sealed because they were still in
+    /// the clear.
+    pub resealed: usize,
+}
+
+/// The outcome of one provider instance health check.
+///
+/// The object is what the instance's row stores, so a later read reports the
+/// check as it was taken.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthOutcome {
+    /// The instance the check ran against.
+    pub slug: String,
+    /// Whether the instance answered that it can serve requests.
+    pub ok: bool,
+    /// What the probe reported: the plugin's own status line when the instance
+    /// is healthy, and the failure when it is not.
+    pub detail: String,
+    /// When the probe ran, in unix milliseconds.
+    pub checked_at: i64,
 }
 
 /// The instances of every layer, with their provider trait objects.
@@ -293,6 +314,9 @@ pub struct ProviderRegistry {
     secrets: SecretBox,
     components: Mutex<HashMap<(String, String), Arc<InstalledPlugin>>>,
     state: RwLock<RegistryState>,
+    /// Whether the entries may not match the plugin tables, because a rebuild
+    /// failed after a write committed.
+    stale: std::sync::atomic::AtomicBool,
 }
 
 /// The entries a registry currently holds.
@@ -324,6 +348,46 @@ impl ProviderRegistry {
             secrets,
             components: Mutex::new(HashMap::new()),
             state: RwLock::new(RegistryState::default()),
+            stale: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    /// Returns whether the entries may not match the plugin tables.
+    ///
+    /// The flag is cleared by a successful [`ProviderRegistry::rebuild_or_mark_stale`]
+    /// and set when one fails: a write that committed and a rebuild that failed
+    /// leave the server serving the previous entries, and the reload worker
+    /// retries while the flag is set instead of waiting for the next admin
+    /// write.
+    pub fn is_stale(&self) -> bool {
+        self.stale.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Rebuilds, remembering a failure so the registry is retried.
+    ///
+    /// The write that preceded the rebuild has already committed, so a failed
+    /// rebuild is not the caller's data problem: it means the running server
+    /// could not apply the change yet. The previous entries stay in place and
+    /// the flag makes the reload worker try again within one poll interval.
+    ///
+    /// # Returns
+    ///
+    /// What the rebuild produced.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError`] when the plugin tables cannot be read, with the
+    /// registry left marked stale.
+    pub async fn rebuild_or_mark_stale(&self) -> Result<RegistryReport, RepoError> {
+        match self.rebuild().await {
+            Ok(report) => {
+                self.stale.store(false, std::sync::atomic::Ordering::SeqCst);
+                Ok(report)
+            }
+            Err(error) => {
+                self.stale.store(true, std::sync::atomic::Ordering::SeqCst);
+                Err(error)
+            }
         }
     }
 
@@ -359,6 +423,13 @@ impl ProviderRegistry {
             .into_iter()
             .map(|row| (row.id.clone(), row))
             .collect();
+
+        // A plugin that starts marking a field `writeOnly` - or one that already
+        // did after an instance was configured - leaves the row holding the
+        // value in the clear. Sealing it here means a plugin upgrade needs no
+        // operator step, and it happens before any entry is built, so the
+        // configuration the plugin is handed is unchanged.
+        let resealed = self.reseal_plaintext_secrets(&instances, &plugins).await;
 
         let mut order: BTreeMap<Layer, Vec<uuid::Uuid>> = BTreeMap::new();
         for assignment in assignments {
@@ -424,6 +495,7 @@ impl ProviderRegistry {
             state.layers.insert(*layer, entries);
         }
         report.instances = state.by_slug.len();
+        report.resealed = resealed;
         drop(state);
 
         self.components
@@ -432,6 +504,125 @@ impl ProviderRegistry {
             .retain(|key, _| used.contains(key));
 
         Ok(report)
+    }
+
+    /// Seals every write-only field a stored configuration still holds in the
+    /// clear.
+    ///
+    /// One call per rebuild, over every instance with a stored configuration. A
+    /// row whose plugin manifest cannot be read, whose configuration cannot be
+    /// parsed, or whose write fails is logged and left as it is: a rebuild must
+    /// never fail because one instance cannot be upgraded, which is the same
+    /// policy a skipped instance follows.
+    ///
+    /// # Parameters
+    ///
+    /// - `instances`: the instance rows of this rebuild.
+    /// - `plugins`: the plugin rows of this rebuild.
+    ///
+    /// # Returns
+    ///
+    /// How many fields were sealed across every instance.
+    async fn reseal_plaintext_secrets(
+        &self,
+        instances: &HashMap<uuid::Uuid, InstanceRow>,
+        plugins: &HashMap<String, PluginRow>,
+    ) -> usize {
+        let mut resealed = 0usize;
+        for row in instances.values() {
+            let Some(stored) = row.server_config.as_deref() else {
+                continue;
+            };
+            let Some(plugin) = plugins.get(&row.plugin_id) else {
+                continue;
+            };
+            let manifest = match Manifest::parse(plugin.manifest.as_bytes(), self.host.settings()) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "hearthsound::plugin",
+                        plugin = %plugin.id,
+                        instance = %row.slug,
+                        error = %error,
+                        "cannot re-seal a stored secret: the manifest cannot be read",
+                    );
+                    continue;
+                }
+            };
+            let Some(section) = manifest.config.server.as_ref() else {
+                continue;
+            };
+            let mut config: serde_json::Value = match serde_json::from_str(stored) {
+                Ok(config) => config,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "hearthsound::plugin",
+                        plugin = %plugin.id,
+                        instance = %row.slug,
+                        error = %error,
+                        "cannot re-seal a stored secret: the configuration cannot be read",
+                    );
+                    continue;
+                }
+            };
+            let sealed = match crate::instances::seal_plaintext_write_only(
+                &section.schema,
+                &mut config,
+                &self.secrets,
+            ) {
+                Ok(sealed) => sealed,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "hearthsound::plugin",
+                        plugin = %plugin.id,
+                        instance = %row.slug,
+                        error = %error,
+                        "cannot re-seal a stored secret",
+                    );
+                    continue;
+                }
+            };
+            if sealed == 0 {
+                continue;
+            }
+            let text = match serde_json::to_string(&config) {
+                Ok(text) => text,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "hearthsound::plugin",
+                        plugin = %plugin.id,
+                        instance = %row.slug,
+                        error = %error,
+                        "cannot re-seal a stored secret: the configuration cannot be stored",
+                    );
+                    continue;
+                }
+            };
+            match self
+                .repository
+                .set_instance_server_config(row.id, &text, now_millis())
+                .await
+            {
+                Ok(()) => {
+                    resealed += sealed;
+                    tracing::info!(
+                        target: "hearthsound::plugin",
+                        plugin = %plugin.id,
+                        instance = %row.slug,
+                        fields = sealed,
+                        "sealed stored secrets a plugin left in the clear",
+                    );
+                }
+                Err(error) => tracing::warn!(
+                    target: "hearthsound::plugin",
+                    plugin = %plugin.id,
+                    instance = %row.slug,
+                    error = %error,
+                    "cannot re-seal a stored secret: the row cannot be written",
+                ),
+            }
+        }
+        resealed
     }
 
     /// Returns the instances of one layer, in the order the layer tries them.
@@ -546,6 +737,48 @@ impl ProviderRegistry {
         // No provider is held, so nothing can serve a request for this
         // instance; that is what `unavailable` means.
         Some(Err(ProviderError::Unavailable))
+    }
+
+    /// Runs one instance's health probe and records the outcome on its row.
+    ///
+    /// This is the one path both the manual `GET
+    /// /api/v1/admin/providers/{slug}/health` route and the periodic health job
+    /// take, so a scheduled check publishes exactly what pressing Check Health
+    /// publishes.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the instance slug.
+    ///
+    /// # Returns
+    ///
+    /// `None` when the registry serves no instance with the slug - an unknown
+    /// instance, or one that is disabled, unassigned or whose plugin could not
+    /// be loaded - and otherwise the outcome that was recorded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepoError`] when the outcome cannot be stored.
+    pub async fn check_health(&self, slug: &str) -> Result<Option<HealthOutcome>, RepoError> {
+        let Some(instance) = self.instance(slug) else {
+            return Ok(None);
+        };
+        let (ok, detail) = match self.health(slug).await {
+            Some(Ok(detail)) => (true, detail),
+            Some(Err(error)) => (false, error.to_string()),
+            None => return Ok(None),
+        };
+        let outcome = HealthOutcome {
+            slug: slug.to_owned(),
+            ok,
+            detail,
+            checked_at: now_millis(),
+        };
+        let text = serde_json::to_string(&outcome)?;
+        self.repository
+            .set_instance_health(instance.id(), Some(&text))
+            .await?;
+        Ok(Some(outcome))
     }
 
     /// Builds one instance's entry.
