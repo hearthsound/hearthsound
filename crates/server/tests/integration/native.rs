@@ -3450,3 +3450,106 @@ mod provider_admin {
         fixture.stop().await;
     }
 }
+
+/// A folder whose scan refused to prune says so in the listing.
+///
+/// An unmounted disk is an existing, empty directory, so the scan keeps every
+/// row and writes the reason onto the folder; the field is the complete sentence
+/// the client renders.
+#[tokio::test]
+async fn a_folder_reports_a_scan_that_refused_to_prune() {
+    let fixture = Fixture::new().await;
+    let root = fixture
+        .database_path()
+        .parent()
+        .unwrap()
+        .join("music-unmounted");
+    write_album(&root, "Folder Artist", "Mounted Album").await;
+
+    let created = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/folders",
+        Some(serde_json::json!({ "path": root, "generic": true, "watch": false })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let folder = json(created).await["id"].as_str().unwrap().to_owned();
+
+    let mut scanned_at = None;
+    for _ in 0..250 {
+        let listed = json(
+            bearer(
+                &fixture,
+                reqwest::Method::GET,
+                "/api/v1/admin/folders",
+                None,
+            )
+            .await,
+        )
+        .await;
+        if let Some(at) = listed["folders"][0].get("lastScanAt") {
+            scanned_at = at.as_i64();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    }
+    assert!(scanned_at.is_some(), "the first scan finished");
+
+    // The music is gone and the mount point is still an empty directory.
+    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let scan = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        &format!("/api/v1/admin/folders/{folder}/scan"),
+        None,
+    )
+    .await;
+    assert_eq!(scan.status(), StatusCode::ACCEPTED);
+
+    let mut problem = None;
+    for _ in 0..250 {
+        let listed = json(
+            bearer(
+                &fixture,
+                reqwest::Method::GET,
+                "/api/v1/admin/folders",
+                None,
+            )
+            .await,
+        )
+        .await;
+        if let Some(error) = listed["folders"][0].get("lastScanError") {
+            problem = Some(error.as_str().unwrap().to_owned());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    }
+    assert_eq!(
+        problem.as_deref(),
+        Some("Nothing was removed: the folder root is empty, so the disk may not be mounted.")
+    );
+
+    let listed = json(
+        bearer(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/admin/folders",
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        listed["folders"][0]["lastScanAt"].as_i64() >= scanned_at,
+        "the refused scan still finished"
+    );
+    let tracks: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks")
+        .fetch_one(fixture.services.database().readers())
+        .await
+        .unwrap();
+    assert_eq!(tracks, 2, "nothing was removed");
+
+    fixture.stop().await;
+}

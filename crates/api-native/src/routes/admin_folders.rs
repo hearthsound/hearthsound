@@ -47,9 +47,14 @@ pub struct FolderView {
     pub watch: bool,
     /// When the folder was added, in unix milliseconds.
     pub created_at: i64,
-    /// When the folder was last scanned, in unix milliseconds.
+    /// When the folder's last scan finished, in unix milliseconds; a scan that
+    /// failed leaves it unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_scan_at: Option<i64>,
+    /// Why the folder's last scan failed or ended with a warning, when it did.
+    /// A complete sentence to render verbatim; `None` after a clean scan.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_scan_error: Option<String>,
 }
 
 impl From<&LibraryFolder> for FolderView {
@@ -65,6 +70,7 @@ impl From<&LibraryFolder> for FolderView {
             watch: folder.watch,
             created_at: folder.created_at,
             last_scan_at: folder.last_scan_at,
+            last_scan_error: folder.last_scan_error.clone(),
         }
     }
 }
@@ -209,7 +215,7 @@ async fn reconcile_watchers(state: &NativeState) {
     path = "/api/v1/admin/folders",
     tag = "admin",
     responses(
-        (status = 200, description = "The folders", body = FolderList),
+        (status = 200, description = "The folders; `lastScanAt` and `lastScanError` say how the last scan ended", body = FolderList),
         (status = 403, description = "Not an administrator", body = Problem, content_type = "application/problem+json"),
     ),
     security(("bearer" = []), ("session" = []))
@@ -241,7 +247,7 @@ pub async fn list_folders(
     tag = "admin",
     request_body = NewFolder,
     responses(
-        (status = 201, description = "The new folder; its first scan is queued", body = FolderView),
+        (status = 201, description = "The new folder; its first scan is queued, and `lastScanError` says how it ended", body = FolderView),
         (status = 400, description = "No association, an unknown owner, or an unusable path", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The folder is already added", body = Problem, content_type = "application/problem+json"),
     ),

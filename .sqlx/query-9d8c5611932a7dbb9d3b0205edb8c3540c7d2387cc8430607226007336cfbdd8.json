@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE library_folders SET last_scan_at = COALESCE(?, last_scan_at), last_scan_error = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "9d8c5611932a7dbb9d3b0205edb8c3540c7d2387cc8430607226007336cfbdd8"
+}

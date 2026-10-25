@@ -235,7 +235,7 @@
         "operationId": "list_folders",
         "responses": {
           "200": {
-            "description": "The folders",
+            "description": "The folders; `lastScanAt` and `lastScanError` say how the last scan ended",
             "content": {
               "application/json": {
                 "schema": {
@@ -283,7 +283,7 @@
         },
         "responses": {
           "201": {
-            "description": "The new folder; its first scan is queued",
+            "description": "The new folder; its first scan is queued, and `lastScanError` says how it ended",
             "content": {
               "application/json": {
                 "schema": {
@@ -4266,7 +4266,14 @@
               "null"
             ],
             "format": "int64",
-            "description": "When the folder was last scanned, in unix milliseconds."
+            "description": "When the folder's last scan finished, in unix milliseconds; a scan that\nfailed leaves it unchanged."
+          },
+          "lastScanError": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the folder's last scan failed or ended with a warning, when it did.\nA complete sentence to render verbatim; `None` after a clean scan."
           },
           "name": {
             "type": "string",

@@ -324,8 +324,12 @@ async fn an_owned_folder_pins_its_tracks() {
     assert_eq!(count, 1, "only the owned folder's track is pinned");
 }
 
+/// A link inside a folder is part of the folder, wherever it points.
+///
+/// The administrator chose the folder, so a link into it is a deliberate
+/// decision; a scan and a watcher therefore agree on following it.
 #[tokio::test]
-async fn the_walk_stays_inside_the_folder() {
+async fn a_symlinked_directory_is_followed_outside_the_folder() {
     let dir = tempfile::tempdir().unwrap();
     let db = migrated(dir.path()).await;
     let library = LibraryRepository::new(&db);
@@ -340,8 +344,116 @@ async fn the_walk_stays_inside_the_folder() {
     let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
     let folder = library.add_library_folder(&music, None).await.unwrap();
     let report = scanner.scan_folder(folder.id).await.unwrap();
-    assert_eq!(report.files_seen, 1, "the symlink is not followed");
-    assert_eq!(library.list_artists().await.unwrap()[0].name, "Energy 52");
+    assert_eq!(report.files_seen, 2, "the link is followed");
+    let mut names: Vec<String> = library
+        .list_artists()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|artist| artist.name)
+        .collect();
+    names.sort();
+    assert_eq!(names, ["Energy 52", "Nobody"]);
+}
+
+/// A link cycle is visited once, and the scan finishes.
+#[tokio::test]
+async fn a_symlink_cycle_does_not_hang() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir_all(music.join("a")).unwrap();
+    std::fs::create_dir_all(music.join("b")).unwrap();
+    write_song(
+        &music.join("a"),
+        "Cafe del Mar",
+        "Energy 52",
+        "Cafe del Mar",
+    )
+    .await;
+    write_song(&music.join("b"), "Sunset", "Someone Else", "Evening").await;
+    std::os::unix::fs::symlink(music.join("a"), music.join("a/loop")).unwrap();
+    std::os::unix::fs::symlink(&music, music.join("b/up")).unwrap();
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    let report = tokio::time::timeout(Duration::from_secs(30), scanner.scan_folder(folder.id))
+        .await
+        .expect("the walk terminates")
+        .unwrap();
+
+    assert_eq!(report.files_seen, 2, "each file is walked once");
+    for name in ["Energy 52", "Someone Else"] {
+        let track = only_track(&library, name).await;
+        assert_eq!(
+            library
+                .list_media_files_for_track(track)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "{name} is indexed once"
+        );
+    }
+}
+
+/// A link to an audio file is indexed under its own name.
+#[tokio::test]
+async fn a_symlinked_audio_file_is_indexed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir(&music).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    let target = write_song(&outside, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+    std::os::unix::fs::symlink(&target, music.join("linked.flac")).unwrap();
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    let report = scanner.scan_folder(folder.id).await.unwrap();
+    assert_eq!(report.files_seen, 1);
+    assert_eq!(report.files_indexed, 1);
+
+    let track = only_track(&library, "Energy 52").await;
+    let files = library.list_media_files_for_track(track).await.unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].rel_path, "linked.flac", "the path stays relative");
+}
+
+/// A name that is not valid UTF-8 is skipped, never stored lossily.
+#[tokio::test]
+async fn a_file_name_that_is_not_utf8_is_skipped() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+    std::fs::write(
+        music.join(OsString::from_vec(b"bad\xff.flac".to_vec())),
+        b"audio",
+    )
+    .unwrap();
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    let report = scanner.scan_folder(folder.id).await.unwrap();
+
+    assert_eq!(report.files_seen, 1);
+    assert_eq!(report.unreadable, 1);
+    assert_eq!(library.list_artists().await.unwrap().len(), 1);
+    let lossy: i64 = sqlx::query_scalar("SELECT count(*) FROM media_files WHERE rel_path LIKE ?")
+        .bind("%\u{fffd}%")
+        .fetch_one(db.readers())
+        .await
+        .unwrap();
+    assert_eq!(lossy, 0, "no stored path carries a replacement character");
 }
 
 #[tokio::test]
@@ -999,4 +1111,340 @@ async fn concurrent_scans_of_one_folder_keep_the_writer_available() {
 
     shutdown.trigger();
     running.await.unwrap();
+}
+
+/// The message a scan that refused to prune stores on the folder.
+const PRUNE_REFUSED: &str =
+    "Nothing was removed: the folder root is empty, so the disk may not be mounted.";
+
+/// Builds a claimed `library.scan` job with a payload.
+///
+/// # Parameters
+///
+/// - `payload`: the job's JSON payload.
+fn scan_job(payload: Option<String>) -> hearthsound_jobs::Job {
+    hearthsound_jobs::Job {
+        id: uuid::Uuid::now_v7(),
+        kind: SCAN_JOB_KIND.into(),
+        payload,
+        state: JobState::Running,
+        priority: hearthsound_core::Priority::Background,
+        attempts: 1,
+        run_at: 0,
+        locked_until: None,
+        last_error: None,
+        created_at: 0,
+        updated_at: 0,
+    }
+}
+
+/// A folder whose root holds no entry at all keeps every row it had.
+///
+/// An unmounted bind mount is an existing directory with nothing in it, which
+/// looks exactly like an empty folder. Pruning it would delete a library that is
+/// only out of reach, likes and playlist entries included.
+#[tokio::test]
+async fn an_empty_root_keeps_its_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    let first = write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+    let second = write_song(&music, "Sunset", "Someone Else", "Evening").await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(folder.id).await.unwrap();
+    assert_eq!(library.list_artists().await.unwrap().len(), 2);
+
+    // The music went away, but the mount point is still a directory.
+    std::fs::remove_file(&first).unwrap();
+    std::fs::remove_file(&second).unwrap();
+    let report = scanner.scan_folder(folder.id).await.unwrap();
+
+    assert!(report.prune_refused, "the scan refused to prune");
+    assert_eq!(report.files_removed, 0);
+    assert_eq!(report.tracks_removed, 0);
+    assert_eq!(library.list_artists().await.unwrap().len(), 2);
+    assert_eq!(
+        library
+            .get_library_folder(folder.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_scan_error,
+        Some(PRUNE_REFUSED.to_owned())
+    );
+
+    // Once the root holds content again the next scan prunes normally.
+    write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+    let report = scanner.scan_folder(folder.id).await.unwrap();
+    assert!(!report.prune_refused);
+    assert_eq!(
+        library
+            .get_library_folder(folder.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_scan_error,
+        None
+    );
+}
+
+/// A root that holds a non-audio file is mounted and is pruned.
+#[tokio::test]
+async fn a_root_holding_only_a_non_audio_file_still_prunes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    let song = write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(folder.id).await.unwrap();
+
+    std::fs::remove_file(&song).unwrap();
+    std::fs::write(music.join("notes.txt"), b"not audio").unwrap();
+    let report = scanner.scan_folder(folder.id).await.unwrap();
+
+    assert!(
+        !report.prune_refused,
+        "an entry proves the mount is present"
+    );
+    assert_eq!(report.files_removed, 1);
+    assert_eq!(report.tracks_removed, 1);
+    let tracks: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks")
+        .fetch_one(db.readers())
+        .await
+        .unwrap();
+    assert_eq!(tracks, 0, "the track row went with its last file");
+}
+
+/// One unreadable subdirectory is counted and skipped, not fatal.
+#[tokio::test]
+async fn an_unreadable_subdirectory_does_not_stop_the_scan() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    let locked = music.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+
+    // Root reads the directory whatever its mode, so the assertion is skipped
+    // there rather than failed.
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let enforced = std::fs::read_dir(&locked).is_err();
+    let report = scanner.scan_folder(folder.id).await.unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(report.files_seen, 1);
+    assert_eq!(report.files_indexed, 1);
+    assert_eq!(library.list_artists().await.unwrap().len(), 1);
+    if !enforced {
+        return;
+    }
+    assert_eq!(report.unreadable, 1);
+    let problem = report.problem().unwrap();
+    assert!(problem.contains("1 entries could not be read"), "{problem}");
+    assert!(problem.contains("locked"), "{problem}");
+    let stored = library
+        .get_library_folder(folder.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .last_scan_error
+        .unwrap();
+    assert!(stored.contains("locked"), "{stored}");
+}
+
+/// A folder whose root cannot be read fails its own scan only.
+#[tokio::test]
+async fn one_unreadable_folder_does_not_stop_the_others() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let broken = dir.path().join("broken");
+    let music = dir.path().join("music");
+    std::fs::create_dir(&broken).unwrap();
+    std::fs::create_dir(&music).unwrap();
+    write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let broken_folder = library.add_library_folder(&broken, None).await.unwrap();
+    library.add_library_folder(&music, None).await.unwrap();
+    // A path that is a file cannot be walked at all.
+    std::fs::remove_dir(&broken).unwrap();
+    std::fs::write(&broken, b"not a directory").unwrap();
+
+    let error = scanner.scan(&ScanRequest::all()).await.unwrap_err();
+    assert!(matches!(
+        error,
+        hearthsound_library::LibraryError::Scan { .. }
+    ));
+    assert_eq!(
+        library.list_artists().await.unwrap().len(),
+        1,
+        "the healthy folder was still indexed"
+    );
+    let stored = library
+        .get_library_folder(broken_folder.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .last_scan_error
+        .unwrap();
+    assert!(stored.starts_with("Scan failed: reading"), "{stored}");
+}
+
+/// A scan that could not run is recorded on its folder and keeps the last
+/// successful instant.
+#[tokio::test]
+async fn a_failed_scan_is_recorded_on_the_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(folder.id).await.unwrap();
+    let scanned_at = library
+        .get_library_folder(folder.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .last_scan_at;
+    assert!(scanned_at.is_some());
+
+    // The directory is replaced by a file, which no walk can read.
+    std::fs::remove_dir_all(&music).unwrap();
+    std::fs::write(&music, b"not a directory").unwrap();
+    assert!(scanner.scan_folder(folder.id).await.is_err());
+
+    let folder = library
+        .get_library_folder(folder.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        folder.last_scan_at, scanned_at,
+        "a failed scan keeps the instant"
+    );
+    let error = folder.last_scan_error.unwrap();
+    assert!(error.starts_with("Scan failed: reading"), "{error}");
+    assert!(error.contains("music"), "{error}");
+}
+
+/// A later clean scan clears the recorded problem.
+#[tokio::test]
+async fn a_clean_scan_clears_the_recorded_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(folder.id).await.unwrap();
+    let scanned_at = library
+        .get_library_folder(folder.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .last_scan_at;
+
+    std::fs::remove_dir_all(&music).unwrap();
+    std::fs::write(&music, b"not a directory").unwrap();
+    assert!(scanner.scan_folder(folder.id).await.is_err());
+
+    std::fs::remove_file(&music).unwrap();
+    std::fs::create_dir(&music).unwrap();
+    write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    scanner.scan_folder(folder.id).await.unwrap();
+
+    let folder = library
+        .get_library_folder(folder.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(folder.last_scan_error, None);
+    assert!(folder.last_scan_at >= scanned_at);
+}
+
+/// A queued scan of a folder that no longer exists finishes without failing.
+#[tokio::test]
+async fn a_scan_of_a_deleted_folder_finishes_quietly() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+
+    let scanner = Arc::new(scanner_for(&db, Arc::new(EventBus::new())).await);
+    let queue = JobQueue::new(&db, QueueOptions::default());
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    scanner
+        .request_scan(&queue, &ScanRequest::folder(folder.id))
+        .await
+        .unwrap();
+    library.remove_library_folder(folder.id).await.unwrap();
+    assert!(scanner.status().scanning, "the request is queued");
+
+    let payload = serde_json::to_string(&ScanRequest::folder(folder.id)).unwrap();
+    let handler = ScanJobHandler::new(Arc::clone(&scanner));
+    hearthsound_jobs::JobHandler::handle(&handler, scan_job(Some(payload)))
+        .await
+        .unwrap();
+    assert!(!scanner.status().scanning, "the counter was released");
+}
+
+/// A scan whose payload cannot be parsed still releases the status counter.
+#[tokio::test]
+async fn a_malformed_scan_payload_releases_the_scan_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+
+    let scanner = Arc::new(scanner_for(&db, Arc::new(EventBus::new())).await);
+    let queue = JobQueue::new(&db, QueueOptions::default());
+    scanner
+        .request_scan(&queue, &ScanRequest::folder(folder.id))
+        .await
+        .unwrap();
+    let job = queue.claim().await.unwrap().unwrap();
+    sqlx::query("UPDATE jobs SET payload = '{' WHERE id = ?")
+        .bind(job.id.as_bytes().as_slice())
+        .execute(db.writer())
+        .await
+        .unwrap();
+    let malformed = hearthsound_jobs::Job {
+        payload: Some("{".to_owned()),
+        ..job
+    };
+
+    let handler = ScanJobHandler::new(Arc::clone(&scanner));
+    assert!(
+        hearthsound_jobs::JobHandler::handle(&handler, malformed)
+            .await
+            .is_err()
+    );
+    assert!(!scanner.status().scanning, "the counter was released");
 }

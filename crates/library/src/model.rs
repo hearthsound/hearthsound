@@ -304,8 +304,12 @@ pub struct LibraryFolder {
     pub watch: bool,
     /// When the folder was added, in unix milliseconds.
     pub created_at: i64,
-    /// When the folder was last scanned, in unix milliseconds.
+    /// When the folder was last scanned, in unix milliseconds. A scan that
+    /// failed leaves it unchanged.
     pub last_scan_at: Option<i64>,
+    /// Why the folder's last scan failed or ended with a warning, when it did.
+    /// `None` after a clean scan.
+    pub last_scan_error: Option<String>,
 }
 
 /// One row of the `media_files` table.

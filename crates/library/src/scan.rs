@@ -210,7 +210,69 @@ pub struct ScanReport {
     /// How many locally created tracks were removed because they lost their last
     /// file.
     pub tracks_removed: u64,
+    /// How many entries the walk could not read and skipped: a directory the
+    /// process has no permission for, an entry that vanished mid-walk, a link
+    /// that does not resolve, or a file name that is not valid UTF-8. They are
+    /// counted rather than stored, so the next scan can find them.
+    pub unreadable: u64,
+    /// The first entry the walk could not read, which the problem message names
+    /// as an example.
+    unreadable_path: Option<PathBuf>,
+    /// Whether the scan refused to remove anything because the folder root held
+    /// no entry at all, which is what an unmounted disk looks like.
+    pub prune_refused: bool,
 }
+
+impl ScanReport {
+    /// The problem the scan ended with, when it ended with one.
+    ///
+    /// A clean scan reports `None`. A scan that finished but could not do its
+    /// job reports the sentence the folder's `last_scan_error` stores and the
+    /// terminal `scan.progress` event carries, so the administrator sees one
+    /// wording everywhere.
+    ///
+    /// # Returns
+    ///
+    /// The message, or `None` when the scan had nothing to report.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_library::scan::ScanReport;
+    ///
+    /// let clean = ScanReport::default();
+    /// assert_eq!(clean.problem(), None);
+    ///
+    /// let refused = ScanReport {
+    ///     prune_refused: true,
+    ///     ..ScanReport::default()
+    /// };
+    /// assert_eq!(
+    ///     refused.problem().as_deref(),
+    ///     Some("Nothing was removed: the folder root is empty, so the disk may not be mounted.")
+    /// );
+    /// ```
+    pub fn problem(&self) -> Option<String> {
+        if self.prune_refused {
+            return Some(PRUNE_REFUSED.to_owned());
+        }
+        if self.unreadable == 0 {
+            return None;
+        }
+        let example = match &self.unreadable_path {
+            Some(path) => format!(" (for example \"{}\")", path.display()),
+            None => String::new(),
+        };
+        Some(format!(
+            "{} entries could not be read and were skipped{example}.",
+            self.unreadable
+        ))
+    }
+}
+
+/// What the scan writes into `last_scan_error` when it refused to prune.
+const PRUNE_REFUSED: &str =
+    "Nothing was removed: the folder root is empty, so the disk may not be mounted.";
 
 /// An audio file the walk found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -392,12 +454,15 @@ impl LibraryScanner {
     ///
     /// # Returns
     ///
-    /// One report per folder, in the order the folders are listed.
+    /// One report per folder that scanned, in the order the folders are listed.
     ///
     /// # Errors
     ///
-    /// Returns the first folder's error. A scan is idempotent, so the caller can
-    /// retry it after fixing what made the folder unreadable.
+    /// Returns the first folder's error. Every other folder is still scanned:
+    /// one disk that is not mounted must not cost the rest of the library its
+    /// scan, and the folder that failed carries its own `last_scan_error`. A
+    /// scan is idempotent, so the caller can retry it after fixing what made the
+    /// folder unreadable.
     pub async fn scan(&self, request: &ScanRequest) -> Result<Vec<ScanReport>, LibraryError> {
         let _running = self.begin_scan();
         match request.folder_id {
@@ -407,10 +472,27 @@ impl LibraryScanner {
                 let folders = folders::list_library_folders(&mut read).await?;
                 drop(read);
                 let mut reports = Vec::with_capacity(folders.len());
+                let mut first_error: Option<LibraryError> = None;
                 for folder in folders {
-                    reports.push(self.scan_one(folder.id, request).await?);
+                    match self.scan_one(folder.id, request).await {
+                        Ok(report) => reports.push(report),
+                        Err(error) => {
+                            tracing::warn!(
+                                folder = %folder.id,
+                                path = %folder.path.display(),
+                                %error,
+                                "a folder scan failed"
+                            );
+                            if first_error.is_none() {
+                                first_error = Some(error);
+                            }
+                        }
+                    }
                 }
-                Ok(reports)
+                match first_error {
+                    Some(error) => Err(error),
+                    None => Ok(reports),
+                }
             }
         }
     }
@@ -526,7 +608,12 @@ impl LibraryScanner {
         Arc::clone(locks.entry(folder_id).or_default())
     }
 
-    /// Scans one folder, with its lock already held.
+    /// Scans one folder under its lock and records how it ended.
+    ///
+    /// The folder's row and the terminal `scan.progress` event always say how
+    /// the scan ended: a clean scan clears the stored problem, a scan that
+    /// finished with a warning stores it, and a scan that failed stores the
+    /// failure and leaves the last successful instant alone.
     ///
     /// # Parameters
     ///
@@ -541,6 +628,75 @@ impl LibraryScanner {
     ///
     /// Returns the errors of [`LibraryScanner::scan_one`].
     async fn scan_locked(
+        &self,
+        folder_id: Uuid,
+        request: &ScanRequest,
+    ) -> Result<ScanReport, LibraryError> {
+        match self.scan_body(folder_id, request).await {
+            Ok(report) => {
+                let problem = report.problem();
+                self.record_outcome(folder_id, Some(now_millis()), problem.as_deref())
+                    .await;
+                self.progress(folder_id, "done", &report, problem);
+                Ok(report)
+            }
+            Err(error) => {
+                let message = format!("Scan failed: {error}");
+                self.record_outcome(folder_id, None, Some(&message)).await;
+                self.progress_failed(folder_id, message);
+                Err(error)
+            }
+        }
+    }
+
+    /// Records the outcome of a scan on the folder's row.
+    ///
+    /// The write is one short transaction and never fails the scan: the files
+    /// were already walked and indexed, and a status column that cannot be
+    /// written is a log line rather than a lost scan.
+    ///
+    /// # Parameters
+    ///
+    /// - `folder_id`: the folder that was scanned. A folder that no longer
+    ///   exists updates no row, which is not an error.
+    /// - `at`: when the scan finished, or `None` to leave the stored instant.
+    /// - `error`: the problem the scan ended with, or `None` for a clean scan.
+    async fn record_outcome(&self, folder_id: Uuid, at: Option<i64>, error: Option<&str>) {
+        let mut tx = match self.writer.begin().await {
+            Ok(tx) => tx,
+            Err(error) => {
+                tracing::error!(%error, folder = %folder_id, "could not record the outcome of a scan");
+                return;
+            }
+        };
+        let stored = folders::set_library_folder_scan_outcome(&mut tx, folder_id, at, error).await;
+        match stored {
+            Ok(_) => {
+                if let Err(error) = tx.commit().await {
+                    tracing::error!(%error, folder = %folder_id, "could not record the outcome of a scan");
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, folder = %folder_id, "could not record the outcome of a scan");
+            }
+        }
+    }
+
+    /// Scans one folder, with its lock already held.
+    ///
+    /// # Parameters
+    ///
+    /// - `folder_id`: the folder to scan.
+    /// - `request`: the scan to run; its `folder_id` is ignored.
+    ///
+    /// # Returns
+    ///
+    /// What the scan did.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`LibraryScanner::scan_one`].
+    async fn scan_body(
         &self,
         folder_id: Uuid,
         request: &ScanRequest,
@@ -563,14 +719,19 @@ impl LibraryScanner {
 
         let walk_root = folder.path.clone();
         let walk_subtrees = subtrees.clone();
-        let found = tokio::task::spawn_blocking(move || walk(&walk_root, &walk_subtrees)).await??;
+        let skip: Vec<PathBuf> = Vec::new();
+        let outcome =
+            tokio::task::spawn_blocking(move || walk(&walk_root, &walk_subtrees, &skip)).await??;
+        let found = outcome.found;
 
         let mut report = ScanReport {
             folder_id,
             files_seen: found.len() as u64,
+            unreadable: outcome.unreadable,
+            unreadable_path: outcome.unreadable_path,
             ..ScanReport::default()
         };
-        self.progress(&folder, "indexing", &report, None);
+        self.progress(folder.id, "indexing", &report, None);
 
         // The files whose size or modification time changed, with the track
         // their stored row belongs to. A full scan probes every file.
@@ -622,20 +783,27 @@ impl LibraryScanner {
             if pending.len() >= WRITE_BATCH {
                 self.flush(&folder, separators, &mut pending, &mut report)
                     .await?;
-                self.progress(&folder, "indexing", &report, None);
+                self.progress(folder.id, "indexing", &report, None);
             }
         }
         self.flush(&folder, separators, &mut pending, &mut report)
             .await?;
 
-        self.progress(&folder, "pruning", &report, None);
-        self.prune(&folder, &seen, &subtrees, &mut report).await?;
-
-        let mut tx = self.writer.begin().await?;
-        folders::set_library_folder_last_scan(&mut tx, folder.id, now_millis()).await?;
-        tx.commit().await?;
-
-        self.progress(&folder, "done", &report, None);
+        self.progress(folder.id, "pruning", &report, None);
+        if outcome.root_empty && !stored.is_empty() {
+            // An existing root with nothing in it is what an unmounted bind
+            // mount looks like, so pruning would delete a library that is only
+            // out of reach. The rows stay until a scan sees content again.
+            report.prune_refused = true;
+            tracing::warn!(
+                folder = %folder.id,
+                path = %folder.path.display(),
+                files = stored.len(),
+                "refused to prune a folder whose root is empty; the disk may be unmounted"
+            );
+        } else {
+            self.prune(&folder, &seen, &subtrees, &mut report).await?;
+        }
         Ok(report)
     }
 
@@ -781,27 +949,35 @@ impl LibraryScanner {
     ///
     /// # Parameters
     ///
-    /// - `folder`: the folder being scanned.
-    /// - `phase`: the phase name.
+    /// - `folder_id`: the folder being scanned.
+    /// - `phase`: the phase name; `done` is the terminal phase of a scan that
+    ///   finished, with or without a problem.
     /// - `report`: the counters so far.
-    /// - `error`: the error that stopped the scan, when it failed.
-    fn progress(
-        &self,
-        folder: &LibraryFolder,
-        phase: &str,
-        report: &ScanReport,
-        error: Option<String>,
-    ) {
+    /// - `error`: the problem the scan ended with, when it ended with one.
+    fn progress(&self, folder_id: Uuid, phase: &str, report: &ScanReport, error: Option<String>) {
         self.events.publish_for(
             Audience::Admins,
             ServerEvent::ScanProgress(ScanProgress {
-                folder_id: folder.id.to_string(),
+                folder_id: folder_id.to_string(),
                 phase: phase.to_owned(),
                 files_seen: report.files_seen,
                 files_done: report.files_indexed + report.files_skipped,
                 error,
             }),
         );
+    }
+
+    /// Publishes the terminal `scan.progress` event of a scan that failed.
+    ///
+    /// The phase is `failed`, never `done`, so a client can tell a scan that
+    /// did not finish from one that finished with a warning.
+    ///
+    /// # Parameters
+    ///
+    /// - `folder_id`: the folder whose scan failed.
+    /// - `error`: what the failure was.
+    fn progress_failed(&self, folder_id: Uuid, error: String) {
+        self.progress(folder_id, "failed", &ScanReport::default(), Some(error));
     }
 
     /// Publishes a `library.changed` event for a track.
@@ -1080,45 +1256,101 @@ fn scanned_file(folder_id: Uuid, file: &PendingFile) -> ScannedMediaFile {
     }
 }
 
+/// What one walk found, and what it could not read.
+#[derive(Debug, Default)]
+struct WalkOutcome {
+    /// The audio files the walk found.
+    found: Vec<FoundFile>,
+    /// How many entries the walk could not read and skipped.
+    unreadable: u64,
+    /// The first entry the walk could not read.
+    unreadable_path: Option<PathBuf>,
+    /// Whether the whole folder was walked and its root held no entry at all.
+    root_empty: bool,
+}
+
+impl WalkOutcome {
+    /// Records that an entry could not be read.
+    ///
+    /// # Parameters
+    ///
+    /// - `path`: the entry that was skipped.
+    fn note_unreadable(&mut self, path: &Path) {
+        self.unreadable += 1;
+        if self.unreadable_path.is_none() {
+            self.unreadable_path = Some(path.to_path_buf());
+        }
+    }
+}
+
 /// Walks a folder, or the listed subtrees of it, and returns its audio files.
 ///
-/// The walk is depth-first and never follows a symbolic link, so it can never
-/// leave the folder it started in. Hidden files and directories (names starting
-/// with a dot) are skipped. Directories are visited in the order the
-/// filesystem lists them; the result is sorted by relative path so a scan is
-/// reproducible, and a file reachable through two subtrees is returned once.
+/// The walk follows symbolic links, including ones whose target is outside the
+/// folder: the administrator chose the folder, so a link into it is part of it.
+/// A directory the walk already visited is skipped, so a link cycle cannot loop,
+/// and the subdirectories that are library folders of their own are skipped, so
+/// each file is indexed by the deepest folder that contains it.
+///
+/// An entry the walk cannot read - a directory it has no permission for, an
+/// entry that vanished between listing and stating, a link that does not
+/// resolve, a name that is not valid UTF-8 - is logged, counted, and skipped, so
+/// one bad directory never costs the whole folder its scan. Hidden files and
+/// directories (names starting with a dot) are skipped. Directories are visited
+/// in the order the filesystem lists them; the result is sorted by relative path
+/// so a scan is reproducible, and a file reachable through two subtrees is
+/// returned once.
 ///
 /// # Parameters
 ///
-/// - `root`: the folder root.
+/// - `root`: the folder root, which must be a directory.
 /// - `subtrees`: the directories to walk, relative to the root and already
 ///   normalized; empty walks the whole folder. A subtree that does not exist or
 ///   is not a directory contributes nothing.
+/// - `skip`: the absolute paths of nested library folders, which the walk does
+///   not descend into.
 ///
 /// # Returns
 ///
-/// Every recognised audio file under the walked directories, with its path
-/// relative to the root.
+/// Every recognised audio file under the walked directories with its path
+/// relative to the root, and what the walk could not read.
 ///
 /// # Errors
 ///
-/// Returns [`LibraryError::Scan`] when a directory or an entry cannot be read.
-fn walk(root: &Path, subtrees: &[String]) -> Result<Vec<FoundFile>, LibraryError> {
-    let mut found = Vec::new();
+/// Returns [`LibraryError::Scan`] when the folder root itself cannot be read as
+/// a directory, which is what a deleted folder or a path replaced by a file
+/// looks like. Nothing inside the folder fails the walk.
+fn walk(root: &Path, subtrees: &[String], skip: &[PathBuf]) -> Result<WalkOutcome, LibraryError> {
+    let mut outcome = WalkOutcome::default();
+    // Reading the root is both the existence check and the emptiness check: an
+    // existing empty root reads fine with no entry, which is what an unmounted
+    // bind mount looks like, while a missing root or a path that is a file
+    // fails here.
+    let mut root_entries = std::fs::read_dir(root).map_err(|source| LibraryError::Scan {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    outcome.root_empty = subtrees.is_empty() && root_entries.next().is_none();
+    drop(root_entries);
+
+    let mut visited: HashSet<PathBuf> = HashSet::new();
     if subtrees.is_empty() {
-        walk_into(root, root, &mut found)?;
+        walk_into(root, root, skip, &mut visited, &mut outcome);
     } else {
         for subtree in subtrees {
             let start = root.join(subtree);
-            if !start.is_dir() {
+            if !start.is_dir() || skip.iter().any(|nested| start == *nested) {
                 continue;
             }
-            walk_into(&start, root, &mut found)?;
+            walk_into(&start, root, skip, &mut visited, &mut outcome);
         }
     }
-    found.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
-    found.dedup_by(|left, right| left.rel_path == right.rel_path);
-    Ok(found)
+    outcome
+        .found
+        .sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
+    outcome
+        .found
+        .dedup_by(|left, right| left.rel_path == right.rel_path);
+    Ok(outcome)
 }
 
 /// Walks one directory tree and appends its audio files.
@@ -1127,36 +1359,104 @@ fn walk(root: &Path, subtrees: &[String]) -> Result<Vec<FoundFile>, LibraryError
 ///
 /// - `start`: the directory to walk.
 /// - `root`: the folder root every reported path is relative to.
-/// - `found`: the files found so far, appended to.
-///
-/// # Errors
-///
-/// Returns [`LibraryError::Scan`] when a directory or an entry cannot be read.
-fn walk_into(start: &Path, root: &Path, found: &mut Vec<FoundFile>) -> Result<(), LibraryError> {
+/// - `skip`: the absolute paths of nested library folders.
+/// - `visited`: the canonical directories already walked, which is what stops a
+///   link cycle.
+/// - `outcome`: the files and counters, appended to.
+fn walk_into(
+    start: &Path,
+    root: &Path,
+    skip: &[PathBuf],
+    visited: &mut HashSet<PathBuf>,
+    outcome: &mut WalkOutcome,
+) {
+    match std::fs::canonicalize(start) {
+        Ok(canonical) => {
+            visited.insert(canonical);
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %start.display(),
+                %error,
+                "skipped a directory the scan cannot read"
+            );
+            outcome.note_unreadable(start);
+            return;
+        }
+    }
     let mut directories = vec![start.to_path_buf()];
     while let Some(directory) = directories.pop() {
-        let entries = std::fs::read_dir(&directory).map_err(|source| LibraryError::Scan {
-            path: directory.clone(),
-            source,
-        })?;
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(
+                    path = %directory.display(),
+                    %error,
+                    "skipped a directory the scan cannot read"
+                );
+                outcome.note_unreadable(&directory);
+                continue;
+            }
+        };
         for entry in entries {
-            let entry = entry.map_err(|source| LibraryError::Scan {
-                path: directory.clone(),
-                source,
-            })?;
-            let file_type = entry.file_type().map_err(|source| LibraryError::Scan {
-                path: entry.path(),
-                source,
-            })?;
-            if file_type.is_symlink() || is_hidden(&entry.file_name()) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %directory.display(),
+                        %error,
+                        "skipped an entry the scan cannot read"
+                    );
+                    outcome.note_unreadable(&directory);
+                    continue;
+                }
+            };
+            if is_hidden(&entry.file_name()) {
                 continue;
             }
             let path = entry.path();
-            if file_type.is_dir() {
+            // Following the link decides what the entry is: a link to a
+            // directory is walked, a link to a file is indexed, and a link that
+            // does not resolve is counted and skipped.
+            let metadata = match std::fs::metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "skipped an entry the scan cannot stat"
+                    );
+                    outcome.note_unreadable(&path);
+                    continue;
+                }
+            };
+            if metadata.is_dir() {
+                if skip.iter().any(|nested| path == *nested) {
+                    continue;
+                }
+                let canonical = match std::fs::canonicalize(&path) {
+                    Ok(canonical) => canonical,
+                    Err(error) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            %error,
+                            "skipped a directory the scan cannot read"
+                        );
+                        outcome.note_unreadable(&path);
+                        continue;
+                    }
+                };
+                if !visited.insert(canonical) {
+                    tracing::debug!(
+                        path = %path.display(),
+                        "skipped a directory the walk already visited; a link points back into the tree"
+                    );
+                    continue;
+                }
                 directories.push(path);
                 continue;
             }
-            if !file_type.is_file() {
+            if !metadata.is_file() {
                 continue;
             }
             let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
@@ -1165,23 +1465,28 @@ fn walk_into(start: &Path, root: &Path, found: &mut Vec<FoundFile>) -> Result<()
             if !is_audio_extension(extension) {
                 continue;
             }
-            let metadata = entry.metadata().map_err(|source| LibraryError::Scan {
-                path: path.clone(),
-                source,
-            })?;
-            let rel_path = path
-                .strip_prefix(root)
-                .map(|rel| rel.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| path.to_string_lossy().into_owned());
-            found.push(FoundFile {
-                rel_path,
+            // Both sides are built from the root, so a failure here is
+            // unreachable; skipping keeps a stray absolute path out of the
+            // table, because a stored `rel_path` is always relative.
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            let Some(rel_path) = relative.to_str() else {
+                tracing::warn!(
+                    path = %path.display(),
+                    "skipped a file whose name is not valid UTF-8"
+                );
+                outcome.note_unreadable(&path);
+                continue;
+            };
+            outcome.found.push(FoundFile {
+                rel_path: rel_path.to_owned(),
                 absolute: path,
                 size: metadata.len() as i64,
                 mtime_ms: modified_ms(&metadata),
             });
         }
     }
-    Ok(())
 }
 
 /// Normalizes the subtree paths of a request.
@@ -1335,6 +1640,13 @@ impl ScanJobHandler {
 impl JobHandler for ScanJobHandler {
     /// Runs one scan.
     ///
+    /// A scan of a folder that no longer exists is nothing to retry - the row
+    /// was removed between the request and the claim, and the queue cannot drop
+    /// a job by its payload - so it ends quietly. A malformed payload is an
+    /// error, and it still releases the scanner's queued counter, because a
+    /// status that reads `scanning` until the next restart is worse than the
+    /// failed job.
+    ///
     /// # Parameters
     ///
     /// - `job`: the claimed job.
@@ -1343,18 +1655,27 @@ impl JobHandler for ScanJobHandler {
     ///
     /// Returns [`JobError`] when the payload is malformed or the scan fails.
     async fn handle(&self, job: Job) -> Result<(), JobError> {
-        let request: ScanRequest = job
-            .payload_json()
-            .map_err(|error| JobError::new(error.to_string()))?
-            .unwrap_or_default();
+        let request: ScanRequest = match job.payload_json() {
+            Ok(payload) => payload.unwrap_or_default(),
+            Err(error) => {
+                self.scanner.request_started();
+                return Err(JobError::new(error.to_string()));
+            }
+        };
         // The scan counts as running before its request stops counting as
         // queued, so a status read in between never sees an idle scanner.
         let _running = self.scanner.begin_scan();
         self.scanner.request_started();
-        self.scanner
-            .scan(&request)
-            .await
-            .map(|_| ())
-            .map_err(|error| JobError::new(error.to_string()))
+        match self.scanner.scan(&request).await {
+            Ok(_) => Ok(()),
+            Err(LibraryError::UnknownFolder { folder_id }) => {
+                tracing::info!(
+                    folder = %folder_id,
+                    "dropped a queued scan of a folder that no longer exists"
+                );
+                Ok(())
+            }
+            Err(error) => Err(JobError::new(error.to_string())),
+        }
     }
 }

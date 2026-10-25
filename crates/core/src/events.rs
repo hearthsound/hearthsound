@@ -254,7 +254,9 @@ pub struct ScanProgress {
     pub files_seen: u64,
     /// The number of files processed so far.
     pub files_done: u64,
-    /// The error that stopped the scan, when it failed.
+    /// The problem the scan ended with, when it ended with one: the failure of
+    /// a scan that did not finish, or the warning of one that finished without
+    /// doing all of its work.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, path, name, owner_user_id, watch, created_at, last_scan_at FROM library_folders ORDER BY name, id",
+  "query": "SELECT id, path, name, owner_user_id, watch, created_at, last_scan_at, last_scan_error FROM library_folders ORDER BY name, id",
   "describe": {
     "columns": [
       {
@@ -79,6 +79,17 @@
             "name": "last_scan_at"
           }
         }
+      },
+      {
+        "name": "last_scan_error",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "library_folders",
+            "name": "last_scan_error"
+          }
+        }
       }
     ],
     "parameters": {
@@ -91,8 +102,9 @@
       true,
       false,
       false,
+      true,
       true
     ]
   },
-  "hash": "5d681b45aa8db405d26f7f860961b523ffb58dbd5459b5a4414e76eb158bee80"
+  "hash": "47c9d6e80cdfc3fb592010926165b482a1e80b419a4c7bc9674b9f320f01c270"
 }

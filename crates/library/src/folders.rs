@@ -30,6 +30,7 @@ struct FolderRow {
     watch: i64,
     created_at: i64,
     last_scan_at: Option<i64>,
+    last_scan_error: Option<String>,
 }
 
 impl FolderRow {
@@ -47,6 +48,7 @@ impl FolderRow {
             watch: self.watch != 0,
             created_at: self.created_at,
             last_scan_at: self.last_scan_at,
+            last_scan_error: self.last_scan_error,
         })
     }
 }
@@ -128,6 +130,7 @@ pub async fn add_library_folder(
         watch: true,
         created_at: now,
         last_scan_at: None,
+        last_scan_error: None,
     })
 }
 
@@ -151,7 +154,8 @@ pub async fn get_library_folder(
 ) -> Result<Option<LibraryFolder>, LibraryError> {
     let row = sqlx::query_as!(
         FolderRow,
-        "SELECT id, path, name, owner_user_id, watch, created_at, last_scan_at \
+        "SELECT id, path, name, owner_user_id, watch, created_at, last_scan_at, \
+                last_scan_error \
          FROM library_folders WHERE id = ?",
         id.as_bytes().as_slice(),
     )
@@ -180,7 +184,8 @@ pub async fn find_library_folder_by_path(
 ) -> Result<Option<LibraryFolder>, LibraryError> {
     let row = sqlx::query_as!(
         FolderRow,
-        "SELECT id, path, name, owner_user_id, watch, created_at, last_scan_at \
+        "SELECT id, path, name, owner_user_id, watch, created_at, last_scan_at, \
+                last_scan_error \
          FROM library_folders WHERE path = ?",
         path,
     )
@@ -207,7 +212,8 @@ pub async fn list_library_folders(
 ) -> Result<Vec<LibraryFolder>, LibraryError> {
     let rows = sqlx::query_as!(
         FolderRow,
-        "SELECT id, path, name, owner_user_id, watch, created_at, last_scan_at \
+        "SELECT id, path, name, owner_user_id, watch, created_at, last_scan_at, \
+                last_scan_error \
          FROM library_folders ORDER BY name, id",
     )
     .fetch_all(&mut *conn)
@@ -346,13 +352,20 @@ pub async fn set_library_folder_watch(
     Ok(affected > 0)
 }
 
-/// Records when a folder was last scanned.
+/// Records the outcome of a folder's last scan.
+///
+/// One statement, so the scan instant and the problem never disagree: a scan
+/// that finished writes both, a scan that failed writes the message and leaves
+/// the instant alone, and a clean scan clears the message.
 ///
 /// # Parameters
 ///
 /// - `conn`: the connection or transaction to write on.
 /// - `id`: the folder that was scanned.
-/// - `at`: the scan instant in unix milliseconds.
+/// - `at`: when the scan finished, in unix milliseconds, or `None` to leave the
+///   stored instant as it is.
+/// - `error`: why the scan failed or ended with a warning, or `None` for a clean
+///   scan.
 ///
 /// # Returns
 ///
@@ -361,14 +374,17 @@ pub async fn set_library_folder_watch(
 /// # Errors
 ///
 /// Returns [`LibraryError::Database`] when the update fails.
-pub async fn set_library_folder_last_scan(
+pub async fn set_library_folder_scan_outcome(
     conn: &mut SqliteConnection,
     id: Uuid,
-    at: i64,
+    at: Option<i64>,
+    error: Option<&str>,
 ) -> Result<bool, LibraryError> {
     let affected = sqlx::query!(
-        "UPDATE library_folders SET last_scan_at = ? WHERE id = ?",
+        "UPDATE library_folders SET last_scan_at = COALESCE(?, last_scan_at), \
+                last_scan_error = ? WHERE id = ?",
         at,
+        error,
         id.as_bytes().as_slice(),
     )
     .execute(&mut *conn)

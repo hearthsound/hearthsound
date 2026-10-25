@@ -482,3 +482,93 @@ async fn audience_routing_decides_which_streams_see_an_event() {
     drop(admin);
     fixture.stop().await;
 }
+
+/// A scan that finished with a problem ends with a `done` frame carrying it.
+///
+/// The phase is what a client keys the end of the scan on, so a completed scan
+/// that kept a warning says `done` and names the warning, and only a scan that
+/// did not finish says `failed`.
+#[tokio::test]
+async fn a_scan_that_refused_to_prune_ends_with_a_done_event_carrying_the_reason() {
+    let fixture = Fixture::new().await;
+    let root = fixture
+        .database_path()
+        .parent()
+        .unwrap()
+        .join("music-scan-event");
+    crate::native::write_album(&root, "Event Artist", "Event Album").await;
+
+    let created = bearer(
+        &fixture,
+        Method::POST,
+        "/api/v1/admin/folders",
+        Some(json!({ "path": root, "generic": true, "watch": false })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let folder = read_json(created).await["id"].as_str().unwrap().to_owned();
+    // The progress payload carries the folder's raw uuid, which the client id
+    // encodes.
+    let folder_uuid =
+        hearthsound_api_native::views::parse_id(&folder, hearthsound_core::IdPrefix::LibraryFolder)
+            .unwrap()
+            .to_string();
+
+    let mut scanned = false;
+    for _ in 0..250 {
+        let listed =
+            read_json(bearer(&fixture, Method::GET, "/api/v1/admin/folders", None).await).await;
+        let entry = listed["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == folder.as_str())
+            .cloned()
+            .unwrap();
+        if entry.get("lastScanAt").is_some() {
+            scanned = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    assert!(scanned, "the first scan finished");
+
+    // The music is gone; the mount point is still an empty directory.
+    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+
+    let mut response = fixture
+        .client
+        .get(stream_url(&fixture))
+        .header(AUTHORIZATION, bearer_value(&fixture))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let scan = bearer(
+        &fixture,
+        Method::POST,
+        &format!("/api/v1/admin/folders/{folder}/scan"),
+        None,
+    )
+    .await;
+    assert_eq!(scan.status(), StatusCode::ACCEPTED);
+
+    let terminal = loop {
+        let frame = next_frames(&mut response, 1).await.remove(0);
+        let data = &frame.data["data"];
+        if frame.event == "scan.progress"
+            && data["folderId"] == folder_uuid.as_str()
+            && data["phase"] == "done"
+        {
+            break data.clone();
+        }
+    };
+    assert_eq!(
+        terminal["error"],
+        "Nothing was removed: the folder root is empty, so the disk may not be mounted."
+    );
+
+    drop(response);
+    fixture.stop().await;
+}

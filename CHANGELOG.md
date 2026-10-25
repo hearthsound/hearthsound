@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The server loads plugins built for `hearthsound:plugin@0.4.0` and keeps loading
   `0.3.0` adapters, from `wit/since_v0.3/`.
+- `GET /api/v1/admin/folders` answers `lastScanError`, the reason a folder's last
+  scan failed or ended with a warning.
 
 ### Changed
 
@@ -19,6 +21,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A plugin whose component disagrees with its manifest's `api` is refused with
   the component's version named.
 - A plugin's artist results may carry the provider's album count.
+- A scan no longer removes a folder's tracks when the folder root holds nothing:
+  an unmounted disk looks like an empty directory, so the scan keeps every row
+  and names the reason on the folder until a scan sees content again.
+- One unreadable directory, vanished entry or unresolvable link no longer fails a
+  whole folder's scan; it is counted, logged and skipped, and every other folder
+  is scanned whatever one folder does.
+- A scan of a folder that was deleted while its job was queued ends quietly
+  instead of being retried, and a malformed scan payload releases the scanner's
+  status counter.
+- A folder's last scan always ends with one terminal `scan.progress` event:
+  `done` when it finished, with `error` when it finished with a problem, and
+  `failed` when it did not finish.
+- Scans follow symlinks inside a folder, including links out of it, and skip a
+  directory the walk already visited so a link cycle cannot loop. A file whose
+  name is not valid UTF-8 is skipped instead of being stored lossily.
 
 ## [0.1.6] - 2026-10-24
 
