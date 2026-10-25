@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `POST /api/v1/me/password` lets a signed-in user change their own password
+  with the current one; the change ends every other session and revokes all of
+  the account's API keys and app passwords, while the session that made it keeps
+  working. A wrong current password is 403 `wrong-password`, charged to the
+  address's login budget.
 - The server loads plugins built for `hearthsound:plugin@0.4.0` and keeps loading
   `0.3.0` adapters, from `wit/since_v0.3/`.
 - The first start after this version scans every library folder in full once and
@@ -23,6 +28,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A password is at least 8 characters long wherever it is set - setup, admin
+  create, admin reset, the CLI and the self-service change - and the refusal
+  names the rule. An existing shorter password keeps working until it is changed,
+  because verification never applies the rule.
+- Any password change revokes the account's credentials: an admin reset and a CLI
+  change end every session and revoke every API key and app password, while a
+  self-service change keeps the session that made it.
+- Disabling or demoting the last active administrator is refused, from the API
+  and from the CLI, so a server cannot lose its last way in.
+- The login rate limit counts the pair of address and username instead of the
+  username alone, so no stranger can lock a member out of signing in; failed API
+  key checks are charged per address on `/rest` as well as on the native surface,
+  and a 429 reports the real wait in `Retry-After`.
+- The event stream re-checks its credential at connect and at most every five
+  seconds, so a logout, a revocation, a disable or a role change ends it; an
+  account holds at most 8 outstanding stream tickets.
+- An unknown account or a disabled one costs the same password verification as a
+  wrong password, so the timing does not reveal which usernames exist.
+- The first-run setup limit counts failures against the caller's address only,
+  and a setup that fails before the administrator exists gives the link back.
+- The server logs one warning at startup when the secret key file resolves inside
+  the data directory and `HEARTHSOUND_SECRET_KEY` is unset, and the operations
+  guide states what a copy of that directory exposes.
 - A `host-kv` read failure reaches a 0.4.0 plugin as an error string instead of
   a silent miss.
 - A plugin whose component disagrees with its manifest's `api` is refused with
