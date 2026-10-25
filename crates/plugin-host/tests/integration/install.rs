@@ -8,8 +8,13 @@ use std::sync::Arc;
 
 use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore};
 use hearthsound_db::{Database, MIGRATOR};
+use hearthsound_plugin_host::manifest::{ApiVersion, SUPPORTED_APIS_LIST};
 use hearthsound_plugin_host::{InstallError, PluginHost};
-use hearthsound_test_support::{HELLO_CATALOG, SCROBBLE_FIXTURE, fixture_plugin, workspace_root};
+use hearthsound_test_support::{
+    ACQUISITION_FIXTURE, ALBUM_CATALOG, ARTWORK_FIXTURE, DISCOGRAPHY_CATALOG, HELLO_CATALOG,
+    HTTP_CATALOG, LEGACY_CATALOG, METADATA_FIXTURE, PROCESS_FIXTURE, SCROBBLE_FIXTURE,
+    SPIN_CATALOG, VERIFICATION_FIXTURE, fixture_plugin, workspace_root,
+};
 
 /// The id the hello fixture declares.
 const HELLO_ID: &str = "com.example.hello-catalog";
@@ -134,7 +139,7 @@ async fn a_manifest_promising_metadata_is_rejected() {
 
     match error {
         InstallError::MissingExport { interface } => {
-            assert_eq!(interface, "hearthsound:plugin/metadata@0.3.0");
+            assert_eq!(interface, "hearthsound:plugin/metadata@0.4.0");
         }
         other => panic!("unexpected error: {other}"),
     }
@@ -153,7 +158,7 @@ async fn an_account_link_export_needs_a_scrobble_or_discovery_layer() {
 
     assert!(
         matches!(error, InstallError::UndeclaredExport(ref interface)
-            if interface == "hearthsound:plugin/account-link@0.3.0"),
+            if interface == "hearthsound:plugin/account-link@0.4.0"),
         "unexpected error: {error}"
     );
 }
@@ -171,6 +176,90 @@ async fn an_unsupported_api_version_is_rejected() {
 
     assert!(
         matches!(error, InstallError::UnsupportedApi { ref api } if api == "hearthsound:plugin@0.2.0"),
+        "unexpected error: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("hearthsound:plugin@0.4.0")
+            && message.contains("hearthsound:plugin@0.3.0"),
+        "expected both hosted versions in the message, got: {message}"
+    );
+    assert_eq!(
+        SUPPORTED_APIS_LIST,
+        "hearthsound:plugin@0.4.0 and hearthsound:plugin@0.3.0"
+    );
+}
+
+#[tokio::test]
+async fn every_fixture_installs_and_reports_its_own_api() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = host(dir.path()).await;
+
+    for fixture in [
+        HELLO_CATALOG,
+        ALBUM_CATALOG,
+        DISCOGRAPHY_CATALOG,
+        SPIN_CATALOG,
+        HTTP_CATALOG,
+        METADATA_FIXTURE,
+        ARTWORK_FIXTURE,
+        ACQUISITION_FIXTURE,
+        PROCESS_FIXTURE,
+        SCROBBLE_FIXTURE,
+        VERIFICATION_FIXTURE,
+    ] {
+        let installed = host.install(&fixture_plugin(fixture)).await.unwrap();
+        assert_eq!(
+            installed.api(),
+            ApiVersion::V0_4,
+            "{fixture} should be built for the newest API"
+        );
+    }
+
+    let legacy = host.install(&fixture_plugin(LEGACY_CATALOG)).await.unwrap();
+    assert_eq!(legacy.api(), ApiVersion::V0_3);
+}
+
+#[tokio::test]
+async fn a_manifest_newer_than_its_component_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = host(dir.path()).await;
+    let archive = dir.path().join("newer-manifest.hsplugin");
+    archive_with_source(&fixture_plugin(LEGACY_CATALOG), &archive, |manifest| {
+        manifest["api"] = serde_json::json!("hearthsound:plugin@0.4.0");
+    });
+
+    let error = host.install(&archive).await.unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            InstallError::ApiMismatch { ref declared, ref component }
+                if declared == "hearthsound:plugin@0.4.0"
+                    && component == "hearthsound:plugin@0.3.0"
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn a_manifest_older_than_its_component_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = host(dir.path()).await;
+    let archive = dir.path().join("older-manifest.hsplugin");
+    archive_with_manifest(&archive, |manifest| {
+        manifest["api"] = serde_json::json!("hearthsound:plugin@0.3.0");
+    });
+
+    let error = host.install(&archive).await.unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            InstallError::ApiMismatch { ref declared, ref component }
+                if declared == "hearthsound:plugin@0.3.0"
+                    && component == "hearthsound:plugin@0.4.0"
+        ),
         "unexpected error: {error}"
     );
 }

@@ -360,7 +360,7 @@ mod import_tests {
 
     use hearthsound_core::Slug;
 
-    use crate::bindings::hearthsound::plugin::host_files;
+    use crate::api::v4::bindings::hearthsound::plugin::host_files;
     use crate::http::{HttpClient, HttpGrant};
     use crate::kv::KvStore;
     use crate::log::LogSink;

@@ -9,7 +9,9 @@
 //!
 //! The mirror covers the `catalog`, `metadata`, `artwork`, `acquisition`,
 //! `verification`, `scrobble`, `discovery` and `account-link` interfaces of
-//! `hearthsound:plugin@0.3.0`. Acquisition is the only layer whose calls need
+//! `hearthsound:plugin@0.4.0`, and of the previous `0.3.0` while the host still
+//! loads it: a field only the newer package carries stays `None` for a plugin
+//! built against the older one. Acquisition is the only layer whose calls need
 //! host state beyond the provider's own configuration: its downloads land in a
 //! per-job staging directory, so every call carries an [`AcquisitionContext`].
 
@@ -212,6 +214,12 @@ pub struct CatalogArtist {
     pub images: Vec<Image>,
     /// External identifiers for the artist.
     pub ids: Vec<ExternalId>,
+    /// The number of albums the provider reports for the artist, when it
+    /// reports one.
+    ///
+    /// This is the provider's own count, not the number of albums the server
+    /// stores for the artist; a provider that reports none leaves it `None`.
+    pub album_count: Option<u32>,
 }
 
 /// The query passed to [`CatalogProvider::search`].

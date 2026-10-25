@@ -11,9 +11,9 @@ use hearthsound_core::providers::{
 };
 use hearthsound_core::{EntityKind, ProviderError, Slug};
 
-use crate::bindings;
-use crate::bindings::exports::hearthsound::plugin::catalog::{SearchQuery, SearchResults};
-use crate::bindings::hearthsound::plugin::types as wit;
+use crate::api::v3::bindings;
+use crate::api::v3::bindings::exports::hearthsound::plugin::catalog::{SearchQuery, SearchResults};
+use crate::api::v3::bindings::hearthsound::plugin::types as wit;
 use crate::error::map_provider_error;
 use crate::pool::StorePool;
 
@@ -42,7 +42,7 @@ impl WasmCatalogProvider {
 
     /// Maps a guest error to the core error, logging the guest's message.
     fn map_error(&self, error: wit::ProviderError) -> ProviderError {
-        map_provider_error(&self.plugin, &self.slug, error)
+        map_provider_error(&self.plugin, &self.slug, error.into())
     }
 }
 
@@ -309,6 +309,8 @@ fn to_core_artist(artist: wit::Artist) -> CatalogArtist {
         name: artist.name,
         images: artist.images.into_iter().map(to_core_image).collect(),
         ids: artist.ids.into_iter().map(to_core_id).collect(),
+        // A 0.3.0 plugin cannot report an album count.
+        album_count: None,
     }
 }
 

@@ -639,15 +639,16 @@ impl ProviderRegistry {
             }
         }
 
-        let account_link = if crate::validate::exports_account_link(component.component()) {
-            Some(
-                self.host
-                    .account_link_provider(&component, instance.clone())
-                    .map_err(|error| error.to_string())?,
-            )
-        } else {
-            None
-        };
+        let account_link =
+            if crate::validate::exports_account_link(component.component(), component.api()) {
+                Some(
+                    self.host
+                        .account_link_provider(&component, instance.clone())
+                        .map_err(|error| error.to_string())?,
+                )
+            } else {
+                None
+            };
 
         Ok(RegistryInstance {
             id: row.id,

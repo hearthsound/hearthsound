@@ -12,8 +12,84 @@ use hearthsound_config::{ConfigError, SettingsStore, keys};
 use hearthsound_core::Layer;
 use serde::{Deserialize, Serialize};
 
-/// The API version this server hosts.
-pub const SUPPORTED_API: &str = "hearthsound:plugin@0.3.0";
+/// The API versions this server hosts, newest first.
+///
+/// The host loads the newest package in `wit/` and every older minor pinned in
+/// `wit/since_v0.<minor>/` by `wit/SINCE`. A component whose interfaces carry
+/// neither version is refused with [`InstallError::UnsupportedApi`].
+///
+/// [`InstallError::UnsupportedApi`]: crate::error::InstallError::UnsupportedApi
+pub const SUPPORTED_APIS: [&str; 2] = ["hearthsound:plugin@0.4.0", "hearthsound:plugin@0.3.0"];
+
+/// The newest API version this server hosts; the one a new plugin should target.
+pub const NEWEST_API: &str = SUPPORTED_APIS[0];
+
+/// The supported versions as one readable phrase, for error messages.
+pub const SUPPORTED_APIS_LIST: &str = "hearthsound:plugin@0.4.0 and hearthsound:plugin@0.3.0";
+
+/// One plugin API package version the host can load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiVersion {
+    /// The frozen previous minor.
+    V0_3,
+    /// The current minor.
+    V0_4,
+}
+
+impl ApiVersion {
+    /// Returns the manifest string that names this version.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use hearthsound_plugin_host::manifest::ApiVersion;
+    ///
+    /// assert_eq!(ApiVersion::V0_4.api(), "hearthsound:plugin@0.4.0");
+    /// assert_eq!(ApiVersion::V0_3.api(), "hearthsound:plugin@0.3.0");
+    /// ```
+    pub const fn api(self) -> &'static str {
+        match self {
+            ApiVersion::V0_3 => SUPPORTED_APIS[1],
+            ApiVersion::V0_4 => SUPPORTED_APIS[0],
+        }
+    }
+
+    /// Returns the package version, the suffix the WIT interfaces carry.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use hearthsound_plugin_host::manifest::ApiVersion;
+    ///
+    /// assert_eq!(ApiVersion::V0_4.package(), "0.4.0");
+    /// ```
+    pub const fn package(self) -> &'static str {
+        match self {
+            ApiVersion::V0_3 => "0.3.0",
+            ApiVersion::V0_4 => "0.4.0",
+        }
+    }
+
+    /// Parses a manifest `api` value into the version it names.
+    ///
+    /// # Parameters
+    ///
+    /// - `api`: the manifest's `api` string, for example
+    ///   `hearthsound:plugin@0.4.0`.
+    ///
+    /// # Returns
+    ///
+    /// `None` when the string names a version this host does not host.
+    pub fn parse(api: &str) -> Option<ApiVersion> {
+        SUPPORTED_APIS
+            .iter()
+            .position(|supported| *supported == api)
+            .map(|index| match index {
+                0 => ApiVersion::V0_4,
+                _ => ApiVersion::V0_3,
+            })
+    }
+}
 
 /// The largest accepted `id` length.
 const MAX_ID_LENGTH: usize = 128;
@@ -99,6 +175,18 @@ impl Manifest {
     /// Returns the layers the plugin provides.
     pub fn provides(&self) -> &[Layer] {
         &self.layers
+    }
+
+    /// Returns the API version the manifest names, when this host hosts it.
+    ///
+    /// # Returns
+    ///
+    /// The version, or `None` when `api` names one of the versions this server
+    /// does not host. The component must then be checked separately: a manifest
+    /// accepts any `hearthsound:plugin@X.Y.Z` string, and the archive is refused
+    /// when that version is not one of [`SUPPORTED_APIS`].
+    pub fn api_version(&self) -> Option<ApiVersion> {
+        ApiVersion::parse(&self.api)
     }
 
     /// Applies every semantic manifest rule.
@@ -605,6 +693,44 @@ mod tests {
 
     fn store(sources: &SettingSources) -> SettingsStore {
         SettingsStore::resolve(&SettingsRegistry::builtin(), sources).unwrap()
+    }
+
+    #[test]
+    fn parses_the_api_versions_this_host_supports() {
+        assert_eq!(
+            ApiVersion::parse("hearthsound:plugin@0.4.0"),
+            Some(ApiVersion::V0_4)
+        );
+        assert_eq!(
+            ApiVersion::parse("hearthsound:plugin@0.3.0"),
+            Some(ApiVersion::V0_3)
+        );
+        assert_eq!(ApiVersion::parse("hearthsound:plugin@0.2.0"), None);
+        assert_eq!(ApiVersion::parse("hearthsound:plugin@0.4"), None);
+        assert_eq!(ApiVersion::parse(""), None);
+        assert_eq!(ApiVersion::V0_4.api(), SUPPORTED_APIS[0]);
+        assert_eq!(ApiVersion::V0_4.package(), "0.4.0");
+        assert_eq!(ApiVersion::V0_3.package(), "0.3.0");
+    }
+
+    #[test]
+    fn the_supported_versions_phrase_is_built_from_the_list() {
+        assert_eq!(SUPPORTED_APIS.join(" and "), SUPPORTED_APIS_LIST);
+        assert_eq!(NEWEST_API, "hearthsound:plugin@0.4.0");
+    }
+
+    #[test]
+    fn a_manifest_reports_the_api_version_it_names() {
+        let settings = store(&SettingSources::default());
+        let mut value = hello_value();
+        value["api"] = serde_json::json!("hearthsound:plugin@0.4.0");
+        assert_eq!(
+            parse(&value, &settings).unwrap().api_version(),
+            Some(ApiVersion::V0_4)
+        );
+
+        value["api"] = serde_json::json!("hearthsound:plugin@0.2.0");
+        assert_eq!(parse(&value, &settings).unwrap().api_version(), None);
     }
 
     fn hello_value() -> serde_json::Value {

@@ -1600,7 +1600,7 @@ mod plugin_admin {
     const DEZER_ID: &str = "app.hearthsound.deezer";
 
     /// The API version this server hosts.
-    const API: &str = "hearthsound:plugin@0.3.0";
+    const API: &str = "hearthsound:plugin@0.4.0";
 
     /// The path an index document is served at in these tests.
     const INDEX_PATH: &str = "/v1/index.json";
@@ -2441,7 +2441,7 @@ mod plugin_admin {
             false,
             &[version(
                 "0.1.0",
-                "hearthsound:plugin@0.4.0",
+                "hearthsound:plugin@0.2.0",
                 &archive,
                 &bytes,
                 json!({}),

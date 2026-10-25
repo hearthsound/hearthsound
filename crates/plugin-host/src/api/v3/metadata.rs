@@ -12,10 +12,12 @@ use hearthsound_core::providers::{
 };
 use hearthsound_core::{ProviderError, Slug};
 
-use crate::bindings;
-use crate::bindings::hearthsound::plugin::types::{IdPair, ProviderError as WitProviderError};
-use crate::bindings::metadata::exports::hearthsound::plugin::metadata;
-use crate::catalog::{to_core_album, to_core_credit, to_core_id, to_wit_id};
+use crate::api::v3::bindings;
+use crate::api::v3::bindings::hearthsound::plugin::types::{
+    IdPair, ProviderError as WitProviderError,
+};
+use crate::api::v3::bindings::metadata::exports::hearthsound::plugin::metadata;
+use crate::api::v3::catalog::{to_core_album, to_core_credit, to_core_id, to_wit_id};
 use crate::error::map_provider_error;
 use crate::pool::StorePool;
 
@@ -44,7 +46,7 @@ impl WasmMetadataProvider {
 
     /// Maps a guest error to the core error, logging the guest's message.
     fn map_error(&self, error: WitProviderError) -> ProviderError {
-        map_provider_error(&self.plugin, &self.slug, error)
+        map_provider_error(&self.plugin, &self.slug, error.into())
     }
 }
 

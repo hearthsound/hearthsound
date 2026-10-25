@@ -9,7 +9,10 @@
 //!
 //! A pool is generic over the [`World`] it drives, so every provider adapter
 //! shares this one implementation while each still gets its own world handle
-//! back from the store.
+//! back from the store. Each hosted plugin API version contributes its own
+//! `World` impls - the `v4` worlds keep their plain names and the `v3` worlds
+//! carry a `3` suffix - so trap accounting, the permits and the deadlines are
+//! the same code for both.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -23,7 +26,18 @@ use tokio::sync::Semaphore;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
-use crate::bindings::{
+use crate::api::v3::bindings::{
+    AccountLinkProvider as AccountLinkProvider3, AccountLinkProviderPre as AccountLinkProviderPre3,
+    AcquisitionProvider as AcquisitionProvider3, AcquisitionProviderPre as AcquisitionProviderPre3,
+    ArtworkProvider as ArtworkProvider3, ArtworkProviderPre as ArtworkProviderPre3,
+    CatalogProvider as CatalogProvider3, CatalogProviderPre as CatalogProviderPre3,
+    DiscoveryProvider as DiscoveryProvider3, DiscoveryProviderPre as DiscoveryProviderPre3,
+    MetadataProvider as MetadataProvider3, MetadataProviderPre as MetadataProviderPre3,
+    ScrobbleProvider as ScrobbleProvider3, ScrobbleProviderPre as ScrobbleProviderPre3,
+    VerificationProvider as VerificationProvider3,
+    VerificationProviderPre as VerificationProviderPre3,
+};
+use crate::api::v4::bindings::{
     AccountLinkProvider, AccountLinkProviderPre, AcquisitionProvider, AcquisitionProviderPre,
     ArtworkProvider, ArtworkProviderPre, CatalogProvider, CatalogProviderPre, DiscoveryProvider,
     DiscoveryProviderPre, MetadataProvider, MetadataProviderPre, ScrobbleProvider,
@@ -222,6 +236,158 @@ impl World for AccountLinkProvider {
         component: &Component,
     ) -> Result<Self::Pre, wasmtime::Error> {
         AccountLinkProviderPre::new(linker.instantiate_pre(component)?)
+    }
+
+    async fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> Result<Self::Instance, wasmtime::Error> {
+        pre.instantiate_async(store).await
+    }
+}
+
+impl World for CatalogProvider3 {
+    type Pre = CatalogProviderPre3<InstanceState>;
+    type Instance = CatalogProvider3;
+
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error> {
+        CatalogProviderPre3::new(linker.instantiate_pre(component)?)
+    }
+
+    async fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> Result<Self::Instance, wasmtime::Error> {
+        pre.instantiate_async(store).await
+    }
+}
+
+impl World for MetadataProvider3 {
+    type Pre = MetadataProviderPre3<InstanceState>;
+    type Instance = MetadataProvider3;
+
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error> {
+        MetadataProviderPre3::new(linker.instantiate_pre(component)?)
+    }
+
+    async fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> Result<Self::Instance, wasmtime::Error> {
+        pre.instantiate_async(store).await
+    }
+}
+
+impl World for ArtworkProvider3 {
+    type Pre = ArtworkProviderPre3<InstanceState>;
+    type Instance = ArtworkProvider3;
+
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error> {
+        ArtworkProviderPre3::new(linker.instantiate_pre(component)?)
+    }
+
+    async fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> Result<Self::Instance, wasmtime::Error> {
+        pre.instantiate_async(store).await
+    }
+}
+
+impl World for AcquisitionProvider3 {
+    type Pre = AcquisitionProviderPre3<InstanceState>;
+    type Instance = AcquisitionProvider3;
+
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error> {
+        AcquisitionProviderPre3::new(linker.instantiate_pre(component)?)
+    }
+
+    async fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> Result<Self::Instance, wasmtime::Error> {
+        pre.instantiate_async(store).await
+    }
+}
+
+impl World for VerificationProvider3 {
+    type Pre = VerificationProviderPre3<InstanceState>;
+    type Instance = VerificationProvider3;
+
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error> {
+        VerificationProviderPre3::new(linker.instantiate_pre(component)?)
+    }
+
+    async fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> Result<Self::Instance, wasmtime::Error> {
+        pre.instantiate_async(store).await
+    }
+}
+
+impl World for ScrobbleProvider3 {
+    type Pre = ScrobbleProviderPre3<InstanceState>;
+    type Instance = ScrobbleProvider3;
+
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error> {
+        ScrobbleProviderPre3::new(linker.instantiate_pre(component)?)
+    }
+
+    async fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> Result<Self::Instance, wasmtime::Error> {
+        pre.instantiate_async(store).await
+    }
+}
+
+impl World for DiscoveryProvider3 {
+    type Pre = DiscoveryProviderPre3<InstanceState>;
+    type Instance = DiscoveryProvider3;
+
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error> {
+        DiscoveryProviderPre3::new(linker.instantiate_pre(component)?)
+    }
+
+    async fn instantiate(
+        pre: &Self::Pre,
+        store: &mut Store<InstanceState>,
+    ) -> Result<Self::Instance, wasmtime::Error> {
+        pre.instantiate_async(store).await
+    }
+}
+
+impl World for AccountLinkProvider3 {
+    type Pre = AccountLinkProviderPre3<InstanceState>;
+    type Instance = AccountLinkProvider3;
+
+    fn prepare(
+        linker: &Linker<InstanceState>,
+        component: &Component,
+    ) -> Result<Self::Pre, wasmtime::Error> {
+        AccountLinkProviderPre3::new(linker.instantiate_pre(component)?)
     }
 
     async fn instantiate(

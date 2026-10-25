@@ -38,7 +38,7 @@ use std::time::Duration;
 use minisign_verify::{PublicKey, Signature};
 use serde::{Deserialize, Serialize};
 
-use crate::manifest::{Permissions, SUPPORTED_API};
+use crate::manifest::{Permissions, SUPPORTED_APIS, SUPPORTED_APIS_LIST};
 
 /// The URL the official plugin index is served at.
 ///
@@ -132,12 +132,13 @@ impl IndexPlugin {
         self.versions.iter().find(|entry| entry.version == version)
     }
 
-    /// Returns the newest version that targets the API this server hosts.
+    /// Returns the newest version that targets an API this server hosts.
     ///
-    /// A version is compatible when its `api` equals the API version the
-    /// manifest module supports. Versions are compared as semantic versions; an
-    /// entry whose `version` is not a semantic version is ignored, because the
-    /// newest usable version cannot be decided for it.
+    /// A version is compatible when its `api` names a version in
+    /// [`SUPPORTED_APIS`](crate::manifest::SUPPORTED_APIS). Versions are
+    /// compared as semantic versions; an entry whose `version` is not a semantic
+    /// version is ignored, because the newest usable version cannot be decided
+    /// for it.
     ///
     /// # Returns
     ///
@@ -145,7 +146,7 @@ impl IndexPlugin {
     pub fn newest_compatible(&self) -> Option<&IndexVersion> {
         self.versions
             .iter()
-            .filter(|entry| entry.api == SUPPORTED_API)
+            .filter(|entry| SUPPORTED_APIS.contains(&entry.api.as_str()))
             .filter_map(|entry| {
                 semver::Version::parse(&entry.version)
                     .ok()
@@ -159,14 +160,18 @@ impl IndexPlugin {
     ///
     /// # Returns
     ///
-    /// [`Unavailable::NoCompatibleVersion`] when no version targets the API
+    /// [`Unavailable::NoCompatibleVersion`] when no version targets an API
     /// version this server hosts, `None` when at least one does.
     pub fn unavailable(&self) -> Option<Unavailable> {
-        if self.versions.iter().any(|entry| entry.api == SUPPORTED_API) {
+        if self
+            .versions
+            .iter()
+            .any(|entry| SUPPORTED_APIS.contains(&entry.api.as_str()))
+        {
             return None;
         }
         Some(Unavailable::NoCompatibleVersion {
-            supported: SUPPORTED_API,
+            supported: SUPPORTED_APIS_LIST,
             offered: self
                 .versions
                 .iter()
@@ -713,7 +718,7 @@ mod tests {
         assert!(plugin.official);
 
         let version = plugin.version("1.0.0").unwrap();
-        assert_eq!(version.api, SUPPORTED_API);
+        assert_eq!(version.api, "hearthsound:plugin@0.3.0");
         assert_eq!(
             version.url,
             "https://example.com/com.example.hello-1.0.0.hsplugin"
@@ -1039,10 +1044,20 @@ mod tests {
     #[test]
     fn the_newest_compatible_version_is_selected() {
         let plugin = plugin(vec![
-            version("0.1.0", SUPPORTED_API),
+            version("0.3.1", "hearthsound:plugin@0.3.0"),
             version("0.4.0", "hearthsound:plugin@0.4.0"),
-            version("0.2.0", SUPPORTED_API),
-            version("not-a-version", SUPPORTED_API),
+        ]);
+
+        assert_eq!(plugin.newest_compatible().unwrap().version, "0.4.0");
+        assert_eq!(plugin.unavailable(), None);
+    }
+
+    #[test]
+    fn the_previous_minor_stays_compatible() {
+        let plugin = plugin(vec![
+            version("not-a-version", "hearthsound:plugin@0.3.0"),
+            version("0.2.0", "hearthsound:plugin@0.3.0"),
+            version("0.2.1", "hearthsound:plugin@0.2.0"),
         ]);
 
         assert_eq!(plugin.newest_compatible().unwrap().version, "0.2.0");
@@ -1053,7 +1068,7 @@ mod tests {
     fn a_plugin_without_a_compatible_version_is_unavailable() {
         let plugin = plugin(vec![
             version("0.1.0", "hearthsound:plugin@0.1.0"),
-            version("0.2.0", "hearthsound:plugin@0.4.0"),
+            version("0.2.0", "hearthsound:plugin@0.2.0"),
         ]);
 
         assert!(plugin.newest_compatible().is_none());
@@ -1061,24 +1076,31 @@ mod tests {
         assert_eq!(
             unavailable,
             Unavailable::NoCompatibleVersion {
-                supported: SUPPORTED_API,
+                supported: SUPPORTED_APIS_LIST,
                 offered: vec![
                     "hearthsound:plugin@0.1.0".to_owned(),
-                    "hearthsound:plugin@0.4.0".to_owned(),
+                    "hearthsound:plugin@0.2.0".to_owned(),
                 ],
             }
         );
         let message = unavailable.to_string();
-        assert!(message.contains(SUPPORTED_API), "message was {message}");
         assert!(
             message.contains("hearthsound:plugin@0.4.0"),
+            "message was {message}"
+        );
+        assert!(
+            message.contains("hearthsound:plugin@0.3.0"),
+            "message was {message}"
+        );
+        assert!(
+            message.contains("hearthsound:plugin@0.2.0"),
             "message was {message}"
         );
     }
 
     #[test]
     fn a_declared_digest_decodes_to_its_bytes() {
-        let entry = version("1.0.0", SUPPORTED_API);
+        let entry = version("1.0.0", "hearthsound:plugin@0.4.0");
         let digest = entry.sha256_digest().unwrap();
         assert_eq!(digest[0], 0x9c);
         assert_eq!(digest[1], 0x1f);

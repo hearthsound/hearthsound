@@ -13,10 +13,10 @@ use hearthsound_core::providers::{
 };
 use hearthsound_core::{ProviderError, Slug};
 
-use crate::bindings;
-use crate::bindings::hearthsound::plugin::types::ProviderError as WitProviderError;
-use crate::bindings::verification::exports::hearthsound::plugin::verification;
-use crate::catalog::{to_core_id, to_wit_id};
+use crate::api::v4::bindings;
+use crate::api::v4::bindings::hearthsound::plugin::types::ProviderError as WitProviderError;
+use crate::api::v4::bindings::verification::exports::hearthsound::plugin::verification;
+use crate::api::v4::catalog::{to_core_id, to_wit_id};
 use crate::error::map_provider_error;
 use crate::pool::StorePool;
 
@@ -45,7 +45,7 @@ impl WasmVerificationProvider {
 
     /// Maps a guest error to the core error, logging the guest's message.
     fn map_error(&self, error: WitProviderError) -> ProviderError {
-        map_provider_error(&self.plugin, &self.slug, error)
+        map_provider_error(&self.plugin, &self.slug, error.into())
     }
 }
 

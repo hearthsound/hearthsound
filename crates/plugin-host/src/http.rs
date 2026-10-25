@@ -784,7 +784,7 @@ mod enforcement {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::bindings::hearthsound::plugin::host_http;
+    use crate::api::v4::bindings::hearthsound::plugin::host_http;
     use crate::files::FileAccess;
     use crate::kv::KvStore;
     use crate::log::LogSink;

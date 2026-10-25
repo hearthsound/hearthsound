@@ -13,12 +13,12 @@ use hearthsound_core::providers::{
 };
 use hearthsound_core::{ProviderError, Slug};
 
-use crate::bindings;
-use crate::bindings::hearthsound::plugin::types::{
+use crate::api::v4::bindings;
+use crate::api::v4::bindings::hearthsound::plugin::types::{
     ProviderError as WitProviderError, UserContext as WitUserContext,
 };
-use crate::bindings::scrobble::exports::hearthsound::plugin::scrobble;
-use crate::catalog::to_wit_id;
+use crate::api::v4::bindings::scrobble::exports::hearthsound::plugin::scrobble;
+use crate::api::v4::catalog::to_wit_id;
 use crate::error::map_provider_error;
 use crate::pool::StorePool;
 
@@ -47,7 +47,7 @@ impl WasmScrobbleProvider {
 
     /// Maps a guest error to the core error, logging the guest's message.
     fn map_error(&self, error: WitProviderError) -> ProviderError {
-        map_provider_error(&self.plugin, &self.slug, error)
+        map_provider_error(&self.plugin, &self.slug, error.into())
     }
 }
 

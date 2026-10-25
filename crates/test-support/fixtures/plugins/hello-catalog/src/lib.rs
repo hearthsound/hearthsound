@@ -122,6 +122,7 @@ fn hello_artist(cover_url: Option<&str>) -> Artist {
         name: "Hello Artist".to_string(),
         images: cover_images(cover_url),
         ids: artist_ids(),
+        album_count: None,
     }
 }
 

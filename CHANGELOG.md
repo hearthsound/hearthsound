@@ -9,9 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- The WIT tree keeps the previous API minor under `wit/since_v0.3/`, named by
-  `wit/SINCE`, so the host can load `hearthsound:plugin@0.4.0` and `0.3.0`; the
-  0.4.0 package is pinned.
+- The server loads plugins built for `hearthsound:plugin@0.4.0` and keeps loading
+  `0.3.0` adapters, from `wit/since_v0.3/`.
 
 ### Changed
 

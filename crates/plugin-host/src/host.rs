@@ -24,17 +24,8 @@ use uuid::Uuid;
 use wasmtime::Engine;
 use wasmtime::component::{Component, HasSelf, Linker};
 
-use crate::account_link::WasmAccountLinkProvider;
-use crate::acquisition::WasmAcquisitionProvider;
+use crate::api::{v3, v4};
 use crate::archive::PluginArchive;
-use crate::artwork::WasmArtworkProvider;
-use crate::bindings::{
-    self, AccountLinkProviderPre, AcquisitionProviderPre, ArtworkProviderPre, CatalogProviderPre,
-    DiscoveryProviderPre, MetadataProviderPre, ScrobbleProviderPre, VerificationProviderPre,
-    imports,
-};
-use crate::catalog::WasmCatalogProvider;
-use crate::discovery::WasmDiscoveryProvider;
 use crate::engine::PluginEngine;
 use crate::error::{HostError, InstallError};
 use crate::files::FileAccess;
@@ -42,15 +33,12 @@ use crate::http::{HttpClient, HttpGrant};
 use crate::instance::InstanceConfig;
 use crate::kv::KvStore;
 use crate::log::LogSink;
-use crate::manifest::{Manifest, ManifestError, SUPPORTED_API};
-use crate::metadata::WasmMetadataProvider;
+use crate::manifest::{ApiVersion, Manifest, ManifestError};
 use crate::pool::{self, PoolConfig, StorePool};
 use crate::process::ProcessTable;
 use crate::repo::InstanceDisabler;
-use crate::scrobble::WasmScrobbleProvider;
 use crate::state::InstanceState;
 use crate::validate;
-use crate::verification::WasmVerificationProvider;
 
 /// An installed plugin, ready to be instantiated.
 #[derive(Debug)]
@@ -60,12 +48,22 @@ pub struct InstalledPlugin {
     dir: PathBuf,
     sha256: [u8; 32],
     component: Component,
+    api: ApiVersion,
 }
 
 impl InstalledPlugin {
     /// Returns the plugin's manifest.
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
+    }
+
+    /// Returns the plugin API version the plugin is built for.
+    ///
+    /// The version comes from the manifest on disk, never from the `plugins.api`
+    /// column, so a stale row cannot drive a component through the wrong
+    /// adapter.
+    pub fn api(&self) -> ApiVersion {
+        self.api
     }
 
     /// Returns the plugin's manifest as the JSON text the install wrote.
@@ -107,8 +105,9 @@ pub struct PluginHost {
 impl PluginHost {
     /// Creates a host rooted at `plugins_dir`.
     ///
-    /// The linker is built once here: the WASI preview 2 interfaces and the
-    /// catalog provider world, both backed by [`InstanceState`].
+    /// The linker is built once here: the WASI preview 2 interfaces and the host
+    /// imports of every plugin API version this server hosts, both backed by
+    /// [`InstanceState`].
     ///
     /// # Parameters
     ///
@@ -131,8 +130,16 @@ impl PluginHost {
 
         let mut linker = Linker::new(engine.engine());
         wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(HostError::Engine)?;
-        imports::HostImports::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
-            .map_err(HostError::Engine)?;
+        // One linker serves both API versions: an interface's instance name
+        // carries its version, so the two import sets never collide.
+        v4::bindings::imports::HostImports::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| {
+            state
+        })
+        .map_err(HostError::Engine)?;
+        v3::bindings::imports::HostImports::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| {
+            state
+        })
+        .map_err(HostError::Engine)?;
 
         Ok(PluginHost {
             engine,
@@ -355,7 +362,8 @@ impl PluginHost {
     ///
     /// The returned provider owns a pool of guest stores for one instance; each
     /// call borrows a store, runs under the instance's deadline, and is returned
-    /// to the pool when the guest answers.
+    /// to the pool when the guest answers. Both hosted plugin API versions are
+    /// supported: the adapter the plugin's manifest names is the one used.
     ///
     /// # Parameters
     ///
@@ -376,12 +384,26 @@ impl PluginHost {
         plugin: &InstalledPlugin,
         instance: InstanceConfig,
     ) -> Result<Arc<dyn CatalogProvider>, HostError> {
-        let (pool, _process) = self.store_pool::<bindings::CatalogProvider>(plugin, &instance)?;
-        Ok(Arc::new(WasmCatalogProvider::new(
-            pool,
-            plugin.manifest().id.clone(),
-            instance.slug,
-        )))
+        match plugin.api() {
+            ApiVersion::V0_4 => {
+                let (pool, _process) =
+                    self.store_pool::<v4::bindings::CatalogProvider>(plugin, &instance)?;
+                Ok(Arc::new(v4::catalog::WasmCatalogProvider::new(
+                    pool,
+                    plugin.manifest().id.clone(),
+                    instance.slug,
+                )))
+            }
+            ApiVersion::V0_3 => {
+                let (pool, _process) =
+                    self.store_pool::<v3::bindings::CatalogProvider>(plugin, &instance)?;
+                Ok(Arc::new(v3::catalog::WasmCatalogProvider::new(
+                    pool,
+                    plugin.manifest().id.clone(),
+                    instance.slug,
+                )))
+            }
+        }
     }
 
     /// Wraps an installed plugin as a metadata provider.
@@ -403,15 +425,29 @@ impl PluginHost {
         plugin: &InstalledPlugin,
         instance: InstanceConfig,
     ) -> Result<Arc<dyn MetadataProvider>, HostError> {
-        let (pool, _process) = self.store_pool::<bindings::MetadataProvider>(plugin, &instance)?;
-        Ok(Arc::new(WasmMetadataProvider::new(
-            pool,
-            plugin.manifest().id.clone(),
-            instance.slug,
-        )))
+        match plugin.api() {
+            ApiVersion::V0_4 => {
+                let (pool, _process) =
+                    self.store_pool::<v4::bindings::MetadataProvider>(plugin, &instance)?;
+                Ok(Arc::new(v4::metadata::WasmMetadataProvider::new(
+                    pool,
+                    plugin.manifest().id.clone(),
+                    instance.slug,
+                )))
+            }
+            ApiVersion::V0_3 => {
+                let (pool, _process) =
+                    self.store_pool::<v3::bindings::MetadataProvider>(plugin, &instance)?;
+                Ok(Arc::new(v3::metadata::WasmMetadataProvider::new(
+                    pool,
+                    plugin.manifest().id.clone(),
+                    instance.slug,
+                )))
+            }
+        }
     }
 
-    /// Wraps an installed plugin as an artwork provider.
+    /// Wraps an installed plugin as a artwork provider.
     ///
     /// # Parameters
     ///
@@ -430,15 +466,29 @@ impl PluginHost {
         plugin: &InstalledPlugin,
         instance: InstanceConfig,
     ) -> Result<Arc<dyn ArtworkProvider>, HostError> {
-        let (pool, _process) = self.store_pool::<bindings::ArtworkProvider>(plugin, &instance)?;
-        Ok(Arc::new(WasmArtworkProvider::new(
-            pool,
-            plugin.manifest().id.clone(),
-            instance.slug,
-        )))
+        match plugin.api() {
+            ApiVersion::V0_4 => {
+                let (pool, _process) =
+                    self.store_pool::<v4::bindings::ArtworkProvider>(plugin, &instance)?;
+                Ok(Arc::new(v4::artwork::WasmArtworkProvider::new(
+                    pool,
+                    plugin.manifest().id.clone(),
+                    instance.slug,
+                )))
+            }
+            ApiVersion::V0_3 => {
+                let (pool, _process) =
+                    self.store_pool::<v3::bindings::ArtworkProvider>(plugin, &instance)?;
+                Ok(Arc::new(v3::artwork::WasmArtworkProvider::new(
+                    pool,
+                    plugin.manifest().id.clone(),
+                    instance.slug,
+                )))
+            }
+        }
     }
 
-    /// Wraps an installed plugin as an acquisition provider.
+    /// Wraps an installed plugin as a acquisition provider.
     ///
     /// # Parameters
     ///
@@ -457,14 +507,28 @@ impl PluginHost {
         plugin: &InstalledPlugin,
         instance: InstanceConfig,
     ) -> Result<Arc<dyn AcquisitionProvider>, HostError> {
-        let (pool, process) =
-            self.store_pool::<bindings::AcquisitionProvider>(plugin, &instance)?;
-        Ok(Arc::new(WasmAcquisitionProvider::new(
-            pool,
-            process,
-            plugin.manifest().id.clone(),
-            instance.slug,
-        )))
+        match plugin.api() {
+            ApiVersion::V0_4 => {
+                let (pool, process) =
+                    self.store_pool::<v4::bindings::AcquisitionProvider>(plugin, &instance)?;
+                Ok(Arc::new(v4::acquisition::WasmAcquisitionProvider::new(
+                    pool,
+                    process,
+                    plugin.manifest().id.clone(),
+                    instance.slug,
+                )))
+            }
+            ApiVersion::V0_3 => {
+                let (pool, process) =
+                    self.store_pool::<v3::bindings::AcquisitionProvider>(plugin, &instance)?;
+                Ok(Arc::new(v3::acquisition::WasmAcquisitionProvider::new(
+                    pool,
+                    process,
+                    plugin.manifest().id.clone(),
+                    instance.slug,
+                )))
+            }
+        }
     }
 
     /// Wraps an installed plugin as a verification provider.
@@ -486,13 +550,26 @@ impl PluginHost {
         plugin: &InstalledPlugin,
         instance: InstanceConfig,
     ) -> Result<Arc<dyn VerificationProvider>, HostError> {
-        let (pool, _process) =
-            self.store_pool::<bindings::VerificationProvider>(plugin, &instance)?;
-        Ok(Arc::new(WasmVerificationProvider::new(
-            pool,
-            plugin.manifest().id.clone(),
-            instance.slug,
-        )))
+        match plugin.api() {
+            ApiVersion::V0_4 => {
+                let (pool, _process) =
+                    self.store_pool::<v4::bindings::VerificationProvider>(plugin, &instance)?;
+                Ok(Arc::new(v4::verification::WasmVerificationProvider::new(
+                    pool,
+                    plugin.manifest().id.clone(),
+                    instance.slug,
+                )))
+            }
+            ApiVersion::V0_3 => {
+                let (pool, _process) =
+                    self.store_pool::<v3::bindings::VerificationProvider>(plugin, &instance)?;
+                Ok(Arc::new(v3::verification::WasmVerificationProvider::new(
+                    pool,
+                    plugin.manifest().id.clone(),
+                    instance.slug,
+                )))
+            }
+        }
     }
 
     /// Wraps an installed plugin as a scrobble provider.
@@ -514,12 +591,26 @@ impl PluginHost {
         plugin: &InstalledPlugin,
         instance: InstanceConfig,
     ) -> Result<Arc<dyn ScrobbleProvider>, HostError> {
-        let (pool, _process) = self.store_pool::<bindings::ScrobbleProvider>(plugin, &instance)?;
-        Ok(Arc::new(WasmScrobbleProvider::new(
-            pool,
-            plugin.manifest().id.clone(),
-            instance.slug,
-        )))
+        match plugin.api() {
+            ApiVersion::V0_4 => {
+                let (pool, _process) =
+                    self.store_pool::<v4::bindings::ScrobbleProvider>(plugin, &instance)?;
+                Ok(Arc::new(v4::scrobble::WasmScrobbleProvider::new(
+                    pool,
+                    plugin.manifest().id.clone(),
+                    instance.slug,
+                )))
+            }
+            ApiVersion::V0_3 => {
+                let (pool, _process) =
+                    self.store_pool::<v3::bindings::ScrobbleProvider>(plugin, &instance)?;
+                Ok(Arc::new(v3::scrobble::WasmScrobbleProvider::new(
+                    pool,
+                    plugin.manifest().id.clone(),
+                    instance.slug,
+                )))
+            }
+        }
     }
 
     /// Wraps an installed plugin as a discovery provider.
@@ -541,15 +632,29 @@ impl PluginHost {
         plugin: &InstalledPlugin,
         instance: InstanceConfig,
     ) -> Result<Arc<dyn DiscoveryProvider>, HostError> {
-        let (pool, _process) = self.store_pool::<bindings::DiscoveryProvider>(plugin, &instance)?;
-        Ok(Arc::new(WasmDiscoveryProvider::new(
-            pool,
-            plugin.manifest().id.clone(),
-            instance.slug,
-        )))
+        match plugin.api() {
+            ApiVersion::V0_4 => {
+                let (pool, _process) =
+                    self.store_pool::<v4::bindings::DiscoveryProvider>(plugin, &instance)?;
+                Ok(Arc::new(v4::discovery::WasmDiscoveryProvider::new(
+                    pool,
+                    plugin.manifest().id.clone(),
+                    instance.slug,
+                )))
+            }
+            ApiVersion::V0_3 => {
+                let (pool, _process) =
+                    self.store_pool::<v3::bindings::DiscoveryProvider>(plugin, &instance)?;
+                Ok(Arc::new(v3::discovery::WasmDiscoveryProvider::new(
+                    pool,
+                    plugin.manifest().id.clone(),
+                    instance.slug,
+                )))
+            }
+        }
     }
 
-    /// Wraps an installed plugin as an account-link provider.
+    /// Wraps an installed plugin as a account link provider.
     ///
     /// # Parameters
     ///
@@ -562,7 +667,7 @@ impl PluginHost {
     ///
     /// # Errors
     ///
-    /// Returns the same errors as [`PluginHost::catalog_provider`], and
+    /// Returns the same errors as [`PluginHost::catalog_provider`]., and
     /// [`HostError::Incompatible`] when the component exports no `account-link`
     /// interface.
     pub fn account_link_provider(
@@ -570,13 +675,26 @@ impl PluginHost {
         plugin: &InstalledPlugin,
         instance: InstanceConfig,
     ) -> Result<Arc<dyn AccountLinkProvider>, HostError> {
-        let (pool, _process) =
-            self.store_pool::<bindings::AccountLinkProvider>(plugin, &instance)?;
-        Ok(Arc::new(WasmAccountLinkProvider::new(
-            pool,
-            plugin.manifest().id.clone(),
-            instance.slug,
-        )))
+        match plugin.api() {
+            ApiVersion::V0_4 => {
+                let (pool, _process) =
+                    self.store_pool::<v4::bindings::AccountLinkProvider>(plugin, &instance)?;
+                Ok(Arc::new(v4::account_link::WasmAccountLinkProvider::new(
+                    pool,
+                    plugin.manifest().id.clone(),
+                    instance.slug,
+                )))
+            }
+            ApiVersion::V0_3 => {
+                let (pool, _process) =
+                    self.store_pool::<v3::bindings::AccountLinkProvider>(plugin, &instance)?;
+                Ok(Arc::new(v3::account_link::WasmAccountLinkProvider::new(
+                    pool,
+                    plugin.manifest().id.clone(),
+                    instance.slug,
+                )))
+            }
+        }
     }
 
     /// Builds the store pool of one instance for one provider world.
@@ -704,11 +822,11 @@ fn install_blocking(
     let archive = PluginArchive::read(archive_path)?;
     let manifest = Manifest::parse(archive.manifest(), settings)?;
 
-    if manifest.api != SUPPORTED_API {
+    let Some(api) = manifest.api_version() else {
         return Err(InstallError::UnsupportedApi {
             api: manifest.api.clone(),
         });
-    }
+    };
     let version = parse_version(&manifest.version)?;
     let target = plugins_dir.join(&manifest.id).join(version.to_string());
     if target.exists() {
@@ -719,8 +837,8 @@ fn install_blocking(
     }
 
     let component = Component::new(engine, archive.wasm()).map_err(InstallError::Compile)?;
-    validate::validate(&component, &manifest)?;
-    ensure_instantiable(linker, &component, &manifest)?;
+    validate::validate(&component, &manifest, api)?;
+    ensure_instantiable(linker, &component, &manifest, api)?;
 
     let staging = plugins_dir.join(format!(".staging-{}", Uuid::now_v7()));
     std::fs::create_dir_all(&staging).map_err(|source| InstallError::Io {
@@ -763,6 +881,7 @@ fn install_blocking(
         dir: target,
         sha256: archive.sha256(),
         component,
+        api,
     })
 }
 
@@ -777,7 +896,7 @@ fn inspect_blocking(
     let archive = PluginArchive::read(archive_path)?;
     let manifest = Manifest::parse(archive.manifest(), settings)?;
 
-    if manifest.api != SUPPORTED_API {
+    if manifest.api_version().is_none() {
         return Err(InstallError::UnsupportedApi {
             api: manifest.api.clone(),
         });
@@ -869,10 +988,15 @@ fn load_blocking(
             source,
         })?;
     let manifest = Manifest::parse(&manifest_bytes, settings)?;
+    let Some(api) = manifest.api_version() else {
+        return Err(InstallError::UnsupportedApi {
+            api: manifest.api.clone(),
+        });
+    };
 
     let component = load_component(engine, &dir.join("plugin.cwasm"), &dir.join("plugin.wasm"))?;
-    validate::validate(&component, &manifest)?;
-    ensure_instantiable(linker, &component, &manifest)?;
+    validate::validate(&component, &manifest, api)?;
+    ensure_instantiable(linker, &component, &manifest, api)?;
 
     let sha256 = std::fs::read(dir.join("plugin.wasm"))
         .map(|bytes| {
@@ -889,6 +1013,7 @@ fn load_blocking(
         dir,
         sha256,
         component,
+        api,
     })
 }
 
@@ -902,39 +1027,68 @@ fn ensure_instantiable(
     linker: &Linker<InstanceState>,
     component: &Component,
     manifest: &Manifest,
+    api: ApiVersion,
 ) -> Result<(), InstallError> {
     let incompatible = |error: wasmtime::Error| InstallError::Incompatible(format!("{error:#}"));
     for layer in manifest.provides() {
         let pre = linker.instantiate_pre(component).map_err(incompatible)?;
-        match layer {
-            Layer::Catalog => {
-                CatalogProviderPre::new(pre).map_err(incompatible)?;
+        match (api, layer) {
+            (ApiVersion::V0_4, Layer::Catalog) => {
+                v4::bindings::CatalogProviderPre::new(pre).map_err(incompatible)?;
             }
-            Layer::Metadata => {
-                MetadataProviderPre::new(pre).map_err(incompatible)?;
+            (ApiVersion::V0_4, Layer::Metadata) => {
+                v4::bindings::MetadataProviderPre::new(pre).map_err(incompatible)?;
             }
-            Layer::Acquisition => {
-                AcquisitionProviderPre::new(pre).map_err(incompatible)?;
+            (ApiVersion::V0_4, Layer::Acquisition) => {
+                v4::bindings::AcquisitionProviderPre::new(pre).map_err(incompatible)?;
             }
-            Layer::Artwork => {
-                ArtworkProviderPre::new(pre).map_err(incompatible)?;
+            (ApiVersion::V0_4, Layer::Artwork) => {
+                v4::bindings::ArtworkProviderPre::new(pre).map_err(incompatible)?;
             }
-            Layer::Verification => {
-                VerificationProviderPre::new(pre).map_err(incompatible)?;
+            (ApiVersion::V0_4, Layer::Verification) => {
+                v4::bindings::VerificationProviderPre::new(pre).map_err(incompatible)?;
             }
-            Layer::Scrobble => {
-                ScrobbleProviderPre::new(pre).map_err(incompatible)?;
+            (ApiVersion::V0_4, Layer::Scrobble) => {
+                v4::bindings::ScrobbleProviderPre::new(pre).map_err(incompatible)?;
             }
-            Layer::Discovery => {
-                DiscoveryProviderPre::new(pre).map_err(incompatible)?;
+            (ApiVersion::V0_4, Layer::Discovery) => {
+                v4::bindings::DiscoveryProviderPre::new(pre).map_err(incompatible)?;
             }
-            other => return Err(InstallError::UnsupportedCapability(*other)),
+            (ApiVersion::V0_3, Layer::Catalog) => {
+                v3::bindings::CatalogProviderPre::new(pre).map_err(incompatible)?;
+            }
+            (ApiVersion::V0_3, Layer::Metadata) => {
+                v3::bindings::MetadataProviderPre::new(pre).map_err(incompatible)?;
+            }
+            (ApiVersion::V0_3, Layer::Acquisition) => {
+                v3::bindings::AcquisitionProviderPre::new(pre).map_err(incompatible)?;
+            }
+            (ApiVersion::V0_3, Layer::Artwork) => {
+                v3::bindings::ArtworkProviderPre::new(pre).map_err(incompatible)?;
+            }
+            (ApiVersion::V0_3, Layer::Verification) => {
+                v3::bindings::VerificationProviderPre::new(pre).map_err(incompatible)?;
+            }
+            (ApiVersion::V0_3, Layer::Scrobble) => {
+                v3::bindings::ScrobbleProviderPre::new(pre).map_err(incompatible)?;
+            }
+            (ApiVersion::V0_3, Layer::Discovery) => {
+                v3::bindings::DiscoveryProviderPre::new(pre).map_err(incompatible)?;
+            }
+            (_, other) => return Err(InstallError::UnsupportedCapability(*other)),
         }
     }
 
-    if validate::exports_account_link(component) {
+    if validate::exports_account_link(component, api) {
         let pre = linker.instantiate_pre(component).map_err(incompatible)?;
-        AccountLinkProviderPre::new(pre).map_err(incompatible)?;
+        match api {
+            ApiVersion::V0_4 => {
+                v4::bindings::AccountLinkProviderPre::new(pre).map_err(incompatible)?;
+            }
+            ApiVersion::V0_3 => {
+                v3::bindings::AccountLinkProviderPre::new(pre).map_err(incompatible)?;
+            }
+        }
     }
     Ok(())
 }

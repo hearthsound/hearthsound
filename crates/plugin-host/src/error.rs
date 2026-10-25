@@ -6,7 +6,6 @@ use hearthsound_config::ConfigError;
 use hearthsound_core::{Layer, ProviderError, Slug};
 use uuid::Uuid;
 
-use crate::bindings::hearthsound::plugin::types::ProviderError as WitProviderError;
 use crate::manifest::ManifestError;
 
 /// An error from installing or loading a plugin.
@@ -41,10 +40,21 @@ pub enum InstallError {
     #[error(transparent)]
     Manifest(#[from] ManifestError),
     /// The plugin was built against an API version this server does not host.
-    #[error("plugin API `{api}` is not supported; this server hosts hearthsound:plugin@0.3.0")]
+    #[error(
+        "plugin API `{api}` is not supported; this server hosts {}",
+        crate::manifest::SUPPORTED_APIS_LIST
+    )]
     UnsupportedApi {
         /// The API version the plugin declared.
         api: String,
+    },
+    /// The manifest and the component disagree about the plugin API version.
+    #[error("the manifest declares `{declared}`, but the component is built for `{component}`")]
+    ApiMismatch {
+        /// The version the manifest names.
+        declared: String,
+        /// The version the component imports and exports.
+        component: String,
     },
     /// The component failed to compile.
     #[error("failed to compile the component: {0:#}")]
@@ -180,6 +190,27 @@ pub enum HostError {
     Settings(#[from] ConfigError),
 }
 
+/// A guest provider error, independent of the API version that produced it.
+///
+/// Every plugin API version generates its own `provider-error` variant; each
+/// version tree converts its own onto this enum, so the mapping to the core
+/// error and its log line are written once and apply to every hosted version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GuestError {
+    /// The plugin has no such entity.
+    NotFound,
+    /// The provider asked the caller to wait.
+    RateLimited(u32),
+    /// The provider rejected the credentials or the token.
+    Unauthorized(String),
+    /// The instance's configuration is unusable.
+    InvalidConfig(String),
+    /// The provider is temporarily unavailable.
+    Unavailable(String),
+    /// The plugin failed in a way it cannot classify.
+    Internal(String),
+}
+
 /// Converts a guest's error into the core error.
 ///
 /// Every provider world reports the same error variant, so every adapter maps it
@@ -191,28 +222,20 @@ pub enum HostError {
 /// - `plugin`: the plugin id, used as the log field.
 /// - `slug`: the instance slug, used as the log field.
 /// - `error`: the error the guest returned.
-pub(crate) fn map_provider_error(
-    plugin: &str,
-    slug: &Slug,
-    error: WitProviderError,
-) -> ProviderError {
+pub(crate) fn map_provider_error(plugin: &str, slug: &Slug, error: GuestError) -> ProviderError {
     let (kind, message, mapped) = match error {
-        WitProviderError::NotFound => return ProviderError::NotFound,
-        WitProviderError::RateLimited(millis) => {
+        GuestError::NotFound => return ProviderError::NotFound,
+        GuestError::RateLimited(millis) => {
             return ProviderError::RateLimited {
                 retry_after_ms: u64::from(millis),
             };
         }
-        WitProviderError::Unauthorized(message) => {
-            ("unauthorized", message, ProviderError::Unauthorized)
-        }
-        WitProviderError::InvalidConfig(message) => {
+        GuestError::Unauthorized(message) => ("unauthorized", message, ProviderError::Unauthorized),
+        GuestError::InvalidConfig(message) => {
             ("invalid-config", message, ProviderError::InvalidConfig)
         }
-        WitProviderError::Unavailable(message) => {
-            ("unavailable", message, ProviderError::Unavailable)
-        }
-        WitProviderError::Internal(message) => ("internal", message, ProviderError::Internal),
+        GuestError::Unavailable(message) => ("unavailable", message, ProviderError::Unavailable),
+        GuestError::Internal(message) => ("internal", message, ProviderError::Internal),
     };
     tracing::debug!(
         target: "hearthsound::plugin",

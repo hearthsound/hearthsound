@@ -23,9 +23,9 @@ use hearthsound_core::providers::{
 };
 use hearthsound_core::{Granularity, ProviderError, Slug};
 
-use crate::bindings;
-use crate::bindings::acquisition::exports::hearthsound::plugin::acquisition;
-use crate::bindings::hearthsound::plugin::types::ProviderError as WitProviderError;
+use crate::api::v4::bindings;
+use crate::api::v4::bindings::acquisition::exports::hearthsound::plugin::acquisition;
+use crate::api::v4::bindings::hearthsound::plugin::types::ProviderError as WitProviderError;
 use crate::error::map_provider_error;
 use crate::pool::StorePool;
 use crate::process::ProcessTable;
@@ -65,7 +65,7 @@ impl WasmAcquisitionProvider {
 
     /// Maps a guest error to the core error, logging the guest's message.
     fn map_error(&self, error: WitProviderError) -> ProviderError {
-        map_provider_error(&self.plugin, &self.slug, error)
+        map_provider_error(&self.plugin, &self.slug, error.into())
     }
 }
 
@@ -335,7 +335,11 @@ fn to_wit_wanted(track: &WantedTrack) -> acquisition::WantedTrack {
         disc_number: track.disc_number,
         duration_ms: track.duration_ms,
         isrc: track.isrc.clone(),
-        ids: track.ids.iter().map(crate::catalog::to_wit_id).collect(),
+        ids: track
+            .ids
+            .iter()
+            .map(crate::api::v4::catalog::to_wit_id)
+            .collect(),
     }
 }
 

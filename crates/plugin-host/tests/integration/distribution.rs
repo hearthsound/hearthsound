@@ -18,13 +18,13 @@ use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore};
 use hearthsound_core::{Layer, Priority, new_uuid_v7};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_jobs::{Job, JobHandler, JobKind, JobState};
-use hearthsound_plugin_host::manifest::SUPPORTED_API;
+use hearthsound_plugin_host::manifest::{ApiVersion, NEWEST_API};
 use hearthsound_plugin_host::{
     IndexClient, InstallError, InstanceService, InstanceSpec, PluginAdmin, PluginHost,
     PluginInstaller, PluginRepository, PluginSource, PluginState, ProviderRegistry, RepositoryRef,
     UPDATE_CHECK_JOB_KIND, Unavailable, UpdateCheckJobHandler, UpdateChecker,
 };
-use hearthsound_test_support::{METADATA_FIXTURE, fixture_plugin};
+use hearthsound_test_support::{LEGACY_CATALOG, METADATA_FIXTURE, fixture_plugin};
 use minisign::KeyPair;
 use minisign_verify::PublicKey;
 use serde_json::{Value, json};
@@ -34,6 +34,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// The id of the metadata fixture.
 const METADATA_ID: &str = "com.example.metadata-fixture";
+
+/// The id of the catalog fixture built for the previous plugin API.
+const LEGACY_ID: &str = "com.example.legacy-catalog";
 
 /// The path the official index is served at in these tests.
 const OFFICIAL_PATH: &str = "/v1/index.json";
@@ -335,6 +338,11 @@ fn metadata_bytes() -> Vec<u8> {
     std::fs::read(fixture_plugin(METADATA_FIXTURE)).unwrap()
 }
 
+/// The bytes of the catalog fixture built for the previous plugin API.
+fn legacy_bytes() -> Vec<u8> {
+    std::fs::read(fixture_plugin(LEGACY_CATALOG)).unwrap()
+}
+
 /// The bytes of the metadata fixture repacked at `version` with `permissions`.
 ///
 /// The component is copied unchanged, so the archive installs exactly like the
@@ -385,7 +393,7 @@ async fn an_install_from_a_signed_index_is_enabled() {
         true,
         &[version(
             "0.1.0",
-            SUPPORTED_API,
+            NEWEST_API,
             &env.archive_url(),
             &bytes,
             json!({}),
@@ -401,7 +409,7 @@ async fn an_install_from_a_signed_index_is_enabled() {
 
     assert_eq!(registration.id, METADATA_ID);
     assert_eq!(registration.version, "0.1.0");
-    assert_eq!(registration.api, SUPPORTED_API);
+    assert_eq!(registration.api, NEWEST_API);
     assert_eq!(registration.source, PluginSource::Official);
 
     let row = env.repository.plugin(METADATA_ID).await.unwrap().unwrap();
@@ -414,17 +422,48 @@ async fn an_install_from_a_signed_index_is_enabled() {
 }
 
 #[tokio::test]
+async fn a_plugin_built_for_the_previous_api_installs_from_the_index() {
+    let env = Env::new().await;
+    let bytes = legacy_bytes();
+    let legacy_path = "/download/legacy.hsplugin";
+    serve_bytes(&env.server, legacy_path, bytes.clone()).await;
+    let archive_url = format!("{}{legacy_path}", env.server.uri());
+    env.serve_official(&document(&[plugin(
+        LEGACY_ID,
+        true,
+        &[version(
+            "0.1.0",
+            "hearthsound:plugin@0.3.0",
+            &archive_url,
+            &bytes,
+            json!({}),
+        )],
+    )]))
+    .await;
+
+    let registration = env
+        .installer
+        .install_from_index(LEGACY_ID, None, Some(RepositoryRef::Official))
+        .await
+        .unwrap();
+
+    assert_eq!(registration.id, LEGACY_ID);
+    assert_eq!(registration.api, "hearthsound:plugin@0.3.0");
+    let installed = env
+        .host
+        .load(LEGACY_ID, &semver::Version::new(0, 1, 0))
+        .await
+        .unwrap();
+    assert_eq!(installed.api(), ApiVersion::V0_3);
+    assert_no_downloads(&env);
+}
+
+#[tokio::test]
 async fn a_digest_mismatch_leaves_no_row_and_no_files() {
     let env = Env::new().await;
     let bytes = metadata_bytes();
     serve_bytes(&env.server, ARCHIVE_PATH, bytes.clone()).await;
-    let mut entry = version(
-        "0.1.0",
-        SUPPORTED_API,
-        &env.archive_url(),
-        &bytes,
-        json!({}),
-    );
+    let mut entry = version("0.1.0", NEWEST_API, &env.archive_url(), &bytes, json!({}));
     entry["sha256"] = json!("00".repeat(32));
     env.serve_official(&document(&[plugin(METADATA_ID, true, &[entry])]))
         .await;
@@ -447,13 +486,7 @@ async fn a_size_mismatch_leaves_no_row_and_no_files() {
     let env = Env::new().await;
     let bytes = metadata_bytes();
     serve_bytes(&env.server, ARCHIVE_PATH, bytes.clone()).await;
-    let mut entry = version(
-        "0.1.0",
-        SUPPORTED_API,
-        &env.archive_url(),
-        &bytes,
-        json!({}),
-    );
+    let mut entry = version("0.1.0", NEWEST_API, &env.archive_url(), &bytes, json!({}));
     entry["size"] = json!(bytes.len() + 1);
     env.serve_official(&document(&[plugin(METADATA_ID, true, &[entry])]))
         .await;
@@ -494,7 +527,7 @@ async fn the_newest_compatible_version_is_installed() {
                 &old,
                 json!({}),
             ),
-            version("0.2.0", SUPPORTED_API, &env.archive_url(), &new, json!({})),
+            version("0.2.0", NEWEST_API, &env.archive_url(), &new, json!({})),
         ],
     )]))
     .await;
@@ -528,13 +561,7 @@ async fn a_requested_version_must_exist_and_be_compatible() {
                 &bytes,
                 json!({}),
             ),
-            version(
-                "0.2.0",
-                SUPPORTED_API,
-                &env.archive_url(),
-                &bytes,
-                json!({}),
-            ),
+            version("0.2.0", NEWEST_API, &env.archive_url(), &bytes, json!({})),
         ],
     )]))
     .await;
@@ -577,7 +604,7 @@ async fn an_incompatible_only_plugin_is_reported_unavailable() {
         true,
         &[version(
             "0.1.0",
-            "hearthsound:plugin@9.9.9",
+            "hearthsound:plugin@0.2.0",
             &env.archive_url(),
             &bytes,
             json!({}),
@@ -637,7 +664,7 @@ async fn the_listing_merges_sources_and_reports_the_failed_one() {
         true,
         &[version(
             "0.1.0",
-            SUPPORTED_API,
+            NEWEST_API,
             &env.archive_url(),
             &bytes,
             json!({"http": {"hosts": ["api.example.com"]}, "kv": {"maxBytes": 2097152}}),
@@ -649,7 +676,7 @@ async fn the_listing_merges_sources_and_reports_the_failed_one() {
         false,
         &[version(
             "1.0.0",
-            SUPPORTED_API,
+            NEWEST_API,
             &env.archive_url(),
             &bytes,
             json!({}),
@@ -738,7 +765,7 @@ async fn a_url_install_registers_the_repository_once() {
         false,
         &[version(
             "0.1.0",
-            SUPPORTED_API,
+            NEWEST_API,
             &env.archive_url(),
             &bytes,
             json!({}),
@@ -794,7 +821,7 @@ async fn the_third_party_gate_refuses_an_unregistered_url() {
         false,
         &[version(
             "0.1.0",
-            SUPPORTED_API,
+            NEWEST_API,
             &env.archive_url(),
             &bytes,
             json!({}),
@@ -866,10 +893,10 @@ async fn serve_two_versions(env: &Env, permissions: Value) -> Vec<u8> {
         METADATA_ID,
         true,
         &[
-            version("0.1.0", SUPPORTED_API, &env.archive_url(), &old, json!({})),
+            version("0.1.0", NEWEST_API, &env.archive_url(), &old, json!({})),
             version(
                 "0.2.0",
-                SUPPORTED_API,
+                NEWEST_API,
                 &env.new_archive_url(),
                 &new,
                 permissions,
@@ -977,14 +1004,8 @@ async fn a_repository_plugin_is_checked_against_its_repository() {
         METADATA_ID,
         false,
         &[
-            version("0.1.0", SUPPORTED_API, &env.archive_url(), &old, json!({})),
-            version(
-                "0.2.0",
-                SUPPORTED_API,
-                &env.new_archive_url(),
-                &new,
-                json!({}),
-            ),
+            version("0.1.0", NEWEST_API, &env.archive_url(), &old, json!({})),
+            version("0.2.0", NEWEST_API, &env.new_archive_url(), &new, json!({})),
         ],
     )]))
     .await;
@@ -995,7 +1016,7 @@ async fn a_repository_plugin_is_checked_against_its_repository() {
         true,
         &[version(
             "9.0.0",
-            SUPPORTED_API,
+            NEWEST_API,
             &env.new_archive_url(),
             &new,
             json!({}),

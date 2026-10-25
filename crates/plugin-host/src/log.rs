@@ -10,8 +10,6 @@ use std::time::{Duration, Instant};
 
 use hearthsound_core::Slug;
 
-use crate::bindings::hearthsound::plugin::host_log::Level;
-
 /// How long one rate limit window lasts.
 const WINDOW: Duration = Duration::from_secs(1);
 
@@ -26,6 +24,26 @@ const CHUNK: usize = 4096;
 
 /// The tracing target every plugin log line uses.
 const TARGET: &str = "hearthsound::plugin";
+
+/// The severity of a plugin log line.
+///
+/// Each plugin API version generates its own `host-log` level enum, and the
+/// generated types never reach this module: every version's `host-log` import
+/// maps its level onto this one, so the sink and the guest's stdout are written
+/// once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    /// Finest-grained diagnostic output.
+    Trace,
+    /// Diagnostic output useful while developing a plugin.
+    Debug,
+    /// A routine event.
+    Info,
+    /// Something the operator should look at.
+    Warn,
+    /// A failure the plugin recovered from or reported.
+    Error,
+}
 
 /// A rate limited log sink for one plugin instance.
 #[derive(Debug)]

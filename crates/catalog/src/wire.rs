@@ -149,6 +149,9 @@ pub(crate) struct WireArtist {
     /// The artist's external identifiers.
     #[serde(default)]
     pub ids: Vec<WireExternalId>,
+    /// The number of albums the provider reports, when it reports one.
+    #[serde(default)]
+    pub album_count: Option<u32>,
 }
 
 /// The stored form of a [`CatalogResults`].
@@ -498,6 +501,7 @@ impl From<&CatalogArtist> for WireArtist {
             name: value.name.clone(),
             images: value.images.iter().map(WireImage::from).collect(),
             ids: value.ids.iter().map(WireExternalId::from).collect(),
+            album_count: value.album_count,
         }
     }
 }
@@ -510,6 +514,7 @@ impl From<WireArtist> for CatalogArtist {
             name: value.name,
             images: value.images.into_iter().map(Image::from).collect(),
             ids: value.ids.into_iter().map(ExternalId::from).collect(),
+            album_count: value.album_count,
         }
     }
 }
@@ -667,6 +672,7 @@ mod tests {
                 name: "Artist".to_owned(),
                 images: Vec::new(),
                 ids: Vec::new(),
+                album_count: Some(38),
             }],
         };
 
@@ -676,6 +682,36 @@ mod tests {
             .into();
 
         assert_eq!(results, decoded);
+    }
+
+    #[test]
+    fn round_trips_an_artists_album_count() {
+        let artist = CatalogArtist {
+            id: "ar1".to_owned(),
+            name: "Artist".to_owned(),
+            images: Vec::new(),
+            ids: Vec::new(),
+            album_count: Some(12),
+        };
+        let json = serde_json::to_string(&WireArtist::from(&artist)).unwrap();
+        let decoded: CatalogArtist = serde_json::from_str::<WireArtist>(&json).unwrap().into();
+        assert_eq!(decoded, artist);
+
+        // A provider that reports no count keeps `None`, and so does a payload
+        // stored before the field existed.
+        let none = CatalogArtist {
+            id: "ar2".to_owned(),
+            name: "Other".to_owned(),
+            images: Vec::new(),
+            ids: Vec::new(),
+            album_count: None,
+        };
+        let json = serde_json::to_string(&WireArtist::from(&none)).unwrap();
+        let decoded: CatalogArtist = serde_json::from_str::<WireArtist>(&json).unwrap().into();
+        assert_eq!(decoded, none);
+
+        let stored: WireArtist = serde_json::from_str(r#"{"id":"ar3","name":"Legacy"}"#).unwrap();
+        assert_eq!(CatalogArtist::from(stored).album_count, None);
     }
 
     #[test]

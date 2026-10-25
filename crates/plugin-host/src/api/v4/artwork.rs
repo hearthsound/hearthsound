@@ -9,10 +9,10 @@ use async_trait::async_trait;
 use hearthsound_core::providers::{ArtworkProvider, ArtworkSubject, Image, ProviderLifecycle};
 use hearthsound_core::{ProviderError, Slug};
 
-use crate::bindings;
-use crate::bindings::artwork::exports::hearthsound::plugin::artwork;
-use crate::bindings::hearthsound::plugin::types::ProviderError as WitProviderError;
-use crate::catalog::{to_wit_id, to_wit_kind};
+use crate::api::v4::bindings;
+use crate::api::v4::bindings::artwork::exports::hearthsound::plugin::artwork;
+use crate::api::v4::bindings::hearthsound::plugin::types::ProviderError as WitProviderError;
+use crate::api::v4::catalog::{to_wit_id, to_wit_kind};
 use crate::error::map_provider_error;
 use crate::pool::StorePool;
 
@@ -41,7 +41,7 @@ impl WasmArtworkProvider {
 
     /// Maps a guest error to the core error, logging the guest's message.
     fn map_error(&self, error: WitProviderError) -> ProviderError {
-        map_provider_error(&self.plugin, &self.slug, error)
+        map_provider_error(&self.plugin, &self.slug, error.into())
     }
 }
 
@@ -121,7 +121,9 @@ impl ArtworkProvider for WasmArtworkProvider {
 /// # Returns
 ///
 /// The core image.
-fn to_core_artwork_image(image: crate::bindings::hearthsound::plugin::types::Image) -> Image {
+fn to_core_artwork_image(
+    image: crate::api::v4::bindings::hearthsound::plugin::types::Image,
+) -> Image {
     Image {
         url: image.url,
         width: image.width,

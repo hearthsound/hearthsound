@@ -10,10 +10,7 @@ use wasmtime::component::Component;
 use wasmtime::component::types::ComponentItem;
 
 use crate::error::InstallError;
-use crate::manifest::Manifest;
-
-/// The only API version the host provides.
-const API_VERSION: &str = "0.3.0";
+use crate::manifest::{ApiVersion, Manifest};
 
 /// The `wasi` packages whose 0.2 interfaces the host provides.
 ///
@@ -27,8 +24,14 @@ const WASI_PACKAGES: [&str; 6] = [
     "wasi:sockets",
 ];
 
-/// The interface a catalog plugin must export for the host to drive it.
-pub const LIFECYCLE_INTERFACE: &str = "hearthsound:plugin/lifecycle@0.3.0";
+/// Returns the interface a plugin must export for the host to drive it.
+///
+/// # Parameters
+///
+/// - `api`: the plugin API version whose package the interface name carries.
+fn lifecycle_interface(api: ApiVersion) -> String {
+    format!("hearthsound:plugin/lifecycle@{}", api.package())
+}
 
 /// The layers the host can drive today.
 ///
@@ -56,27 +59,29 @@ const ACCOUNT_LINK_INTERFACE: &str = "hearthsound:plugin/account-link";
 /// # Parameters
 ///
 /// - `component`: the compiled component.
+/// - `api`: the plugin API version the component was built for.
 ///
 /// # Returns
 ///
-/// `true` when the component exports `hearthsound:plugin/account-link@0.3.0`.
+/// `true` when the component exports the `account-link` interface at `api`'s
+/// package version.
 ///
 /// # Example
 ///
 /// ```ignore
 /// let component = Component::new(&engine, bytes)?;
-/// if exports_account_link(&component) {
+/// if exports_account_link(&component, ApiVersion::V0_4) {
 ///     // the instance can link accounts
 /// }
 /// ```
-pub fn exports_account_link(component: &Component) -> bool {
+pub fn exports_account_link(component: &Component, api: ApiVersion) -> bool {
     let engine = component.engine();
     component
         .component_type()
         .exports(engine)
         .any(|(name, _item)| {
             let (interface, version) = split_version(name);
-            interface == ACCOUNT_LINK_INTERFACE && version == API_VERSION
+            interface == ACCOUNT_LINK_INTERFACE && version == api.package()
         })
 }
 
@@ -86,15 +91,22 @@ pub fn exports_account_link(component: &Component) -> bool {
 ///
 /// - `component`: the compiled component.
 /// - `manifest`: the manifest the plugin shipped with.
+/// - `api`: the plugin API version the manifest declared.
 ///
 /// # Errors
 ///
 /// Returns [`InstallError::DisallowedImport`] for an import the host does not
-/// provide, [`InstallError::MissingExport`] when an interface the manifest
-/// requires is not exported, [`InstallError::UndeclaredExport`] when an export
-/// is not declared, and [`InstallError::UnsupportedCapability`] when the plugin
+/// provide, [`InstallError::ApiMismatch`] when the component's interfaces carry
+/// a different version than the manifest declared,
+/// [`InstallError::MissingExport`] when an interface the manifest requires is
+/// not exported, [`InstallError::UndeclaredExport`] when an export is not
+/// declared, and [`InstallError::UnsupportedCapability`] when the plugin
 /// provides a layer this server cannot host yet.
-pub fn validate(component: &Component, manifest: &Manifest) -> Result<(), InstallError> {
+pub fn validate(
+    component: &Component,
+    manifest: &Manifest,
+    api: ApiVersion,
+) -> Result<(), InstallError> {
     let engine = component.engine();
     let component_type = component.component_type();
 
@@ -103,7 +115,10 @@ pub fn validate(component: &Component, manifest: &Manifest) -> Result<(), Instal
             return Err(InstallError::DisallowedImport(name.to_owned()));
         }
         let (interface, version) = split_version(name);
-        if !allowed_import(interface, version, manifest) {
+        if interface.starts_with("hearthsound:plugin/") && version != api.package() {
+            return Err(api_mismatch(api, version));
+        }
+        if !allowed_import(interface, version, manifest, api) {
             return Err(InstallError::DisallowedImport(name.to_owned()));
         }
     }
@@ -116,8 +131,8 @@ pub fn validate(component: &Component, manifest: &Manifest) -> Result<(), Instal
         let Some(export) = interface.strip_prefix("hearthsound:plugin/") else {
             return Err(InstallError::UndeclaredExport(name.to_owned()));
         };
-        if version != API_VERSION {
-            return Err(InstallError::UndeclaredExport(name.to_owned()));
+        if version != api.package() {
+            return Err(api_mismatch(api, version));
         }
         match export {
             "lifecycle" => exports_lifecycle = true,
@@ -135,7 +150,7 @@ pub fn validate(component: &Component, manifest: &Manifest) -> Result<(), Instal
 
     if !exports_lifecycle {
         return Err(InstallError::MissingExport {
-            interface: LIFECYCLE_INTERFACE.to_owned(),
+            interface: lifecycle_interface(api),
         });
     }
     // `account-link` is checked first because it is a capability rather than a
@@ -148,20 +163,22 @@ pub fn validate(component: &Component, manifest: &Manifest) -> Result<(), Instal
             .any(|layer| matches!(layer, Layer::Scrobble | Layer::Discovery))
     {
         return Err(InstallError::UndeclaredExport(format!(
-            "{ACCOUNT_LINK_INTERFACE}@{API_VERSION}"
+            "{ACCOUNT_LINK_INTERFACE}@{}",
+            api.package()
         )));
     }
     for layer in manifest.provides() {
         if !exported_layers.contains(layer) {
             return Err(InstallError::MissingExport {
-                interface: format!("hearthsound:plugin/{layer}@{API_VERSION}"),
+                interface: format!("hearthsound:plugin/{layer}@{}", api.package()),
             });
         }
     }
     for layer in &exported_layers {
         if !manifest.provides().contains(layer) {
             return Err(InstallError::UndeclaredExport(format!(
-                "hearthsound:plugin/{layer}@{API_VERSION}"
+                "hearthsound:plugin/{layer}@{}",
+                api.package()
             )));
         }
     }
@@ -173,6 +190,20 @@ pub fn validate(component: &Component, manifest: &Manifest) -> Result<(), Instal
     }
 
     Ok(())
+}
+
+/// Builds the error for a component whose interface version disagrees with the
+/// manifest.
+///
+/// # Parameters
+///
+/// - `api`: the version the manifest declared.
+/// - `version`: the version the component's interface carries.
+fn api_mismatch(api: ApiVersion, version: &str) -> InstallError {
+    InstallError::ApiMismatch {
+        declared: api.api().to_owned(),
+        component: format!("hearthsound:plugin@{version}"),
+    }
 }
 
 /// Splits an interface name into its id and version.
@@ -190,9 +221,16 @@ fn split_version(name: &str) -> (&str, &str) {
 ///
 /// `host-files` is only provided to acquisition plugins, and `host-process`
 /// only to acquisition plugins whose manifest lists a tool to run.
-fn allowed_import(interface: &str, version: &str, manifest: &Manifest) -> bool {
+///
+/// # Parameters
+///
+/// - `interface`: the interface id without its version.
+/// - `version`: the version the component's interface carries.
+/// - `manifest`: the manifest the plugin shipped with.
+/// - `api`: the plugin API version the manifest declared.
+fn allowed_import(interface: &str, version: &str, manifest: &Manifest, api: ApiVersion) -> bool {
     if let Some(rest) = interface.strip_prefix("hearthsound:plugin/") {
-        if version != API_VERSION {
+        if version != api.package() {
             return false;
         }
         return match rest {

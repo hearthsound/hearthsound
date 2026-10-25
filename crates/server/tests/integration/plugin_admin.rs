@@ -16,7 +16,9 @@ use std::process::Command;
 use std::sync::LazyLock;
 
 use hearthsound_core::Layer;
-use hearthsound_test_support::{HELLO_CATALOG, HTTP_CATALOG, METADATA_FIXTURE, fixture_plugin};
+use hearthsound_test_support::{
+    HELLO_CATALOG, HTTP_CATALOG, LEGACY_CATALOG, METADATA_FIXTURE, fixture_plugin,
+};
 use minisign::KeyPair;
 use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -34,7 +36,7 @@ const PLUGIN_ID: &str = "com.example.metadata-fixture";
 const VERSION: &str = "0.1.0";
 
 /// The plugin API version this server hosts.
-const API: &str = "hearthsound:plugin@0.3.0";
+const API: &str = "hearthsound:plugin@0.4.0";
 
 /// The path an index document is served at.
 const INDEX_PATH: &str = "/v1/index.json";
@@ -780,6 +782,48 @@ async fn an_upload_installs_and_the_sideload_gate_refuses_it() {
     );
     assert_untouched(&fixture, "com.example.hello-catalog").await;
     assert!(plugins_dir(&fixture).join(PLUGIN_ID).exists());
+}
+
+/// The upload route installs a plugin built for the previous plugin API.
+///
+/// The host loads both hosted versions, so an archive whose manifest declares
+/// `hearthsound:plugin@0.3.0` installs, reports its own version, and is served.
+#[tokio::test]
+async fn an_upload_installs_a_plugin_built_for_the_previous_api() {
+    let fixture = Fixture::new().await;
+    let bytes = std::fs::read(fixture_plugin(LEGACY_CATALOG)).unwrap();
+
+    let response = upload(&fixture, &bytes).await;
+    let status = response.status();
+    let view = json(response).await;
+    assert_eq!(status, StatusCode::CREATED, "{view}");
+    assert_eq!(view["id"], "com.example.legacy-catalog");
+    assert_eq!(view["api"], "hearthsound:plugin@0.3.0");
+    assert_eq!(view["source"], "sideload");
+    assert_eq!(view["state"], "enabled");
+
+    let created = admin(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/providers",
+        Some(json!({ "slug": "legacy", "pluginId": "com.example.legacy-catalog" })),
+    )
+    .await;
+    let status = created.status();
+    let instance = json(created).await;
+    assert_eq!(status, StatusCode::CREATED, "{instance}");
+
+    let assigned = admin(
+        &fixture,
+        reqwest::Method::PUT,
+        "/api/v1/admin/layers/catalog",
+        Some(json!(["legacy"])),
+    )
+    .await;
+    let status = assigned.status();
+    let layers = json(assigned).await;
+    assert_eq!(status, StatusCode::OK, "{layers}");
+    assert_eq!(served(&fixture, Layer::Catalog), vec!["legacy".to_owned()]);
 }
 
 /// The inspection route reports an archive and installs nothing.

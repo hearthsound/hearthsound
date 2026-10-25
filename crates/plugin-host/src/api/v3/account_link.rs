@@ -14,9 +14,9 @@ use hearthsound_core::providers::{
 };
 use hearthsound_core::{ProviderError, Slug};
 
-use crate::bindings;
-use crate::bindings::account_link::exports::hearthsound::plugin::account_link;
-use crate::bindings::hearthsound::plugin::types::{
+use crate::api::v3::bindings;
+use crate::api::v3::bindings::account_link::exports::hearthsound::plugin::account_link;
+use crate::api::v3::bindings::hearthsound::plugin::types::{
     ProviderError as WitProviderError, UserContext as WitUserContext,
 };
 use crate::error::map_provider_error;
@@ -47,7 +47,7 @@ impl WasmAccountLinkProvider {
 
     /// Maps a guest error to the core error, logging the guest's message.
     fn map_error(&self, error: WitProviderError) -> ProviderError {
-        map_provider_error(&self.plugin, &self.slug, error)
+        map_provider_error(&self.plugin, &self.slug, error.into())
     }
 }
 

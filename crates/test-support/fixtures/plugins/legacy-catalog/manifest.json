@@ -1,0 +1,43 @@
+{
+  "manifestVersion": 1,
+  "id": "com.example.legacy-catalog",
+  "name": "Legacy catalog",
+  "version": "0.1.0",
+  "description": "A catalog plugin built for the previous plugin API, for dual-load tests.",
+  "authors": ["Hearthsound contributors"],
+  "license": "MIT OR Apache-2.0",
+  "homepage": "https://github.com/hearthsound/hearthsound",
+  "api": "hearthsound:plugin@0.3.0",
+  "provides": ["catalog"],
+  "permissions": {
+    "http": { "hosts": ["$config:coverUrl"], "maxBodyBytes": 1048576 }
+  },
+  "config": {
+    "server": {
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+          "greeting": { "type": "string", "title": "Greeting", "default": "Hello" },
+          "isrc": { "type": "string", "title": "ISRC" },
+          "coverUrl": {
+            "type": "string",
+            "title": "Cover URL template",
+            "description": "An absolute URL with a {size} placeholder, replaced by 250, 500 and 1000."
+          }
+        }
+      },
+      "uiSchema": {
+        "type": "VerticalLayout",
+        "elements": [
+          { "type": "Control", "scope": "#/properties/greeting" },
+          { "type": "Control", "scope": "#/properties/isrc" },
+          { "type": "Control", "scope": "#/properties/coverUrl" }
+        ]
+      }
+    },
+    "user": null
+  },
+  "resources": { "memoryMb": 64, "callTimeoutMs": 5000, "maxInstances": 2 },
+  "catalog": { "imageCachePolicy": "cache" }
+}

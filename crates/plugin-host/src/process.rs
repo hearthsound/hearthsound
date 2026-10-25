@@ -31,9 +31,61 @@ use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::bindings::hearthsound::plugin::host_process::{
-    ProcessError, ProcessHandle, ProcessState, SpawnOptions, StdoutMode,
-};
+/// An opaque handle to a process one instance started.
+///
+/// Each plugin API version generates its own `process-handle` type from its
+/// `type process-handle = u64` alias; both map onto this one, so the table, its
+/// tests and the policies it enforces are written once.
+pub(crate) type ProcessHandle = u64;
+
+/// Where a process's standard output goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StdoutMode {
+    /// Kept in memory, at most [`MAX_UNREAD_OUTPUT`] unread bytes.
+    Capture,
+    /// Written to this path, relative to the current staging directory.
+    File(String),
+}
+
+/// The options of one `spawn` call.
+#[derive(Debug, Clone)]
+pub(crate) struct SpawnOptions {
+    /// Working directory relative to the staging directory, when the plugin
+    /// named one.
+    pub cwd: Option<String>,
+    /// Extra environment entries; each name must be allowlisted by the tool.
+    pub env: Vec<(String, String)>,
+    /// Where standard output goes.
+    pub stdout: StdoutMode,
+    /// Wall-clock limit in milliseconds, at most [`MAX_TIMEOUT_MS`].
+    pub timeout_ms: u32,
+}
+
+/// The state of a process as `poll` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessState {
+    /// Still running.
+    Running,
+    /// Exited with this status code.
+    Exited(i32),
+    /// Killed by `kill` or by the instance being torn down.
+    Killed,
+    /// Killed because the wall-clock limit expired.
+    TimedOut,
+}
+
+/// A refused process operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProcessError {
+    /// The tool is not in the manifest's tools, or an option broke a rule.
+    Denied(String),
+    /// The administrator has no usable path for the tool.
+    NotConfigured(String),
+    /// The operating system refused to start the process.
+    SpawnFailed(String),
+    /// The handle is unknown to this instance or already released.
+    UnknownHandle,
+}
 
 /// The most captured bytes one stream keeps before it starts dropping.
 const MAX_UNREAD_OUTPUT: usize = 1024 * 1024;

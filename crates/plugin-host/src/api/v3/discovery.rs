@@ -13,12 +13,12 @@ use hearthsound_core::providers::{
 };
 use hearthsound_core::{ProviderError, Slug};
 
-use crate::bindings;
-use crate::bindings::discovery::exports::hearthsound::plugin::discovery;
-use crate::bindings::hearthsound::plugin::types::{
+use crate::api::v3::bindings;
+use crate::api::v3::bindings::discovery::exports::hearthsound::plugin::discovery;
+use crate::api::v3::bindings::hearthsound::plugin::types::{
     ProviderError as WitProviderError, UserContext as WitUserContext,
 };
-use crate::catalog::{to_core_id, to_wit_id};
+use crate::api::v3::catalog::{to_core_id, to_wit_id};
 use crate::error::map_provider_error;
 use crate::pool::StorePool;
 
@@ -47,7 +47,7 @@ impl WasmDiscoveryProvider {
 
     /// Maps a guest error to the core error, logging the guest's message.
     fn map_error(&self, error: WitProviderError) -> ProviderError {
-        map_provider_error(&self.plugin, &self.slug, error)
+        map_provider_error(&self.plugin, &self.slug, error.into())
     }
 }
 

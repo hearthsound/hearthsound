@@ -84,6 +84,14 @@ pub const SCROBBLE_FIXTURE: &str = "com.example.scrobble-fixture-0.1.0.hsplugin"
 /// The archive file name of the verification fixture.
 pub const VERIFICATION_FIXTURE: &str = "com.example.verification-fixture-0.1.0.hsplugin";
 
+/// The archive file name of the legacy catalog fixture, built for the previous
+/// plugin API.
+pub const LEGACY_CATALOG: &str = "com.example.legacy-catalog-0.1.0.hsplugin";
+
+/// The archive file name of the key-value fixture, whose search reports a
+/// `host-kv` read.
+pub const KV_FIXTURE: &str = "com.example.kv-fixture-0.1.0.hsplugin";
+
 /// Returns the path of a fixture tool.
 ///
 /// # Parameters

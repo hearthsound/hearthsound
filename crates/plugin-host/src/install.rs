@@ -572,7 +572,7 @@ mod tests {
               "description": "An example plugin.",
               "license": "MIT",
               "homepage": "https://example.com",
-              "api": "hearthsound:plugin@0.3.0",
+              "api": "hearthsound:plugin@0.4.0",
               "provides": ["catalog"],
               "permissions": {permissions},
               "config": {{"server": null, "user": null}},

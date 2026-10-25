@@ -41,7 +41,7 @@ use crate::admin::{PluginAdmin, to_hex};
 use crate::error::InstallError;
 use crate::index::{Index, IndexClient, IndexPlugin, IndexVersion, Unavailable};
 use crate::install::{PluginRegistration, RequestedPermission, requested_permissions_of};
-use crate::manifest::SUPPORTED_API;
+use crate::manifest::{SUPPORTED_APIS, SUPPORTED_APIS_LIST};
 use crate::repo::{PluginRepository, PluginSource, RepoError, RepositoryRow, now_millis};
 
 /// How long one plugin archive download may take in total.
@@ -747,7 +747,7 @@ fn select<'entry>(
                 .map(|version| version.version.clone())
                 .collect(),
         })?;
-    if listed.api != SUPPORTED_API {
+    if !SUPPORTED_APIS.contains(&listed.api.as_str()) {
         return Err(incompatible(entry));
     }
     Ok(listed)
@@ -764,7 +764,7 @@ fn select<'entry>(
 /// The reason, carrying the API versions the entry offers.
 fn incompatible(entry: &IndexPlugin) -> Unavailable {
     Unavailable::NoCompatibleVersion {
-        supported: SUPPORTED_API,
+        supported: SUPPORTED_APIS_LIST,
         offered: entry
             .versions
             .iter()

@@ -1,7 +1,9 @@
 //! The WebAssembly plugin host.
 //!
-//! A Hearthsound plugin is a WebAssembly component that speaks the
-//! `hearthsound:plugin@0.3.0` package. This crate reads plugin archives,
+//! A Hearthsound plugin is a WebAssembly component that speaks a
+//! `hearthsound:plugin` API package: `hearthsound:plugin@0.4.0`, the newest one
+//! in `wit/`, and `hearthsound:plugin@0.3.0`, the previous minor the host still
+//! loads from `wit/since_v0.3/`. This crate reads plugin archives,
 //! validates that a component only imports what the host offers and only
 //! exports the interfaces its manifest declares, installs it under the data
 //! directory, and runs it inside a pool of wasmtime stores with deadlines and
@@ -26,15 +28,10 @@
 #![deny(unsafe_code)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 
-mod account_link;
-mod acquisition;
 mod admin;
+mod api;
 pub mod archive;
-mod artwork;
-mod bindings;
-mod catalog;
 mod defaults;
-mod discovery;
 mod engine;
 mod error;
 pub mod files;
@@ -48,17 +45,14 @@ pub mod instances;
 pub mod kv;
 pub mod log;
 pub mod manifest;
-mod metadata;
 mod pool;
 mod process;
 pub mod registry;
 mod repo;
-mod scrobble;
 mod state;
 mod updates;
 mod user_configs;
 mod validate;
-mod verification;
 
 pub use admin::{AdminError, PluginAdmin};
 pub use archive::PluginArchive;

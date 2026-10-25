@@ -155,6 +155,7 @@ fn artist() -> Artist {
         name: ARTIST_NAME.to_string(),
         images: vec![],
         ids: artist_ids(),
+        album_count: None,
     }
 }
 

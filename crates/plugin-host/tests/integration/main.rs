@@ -15,6 +15,8 @@ mod discovery_provider;
 mod distribution;
 mod http_catalog;
 mod install;
+mod kv;
+mod legacy;
 mod metadata_provider;
 mod plugin_log;
 mod provisioning;

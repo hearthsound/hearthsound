@@ -1122,6 +1122,7 @@ fn install_problem(error: &InstallError) -> Problem {
         | InstallError::EntryTooLarge { .. }
         | InstallError::Manifest(_)
         | InstallError::UnsupportedApi { .. }
+        | InstallError::ApiMismatch { .. }
         | InstallError::Compile(_)
         | InstallError::DisallowedImport(_)
         | InstallError::MissingExport { .. }
