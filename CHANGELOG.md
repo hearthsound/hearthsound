@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An artist and an album each answer to one readable path. `hsResolve` takes
+  `artist`, or `artist` and `album`, path segments and answers the entity the
+  path names, or takes an entity `id` and answers its canonical path; the
+  segments come from names only, so the path is the same whatever plugin
+  instances the server runs and never carries a stored id or a plugin slug. Two
+  acts of the same name are told apart by an ordinal suffix (`nirvana`,
+  `nirvana--2`), the bare name belonging to the artist in the caller's library
+  and the rest following catalog rank, and the same rule applies to albums of
+  one artist. Every `hearthsound` member carries the path of its object as
+  `path`, `artistPath` and `albumPath`, so a client builds a link without asking
+  the server.
 - An acquired file is fingerprinted with Chromaprint and checked against the
   verification layer when `acquisition.verify.fingerprint` is on. A file the
   service judges a different recording is quarantined: its source and file name
@@ -271,6 +282,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A search lists a stored artist or album once. A catalog result whose name is
+  the stored row's name - an artist of the same folded name, or an album of the
+  same title credited to the same artist - is left out of `search3` unless an
+  alias already says the two are one entity, so a server with a catalog layer
+  shows one Radiohead instead of two.
 - A catalog album or song view shows a recording the server already stores as
   the stored track. A scanned file without an ISRC now matches by MusicBrainz
   recording id or by the same normalized title, display artist and album within
