@@ -33,7 +33,9 @@ use time::OffsetDateTime;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::{AcquisitionState, Availability, EntityKind, FailureReason, Priority, QualityTier};
+use crate::{
+    AcquisitionState, Availability, EntityKind, FailureReason, ParkReason, Priority, QualityTier,
+};
 
 /// The number of recent events the bus keeps for replay.
 ///
@@ -146,6 +148,15 @@ pub struct AcquisitionUpdated {
     /// Why the acquisition failed, when it has failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<FailureReason>,
+    /// Whether the acquisition is waiting for an acquisition source.
+    ///
+    /// A parked acquisition is `queued` and looks idle; this flag is what makes
+    /// a client say so instead of showing a search that never starts.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub awaiting_source: bool,
+    /// Why the acquisition is waiting for a source, when it is parked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub park_reason: Option<ParkReason>,
 }
 
 /// The payload of a `track.availability` event.
@@ -664,6 +675,8 @@ mod tests {
                 eta_secs: Some(31),
                 instance: Some("slskd".to_owned()),
                 failure_reason: None,
+                awaiting_source: false,
+                park_reason: None,
             }),
             ServerEvent::TrackAvailability(TrackAvailability {
                 track_id: "tr_01jgn00000e008000000000001".to_owned(),
@@ -767,6 +780,8 @@ mod tests {
             eta_secs: Some(31),
             instance: Some("slskd".to_owned()),
             failure_reason: None,
+            awaiting_source: false,
+            park_reason: None,
         });
         assert_eq!(
             serde_json::to_value(&event).unwrap(),
@@ -796,11 +811,36 @@ mod tests {
             eta_secs: None,
             instance: None,
             failure_reason: Some(FailureReason::NoCandidates),
+            awaiting_source: false,
+            park_reason: None,
         });
         let value = serde_json::to_value(&event).unwrap();
         assert_eq!(value["data"]["failureReason"], "no-candidates");
         assert_eq!(value["data"]["state"], "failed");
         assert!(value["data"].get("percent").is_none());
+        assert!(value["data"].get("awaitingSource").is_none());
+        assert!(value["data"].get("parkReason").is_none());
+    }
+
+    #[test]
+    fn a_parked_acquisition_reports_why_it_waits() {
+        let event = ServerEvent::AcquisitionUpdated(AcquisitionUpdated {
+            acquisition_id: "ac_01j9z4k7m2q8v3n5r6t7w8x9za".to_owned(),
+            target_id: "tr_01jgn00000e008000000000001".to_owned(),
+            state: AcquisitionState::Queued,
+            priority: Priority::Queue,
+            percent: None,
+            eta_secs: None,
+            instance: None,
+            failure_reason: None,
+            awaiting_source: true,
+            park_reason: Some(ParkReason::SourceUnavailable),
+        });
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["data"]["awaitingSource"], true);
+        assert_eq!(value["data"]["parkReason"], "source-unavailable");
+        assert_eq!(value["data"]["state"], "queued");
+        assert!(value["data"].get("failureReason").is_none());
     }
 
     #[test]

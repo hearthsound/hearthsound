@@ -29,7 +29,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AcquisitionState {
-    /// Admitted and waiting for a worker slot.
+    /// Admitted and waiting for a worker slot, or waiting for an acquisition
+    /// source.
+    ///
+    /// A row in this state that carries a park reason is not waiting for a
+    /// slot: it is waiting for the acquisition layer to serve an instance that
+    /// can be attempted.
     Queued,
     /// Resolving the wanted track to canonical identifiers.
     Resolving,
@@ -110,13 +115,25 @@ impl AcquisitionState {
     ///
     /// - `queued -> resolving | failed`
     /// - `resolving -> searching | failed`
-    /// - `searching -> downloading | failed | cancelled`
-    /// - `downloading -> verifying | searching | failed | cancelled`
+    /// - `searching -> downloading | queued | failed | cancelled`
+    /// - `downloading -> verifying | searching | queued | failed | cancelled`
     /// - `verifying -> importing | failed | cancelled`
     /// - `importing -> completed | failed | cancelled`
     ///
     /// `downloading -> searching` is the retry edge: a candidate that fails to
     /// download or verify sends the job back to search for the next candidate.
+    /// `searching -> queued` and `downloading -> queued` are the park edge: the
+    /// acquisition waits for an acquisition source instead of failing, because
+    /// nothing about the song was learned when the layer served no source or
+    /// the source it chose did not answer.
+    ///
+    /// `verifying -> queued` and `importing -> queued` do not exist, because no
+    /// stage after the download produces `backend-unavailable`:
+    /// [`FailureReason::BackendUnavailable`] comes out of the search and
+    /// the download only, and a verification or import failure is about the
+    /// file. A future producer of a park from those states has to add the edge
+    /// here.
+    ///
     /// Terminal states have no outgoing transitions, and a state never
     /// transitions to itself.
     ///
@@ -139,12 +156,14 @@ impl AcquisitionState {
             ) | (
                 AcquisitionState::Searching,
                 AcquisitionState::Downloading
+                    | AcquisitionState::Queued
                     | AcquisitionState::Failed
                     | AcquisitionState::Cancelled
             ) | (
                 AcquisitionState::Downloading,
                 AcquisitionState::Verifying
                     | AcquisitionState::Searching
+                    | AcquisitionState::Queued
                     | AcquisitionState::Failed
                     | AcquisitionState::Cancelled
             ) | (
@@ -363,6 +382,40 @@ impl FailureReason {
         FailureReason::Cancelled,
     ];
 
+    /// Returns whether this failure says something about the song, and therefore
+    /// cools the track down.
+    ///
+    /// A song-specific failure - nothing found, nothing good enough, every
+    /// candidate failed, the wrong audio, a transfer that ran past its deadline
+    /// - is a fact about this song's sources, which is what the
+    /// `acquisition.unavailable_cooldown_hours` pause exists to stop retrying.
+    /// A source outage says nothing about the song: it parks the acquisition
+    /// instead (see [`ParkReason`]), so the song is immediately retryable when
+    /// the source answers again. Only [`FailureReason::NoCandidates`],
+    /// [`FailureReason::NoAcceptableQuality`],
+    /// [`FailureReason::AllCandidatesFailed`],
+    /// [`FailureReason::VerificationFailed`] and [`FailureReason::Timeout`]
+    /// reach a terminal failure with a cooldown;
+    /// [`FailureReason::QuotaExceeded`] and
+    /// [`FailureReason::PermissionDenied`] are admission outcomes and
+    /// [`FailureReason::Cancelled`] ends through the cancellation path, but all
+    /// three are answered here for completeness.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_core::FailureReason;
+    ///
+    /// assert!(FailureReason::NoCandidates.cools_down());
+    /// assert!(!FailureReason::BackendUnavailable.cools_down());
+    /// ```
+    pub const fn cools_down(self) -> bool {
+        !matches!(
+            self,
+            FailureReason::BackendUnavailable | FailureReason::Cancelled
+        )
+    }
+
     /// Returns the literal recorded in `acquisitions.failure_reason`.
     ///
     /// # Examples
@@ -416,6 +469,91 @@ impl FromStr for FailureReason {
             .copied()
             .find(|reason| reason.as_str() == s)
             .ok_or_else(|| UnknownFailureReason(s.to_owned()))
+    }
+}
+
+/// Why a queued acquisition cannot be attempted.
+///
+/// Exactly one of these literals is recorded in `acquisitions.park_reason` while
+/// an acquisition waits for a source, and the same literals are the
+/// `parkReason` member of the native API's acquisition view and of the vendor
+/// extension's acquisition row, so they must not be renamed.
+///
+/// A parked acquisition is a row in [`AcquisitionState::Queued`]: it has not
+/// failed, the track keeps [`crate::Availability::Acquiring`], and the
+/// scheduler claims it again when its retry timer passes or when a provider
+/// registry change clears every park schedule.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_core::ParkReason;
+///
+/// assert_eq!(ParkReason::NoSource.as_str(), "no-source");
+/// assert_eq!("source-unavailable".parse::<ParkReason>().unwrap(), ParkReason::SourceUnavailable);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ParkReason {
+    /// The acquisition layer serves no instance with an acquisition provider.
+    NoSource,
+    /// An instance is configured but the source did not answer.
+    SourceUnavailable,
+}
+
+impl ParkReason {
+    /// Every park reason, in a fixed order.
+    ///
+    /// The order matches the variant declaration order and is stable across
+    /// releases.
+    pub const ALL: [ParkReason; 2] = [ParkReason::NoSource, ParkReason::SourceUnavailable];
+
+    /// Returns the literal recorded in `acquisitions.park_reason`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_core::ParkReason;
+    ///
+    /// assert_eq!(ParkReason::SourceUnavailable.as_str(), "source-unavailable");
+    /// ```
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ParkReason::NoSource => "no-source",
+            ParkReason::SourceUnavailable => "source-unavailable",
+        }
+    }
+}
+
+impl fmt::Display for ParkReason {
+    /// Writes the literal.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The error returned when a string is not a known [`ParkReason`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown park reason `{0}`")]
+pub struct UnknownParkReason(pub String);
+
+impl FromStr for ParkReason {
+    type Err = UnknownParkReason;
+
+    /// Parses a park reason from its literal.
+    ///
+    /// The comparison is exact and case-sensitive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnknownParkReason`] when `s` is not one of the literals
+    /// produced by [`ParkReason::as_str`].
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|reason| reason.as_str() == s)
+            .ok_or_else(|| UnknownParkReason(s.to_owned()))
     }
 }
 
@@ -527,10 +665,12 @@ mod tests {
             (AcquisitionState::Resolving, AcquisitionState::Searching),
             (AcquisitionState::Resolving, AcquisitionState::Failed),
             (AcquisitionState::Searching, AcquisitionState::Downloading),
+            (AcquisitionState::Searching, AcquisitionState::Queued),
             (AcquisitionState::Searching, AcquisitionState::Failed),
             (AcquisitionState::Searching, AcquisitionState::Cancelled),
             (AcquisitionState::Downloading, AcquisitionState::Verifying),
             (AcquisitionState::Downloading, AcquisitionState::Searching),
+            (AcquisitionState::Downloading, AcquisitionState::Queued),
             (AcquisitionState::Downloading, AcquisitionState::Failed),
             (AcquisitionState::Downloading, AcquisitionState::Cancelled),
             (AcquisitionState::Verifying, AcquisitionState::Importing),
@@ -574,6 +714,38 @@ mod tests {
     fn a_failed_candidate_returns_to_search() {
         assert!(AcquisitionState::Downloading.can_transition_to(AcquisitionState::Searching));
         assert!(AcquisitionState::Searching.can_transition_to(AcquisitionState::Downloading));
+    }
+
+    #[test]
+    fn only_the_search_and_download_stages_park() {
+        assert!(AcquisitionState::Searching.can_transition_to(AcquisitionState::Queued));
+        assert!(AcquisitionState::Downloading.can_transition_to(AcquisitionState::Queued));
+        assert!(!AcquisitionState::Verifying.can_transition_to(AcquisitionState::Queued));
+        assert!(!AcquisitionState::Importing.can_transition_to(AcquisitionState::Queued));
+    }
+
+    #[test]
+    fn only_a_song_specific_failure_cools_down() {
+        for reason in FailureReason::ALL {
+            let expected = !matches!(
+                reason,
+                FailureReason::BackendUnavailable | FailureReason::Cancelled
+            );
+            assert_eq!(
+                reason.cools_down(),
+                expected,
+                "`{}` should cool down: {expected}",
+                reason.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn park_reasons_match_the_specification() {
+        assert_eq!(
+            ParkReason::ALL.map(ParkReason::as_str),
+            ["no-source", "source-unavailable"]
+        );
     }
 
     #[test]
@@ -645,6 +817,11 @@ mod tests {
             check(reason, reason.as_str());
             assert_eq!(reason.to_string(), reason.as_str());
         }
+        for reason in ParkReason::ALL {
+            check(reason, reason.as_str());
+            assert_eq!(reason.to_string(), reason.as_str());
+            assert_eq!(reason.as_str().parse::<ParkReason>().unwrap(), reason);
+        }
         for granularity in Granularity::ALL {
             check(granularity, granularity.as_str());
             assert_eq!(granularity.to_string(), granularity.as_str());
@@ -664,6 +841,10 @@ mod tests {
         assert_eq!(
             "no-candidate".parse::<FailureReason>(),
             Err(UnknownFailureReason("no-candidate".to_owned()))
+        );
+        assert_eq!(
+            "no-source-".parse::<ParkReason>(),
+            Err(UnknownParkReason("no-source-".to_owned()))
         );
         assert!(matches!(
             "Track".parse::<Granularity>(),

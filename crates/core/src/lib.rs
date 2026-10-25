@@ -24,8 +24,8 @@ pub mod events;
 pub mod providers;
 
 pub use acquisition::{
-    AcquisitionState, FailureReason, Granularity, Priority, UnknownAcquisitionState,
-    UnknownFailureReason, UnknownGranularity, UnknownPriority,
+    AcquisitionState, FailureReason, Granularity, ParkReason, Priority, UnknownAcquisitionState,
+    UnknownFailureReason, UnknownGranularity, UnknownParkReason, UnknownPriority,
 };
 pub use availability::{Availability, UnknownAvailability};
 pub use error::ProviderError;
