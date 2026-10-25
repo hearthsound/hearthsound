@@ -3817,10 +3817,15 @@
           "id",
           "state",
           "priority",
+          "awaitingSource",
           "createdAt",
           "updatedAt"
         ],
         "properties": {
+          "awaitingSource": {
+            "type": "boolean",
+            "description": "Whether the acquisition is queued and waiting for an acquisition source.\n\nA parked acquisition looks idle because its state is `queued`; this flag\nsays it is not about to run."
+          },
           "createdAt": {
             "type": "integer",
             "format": "int64",
@@ -3843,6 +3848,13 @@
               "null"
             ],
             "description": "The plugin instance doing the work, when one has been assigned."
+          },
+          "parkReason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the acquisition is waiting for a source, when it is parked:\n`no-source` or `source-unavailable`."
           },
           "percent": {
             "type": [
