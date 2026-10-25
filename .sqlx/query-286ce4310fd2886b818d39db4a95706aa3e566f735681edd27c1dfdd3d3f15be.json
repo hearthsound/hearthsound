@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE acquisitions SET state = 'completed', media_file_id = ?, park_reason = NULL, retry_at = NULL, park_count = 0, updated_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "286ce4310fd2886b818d39db4a95706aa3e566f735681edd27c1dfdd3d3f15be"
+}

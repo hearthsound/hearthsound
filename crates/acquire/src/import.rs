@@ -1919,6 +1919,15 @@ impl AcquisitionOrchestrator {
     ///
     /// # Parameters
     ///
+    /// Nothing in the server writes into a managed file after the import, so a
+    /// `link`-mode file shares its inode with the import root's file without the
+    /// source ever being modified: the tags are written to the staged copy in
+    /// the acquisition's staging directory, and the cover art is written beside
+    /// the file, never into it. A future retag or cover-embed feature has to
+    /// break the link first.
+    ///
+    /// # Parameters
+    ///
     /// - `source`: the absolute path of the file the candidate verified.
     /// - `destination`: the absolute managed path to link it to.
     ///
@@ -1959,6 +1968,7 @@ impl AcquisitionOrchestrator {
 }
 
 /// What installing a tagged staged file at its destination did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Installed {
     /// The file is at the destination.
     Placed,
@@ -1971,9 +1981,10 @@ enum Installed {
 /// The staged file is hardlinked into place - the one install primitive that is
 /// both atomic and refuses a name that is taken - and the staged copy is removed
 /// afterwards, which is what a move would have done. A filesystem without hard
-/// links gets a durable copy instead, and a name that turns out to be taken is
-/// reported so the caller can reserve the next collision suffix rather than
-/// overwrite the file that holds it.
+/// links gets a durable copy instead, and the copy claims its name the same way a
+/// link does: it is linked from the temporary file, so a name that appeared
+/// while the bytes were being written is reported as taken instead of being
+/// replaced. Every way out removes the temporary file.
 ///
 /// # Parameters
 ///
@@ -2000,48 +2011,84 @@ async fn install(staged: &Path, destination: &Path) -> Result<Installed, Acquire
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             return Ok(Installed::Taken);
         }
+        // The two paths are on different filesystems, or the filesystem has no
+        // hard links: copy instead, claiming the name on the way in.
         Err(_) => {}
     }
-    if placement::path_exists(destination).await? {
-        return Ok(Installed::Taken);
+    let installed = copy_durable(staged, destination).await?;
+    if installed == Installed::Placed {
+        let _ = tokio::fs::remove_file(staged).await;
     }
-    copy_durable(staged, destination).await?;
-    let _ = tokio::fs::remove_file(staged).await;
-    Ok(Installed::Placed)
+    Ok(installed)
 }
 
 /// Copies a file durably to a destination on another filesystem.
 ///
 /// The bytes are written to a temporary file beside the destination, flushed to
-/// disk, and renamed into place, so a crash never exposes a partial file at the
-/// destination path.
+/// disk, and then linked into place. Linking is what claims the name: a
+/// destination that appeared after the import chose it makes the link fail with
+/// `AlreadyExists`, and the temporary file is removed instead of the other
+/// file being replaced. Only a filesystem that refuses the link for another
+/// reason falls back to a rename, which is the one path that can still replace
+/// a file that appeared in between.
+///
+/// # Parameters
+///
+/// - `source`: the file to copy.
+/// - `destination`: the final managed path.
+///
+/// # Returns
+///
+/// [`Installed::Placed`] when the file is at the destination and
+/// [`Installed::Taken`] when a file holds the name; no temporary file is left
+/// behind either way.
 ///
 /// # Errors
 ///
-/// Returns [`AcquireError::Io`] when a step fails.
-async fn copy_durable(source: &Path, destination: &Path) -> Result<(), AcquireError> {
+/// Returns [`AcquireError::Io`] when a step fails; the temporary file is removed
+/// first.
+async fn copy_durable(source: &Path, destination: &Path) -> Result<Installed, AcquireError> {
     let temporary = match destination.parent() {
         Some(parent) => parent.join(format!(".{}.tmp", Uuid::now_v7())),
         None => destination.with_extension("tmp"),
     };
-    copy_file(source, &temporary).await?;
-    let file = tokio::fs::File::open(&temporary)
-        .await
-        .map_err(|source| AcquireError::Io {
+    if let Err(error) = copy_file(source, &temporary).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error);
+    }
+    let synced = async {
+        let file = tokio::fs::File::open(&temporary).await?;
+        file.sync_all().await
+    }
+    .await;
+    if let Err(source) = synced {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(AcquireError::Io {
             path: temporary.clone(),
             source,
-        })?;
-    file.sync_all().await.map_err(|source| AcquireError::Io {
-        path: temporary.clone(),
-        source,
-    })?;
-    drop(file);
-    tokio::fs::rename(&temporary, destination)
-        .await
-        .map_err(|source| AcquireError::Io {
-            path: destination.to_path_buf(),
-            source,
-        })
+        });
+    }
+    match tokio::fs::hard_link(&temporary, destination).await {
+        Ok(()) => {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            Ok(Installed::Placed)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            Ok(Installed::Taken)
+        }
+        Err(_) => {
+            let renamed = tokio::fs::rename(&temporary, destination).await;
+            if renamed.is_err() {
+                let _ = tokio::fs::remove_file(&temporary).await;
+            }
+            renamed.map_err(|source| AcquireError::Io {
+                path: destination.to_path_buf(),
+                source,
+            })?;
+            Ok(Installed::Placed)
+        }
+    }
 }
 
 /// Copies a file, mapping the error onto the failing path.

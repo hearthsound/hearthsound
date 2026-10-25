@@ -66,6 +66,9 @@ pub(crate) enum SearchOutcome {
         /// The album's tracks, in playing order.
         tracks: Vec<Track>,
     },
+    /// The acquisition layer serves no instance, so nothing could be searched
+    /// and the acquisition has to wait for a source.
+    AwaitingSource,
     /// Nothing could be tried and the acquisition was failed.
     Failed(FailureReason),
     /// The acquisition was cancelled while the search ran, so the backend
@@ -82,10 +85,11 @@ impl AcquisitionOrchestrator {
     ///
     /// # Returns
     ///
-    /// The plan to download, or the reason the acquisition was failed. A
-    /// failure is recorded before it is returned: the row is `failed`, the
-    /// track is `unavailable` until the cooldown elapses, and both events have
-    /// been published.
+    /// The plan to download, the reason the acquisition was failed, or
+    /// [`SearchOutcome::AwaitingSource`] when the acquisition layer serves no
+    /// instance. A failure is recorded before it is returned: the row is
+    /// `failed`, the track is `unavailable` until the cooldown elapses, and both
+    /// events have been published.
     ///
     /// # Errors
     ///
@@ -215,6 +219,15 @@ impl AcquisitionOrchestrator {
             preferred_formats: preferred_formats(&profile),
         };
 
+        // With no instance there is nothing to ask, and failing would cool the
+        // track down over a configuration that is about to change.
+        if !self.has_acquisition_source() {
+            tracing::info!(
+                acquisition = %row.id,
+                "a search found no acquisition source; waiting for one"
+            );
+            return Ok(SearchOutcome::AwaitingSource);
+        }
         let mut run = LayerSearch {
             orchestrator: self,
             context: AcquisitionContext::new(self.staging_dir(row.id)),
@@ -301,9 +314,11 @@ impl AcquisitionOrchestrator {
     ///
     /// # Returns
     ///
-    /// The album plan to download, the reason nothing could be tried, or the
-    /// cancellation. Unlike a track search, an empty plan does not fail the
-    /// acquisition here: the caller falls back to one acquisition per track.
+    /// The album plan to download, the reason nothing could be tried, the
+    /// cancellation, or [`SearchOutcome::AwaitingSource`] when the acquisition
+    /// layer serves no instance. Unlike a track search, an empty plan does not
+    /// fail the acquisition here: the caller falls back to one acquisition per
+    /// track.
     ///
     /// # Errors
     ///
@@ -381,6 +396,13 @@ impl AcquisitionOrchestrator {
             preferred_formats: preferred_formats(&profile),
         };
 
+        if !self.has_acquisition_source() {
+            tracing::info!(
+                acquisition = %row.id,
+                "an album search found no acquisition source; waiting for one"
+            );
+            return Ok(SearchOutcome::AwaitingSource);
+        }
         let mut run = LayerSearch {
             orchestrator: self,
             context: AcquisitionContext::new(self.staging_dir(row.id)),

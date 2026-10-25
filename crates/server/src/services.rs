@@ -689,6 +689,33 @@ impl Services {
         &self.orchestrator
     }
 
+    /// Rebuilds the provider registry and tells the acquisition orchestrator.
+    ///
+    /// Every path that changes what the registry serves - an instance created,
+    /// edited, enabled or removed, a layer assignment, a plugin disabled by an
+    /// administrator or by the host itself - goes through here rather than
+    /// rebuilding the registry alone. A rebuild only re-reads the tables, so
+    /// without the second half a worker would keep polling a plugin host the
+    /// registry no longer serves: parked acquisitions would wait for a source
+    /// that is already there, and downloads would keep running for an instance
+    /// that is gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns the plugin or database error of the rebuild. The orchestrator is
+    /// told only when the rebuild succeeded, because until then the registry
+    /// still serves what it served before.
+    pub async fn rebuild_providers(&self) -> Result<(), ServerError> {
+        log_rebuild(&self.registry().rebuild().await?);
+        if let Err(error) = self.orchestrator().providers_changed().await {
+            tracing::error!(
+                %error,
+                "could not bring the acquisitions in line with the registry"
+            );
+        }
+        Ok(())
+    }
+
     /// Returns the prefetch scheduler.
     ///
     /// `getAlbum` records the listing it answered and `stream` notes the track

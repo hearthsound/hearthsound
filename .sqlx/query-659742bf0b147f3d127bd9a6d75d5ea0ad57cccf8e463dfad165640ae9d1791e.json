@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE acquisitions SET park_reason = ?, park_count = ?, retry_at = ?, updated_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "659742bf0b147f3d127bd9a6d75d5ea0ad57cccf8e463dfad165640ae9d1791e"
+}

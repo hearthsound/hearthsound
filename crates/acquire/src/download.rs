@@ -37,11 +37,12 @@ use hearthsound_core::{AcquisitionState, FailureReason, ProviderError, QualityTi
 use hearthsound_library::Track;
 use hearthsound_plugin_host::RegistryInstance;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, OwnedSemaphorePermit};
+use tokio::sync::Notify;
 use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::announce::ANNOUNCE_INTERVAL;
+use crate::budget::SlotPermit;
 use crate::error::AcquireError;
 use crate::import::HandoffOutcome;
 use crate::orchestrator::AcquisitionOrchestrator;
@@ -54,6 +55,13 @@ use crate::select::{
 
 /// How long the completion rule waits for a file to stop growing.
 const COMPLETION_MAX_WAIT: Duration = Duration::from_secs(30);
+
+/// How many consecutive backend errors one candidate's polling survives.
+///
+/// A transient backend error is retried this many times before the candidate is
+/// abandoned; the poll interval separates the attempts. Three failures in a row
+/// - the retries and the original - mean the backend is gone rather than busy.
+const POLL_RETRY_LIMIT: u32 = 2;
 
 /// The root name that addresses an acquisition's own staging directory.
 pub(crate) const STAGING_ROOT: &str = "staging";
@@ -110,6 +118,8 @@ enum CandidateAttempt {
     },
     /// The backend no longer knows the download token.
     LostToken,
+    /// The instance serving the attempt left the acquisition layer.
+    Abandoned,
 }
 
 /// What one candidate's attempt leaves to do.
@@ -132,6 +142,9 @@ enum AlbumVerdict {
     Abort(Option<(FailureReason, Option<String>)>),
     /// The acquisition was cancelled.
     Cancelled,
+    /// The instance serving the attempt left the layer, so the plan cannot be
+    /// continued and the album has to be searched again.
+    Abandoned,
 }
 
 /// Lines a completed album download's files up with the candidate's mapping.
@@ -176,6 +189,14 @@ fn order_album_files(
 }
 
 /// How long one candidate's attempt may take and how often it is polled.
+///
+/// The three limits cover one candidate's polling run: the queue timeout while
+/// the source holds the transfer, the stall timeout while it makes no progress,
+/// and the total deadline for the whole attempt, which is what stops a transfer
+/// that trickles from holding an instance's slot forever. The deadline starts
+/// when the transfer starts - not when the search started - and a candidate
+/// retried after a preemption gets a fresh clock, because the `play` request
+/// that interrupted it is a new attempt.
 #[derive(Debug, Clone, Copy)]
 struct AttemptLimits {
     /// How long to wait between two polls.
@@ -184,6 +205,8 @@ struct AttemptLimits {
     stall_timeout: Duration,
     /// How long the download may sit queued.
     queue_timeout: Duration,
+    /// How long the whole attempt may run; [`None`] when there is no limit.
+    total: Option<Duration>,
 }
 
 /// What the completion rule decided about a finished download.
@@ -574,6 +597,16 @@ impl AcquisitionOrchestrator {
             let Some(provider) = instance.acquisition().cloned() else {
                 continue;
             };
+            // The plan was built from a snapshot: an instance that left the
+            // layer since must not be given work any more.
+            if self.instance_by_id(instance.id()).is_none() {
+                tracing::debug!(
+                    acquisition = %row.id,
+                    instance = instance.slug().as_str(),
+                    "skipping an instance that left the acquisition layer"
+                );
+                continue;
+            }
             if attempts == row.attempts {
                 self.repository()
                     .transition(
@@ -644,6 +677,9 @@ impl AcquisitionOrchestrator {
                     if reason.is_some() {
                         failure = reason;
                     }
+                    // Whatever the rejected candidate left behind must not be
+                    // found by the next one.
+                    self.clear_staging(row.id).await;
                 }
             }
         }
@@ -708,6 +744,11 @@ impl AcquisitionOrchestrator {
             SearchOutcome::Planned { instances, plan } => {
                 Box::pin(self.run_download_plan(id, &instances, &plan, false)).await
             }
+            SearchOutcome::AwaitingSource => {
+                self.park(&row, "no acquisition source is configured")
+                    .await?;
+                Ok(DownloadOutcome::Stopped)
+            }
             SearchOutcome::Failed(_)
             | SearchOutcome::Cancelled
             | SearchOutcome::AlbumPlanned { .. } => {
@@ -728,9 +769,10 @@ impl AcquisitionOrchestrator {
     /// instance, and the files it reports when it completes are verified and
     /// imported like any other candidate's. A row that cannot be resumed
     /// continues as the ledger allows instead of failing: a download that is
-    /// missing its instance, candidate or token, or whose candidate has no
-    /// usable tier, goes back to `searching`, and an instance the registry no
-    /// longer serves fails the acquisition as `backend-unavailable`.
+    /// missing its instance, candidate or token, whose candidate has no usable
+    /// tier, or whose instance the registry no longer serves goes back to
+    /// `searching`, where the search either picks the remaining instances or
+    /// parks because the layer is empty.
     ///
     /// # Parameters
     ///
@@ -778,13 +820,11 @@ impl AcquisitionOrchestrator {
                 instance = %instance_id,
                 "the instance that served a download is gone"
             );
-            self.fail_acquisition(
-                row.id,
-                FailureReason::BackendUnavailable,
-                Some("the instance that served the download is gone"),
-            )
-            .await?;
-            return Ok(DownloadOutcome::Stopped);
+            // A restart is not a failure of the song: the search picks the
+            // remaining instances, or parks when the layer is empty.
+            return self
+                .restart_search(row, "the instance that served the download is gone")
+                .await;
         };
         let Some(provider) = instance.acquisition().cloned() else {
             tracing::warn!(
@@ -792,13 +832,12 @@ impl AcquisitionOrchestrator {
                 instance = instance.slug().as_str(),
                 "the instance can no longer download"
             );
-            self.fail_acquisition(
-                row.id,
-                FailureReason::BackendUnavailable,
-                Some("the instance that served the download can no longer download"),
-            )
-            .await?;
-            return Ok(DownloadOutcome::Stopped);
+            return self
+                .restart_search(
+                    row,
+                    "the instance that served the download can no longer download",
+                )
+                .await;
         };
         let limits = self.attempt_limits(row)?;
         tracing::info!(
@@ -938,6 +977,15 @@ impl AcquisitionOrchestrator {
                     .await?;
                 Ok(AttemptVerdict::Done(outcome))
             }
+            CandidateAttempt::Abandoned => {
+                let outcome = self
+                    .restart_search(
+                        row,
+                        "the instance that served the download was disabled or removed",
+                    )
+                    .await?;
+                Ok(AttemptVerdict::Done(outcome))
+            }
             CandidateAttempt::Preempted => unreachable!("the preemption loop retries"),
         }
     }
@@ -1021,6 +1069,16 @@ impl AcquisitionOrchestrator {
             let Some(provider) = instance.acquisition().cloned() else {
                 continue;
             };
+            // The plan was built from a snapshot: an instance that left the
+            // layer since must not be given work any more.
+            if self.instance_by_id(instance.id()).is_none() {
+                tracing::debug!(
+                    acquisition = %row.id,
+                    instance = instance.slug().as_str(),
+                    "skipping an instance that left the acquisition layer"
+                );
+                continue;
+            }
             if attempts == row.attempts {
                 self.repository()
                     .transition(
@@ -1091,12 +1149,21 @@ impl AcquisitionOrchestrator {
                     if reason.is_some() {
                         failure = reason;
                     }
+                    self.clear_staging(row.id).await;
                 }
                 AlbumVerdict::Abort(reason) => {
                     failure = reason;
                     break;
                 }
                 AlbumVerdict::Cancelled => return Ok(()),
+                AlbumVerdict::Abandoned => {
+                    self.restart_search(
+                        row,
+                        "the instance that served the download was disabled or removed",
+                    )
+                    .await?;
+                    return Ok(());
+                }
             }
         }
 
@@ -1153,6 +1220,9 @@ impl AcquisitionOrchestrator {
                 plan,
                 tracks,
             } => Box::pin(self.run_album_plan(id, &instances, &plan, &tracks, false)).await,
+            SearchOutcome::AwaitingSource => {
+                self.park(&row, "no acquisition source is configured").await
+            }
             _ => {
                 let detail =
                     detail.unwrap_or("no album folder passed verification after a fresh search");
@@ -1256,6 +1326,7 @@ impl AcquisitionOrchestrator {
                 FailureReason::BackendUnavailable,
                 Some("the backend lost the download token".to_owned()),
             )))),
+            CandidateAttempt::Abandoned => Ok(AlbumVerdict::Abandoned),
             CandidateAttempt::Preempted => unreachable!("the preemption loop retries"),
         }
     }
@@ -1315,7 +1386,8 @@ impl AcquisitionOrchestrator {
     ///
     /// The poll interval and the queue timeout follow the request's class: a user
     /// is waiting for a `play` or `next` acquisition, so it is polled often and
-    /// abandoned sooner.
+    /// abandoned sooner. The total deadline is the same for every class, because
+    /// a slot held by a trickling transfer is lost to everyone.
     ///
     /// # Parameters
     ///
@@ -1351,6 +1423,10 @@ impl AcquisitionOrchestrator {
                 }
                 .max(0) as u64,
             ),
+            total: match snapshot.get(keys::ACQUISITION_ATTEMPT_TIMEOUT_SECS)?.max(0) {
+                0 => None,
+                secs => Some(Duration::from_secs(secs as u64)),
+            },
         })
     }
 }
@@ -1395,15 +1471,16 @@ impl AcquisitionOrchestrator {
         provider: &dyn AcquisitionProvider,
         input: CandidateAttemptInput<'_>,
     ) -> Result<CandidateAttempt, AcquireError> {
-        let Some(permit) = self
+        let permit = self
             .take_download_slot(row, instance, input.must_wait)
-            .await
-        else {
-            return Ok(CandidateAttempt::Failed {
-                reason: FailureReason::BackendUnavailable,
-                detail: Some("the download budget is closed".to_owned()),
-            });
-        };
+            .await;
+        if let Some(handle) = instance.acquisition() {
+            self.remember_backend(
+                row.id,
+                instance.slug().as_str().to_owned(),
+                Arc::clone(handle),
+            );
+        }
         let preempted = self
             .download_budgets()
             .register(row.id, instance.id(), row.priority);
@@ -1441,12 +1518,14 @@ impl AcquisitionOrchestrator {
         token: &str,
         limits: AttemptLimits,
     ) -> Result<CandidateAttempt, AcquireError> {
-        let Some(permit) = self.take_download_slot(row, instance, true).await else {
-            return Ok(CandidateAttempt::Failed {
-                reason: FailureReason::BackendUnavailable,
-                detail: Some("the download budget is closed".to_owned()),
-            });
-        };
+        let permit = self.take_download_slot(row, instance, true).await;
+        if let Some(handle) = instance.acquisition() {
+            self.remember_backend(
+                row.id,
+                instance.slug().as_str().to_owned(),
+                Arc::clone(handle),
+            );
+        }
         let preempted = self
             .download_budgets()
             .register(row.id, instance.id(), row.priority);
@@ -1461,10 +1540,10 @@ impl AcquisitionOrchestrator {
     /// Takes one of an instance's download slots for an attempt.
     ///
     /// The slot is taken without waiting when one is free. When none is, an
-    /// interactive request preempts the instance's least urgent bulk download and
-    /// then waits for the slot, which the preempted download releases as soon as
-    /// it is woken; the waiters are served in order, so the interactive request
-    /// takes the slot first.
+    /// interactive request preempts the instance's least urgent bulk download -
+    /// each in-flight download at most once per attempt, so two interactive
+    /// requests preempt two different ones - and then waits for the slot, which
+    /// the preempted download releases as soon as it is woken.
     ///
     /// # Parameters
     ///
@@ -1475,17 +1554,16 @@ impl AcquisitionOrchestrator {
     ///
     /// # Returns
     ///
-    /// The permit, which the caller must hold for the whole attempt, or `None`
-    /// when the instance's budget is closed.
+    /// The permit, which the caller must hold for the whole attempt.
     async fn take_download_slot(
         &self,
         row: &AcquisitionRow,
         instance: &RegistryInstance,
         must_wait: bool,
-    ) -> Option<OwnedSemaphorePermit> {
+    ) -> SlotPermit {
         let slots = self.download_budgets().slots(instance);
-        if !must_wait && let Ok(permit) = Arc::clone(&slots).try_acquire_owned() {
-            return Some(permit);
+        if !must_wait && let Some(permit) = slots.try_acquire() {
+            return permit;
         }
         if RequestClass::from_priority(row.priority).is_interactive()
             && let Some(victim) = self.download_budgets().preempt(instance.id(), row.priority)
@@ -1497,7 +1575,7 @@ impl AcquisitionOrchestrator {
                 "preempted a bulk download for an interactive request"
             );
         }
-        Arc::clone(&slots).acquire_owned().await.ok()
+        slots.acquire().await
     }
 
     /// Starts a candidate's download and polls it until it ends.
@@ -1553,6 +1631,21 @@ impl AcquisitionOrchestrator {
             .await
     }
 
+    /// Resolves when an attempt's deadline passes, or never when it has none.
+    ///
+    /// It is a select arm rather than a check between polls, so a transfer that
+    /// is stuck in one long poll still ends when its deadline passes.
+    ///
+    /// # Parameters
+    ///
+    /// - `deadline`: the instant the attempt has to end, or `None` for no limit.
+    async fn wait_for_deadline(deadline: Option<Instant>) {
+        match deadline {
+            Some(at) => tokio::time::sleep_until(at).await,
+            None => std::future::pending::<()>().await,
+        }
+    }
+
     /// Polls a running download until it ends.
     ///
     /// The token is polled every `limits.poll_interval` until the backend
@@ -1561,7 +1654,17 @@ impl AcquisitionOrchestrator {
     /// `preempted` and the attempt is abandoned so the slot is free at once; a
     /// cancellation - from [`AcquisitionOrchestrator::cancel`] or from
     /// [`AcquisitionOrchestrator::reconcile`] noticing another process's write -
-    /// wakes it the same way and abandons the attempt as cancelled.
+    /// wakes it the same way and abandons the attempt as cancelled; and a
+    /// provider registry change that took the instance away wakes it through the
+    /// abort signal, so the acquisition re-searches instead of polling an
+    /// instance nobody serves.
+    ///
+    /// A backend error while polling is retried [`POLL_RETRY_LIMIT`] times,
+    /// separated by the poll interval, before the candidate is abandoned: a
+    /// single transient failure must not throw away a live transfer. A transfer
+    /// past its `limits.total` deadline is abandoned at once, and a transfer the
+    /// backend reports as failed is cancelled there before the candidate is
+    /// given up, so the backend does not keep a record nobody will finish.
     ///
     /// # Parameters
     ///
@@ -1586,8 +1689,11 @@ impl AcquisitionOrchestrator {
     ) -> Result<CandidateAttempt, AcquireError> {
         let context = AcquisitionContext::new(self.staging_dir(row.id));
         let stop = self.stop_signal(row.id);
+        let abandon = self.abandon_signal(row.id);
+        let deadline = limits.total.map(|total| Instant::now() + total);
         let mut last_bytes = 0_u64;
         let mut last_progress = Instant::now();
+        let mut poll_errors = 0_u32;
         let mut queued_since: Option<Instant> = None;
         let mut next_poll = Instant::now() + limits.poll_interval;
         let mut heartbeat =
@@ -1613,18 +1719,54 @@ impl AcquisitionOrchestrator {
                     );
                     return Ok(CandidateAttempt::Cancelled);
                 }
+                () = abandon.notified() => {
+                    provider.cancel_download(&context, token).await;
+                    tracing::info!(
+                        acquisition = %row.id,
+                        instance = instance.slug().as_str(),
+                        "abandoned a download whose instance left the acquisition layer"
+                    );
+                    return Ok(CandidateAttempt::Abandoned);
+                }
+                () = Self::wait_for_deadline(deadline) => {
+                    tracing::warn!(
+                        acquisition = %row.id,
+                        instance = instance.slug().as_str(),
+                        "a download ran past its deadline"
+                    );
+                    provider.cancel_download(&context, token).await;
+                    return Ok(CandidateAttempt::Failed {
+                        reason: FailureReason::Timeout,
+                        detail: Some("the transfer ran past its deadline".to_owned()),
+                    });
+                }
             }
             next_poll = Instant::now() + limits.poll_interval;
 
             let state = match provider.poll_download(&context, token).await {
-                Ok(state) => state,
+                Ok(state) => {
+                    poll_errors = 0;
+                    state
+                }
                 Err(ProviderError::NotFound) => {
                     tracing::warn!(
                         instance = instance.slug().as_str(),
                         acquisition = %row.id,
                         "the backend lost the download token"
                     );
+                    provider.cancel_download(&context, token).await;
                     return Ok(CandidateAttempt::LostToken);
+                }
+                Err(error) if poll_errors < POLL_RETRY_LIMIT => {
+                    poll_errors += 1;
+                    tracing::warn!(
+                        instance = instance.slug().as_str(),
+                        acquisition = %row.id,
+                        attempt = poll_errors,
+                        %error,
+                        "polling a download failed; retrying"
+                    );
+                    continue;
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -1696,6 +1838,10 @@ impl AcquisitionOrchestrator {
                         detail = detail.as_str(),
                         "the backend reported a failed download"
                     );
+                    // The backend keeps a record of a transfer nobody will
+                    // finish - slskd keeps its files, Lidarr its queue item -
+                    // until it is told to drop it.
+                    provider.cancel_download(&context, token).await;
                     return Ok(CandidateAttempt::Failed {
                         reason: FailureReason::AllCandidatesFailed,
                         detail: Some(detail),

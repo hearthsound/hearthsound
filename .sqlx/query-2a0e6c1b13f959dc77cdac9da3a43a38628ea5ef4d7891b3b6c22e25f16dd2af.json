@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT a.id, a.track_id, a.priority, a.state, a.progress, a.failure_reason, a.created_at, a.updated_at, t.title AS track_title, t.display_artist AS track_artist, i.slug AS instance_slug FROM acquisitions a LEFT JOIN tracks t ON t.id = a.track_id LEFT JOIN provider_instances i ON i.id = a.instance_id WHERE (? IS NULL OR a.state = ?) AND (? = 0 OR a.state IN ('queued', 'resolving', 'searching', 'downloading', 'verifying', 'importing')) ORDER BY a.created_at DESC, a.rowid DESC LIMIT ?",
+  "query": "SELECT a.id, a.track_id, a.priority, a.state, a.progress, a.failure_reason, a.park_reason, a.created_at, a.updated_at, t.title AS track_title, t.display_artist AS track_artist, i.slug AS instance_slug FROM acquisitions a LEFT JOIN tracks t ON t.id = a.track_id LEFT JOIN provider_instances i ON i.id = a.instance_id WHERE (? IS NULL OR a.state = ?) AND (? = 0 OR a.state IN ('queued', 'resolving', 'searching', 'downloading', 'verifying', 'importing')) ORDER BY a.created_at DESC, a.rowid DESC LIMIT ?",
   "describe": {
     "columns": [
       {
@@ -70,8 +70,19 @@
         }
       },
       {
-        "name": "created_at",
+        "name": "park_reason",
         "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "park_reason"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 7,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -82,7 +93,7 @@
       },
       {
         "name": "updated_at",
-        "ordinal": 7,
+        "ordinal": 8,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -93,7 +104,7 @@
       },
       {
         "name": "track_title",
-        "ordinal": 8,
+        "ordinal": 9,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -104,7 +115,7 @@
       },
       {
         "name": "track_artist",
-        "ordinal": 9,
+        "ordinal": 10,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -115,7 +126,7 @@
       },
       {
         "name": "instance_slug",
-        "ordinal": 10,
+        "ordinal": 11,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -135,6 +146,7 @@
       false,
       true,
       true,
+      true,
       false,
       false,
       true,
@@ -142,5 +154,5 @@
       true
     ]
   },
-  "hash": "446e1bbcf261bdbc778d93d87af3f5bc99054adfdf70fbb5b9aae0991a838a94"
+  "hash": "2a0e6c1b13f959dc77cdac9da3a43a38628ea5ef4d7891b3b6c22e25f16dd2af"
 }

@@ -39,9 +39,10 @@ use hearthsound_core::events::{
     AcquisitionUpdated, Audience, EventBus, ServerEvent, TrackAvailability,
 };
 use hearthsound_core::providers::AcquisitionContext;
+use hearthsound_core::providers::AcquisitionProvider;
 use hearthsound_core::{
-    AcquisitionState, Availability, EntityId, FailureReason, Granularity, IdPrefix, Priority,
-    QualityTier, new_uuid_v7,
+    AcquisitionState, Availability, EntityId, FailureReason, Granularity, IdPrefix, ParkReason,
+    Priority, QualityTier, new_uuid_v7,
 };
 use hearthsound_db::Database;
 use hearthsound_library::{LibraryRepository, StorageRoots, media_files, tracks};
@@ -87,6 +88,32 @@ const QUOTA_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 /// is only worth its cost when more than one track is missing; a single missing
 /// track is acquired by the track pipeline either way.
 const ALBUM_MIN_TRACKS: usize = 2;
+
+/// How long a parked acquisition waits before its source is tried again.
+///
+/// The first retry is a minute away; the wait doubles with every consecutive
+/// park up to [`PARK_RETRY_MAX`]. A registry change clears the schedule, so a
+/// source that was just added or enabled is tried at once instead.
+const PARK_RETRY_BASE: Duration = Duration::from_secs(60);
+
+/// The longest wait between two retries of the same parked acquisition.
+const PARK_RETRY_MAX: Duration = Duration::from_secs(3_600);
+
+/// Returns how long a parked acquisition waits before its next attempt.
+///
+/// # Parameters
+///
+/// - `park_count`: how many times the acquisition has parked in a row,
+///   including the park this delay is for.
+///
+/// # Returns
+///
+/// One minute for the first park, doubling per park up to one hour: 1, 2, 4, 8,
+/// 16, 32, 60 and 60 minutes.
+fn park_retry_delay(park_count: i64) -> Duration {
+    let exponent = park_count.clamp(1, 7) as u32 - 1;
+    (PARK_RETRY_BASE * 2_u32.pow(exponent)).min(PARK_RETRY_MAX)
+}
 
 /// A request for a track that is not on disk.
 ///
@@ -370,6 +397,13 @@ pub struct AcquisitionProgress {
     pub instance: Option<String>,
     /// Why the acquisition failed, when it has failed.
     pub failure_reason: Option<FailureReason>,
+    /// Whether the acquisition is parked and waiting for an acquisition source.
+    ///
+    /// The state of a parked acquisition is `queued`, which on its own says the
+    /// job is about to run; this flag says it is waiting for a source instead.
+    pub awaiting_source: bool,
+    /// Why the acquisition is waiting for a source, when it is parked.
+    pub park_reason: Option<ParkReason>,
     /// The absolute path of a file the acquisition has produced, once its
     /// download completed and the files were resolved.
     ///
@@ -573,8 +607,8 @@ struct Inner {
     /// The gate that decides which progress snapshots reach the bus, with the
     /// latest snapshot of each live acquisition.
     announce_gate: Mutex<AnnounceGate>,
-    /// The acquisitions this process still has side effects for, and the signal
-    /// that wakes a worker when another process ends one of them.
+    /// The acquisitions this process still has side effects for, with the
+    /// signals that wake their workers and the backend each attempt runs on.
     ///
     /// A row is added when the acquisition is admitted, or when a starting
     /// process resumes it, and removed when its task ends and its staging
@@ -582,7 +616,7 @@ struct Inner {
     /// whose cancellation this process has to notice:
     /// [`AcquisitionOrchestrator::reconcile`] walks it after another connection
     /// writes the ledger.
-    in_flight: Mutex<HashMap<Uuid, Arc<Notify>>>,
+    in_flight: Mutex<HashMap<Uuid, InFlight>>,
     /// How many worker slots are in use.
     running: AtomicUsize,
     /// The per-instance search budgets the search stage respects.
@@ -593,6 +627,42 @@ struct Inner {
     started: AtomicBool,
     /// Wakes the scheduler when there is work.
     notify: Notify,
+}
+
+/// The side effects one in-flight acquisition has.
+struct InFlight {
+    /// Wakes the worker when the acquisition has to stop.
+    stop: Arc<Notify>,
+    /// Wakes a download whose instance left the acquisition layer.
+    abandon: Arc<Notify>,
+    /// The backend the attempt was started on, when one was started.
+    ///
+    /// A ledger row names its instance by id and the registry is searched by
+    /// layer membership, so an instance that was disabled or removed cannot be
+    /// found that way any more. The handle this process already holds can still
+    /// be addressed, which is what lets a cancel or a park reach the backend of
+    /// an instance that has just left.
+    backend: Option<RememberedBackend>,
+}
+
+/// The backend one attempt was started on.
+#[derive(Clone)]
+pub(crate) struct RememberedBackend {
+    /// The instance's slug, for the log.
+    slug: String,
+    /// The instance's acquisition provider.
+    provider: Arc<dyn AcquisitionProvider>,
+}
+
+impl Default for InFlight {
+    /// Starts an entry with empty signals and no backend.
+    fn default() -> InFlight {
+        InFlight {
+            stop: Arc::new(Notify::new()),
+            abandon: Arc::new(Notify::new()),
+            backend: None,
+        }
+    }
 }
 
 /// An import destination one import holds until it commits or gives up.
@@ -863,10 +933,12 @@ impl AcquisitionOrchestrator {
             });
         }
 
-        let track = self
-            .inner
-            .library
-            .get_track(request.track_id)
+        let id = new_uuid_v7();
+        let mut tx = self.inner.database.writer().begin().await?;
+        // The track is read inside the transaction admission writes in, so the
+        // availability the request is judged by is the one the row it may join
+        // was written with.
+        let track = tracks::get_track(&mut tx, request.track_id)
             .await?
             .ok_or(AcquireError::UnknownTrack(request.track_id))?;
 
@@ -874,11 +946,10 @@ impl AcquisitionOrchestrator {
             track.availability,
             Availability::Local | Availability::Cached
         ) {
+            tx.rollback().await?;
             return Ok(AcquireOutcome::AlreadyAvailable { track_id: track.id });
         }
 
-        let id = new_uuid_v7();
-        let mut tx = self.inner.database.writer().begin().await?;
         if let Some(active) = repo::active_for_track(&mut tx, track.id).await? {
             let priority = active.priority.min(request.priority);
             let raised = if priority != active.priority {
@@ -942,6 +1013,7 @@ impl AcquisitionOrchestrator {
                 reason = reason.as_str(),
                 "refused an acquire request over the requester's quota"
             );
+            tx.rollback().await?;
             return Ok(AcquireOutcome::Denied {
                 track_id: track.id,
                 reason,
@@ -956,22 +1028,13 @@ impl AcquisitionOrchestrator {
                     unavailable_until = until,
                     "refused an acquire request while the track cools down"
                 );
+                tx.rollback().await?;
                 return Ok(AcquireOutcome::CoolingDown {
                     track_id: track.id,
                     unavailable_until: until,
                 });
             }
         }
-
-        // The directory belongs to an acquisition that is admitted here, so it
-        // is created only once every earlier refusal is behind us.
-        let staging = self.staging_dir(id);
-        tokio::fs::create_dir_all(&staging)
-            .await
-            .map_err(|source| AcquireError::Io {
-                path: staging.clone(),
-                source,
-            })?;
 
         let new = NewAcquisition {
             id,
@@ -992,6 +1055,20 @@ impl AcquisitionOrchestrator {
         .await?;
         tx.commit().await?;
 
+        // The directory belongs to an acquisition that is admitted here, so it
+        // is created once the row is durable. A filesystem that cannot create it
+        // fails the acquisition instead of leaving a queued row no worker can
+        // stage anything for.
+        let staging = self.staging_dir(id);
+        if let Err(source) = tokio::fs::create_dir_all(&staging).await {
+            self.fail_unstageable(id, &[track.id], &staging, &source)
+                .await?;
+            return Err(AcquireError::Io {
+                path: staging,
+                source,
+            });
+        }
+
         tracing::info!(
             acquisition = %id,
             track = %track.id,
@@ -1010,6 +1087,8 @@ impl AcquisitionOrchestrator {
             eta_secs: None,
             instance: None,
             failure_reason: None,
+            awaiting_source: false,
+            park_reason: None,
             file: None,
             requested_by: request.requested_by,
         };
@@ -1026,6 +1105,71 @@ impl AcquisitionOrchestrator {
         self.publish_availability(track.id, Availability::Acquiring, None);
         self.notify_work();
         Ok(AcquireOutcome::Started(handle))
+    }
+
+    /// Ends an admission whose staging directory could not be created.
+    ///
+    /// The acquisition is durable by then, so it cannot simply be dropped: a
+    /// `queued` row whose staging directory does not exist would be claimed by
+    /// the scheduler and fail in the download stage instead, once per sweep. The
+    /// row is failed with `backend-unavailable` and the detail names the
+    /// directory, the tracks go back to `remote` - they were marked `acquiring`
+    /// by the same transaction - and both events are published.
+    ///
+    /// This is the one failure that does not park: a park is a wait for an
+    /// acquisition source, and the source is not what is missing here. The
+    /// reason is the same literal a failed download uses, because this is the
+    /// one thing the attempt could not do.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the admitted acquisition.
+    /// - `track_ids`: the tracks admission marked `acquiring`.
+    /// - `staging`: the directory that could not be created, for the detail.
+    /// - `source`: the filesystem error, for the log.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger error when the failure cannot be written.
+    async fn fail_unstageable(
+        &self,
+        id: Uuid,
+        track_ids: &[EntityId],
+        staging: &Path,
+        source: &std::io::Error,
+    ) -> Result<(), AcquireError> {
+        tracing::error!(
+            acquisition = %id,
+            path = %staging.display(),
+            %source,
+            "an acquisition's staging directory could not be created"
+        );
+        let mut restored = Vec::new();
+        let mut tx = self.inner.database.writer().begin().await?;
+        repo::fail(
+            &mut tx,
+            id,
+            FailureReason::BackendUnavailable,
+            Some("the acquisition's staging directory could not be created"),
+        )
+        .await?;
+        for track_id in track_ids {
+            if self.restore_track(&mut tx, *track_id).await? {
+                restored.push(*track_id);
+            }
+        }
+        tx.commit().await?;
+        if let Some(row) = self.inner.repository.get(id).await? {
+            let mut progress = self.progress_of_row(&row, row.priority);
+            progress.state = AcquisitionState::Failed;
+            progress.failure_reason = Some(FailureReason::BackendUnavailable);
+            self.announce(&progress);
+        }
+        for track_id in restored {
+            self.publish_availability(track_id, Availability::Remote, None);
+        }
+        self.forget(id);
+        Ok(())
     }
 
     /// Reports whether a request exceeds the requester's daily quota.
@@ -1090,8 +1234,10 @@ impl AcquisitionOrchestrator {
     ///
     /// An album is acquired as one job when at least one enabled acquisition
     /// instance advertises the `album` granularity and at least two of its
-    /// tracks have no file; otherwise every missing track gets its own job,
-    /// which is what an instance that only downloads single tracks can serve.
+    /// tracks have no file and are not cooling down; otherwise every missing
+    /// track gets its own job, which is what an instance that only downloads
+    /// single tracks can serve. A track in cooldown is reported as
+    /// [`AcquireOutcome::CoolingDown`] and keeps its timer.
     /// An album that already has an active album job is joined, with the
     /// priority raised when the request is more urgent.
     ///
@@ -1133,8 +1279,17 @@ impl AcquisitionOrchestrator {
                 )
             })
             .collect();
-        let missing = stored.iter().filter(|stored| !**stored).count();
-        if missing >= ALBUM_MIN_TRACKS && self.album_layer_available().await {
+        // A track that is cooling down is not counted: the album job must not
+        // clear a cooldown the per-track admission would have honoured.
+        let cooling = cooling_tracks(&tracks, crate::now_millis());
+        let eligible_missing = tracks
+            .iter()
+            .zip(&stored)
+            .filter(|(track, stored)| {
+                !**stored && !cooling.iter().any(|cooling| cooling.id == track.id)
+            })
+            .count();
+        if eligible_missing >= ALBUM_MIN_TRACKS && self.album_layer_available().await {
             if !request.can_acquire {
                 return Ok(tracks
                     .iter()
@@ -1305,14 +1460,6 @@ impl AcquisitionOrchestrator {
                 .collect());
         }
 
-        let staging = self.staging_dir(id);
-        tokio::fs::create_dir_all(&staging)
-            .await
-            .map_err(|source| AcquireError::Io {
-                path: staging.clone(),
-                source,
-            })?;
-
         let new = NewAcquisition {
             id,
             track_id: None,
@@ -1323,17 +1470,55 @@ impl AcquisitionOrchestrator {
             requested_by: request.requested_by,
         };
         repo::insert(&mut tx, &new).await?;
+        let cooling = cooling_tracks(tracks, crate::now_millis());
+        if !cooling.is_empty() {
+            repo::write_log(
+                &mut tx,
+                id,
+                AcquisitionState::Queued,
+                Some(&format!(
+                    "{} track(s) are cooling down and were not included",
+                    cooling.len()
+                )),
+            )
+            .await?;
+        }
         for track in tracks {
             if matches!(
                 track.availability,
                 Availability::Local | Availability::Cached
-            ) {
+            ) || cooling.iter().any(|cooling| cooling.id == track.id)
+            {
                 continue;
             }
             tracks::set_track_availability(&mut tx, track.id, Availability::Acquiring, None)
                 .await?;
         }
         tx.commit().await?;
+
+        // The directory belongs to an acquisition that is admitted here, so it
+        // is created once the row is durable; a filesystem that cannot create it
+        // fails the acquisition instead of leaving a queued row no worker can
+        // stage anything for.
+        let staging = self.staging_dir(id);
+        if let Err(source) = tokio::fs::create_dir_all(&staging).await {
+            let acquiring: Vec<EntityId> = tracks
+                .iter()
+                .filter(|track| {
+                    !matches!(
+                        track.availability,
+                        Availability::Local | Availability::Cached
+                    ) && !cooling.iter().any(|cooling| cooling.id == track.id)
+                })
+                .map(|track| track.id)
+                .collect();
+            self.fail_unstageable(id, &acquiring, &staging, &source)
+                .await?;
+            return Err(AcquireError::Io {
+                path: staging,
+                source,
+            });
+        }
 
         tracing::info!(
             acquisition = %id,
@@ -1354,6 +1539,8 @@ impl AcquisitionOrchestrator {
             eta_secs: None,
             instance: None,
             failure_reason: None,
+            awaiting_source: false,
+            park_reason: None,
             file: None,
             requested_by: request.requested_by,
         };
@@ -1371,7 +1558,8 @@ impl AcquisitionOrchestrator {
             if matches!(
                 track.availability,
                 Availability::Local | Availability::Cached
-            ) {
+            ) || cooling.iter().any(|cooling| cooling.id == track.id)
+            {
                 continue;
             }
             self.publish_availability(track.id, Availability::Acquiring, None);
@@ -1386,6 +1574,14 @@ impl AcquisitionOrchestrator {
                     Availability::Local | Availability::Cached
                 ) {
                     AcquireOutcome::AlreadyAvailable { track_id: track.id }
+                } else if let Some(cooling) = cooling.iter().find(|cooling| cooling.id == track.id)
+                {
+                    // A track that is cooling down keeps its own timer: the
+                    // album job does not clear it and does not acquire it.
+                    AcquireOutcome::CoolingDown {
+                        track_id: track.id,
+                        unavailable_until: cooling.unavailable_until.unwrap_or(0),
+                    }
                 } else {
                     AcquireOutcome::Started(handle.clone())
                 },
@@ -1507,6 +1703,56 @@ impl AcquisitionOrchestrator {
         Ok(())
     }
 
+    /// Brings the running acquisitions in line with a provider registry change.
+    ///
+    /// An administrator adding, enabling, disabling, removing or reordering an
+    /// instance is the event a parked acquisition waits for and the event an
+    /// in-flight download has to notice, so both are handled here:
+    ///
+    /// - every park schedule is cleared, so a parked row is claimable at once
+    ///   instead of when its timer passes, and the scheduler is woken;
+    /// - every attempt whose instance the layer no longer serves is abandoned,
+    ///   which cancels its backend call and sends the acquisition back to a
+    ///   search that either picks the remaining instances or parks.
+    ///
+    /// The registry itself is rebuilt by the caller, before this runs, because
+    /// the two answers below are read from it.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the tracked acquisitions agree with the new registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns the database error of the park reset or of a row read that
+    /// failed.
+    pub async fn providers_changed(&self) -> Result<(), AcquireError> {
+        self.inner.repository.reset_park_schedule().await?;
+        self.notify_work();
+        let tracked: Vec<Uuid> = lock(&self.inner.in_flight).keys().copied().collect();
+        for id in tracked {
+            let Some(row) = self.inner.repository.get(id).await? else {
+                self.forget(id);
+                continue;
+            };
+            if row.state.is_terminal() {
+                self.forget(id);
+                continue;
+            }
+            if let Some(instance) = row.instance_id
+                && self.instance_by_id(instance).is_none()
+            {
+                tracing::info!(
+                    acquisition = %id,
+                    instance = %instance,
+                    "abandoning a download whose instance left the acquisition layer"
+                );
+                self.abandon_signal(id).notify_one();
+            }
+        }
+        Ok(())
+    }
+
     /// Waits for a free worker slot.
     ///
     /// # Returns
@@ -1571,6 +1817,13 @@ impl AcquisitionOrchestrator {
     /// sweep. A slot reserved for an acquisition that could not be claimed is
     /// released again.
     async fn dispatch(&self) -> Result<(), AcquireError> {
+        // Without a source nothing can be attempted, so the sweep claims
+        // nothing: a parked `no-source` row has no retry timer, and this is what
+        // stops it from being claimed over and over. A registry change wakes the
+        // scheduler, so the check costs one registry read per sweep and no slot.
+        if !self.has_acquisition_source() {
+            return Ok(());
+        }
         loop {
             if !self.try_reserve_slot()? {
                 return Ok(());
@@ -1705,6 +1958,11 @@ impl AcquisitionOrchestrator {
             if row.state == AcquisitionState::Searching {
                 match self.search(&row).await? {
                     SearchOutcome::Failed(_reason) => return Ok(()),
+                    // The layer serves no source, so the row waits for one
+                    // instead of failing.
+                    SearchOutcome::AwaitingSource => {
+                        return self.park(&row, "no acquisition source is configured").await;
+                    }
                     // The acquisition was cancelled while the search ran. The
                     // row already says so; the task ends and the cleanup
                     // happens in `finish_task`.
@@ -1751,7 +2009,8 @@ impl AcquisitionOrchestrator {
     /// search. A download a previous process left in flight is searched again,
     /// because the candidate plan it selected did not survive the process; a
     /// verifying or importing row finishes its import from the files and the
-    /// mapping the ledger holds.
+    /// mapping the ledger holds. The search and download repeat while the row
+    /// comes back in `searching`, which is what an abandoned plan leaves.
     ///
     /// # Parameters
     ///
@@ -1797,38 +2056,50 @@ impl AcquisitionOrchestrator {
             }
             _ => {}
         }
-        if row.state != AcquisitionState::Searching {
-            return Ok(());
-        }
-
-        match self.search_album(&row).await? {
-            SearchOutcome::Cancelled | SearchOutcome::Planned { .. } => Ok(()),
-            SearchOutcome::Failed(reason) => {
-                self.fail_album_acquisition(
-                    &row,
-                    reason,
-                    Some("no album candidate came out of the acquisition layer"),
-                )
-                .await
+        loop {
+            let Some(current) = self.inner.repository.get(row.id).await? else {
+                return Err(AcquireError::UnknownAcquisition(row.id));
+            };
+            row = current;
+            if row.state != AcquisitionState::Searching {
+                return Ok(());
             }
-            SearchOutcome::AlbumPlanned {
-                instances,
-                plan,
-                tracks,
-            } => {
-                let mut progress = self.progress_of_row(&row, row.priority);
-                if let Some(best) = plan.attempts.first() {
-                    progress.instance = instances
-                        .get(best.instance_index)
-                        .map(|instance| instance.slug().as_str().to_owned());
-                    progress.eta_secs = best
-                        .eta
-                        .map(|eta| eta.as_secs().min(u64::from(u32::MAX)) as u32);
+
+            match self.search_album(&row).await? {
+                SearchOutcome::Cancelled | SearchOutcome::Planned { .. } => return Ok(()),
+                SearchOutcome::AwaitingSource => {
+                    return self.park(&row, "no acquisition source is configured").await;
                 }
-                self.announce(&progress);
-                self.download_album(row.id, &instances, &plan, &tracks)
-                    .await?;
-                Ok(())
+                SearchOutcome::Failed(reason) => {
+                    return self
+                        .fail_album_acquisition(
+                            &row,
+                            reason,
+                            Some("no album candidate came out of the acquisition layer"),
+                        )
+                        .await;
+                }
+                SearchOutcome::AlbumPlanned {
+                    instances,
+                    plan,
+                    tracks,
+                } => {
+                    let mut progress = self.progress_of_row(&row, row.priority);
+                    if let Some(best) = plan.attempts.first() {
+                        progress.instance = instances
+                            .get(best.instance_index)
+                            .map(|instance| instance.slug().as_str().to_owned());
+                        progress.eta_secs = best
+                            .eta
+                            .map(|eta| eta.as_secs().min(u64::from(u32::MAX)) as u32);
+                    }
+                    self.announce(&progress);
+                    self.download_album(row.id, &instances, &plan, &tracks)
+                        .await?;
+                    // The download stage leaves the row `searching` when the
+                    // plan was abandoned with the instance that served it, so
+                    // the album searches again instead of ending stranded.
+                }
             }
         }
     }
@@ -1851,6 +2122,16 @@ impl AcquisitionOrchestrator {
         reason: FailureReason,
         detail: Option<&str>,
     ) -> Result<(), AcquireError> {
+        // A parked album job is still alive: it waits for a source under its
+        // own row, so its tracks must not be handed to the per-track pipeline.
+        if reason == FailureReason::BackendUnavailable {
+            return self
+                .park(
+                    row,
+                    detail.unwrap_or("the acquisition source did not answer"),
+                )
+                .await;
+        }
         tracing::info!(
             acquisition = %row.id,
             album = ?row.album_id,
@@ -1974,17 +2255,116 @@ impl AcquisitionOrchestrator {
         Ok(())
     }
 
+    /// Reports whether the acquisition layer serves an instance that can
+    /// download.
+    ///
+    /// # Returns
+    ///
+    /// `true` when at least one instance of the acquisition layer exports an
+    /// acquisition provider. An instance that is listed but cannot download -
+    /// because its plugin is not loaded - does not count, which is exactly the
+    /// case a parked acquisition waits for.
+    pub fn has_acquisition_source(&self) -> bool {
+        self.inner
+            .registry
+            .layers(hearthsound_core::Layer::Acquisition)
+            .iter()
+            .any(|instance| instance.acquisition().is_some())
+    }
+
+    /// Parks an acquisition until a source can be attempted.
+    ///
+    /// A park is not a failure. The attempt ends, whatever it wrote into the
+    /// staging directory is removed, the backend call it holds is cancelled
+    /// best effort, and the row goes back to `queued` with the reason it waits
+    /// and - for a source that did not answer - the time it may be tried again.
+    /// Nothing is written to `tracks.unavailable_until`: the track keeps
+    /// `acquiring`, so the song is not cooled down and the next like, save or
+    /// play of it joins this parked row instead of starting another one.
+    ///
+    /// The row is claimable again when its `retry_at` passes. A
+    /// [`ParkReason::NoSource`] park has none, because no amount of waiting can
+    /// help it: [`AcquisitionOrchestrator::dispatch`] refuses to claim anything
+    /// while the layer serves no source, and a registry change clears the
+    /// schedules and wakes the scheduler.
+    ///
+    /// `park` is reached only from `searching` and `downloading`, which are the
+    /// two stages that produce [`FailureReason::BackendUnavailable`]. The state
+    /// machine has no park edge from the stages after the download, because a
+    /// verification or import failure is about the file, not the source.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the acquisition's ledger row, in `searching` or `downloading`.
+    /// - `message`: why the attempt ended, for the log.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger error when the park cannot be written.
+    pub(crate) async fn park(
+        &self,
+        row: &AcquisitionRow,
+        message: &str,
+    ) -> Result<(), AcquireError> {
+        let reason = if self.has_acquisition_source() {
+            ParkReason::SourceUnavailable
+        } else {
+            ParkReason::NoSource
+        };
+        // The backend is stopped and the partial candidate is removed before
+        // the row is written, so nothing of the attempt survives the park.
+        self.cancel_backend(row).await;
+        self.clear_staging(row.id).await;
+
+        let park_count = row.park_count + 1;
+        let retry_at = (reason == ParkReason::SourceUnavailable)
+            .then(|| crate::now_millis() + park_retry_delay(park_count).as_millis() as i64);
+        let mut tx = self.inner.database.writer().begin().await?;
+        repo::park(&mut tx, row.id, reason, park_count, retry_at, message).await?;
+        tx.commit().await?;
+
+        self.repository()
+            .set_download(row.id, None, None, None)
+            .await?;
+        self.repository().set_progress(row.id, None).await?;
+
+        let mut progress = self.progress_of_row(row, row.priority);
+        progress.state = AcquisitionState::Queued;
+        progress.instance = None;
+        progress.percent = None;
+        progress.eta_secs = None;
+        progress.failure_reason = None;
+        progress.awaiting_source = true;
+        progress.park_reason = Some(reason);
+        self.announce(&progress);
+        // The pipeline task is ending, so the row must not stay tracked as in
+        // flight; the scheduler claims it again when its timer passes.
+        self.forget(row.id);
+        tracing::info!(
+            acquisition = %row.id,
+            reason = reason.as_str(),
+            ?retry_at,
+            "parked an acquisition"
+        );
+        Ok(())
+    }
+
     /// Fails an acquisition and puts its track into cooldown.
     ///
     /// This is the one terminal path every failure reason takes, whether it came
     /// out of the search, the download or the verification stage: the row is
-    /// marked `failed` with the reason and the backend's own detail, the track
-    /// becomes `unavailable` until the cooldown elapses, the backend call the
-    /// acquisition still has in flight is cancelled, the staging directory is
-    /// removed so no partial download is left behind, and the waiters and the
-    /// bus are told. The cooldown is
+    /// marked `failed` with the reason and the backend's own detail, the backend
+    /// call the acquisition still has in flight is cancelled, the staging
+    /// directory is removed so no partial download is left behind, and the
+    /// waiters and the bus are told.
+    ///
+    /// [`FailureReason::BackendUnavailable`] is not a failure of the song, so it
+    /// parks the acquisition through [`AcquisitionOrchestrator::park`] instead:
+    /// the row goes back to `queued` and is attempted again when a source
+    /// answers. Every other reason cools the track down for
     /// `acquisition.unavailable_cooldown_hours`, which stops a track nobody can
-    /// find from making every client retry hit the backends again.
+    /// find from making every client retry hit the backends again;
+    /// [`FailureReason::cools_down`] is the only place that policy lives.
     ///
     /// # Parameters
     ///
@@ -2022,12 +2402,27 @@ impl AcquisitionOrchestrator {
             self.forget(id);
             return Ok(());
         }
-        let cooldown_hours = self
-            .inner
-            .settings
-            .current()
-            .get(keys::ACQUISITION_UNAVAILABLE_COOLDOWN_HOURS)?;
-        let unavailable_until = crate::now_millis() + cooldown_hours.max(0) * 3_600_000;
+        // A source that did not answer says nothing about the song, so it parks
+        // the acquisition instead of failing it: the row goes back to `queued`
+        // and is attempted again when a source answers.
+        if reason == FailureReason::BackendUnavailable {
+            return self
+                .park(
+                    &row,
+                    detail.unwrap_or("the acquisition source did not answer"),
+                )
+                .await;
+        }
+        let unavailable_until = if reason.cools_down() {
+            let cooldown_hours = self
+                .inner
+                .settings
+                .current()
+                .get(keys::ACQUISITION_UNAVAILABLE_COOLDOWN_HOURS)?;
+            Some(crate::now_millis() + cooldown_hours.max(0) * 3_600_000)
+        } else {
+            None
+        };
 
         // The backend is stopped before the row is written, so a failed
         // acquisition cannot keep a download alive in the background.
@@ -2040,7 +2435,7 @@ impl AcquisitionOrchestrator {
                 &mut tx,
                 track_id,
                 Availability::Unavailable,
-                Some(unavailable_until),
+                unavailable_until,
             )
             .await?;
         }
@@ -2055,13 +2450,21 @@ impl AcquisitionOrchestrator {
         }
         self.release_staging(id).await;
         self.forget(id);
-        tracing::info!(
-            acquisition = %id,
-            track = ?row.track_id,
-            reason = reason.as_str(),
-            unavailable_until,
-            "failed an acquisition"
-        );
+        match unavailable_until {
+            Some(until) => tracing::info!(
+                acquisition = %id,
+                track = ?row.track_id,
+                reason = reason.as_str(),
+                unavailable_until = until,
+                "failed an acquisition"
+            ),
+            None => tracing::info!(
+                acquisition = %id,
+                track = ?row.track_id,
+                reason = reason.as_str(),
+                "failed an acquisition"
+            ),
+        }
         Ok(())
     }
 
@@ -2353,6 +2756,12 @@ impl AcquisitionOrchestrator {
     /// ignored: what matters is that the backend stops working for this
     /// acquisition.
     ///
+    /// An instance that has left the layer is still addressed through the handle
+    /// this process used to start the attempt, so disabling or removing an
+    /// instance does not leave its transfer running. Only a row this process
+    /// never started an attempt for - one adopted after a restart - falls back to
+    /// the registry, where an instance that is gone cannot be found.
+    ///
     /// # Parameters
     ///
     /// - `row`: the acquisition whose backend call to cancel.
@@ -2360,13 +2769,22 @@ impl AcquisitionOrchestrator {
         let Some(token) = row.plugin_token.as_deref() else {
             return;
         };
+        let context = AcquisitionContext::new(self.staging_dir(row.id));
+        if let Some(backend) = self.remembered_backend(row.id) {
+            backend.provider.cancel_download(&context, token).await;
+            tracing::debug!(
+                acquisition = %row.id,
+                instance = backend.slug.as_str(),
+                "cancelled the acquisition's backend download"
+            );
+            return;
+        }
         let Some(instance) = row.instance_id.and_then(|id| self.instance_by_id(id)) else {
             return;
         };
         let Some(provider) = instance.acquisition() else {
             return;
         };
-        let context = AcquisitionContext::new(self.staging_dir(row.id));
         provider.cancel_download(&context, token).await;
         tracing::debug!(
             acquisition = %row.id,
@@ -2398,20 +2816,81 @@ impl AcquisitionOrchestrator {
         }
     }
 
+    /// Removes the files a candidate left in an acquisition's staging directory.
+    ///
+    /// A candidate that failed may have written part of its download into the
+    /// staging directory - a yt-dlp `.part` file, half of a folder - and the
+    /// next candidate must not find it. The directory itself stays, because the
+    /// next attempt writes into it; [`AcquisitionOrchestrator::release_staging`]
+    /// removes it when the acquisition ends. A directory that is already gone
+    /// is not an error.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the acquisition whose staging directory to empty.
+    pub(crate) async fn clear_staging(&self, id: Uuid) {
+        let staging = self.staging_dir(id);
+        let mut entries = match tokio::fs::read_dir(&staging).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                tracing::warn!(
+                    path = %staging.display(),
+                    %error,
+                    "an acquisition's staging directory could not be listed"
+                );
+                return;
+            }
+        };
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => return,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %staging.display(),
+                        %error,
+                        "an entry of an acquisition's staging directory could not be read"
+                    );
+                    return;
+                }
+            };
+            let path = entry.path();
+            let removed = match entry.file_type().await {
+                Ok(file_type) if file_type.is_dir() => tokio::fs::remove_dir_all(&path).await,
+                Ok(_) => tokio::fs::remove_file(&path).await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = removed
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "a candidate's staging files could not be removed"
+                );
+            }
+        }
+    }
+
     /// Stops an acquisition's tool processes and removes its staging directory.
     ///
-    /// Every acquisition-layer instance is asked to release the directory,
-    /// because a process is addressed by the handle of the instance that started
-    /// it, and a search can fall through several instances before one download
-    /// starts. Asking all of them also covers the instance a ledger row does not
-    /// name. The directory removal is the same one
-    /// [`AcquisitionOrchestrator::remove_staging`] performs.
+    /// The backend this process started the attempt on is asked first, because
+    /// a process is addressed by the handle of the instance that started it and
+    /// that instance may have left the layer since. Every other
+    /// acquisition-layer instance is asked too, because a search can fall
+    /// through several instances before one download starts. The directory
+    /// removal is the same one [`AcquisitionOrchestrator::remove_staging`]
+    /// performs.
     ///
     /// # Parameters
     ///
     /// - `id`: the acquisition that reached a terminal state.
     pub(crate) async fn release_staging(&self, id: Uuid) {
         let staging = self.staging_dir(id);
+        if let Some(backend) = self.remembered_backend(id) {
+            backend.provider.release_staging(&staging).await;
+        }
         for instance in self
             .inner
             .registry
@@ -2461,11 +2940,64 @@ impl AcquisitionOrchestrator {
     /// The signal, created empty when this is its first use.
     pub(crate) fn stop_signal(&self, id: Uuid) -> Arc<Notify> {
         let mut in_flight = lock(&self.inner.in_flight);
-        Arc::clone(
-            in_flight
-                .entry(id)
-                .or_insert_with(|| Arc::new(Notify::new())),
-        )
+        Arc::clone(&in_flight.entry(id).or_default().stop)
+    }
+
+    /// Returns the signal that abandons the download of an acquisition.
+    ///
+    /// It is what a provider registry change wakes when the instance serving
+    /// the attempt is gone: the download's task cancels the backend call and
+    /// reports the attempt as abandoned, so the acquisition searches again
+    /// instead of polling an instance nobody serves.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the acquisition whose download is in flight.
+    ///
+    /// # Returns
+    ///
+    /// The signal, created empty when this is its first use.
+    pub(crate) fn abandon_signal(&self, id: Uuid) -> Arc<Notify> {
+        let mut in_flight = lock(&self.inner.in_flight);
+        Arc::clone(&in_flight.entry(id).or_default().abandon)
+    }
+
+    /// Records the backend an attempt was started on.
+    ///
+    /// The handle stays with the in-flight entry until the acquisition ends, so
+    /// a cancellation or a park still reaches an instance that has left the
+    /// layer in the meantime.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the acquisition the attempt belongs to.
+    /// - `slug`: the instance's slug.
+    /// - `provider`: the instance's acquisition provider.
+    pub(crate) fn remember_backend(
+        &self,
+        id: Uuid,
+        slug: String,
+        provider: Arc<dyn AcquisitionProvider>,
+    ) {
+        lock(&self.inner.in_flight).entry(id).or_default().backend =
+            Some(RememberedBackend { slug, provider });
+    }
+
+    /// Returns the backend the acquisition's attempt was started on.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the acquisition whose attempt is or was in flight.
+    ///
+    /// # Returns
+    ///
+    /// The remembered backend, or `None` when this process never started an
+    /// attempt for the acquisition - a row that was adopted after a restart,
+    /// for instance.
+    pub(crate) fn remembered_backend(&self, id: Uuid) -> Option<RememberedBackend> {
+        lock(&self.inner.in_flight)
+            .get(&id)
+            .and_then(|entry| entry.backend.clone())
     }
 
     /// Forgets an acquisition this process no longer has side effects for.
@@ -2511,6 +3043,8 @@ impl AcquisitionOrchestrator {
             eta_secs: None,
             instance: None,
             failure_reason,
+            awaiting_source: false,
+            park_reason: None,
             file: None,
             requested_by,
         };
@@ -2590,6 +3124,8 @@ impl AcquisitionOrchestrator {
                 eta_secs: progress.eta_secs,
                 instance: progress.instance.clone(),
                 failure_reason: progress.failure_reason,
+                awaiting_source: progress.awaiting_source,
+                park_reason: progress.park_reason,
             }),
         );
     }
@@ -2647,6 +3183,8 @@ impl AcquisitionOrchestrator {
                 .and_then(crate::download::StoredProgress::eta_secs),
             instance: row.instance_id.and_then(|id| self.instance_slug(id)),
             failure_reason: row.failure_reason,
+            awaiting_source: row.state == AcquisitionState::Queued && row.park_reason.is_some(),
+            park_reason: row.park_reason,
             file: None,
             requested_by: row.requested_by,
         }
@@ -2740,6 +3278,30 @@ impl AcquisitionOrchestrator {
     fn notify_work(&self) {
         self.inner.notify.notify_one();
     }
+}
+
+/// Returns the tracks of an album that are cooling down at `now`.
+///
+/// A track cools down when a song-specific failure marked it `unavailable` until
+/// a time that has not passed. Such a track is left out of an album job: the job
+/// would otherwise clear the cooldown admission wrote, which is exactly what a
+/// per-track request would refuse to do.
+///
+/// # Parameters
+///
+/// - `tracks`: the album's tracks.
+/// - `now`: the current time in unix milliseconds.
+fn cooling_tracks(
+    tracks: &[hearthsound_library::Track],
+    now: i64,
+) -> Vec<&hearthsound_library::Track> {
+    tracks
+        .iter()
+        .filter(|track| {
+            track.availability == Availability::Unavailable
+                && track.unavailable_until.is_some_and(|until| until > now)
+        })
+        .collect()
 }
 
 /// Locks a mutex, ignoring poisoning.

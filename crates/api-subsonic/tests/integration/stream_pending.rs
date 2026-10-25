@@ -252,6 +252,8 @@ fn progress(
         eta_secs: None,
         instance: None,
         failure_reason: None,
+        awaiting_source: false,
+        park_reason: None,
         file,
         requested_by: None,
     }

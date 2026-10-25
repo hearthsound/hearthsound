@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE acquisitions SET state = 'cancelled', failure_reason = ?, error_detail = ?, park_reason = NULL, retry_at = NULL, park_count = 0, updated_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "543f0431543cdaa498bf85e3cb9340e157e59aab736c39b9ce8fc2a1ef52d421"
+}

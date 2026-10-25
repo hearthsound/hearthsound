@@ -763,6 +763,9 @@ async fn rebuild(state: &NativeState) -> Result<(), Problem> {
                 "The change was saved, but the running server could not apply it yet; it retries automatically.",
             )
         })?;
+    if let Err(error) = state.services().orchestrator.providers_changed().await {
+        tracing::error!(%error, "could not bring the acquisitions in line with the registry");
+    }
     Ok(())
 }
 

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, track_id, album_id, granularity, priority, reason, state, requested_by, instance_id, candidate, plugin_token, progress, attempts, failure_reason, error_detail, media_file_id, created_at, updated_at FROM acquisitions WHERE state IN ('queued', 'resolving', 'searching', 'downloading', 'verifying', 'importing') ORDER BY created_at, rowid",
+  "query": "SELECT id, track_id, album_id, granularity, priority, reason, state, requested_by, instance_id, candidate, plugin_token, progress, attempts, failure_reason, park_reason, park_count, retry_at, error_detail, media_file_id, created_at, updated_at FROM acquisitions WHERE state IN ('queued', 'resolving', 'searching', 'downloading', 'verifying', 'importing') ORDER BY created_at, rowid",
   "describe": {
     "columns": [
       {
@@ -158,8 +158,41 @@
         }
       },
       {
-        "name": "error_detail",
+        "name": "park_reason",
         "ordinal": 14,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "park_reason"
+          }
+        }
+      },
+      {
+        "name": "park_count",
+        "ordinal": 15,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "park_count"
+          }
+        }
+      },
+      {
+        "name": "retry_at",
+        "ordinal": 16,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "retry_at"
+          }
+        }
+      },
+      {
+        "name": "error_detail",
+        "ordinal": 17,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -170,7 +203,7 @@
       },
       {
         "name": "media_file_id",
-        "ordinal": 15,
+        "ordinal": 18,
         "type_info": "Blob",
         "origin": {
           "Table": {
@@ -181,7 +214,7 @@
       },
       {
         "name": "created_at",
-        "ordinal": 16,
+        "ordinal": 19,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -192,7 +225,7 @@
       },
       {
         "name": "updated_at",
-        "ordinal": 17,
+        "ordinal": 20,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -221,10 +254,13 @@
       false,
       true,
       true,
+      false,
+      true,
+      true,
       true,
       false,
       false
     ]
   },
-  "hash": "56baec62217d62c93ac6c345b64be4780a004dc40364025269fa7c98118674c1"
+  "hash": "6b735792a80b494ad3a8417255a1f7c626089dd297d1281e858138efb87b1a76"
 }

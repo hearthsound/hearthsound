@@ -210,6 +210,9 @@ async fn rebuild(state: &NativeState) -> Result<(), Problem> {
         .rebuild()
         .await
         .map_err(|error| problem::internal("rebuilding the provider registry", &error))?;
+    if let Err(error) = state.services().orchestrator.providers_changed().await {
+        tracing::error!(%error, "could not bring the acquisitions in line with the registry");
+    }
     Ok(())
 }
 

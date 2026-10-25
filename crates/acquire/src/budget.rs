@@ -6,10 +6,13 @@
 //! module turns those numbers into the objects that enforce them.
 //!
 //! The budgets are built lazily, on the first search or download that names an
-//! instance, and rebuilt when the instance's configuration changes, so a rebuild
+//! instance, and follow the instance's configuration from then on, so a rebuild
 //! of the provider registry - which is what an administrator's change causes -
-//! is picked up without a restart. Each budget belongs to one instance id and is
-//! shared by every clone of the orchestrator.
+//! is picked up without a restart. A search budget is rebuilt when its numbers
+//! change; the download slots keep the permits they already handed out and only
+//! change their limit, so raising or lowering `maxConcurrent` cannot let more
+//! downloads run than the new limit allows. Each budget belongs to one instance
+//! id and is shared by every clone of the orchestrator.
 //!
 //! The download side also carries the in-flight registry: the orchestrator
 //! records which acquisition is downloading from which instance, at which
@@ -18,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
@@ -98,17 +102,127 @@ struct InFlightDownload {
     instance_id: Uuid,
     /// The acquisition's priority.
     priority: Priority,
+    /// Whether a `play` request already preempted this attempt.
+    ///
+    /// A victim stays registered until its task notices the preemption and
+    /// unregisters, so a second interactive request must be able to see that it
+    /// is already paying for a slot and pick another download. The mark is
+    /// cleared by registering the attempt again, which is what the retry does.
+    preempted: AtomicBool,
     /// Wakes the download's task when a `play` request preempts it.
-    preempted: Arc<Notify>,
+    preempted_signal: Arc<Notify>,
+}
+
+/// One instance's download slots.
+///
+/// The limit is read on every use rather than baked into a semaphore, so an
+/// administrator raising or lowering `maxConcurrent` takes effect at once: a
+/// raise wakes the waiters, and a lower limit simply stops handing out permits
+/// until enough attempts have ended. A permit is a count of one download, so
+/// the permits already taken keep counting against the new limit.
+pub(crate) struct InstanceSlots {
+    /// How many downloads may run at once, as configured.
+    limit: Mutex<u32>,
+    /// How many downloads are running.
+    in_use: Mutex<u32>,
+    /// Wakes the waiters when a slot frees up or the limit rises.
+    freed: Notify,
+}
+
+impl InstanceSlots {
+    /// Builds the slots of an instance.
+    ///
+    /// # Parameters
+    ///
+    /// - `limit`: how many downloads may run at once; zero is treated as one,
+    ///   because a budget that admits nothing could never recover.
+    fn new(limit: u32) -> Arc<InstanceSlots> {
+        Arc::new(InstanceSlots {
+            limit: Mutex::new(limit.max(1)),
+            in_use: Mutex::new(0),
+            freed: Notify::new(),
+        })
+    }
+
+    /// Records a new configured limit.
+    ///
+    /// A raise has spare capacity straight away, so every waiter is woken to
+    /// look; a lower limit needs no wake-up, because the permits already taken
+    /// stop new ones until they are given back.
+    ///
+    /// # Parameters
+    ///
+    /// - `limit`: the configured `maxConcurrent`.
+    fn set_limit(&self, limit: u32) {
+        let limit = limit.max(1);
+        let previous = std::mem::replace(&mut *lock(&self.limit), limit);
+        if limit > previous {
+            self.freed.notify_waiters();
+        }
+    }
+
+    /// Takes a slot when one is free.
+    ///
+    /// # Returns
+    ///
+    /// The permit, which the caller holds for the whole attempt, or `None` when
+    /// the instance is at its limit.
+    pub(crate) fn try_acquire(self: &Arc<Self>) -> Option<SlotPermit> {
+        let limit = *lock(&self.limit);
+        let mut in_use = lock(&self.in_use);
+        if *in_use >= limit {
+            return None;
+        }
+        *in_use += 1;
+        Some(SlotPermit {
+            slots: Arc::clone(self),
+        })
+    }
+
+    /// Waits for a free slot.
+    ///
+    /// # Returns
+    ///
+    /// The permit, once a slot was taken.
+    pub(crate) async fn acquire(self: &Arc<Self>) -> SlotPermit {
+        loop {
+            let freed = self.freed.notified();
+            tokio::pin!(freed);
+            // Registering before the attempt is what closes the window in which
+            // a release would be lost between the check and the wait.
+            freed.as_mut().enable();
+            if let Some(permit) = self.try_acquire() {
+                return permit;
+            }
+            freed.await;
+        }
+    }
+}
+
+/// One download's hold on an instance's slots.
+///
+/// Dropping the permit gives the slot back and wakes one waiter, which is what
+/// lets a preempted or finished attempt hand its place to the next one.
+pub(crate) struct SlotPermit {
+    /// The slots the permit was taken from.
+    slots: Arc<InstanceSlots>,
+}
+
+impl Drop for SlotPermit {
+    /// Gives the slot back.
+    fn drop(&mut self) {
+        let mut in_use = lock(&self.slots.in_use);
+        *in_use = in_use.saturating_sub(1);
+        drop(in_use);
+        self.slots.freed.notify_one();
+    }
 }
 
 /// The download budget of every instance, with the in-flight registry.
 #[derive(Default)]
 pub(crate) struct DownloadBudgets {
-    /// The download semaphore of each instance, keyed by instance id.
-    slots: Mutex<HashMap<Uuid, Arc<Semaphore>>>,
-    /// The configuration each semaphore was built from, keyed by instance id.
-    configured: Mutex<HashMap<Uuid, u32>>,
+    /// The download slots of each instance, keyed by instance id.
+    slots: Mutex<HashMap<Uuid, Arc<InstanceSlots>>>,
     /// The downloads in flight, keyed by acquisition id.
     in_flight: Mutex<HashMap<Uuid, InFlightDownload>>,
 }
@@ -119,27 +233,22 @@ impl DownloadBudgets {
         DownloadBudgets::default()
     }
 
-    /// Returns the download semaphore of an instance.
+    /// Returns the download slots of an instance.
     ///
-    /// The semaphore is built on first use and rebuilt when the instance's
-    /// `maxConcurrent` changed, so a configuration change takes effect without a
-    /// restart.
+    /// The slots are built on first use and their limit is updated from the
+    /// instance's `maxConcurrent` on every call, so a configuration change takes
+    /// effect without a restart and without losing the permits already held.
     ///
     /// # Parameters
     ///
     /// - `instance`: the instance whose budget is wanted.
-    pub(crate) fn slots(&self, instance: &RegistryInstance) -> Arc<Semaphore> {
-        let max_concurrent = instance.host_config().max_concurrent.max(1);
-        let configured = *lock(&self.configured).get(&instance.id()).unwrap_or(&0);
-        if configured == max_concurrent
-            && let Some(semaphore) = lock(&self.slots).get(&instance.id())
-        {
-            return Arc::clone(semaphore);
-        }
-        let semaphore = Arc::new(Semaphore::new(max_concurrent as usize));
-        lock(&self.slots).insert(instance.id(), Arc::clone(&semaphore));
-        lock(&self.configured).insert(instance.id(), max_concurrent);
-        semaphore
+    pub(crate) fn slots(&self, instance: &RegistryInstance) -> Arc<InstanceSlots> {
+        let mut slots = lock(&self.slots);
+        let entry = slots
+            .entry(instance.id())
+            .or_insert_with(|| InstanceSlots::new(instance.host_config().max_concurrent));
+        entry.set_limit(instance.host_config().max_concurrent);
+        Arc::clone(entry)
     }
 
     /// Records a download that is starting.
@@ -167,7 +276,8 @@ impl DownloadBudgets {
                 acquisition_id,
                 instance_id,
                 priority,
-                preempted: Arc::clone(&preempted),
+                preempted: AtomicBool::new(false),
+                preempted_signal: Arc::clone(&preempted),
             },
         );
         preempted
@@ -188,6 +298,12 @@ impl DownloadBudgets {
     /// `background` or `upgrade` can be preempted: an interactive or queued
     /// download is never cancelled for another caller.
     ///
+    /// Each in-flight download is preempted at most once per attempt. A victim
+    /// keeps its registration until its task notices the preemption, so without
+    /// the mark two interactive requests arriving together would both pick the
+    /// same victim and the other bulk download would keep its slot. Registering
+    /// the attempt again - which the retry does - clears the mark.
+    ///
     /// # Parameters
     ///
     /// - `instance_id`: the instance whose downloads are in flight.
@@ -201,13 +317,23 @@ impl DownloadBudgets {
         if requester_priority != Priority::Play {
             return None;
         }
-        let victim = lock(&self.in_flight)
+        let in_flight = lock(&self.in_flight);
+        let victim = in_flight
             .values()
             .filter(|download| {
-                download.instance_id == instance_id && download.priority >= Priority::Background
+                download.instance_id == instance_id
+                    && download.priority >= Priority::Background
+                    && !download.preempted.load(Ordering::Acquire)
             })
             .max_by_key(|download| download.priority)
-            .map(|download| (download.acquisition_id, Arc::clone(&download.preempted)))?;
+            .map(|download| {
+                download.preempted.store(true, Ordering::Release);
+                (
+                    download.acquisition_id,
+                    Arc::clone(&download.preempted_signal),
+                )
+            })?;
+        drop(in_flight);
         // `notify_one` stores a permit when nobody is waiting yet, so the wake-up
         // cannot be lost between the registration and the download's next poll.
         victim.1.notify_one();

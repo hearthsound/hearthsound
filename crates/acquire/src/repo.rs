@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 
 use hearthsound_core::{
-    AcquisitionState, EntityId, FailureReason, Granularity, IdPrefix, Priority,
+    AcquisitionState, EntityId, FailureReason, Granularity, IdPrefix, ParkReason, Priority,
 };
 use hearthsound_db::Database;
 use sqlx::{QueryBuilder, Sqlite, SqliteConnection, SqlitePool};
@@ -104,6 +104,18 @@ pub struct AcquisitionRow {
     pub attempts: i64,
     /// Why the acquisition failed, when it has failed.
     pub failure_reason: Option<FailureReason>,
+    /// Why a queued acquisition is waiting for a source, when it is parked.
+    pub park_reason: Option<ParkReason>,
+    /// How many times the acquisition has parked in a row.
+    ///
+    /// The counter is reset by a real attempt and by a registry change, and it
+    /// sets the backoff between two retries.
+    pub park_count: i64,
+    /// When the scheduler may claim a parked row again, in unix milliseconds.
+    ///
+    /// `None` on a parked row means "as soon as a source exists", which is how
+    /// a [`ParkReason::NoSource`] park is written.
+    pub retry_at: Option<i64>,
     /// The backend's own detail of the failure, when there is one.
     pub error_detail: Option<String>,
     /// The media file the import produced, once it has completed.
@@ -170,6 +182,9 @@ struct AcquisitionDbRow {
     progress: Option<String>,
     attempts: i64,
     failure_reason: Option<String>,
+    park_reason: Option<String>,
+    park_count: i64,
+    retry_at: Option<i64>,
     error_detail: Option<String>,
     media_file_id: Option<Vec<u8>>,
     created_at: i64,
@@ -212,6 +227,13 @@ impl AcquisitionDbRow {
                 .as_deref()
                 .map(|value| decode_literal("failure reason", value))
                 .transpose()?,
+            park_reason: self
+                .park_reason
+                .as_deref()
+                .map(|value| decode_literal("park reason", value))
+                .transpose()?,
+            park_count: self.park_count,
+            retry_at: self.retry_at,
             error_detail: self.error_detail,
             media_file_id: self.media_file_id.as_deref().map(uuid_of).transpose()?,
             created_at: self.created_at,
@@ -315,7 +337,7 @@ pub async fn get(
         AcquisitionDbRow,
         "SELECT id, track_id, album_id, granularity, priority, reason, state, requested_by, \
                 instance_id, candidate, plugin_token, progress, attempts, failure_reason, \
-                error_detail, media_file_id, created_at, updated_at \
+                park_reason, park_count, retry_at, error_detail, media_file_id, created_at, updated_at \
          FROM acquisitions WHERE id = ?",
         uuid_key(id),
     )
@@ -351,7 +373,7 @@ pub async fn active_for_track(
         AcquisitionDbRow,
         "SELECT id, track_id, album_id, granularity, priority, reason, state, requested_by, \
                 instance_id, candidate, plugin_token, progress, attempts, failure_reason, \
-                error_detail, media_file_id, created_at, updated_at \
+                park_reason, park_count, retry_at, error_detail, media_file_id, created_at, updated_at \
          FROM acquisitions \
          WHERE track_id = ? AND state IN ('queued', 'resolving', 'searching', 'downloading', \
                                           'verifying', 'importing') \
@@ -390,7 +412,7 @@ pub async fn active_for_album(
         AcquisitionDbRow,
         "SELECT id, track_id, album_id, granularity, priority, reason, state, requested_by, \
                 instance_id, candidate, plugin_token, progress, attempts, failure_reason, \
-                error_detail, media_file_id, created_at, updated_at \
+                park_reason, park_count, retry_at, error_detail, media_file_id, created_at, updated_at \
          FROM acquisitions \
          WHERE album_id = ? AND granularity = 'album' \
            AND state IN ('queued', 'resolving', 'searching', 'downloading', \
@@ -479,7 +501,7 @@ async fn latest_rows_for_tracks(
         let mut builder = QueryBuilder::<Sqlite>::new(
             "SELECT id, track_id, album_id, granularity, priority, reason, state, requested_by, \
                     instance_id, candidate, plugin_token, progress, attempts, failure_reason, \
-                    error_detail, media_file_id, created_at, updated_at \
+                    park_reason, park_count, retry_at, error_detail, media_file_id, created_at, updated_at \
              FROM acquisitions WHERE track_id IN (",
         );
         let mut ids = builder.separated(", ");
@@ -582,11 +604,13 @@ pub async fn next_queued(
         AcquisitionDbRow,
         "SELECT id, track_id, album_id, granularity, priority, reason, state, requested_by, \
                 instance_id, candidate, plugin_token, progress, attempts, failure_reason, \
-                error_detail, media_file_id, created_at, updated_at \
+                park_reason, park_count, retry_at, error_detail, media_file_id, created_at, updated_at \
          FROM acquisitions WHERE state = 'queued' \
+           AND (retry_at IS NULL OR retry_at <= ?) \
          ORDER BY CASE priority WHEN 'play' THEN 0 WHEN 'next' THEN 1 WHEN 'queue' THEN 2 \
                                  WHEN 'background' THEN 3 ELSE 4 END, created_at, rowid \
          LIMIT 1",
+        crate::now_millis(),
     )
     .fetch_optional(&mut *conn)
     .await?;
@@ -617,7 +641,7 @@ pub async fn active(conn: &mut SqliteConnection) -> Result<Vec<AcquisitionRow>, 
         AcquisitionDbRow,
         "SELECT id, track_id, album_id, granularity, priority, reason, state, requested_by, \
                 instance_id, candidate, plugin_token, progress, attempts, failure_reason, \
-                error_detail, media_file_id, created_at, updated_at \
+                park_reason, park_count, retry_at, error_detail, media_file_id, created_at, updated_at \
          FROM acquisitions \
          WHERE state IN ('queued', 'resolving', 'searching', 'downloading', 'verifying', \
                          'importing') \
@@ -722,6 +746,7 @@ pub async fn fail(
     }
     sqlx::query!(
         "UPDATE acquisitions SET state = 'failed', failure_reason = ?, error_detail = ?, \
+                                park_reason = NULL, retry_at = NULL, park_count = 0, \
                                 updated_at = ? WHERE id = ?",
         reason.as_str(),
         detail,
@@ -771,7 +796,8 @@ pub async fn complete(
         });
     }
     sqlx::query!(
-        "UPDATE acquisitions SET state = 'completed', media_file_id = ?, updated_at = ? \
+        "UPDATE acquisitions SET state = 'completed', media_file_id = ?, \
+                                park_reason = NULL, retry_at = NULL, park_count = 0, updated_at = ? \
          WHERE id = ?",
         media_file_id.as_bytes().to_vec(),
         crate::now_millis(),
@@ -812,7 +838,9 @@ pub async fn complete_album(
         });
     }
     sqlx::query!(
-        "UPDATE acquisitions SET state = 'completed', media_file_id = NULL, updated_at = ? \
+        "UPDATE acquisitions SET state = 'completed', media_file_id = NULL, \
+                                park_reason = NULL, retry_at = NULL, park_count = 0, \
+                                updated_at = ? \
          WHERE id = ?",
         crate::now_millis(),
         uuid_key(id),
@@ -889,6 +917,7 @@ pub async fn cancel(
     );
     sqlx::query!(
         "UPDATE acquisitions SET state = 'cancelled', failure_reason = ?, error_detail = ?, \
+                                park_reason = NULL, retry_at = NULL, park_count = 0, \
                                 updated_at = ? WHERE id = ?",
         FailureReason::Cancelled.as_str(),
         message,
@@ -978,7 +1007,8 @@ pub async fn set_priority(
 /// Returns [`AcquireError::Database`] when a statement fails.
 pub async fn claim(conn: &mut SqliteConnection, id: Uuid) -> Result<bool, AcquireError> {
     let affected = sqlx::query!(
-        "UPDATE acquisitions SET state = 'resolving', updated_at = ? WHERE id = ? AND state = 'queued'",
+        "UPDATE acquisitions SET state = 'resolving', park_reason = NULL, retry_at = NULL, \
+                                updated_at = ? WHERE id = ? AND state = 'queued'",
         crate::now_millis(),
         uuid_key(id),
     )
@@ -1027,12 +1057,19 @@ pub async fn set_download(
     candidate: Option<&str>,
     plugin_token: Option<&str>,
 ) -> Result<bool, AcquireError> {
+    // A real attempt starts with a token, and it is what resets the park
+    // backoff: the retry that reached a download must not inherit the wait of
+    // the parks before it.
+    let started = i64::from(plugin_token.is_some());
     let affected = sqlx::query!(
-        "UPDATE acquisitions SET instance_id = ?, candidate = ?, plugin_token = ?, updated_at = ? \
+        "UPDATE acquisitions SET instance_id = ?, candidate = ?, plugin_token = ?, \
+                                park_count = CASE WHEN ? THEN 0 ELSE park_count END, \
+                                updated_at = ? \
          WHERE id = ?",
         instance_id.map(|instance| instance.as_bytes().to_vec()),
         candidate,
         plugin_token,
+        started,
         crate::now_millis(),
         uuid_key(id),
     )
@@ -1104,6 +1141,86 @@ pub async fn set_attempts(
     .await?
     .rows_affected();
     Ok(affected > 0)
+}
+
+/// Parks an acquisition until a source can be attempted.
+///
+/// A park is not a failure: the row goes back to [`AcquisitionState::Queued`]
+/// through [`transition`], which writes the log entry, and the three park
+/// columns say why it waits and when it may be claimed again. The track is not
+/// touched, so it keeps the availability admission gave it.
+///
+/// The caller has already cleared the attempt's instance, candidate, token and
+/// progress, because a parked row holds no backend work.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `id`: the acquisition to park.
+/// - `reason`: why it is waiting.
+/// - `park_count`: how many times it has parked in a row, including this one;
+///   it sets the backoff between retries.
+/// - `retry_at`: when the scheduler may claim it again, in unix milliseconds,
+///   or `None` when it may be claimed as soon as a source exists.
+/// - `message`: why the attempt ended, for the log.
+///
+/// # Errors
+///
+/// Returns [`AcquireError::IllegalTransition`] when the current state has no
+/// edge to `queued` - only `searching` and `downloading` park - and
+/// [`AcquireError::Database`] when a statement fails.
+pub async fn park(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    reason: ParkReason,
+    park_count: i64,
+    retry_at: Option<i64>,
+    message: &str,
+) -> Result<(), AcquireError> {
+    transition(conn, id, AcquisitionState::Queued, Some(message)).await?;
+    sqlx::query!(
+        "UPDATE acquisitions SET park_reason = ?, park_count = ?, retry_at = ?, updated_at = ? \
+         WHERE id = ?",
+        reason.as_str(),
+        park_count,
+        retry_at,
+        crate::now_millis(),
+        uuid_key(id),
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Clears the retry schedule of every parked acquisition.
+///
+/// A provider registry change - an instance added, enabled, disabled, removed
+/// or reordered - is what a parked row is waiting for, so the schedules the
+/// rows built up are dropped and they become claimable at once. The rows stay
+/// parked with their reason until the scheduler picks them up, so a change that
+/// does not help them parks them again and their backoff starts over.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+///
+/// # Returns
+///
+/// How many rows the schedule was cleared for.
+///
+/// # Errors
+///
+/// Returns [`AcquireError::Database`] when the statement fails.
+pub async fn reset_park_schedule(conn: &mut SqliteConnection) -> Result<u64, AcquireError> {
+    let affected = sqlx::query!(
+        "UPDATE acquisitions SET retry_at = NULL, park_count = 0, updated_at = ? \
+         WHERE state = 'queued' AND park_reason IS NOT NULL",
+        crate::now_millis(),
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(affected)
 }
 
 /// Reads an acquisition's log, oldest first.
@@ -1202,6 +1319,8 @@ pub struct AcquisitionSummary {
     pub percent: Option<u8>,
     /// Why the acquisition failed, when it failed or was cancelled.
     pub failure_reason: Option<FailureReason>,
+    /// Why a queued acquisition is waiting for a source, when it is parked.
+    pub park_reason: Option<ParkReason>,
     /// When the row was created, in unix milliseconds.
     pub created_at: i64,
     /// When the row was last written, in unix milliseconds.
@@ -1217,6 +1336,7 @@ struct ListDbRow {
     state: String,
     progress: Option<String>,
     failure_reason: Option<String>,
+    park_reason: Option<String>,
     created_at: i64,
     updated_at: i64,
     track_title: Option<String>,
@@ -1253,6 +1373,11 @@ impl ListDbRow {
                 .failure_reason
                 .as_deref()
                 .map(|value| decode_literal("failure reason", value))
+                .transpose()?,
+            park_reason: self
+                .park_reason
+                .as_deref()
+                .map(|value| decode_literal("park reason", value))
                 .transpose()?,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -1293,7 +1418,7 @@ pub async fn list(
     let rows = sqlx::query_as!(
         ListDbRow,
         "SELECT a.id, a.track_id, a.priority, a.state, a.progress, a.failure_reason, \
-                a.created_at, a.updated_at, \
+                a.park_reason, a.created_at, a.updated_at, \
                 t.title AS track_title, t.display_artist AS track_artist, \
                 i.slug AS instance_slug \
          FROM acquisitions a \
@@ -1386,7 +1511,7 @@ pub async fn list_window(
     let mut builder = QueryBuilder::<Sqlite>::new(
         "SELECT id, track_id, album_id, granularity, priority, reason, state, requested_by, \
                 instance_id, candidate, plugin_token, progress, attempts, failure_reason, \
-                error_detail, media_file_id, created_at, updated_at FROM acquisitions \
+                park_reason, park_count, retry_at, error_detail, media_file_id, created_at, updated_at FROM acquisitions \
          WHERE 1 = 1",
     );
     match query.window {
@@ -1697,6 +1822,27 @@ impl AcquisitionRepository {
         tx.commit().await?;
         Ok(claimed)
     }
+
+    /// Clears the retry schedule of every parked acquisition in its own
+    /// transaction.
+    ///
+    /// This is what a provider registry change does to the parked rows: they
+    /// become claimable at once, so a source that was just added or enabled is
+    /// tried without waiting for the rows' timers.
+    ///
+    /// # Returns
+    ///
+    /// How many rows the schedule was cleared for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::Database`] when the write fails.
+    pub async fn reset_park_schedule(&self) -> Result<u64, AcquireError> {
+        let mut tx = self.writer.begin().await?;
+        let cleared = reset_park_schedule(&mut tx).await?;
+        tx.commit().await?;
+        Ok(cleared)
+    }
 }
 
 /// Reads a 16-byte id column.
@@ -1738,4 +1884,29 @@ fn decode_literal<T: std::str::FromStr>(
             kind,
             value: value.to_owned(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_park_reason_round_trips_through_its_literal() {
+        for reason in ParkReason::ALL {
+            let decoded: ParkReason = decode_literal("park reason", reason.as_str()).unwrap();
+            assert_eq!(decoded, reason);
+        }
+    }
+
+    #[test]
+    fn an_unknown_park_reason_is_refused() {
+        let decoded = decode_literal::<ParkReason>("park reason", "no-sources");
+        assert!(matches!(
+            decoded,
+            Err(AcquireError::UnknownLiteral {
+                kind: "park reason",
+                ..
+            })
+        ));
+    }
 }

@@ -137,7 +137,15 @@ impl Services {
         }
         self.apply_cached_settings();
         match self.registry().rebuild_or_mark_stale().await {
-            Ok(report) => log_rebuild(&report),
+            Ok(report) => {
+                log_rebuild(&report);
+                if let Err(error) = self.orchestrator().providers_changed().await {
+                    tracing::error!(
+                        %error,
+                        "could not bring the acquisitions in line with the registry"
+                    );
+                }
+            }
             Err(error) => tracing::error!(%error, "could not rebuild the provider registry"),
         }
         match self.orchestrator().reconcile().await {

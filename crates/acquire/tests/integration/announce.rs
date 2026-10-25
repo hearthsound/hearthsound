@@ -23,6 +23,8 @@ fn snapshot(id: Uuid, state: AcquisitionState) -> AcquisitionProgress {
         eta_secs: None,
         instance: None,
         failure_reason: None,
+        awaiting_source: false,
+        park_reason: None,
         file: None,
         requested_by: None,
     }

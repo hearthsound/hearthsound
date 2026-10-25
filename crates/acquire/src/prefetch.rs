@@ -672,10 +672,10 @@ impl PrefetchScheduler {
 
     /// Ends one prefetch acquisition that left the upcoming set.
     ///
-    /// An acquisition that already ended, one whose row is gone, and one whose
-    /// track is pinned or past half its download are only forgotten: nothing is
-    /// cancelled and no event is published, because nothing changed for the
-    /// client.
+    /// An acquisition that already ended, one whose row is gone, one whose track
+    /// is pinned or past half its download, and one another client raised to
+    /// `play` are only forgotten: nothing is cancelled and no event is
+    /// published, because nothing changed for the client.
     ///
     /// # Parameters
     ///
@@ -703,6 +703,16 @@ impl PrefetchScheduler {
             lock(&self.inner.listings).forget(user, client, item);
             return;
         };
+        // A play request raised this row, so it is no longer the prefetch it was
+        // started as: whoever asked for it is waiting for it now.
+        if row.priority == Priority::Play {
+            lock(&self.inner.listings).forget(user, client, item);
+            tracing::debug!(
+                acquisition = %acquisition,
+                "kept a prefetch acquisition that a play request raised"
+            );
+            return;
+        }
         if row.state.is_terminal() || self.keep(track, &row).await {
             lock(&self.inner.listings).forget(user, client, item);
             return;
@@ -739,7 +749,8 @@ impl PrefetchScheduler {
     /// queue, and `true` when the download is more than half done, because
     /// finishing costs less than abandoning and acquiring again. A pin that
     /// cannot be read keeps the acquisition, so an unreadable row never throws
-    /// away work.
+    /// away work. An item another client raised to `play` is never dropped at
+    /// all; [`AcquisitionPrefetcher::drop`] decides that before it asks.
     async fn keep(&self, track: EntityId, row: &AcquisitionRow) -> bool {
         match self
             .inner

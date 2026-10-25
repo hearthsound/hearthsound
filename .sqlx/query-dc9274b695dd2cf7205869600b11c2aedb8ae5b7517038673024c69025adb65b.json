@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE acquisitions SET retry_at = NULL, park_count = 0, updated_at = ? WHERE state = 'queued' AND park_reason IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "dc9274b695dd2cf7205869600b11c2aedb8ae5b7517038673024c69025adb65b"
+}

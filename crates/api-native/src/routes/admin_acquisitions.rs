@@ -55,6 +55,14 @@ pub struct AcquisitionView {
     pub percent: Option<u8>,
     /// Why the acquisition failed, once it has.
     pub failure_reason: Option<String>,
+    /// Whether the acquisition is queued and waiting for an acquisition source.
+    ///
+    /// A parked acquisition looks idle because its state is `queued`; this flag
+    /// says it is not about to run.
+    pub awaiting_source: bool,
+    /// Why the acquisition is waiting for a source, when it is parked:
+    /// `no-source` or `source-unavailable`.
+    pub park_reason: Option<String>,
     /// When the acquisition was created, in unix milliseconds.
     pub created_at: i64,
     /// When the acquisition last changed, in unix milliseconds.
@@ -74,6 +82,11 @@ impl From<&AcquisitionSummary> for AcquisitionView {
             percent: summary.percent,
             failure_reason: summary
                 .failure_reason
+                .map(|reason| reason.as_str().to_string()),
+            awaiting_source: summary.state == hearthsound_core::AcquisitionState::Queued
+                && summary.park_reason.is_some(),
+            park_reason: summary
+                .park_reason
                 .map(|reason| reason.as_str().to_string()),
             created_at: summary.created_at,
             updated_at: summary.updated_at,

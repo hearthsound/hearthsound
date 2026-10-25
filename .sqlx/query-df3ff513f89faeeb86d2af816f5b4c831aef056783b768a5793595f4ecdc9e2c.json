@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE acquisitions SET instance_id = ?, candidate = ?, plugin_token = ?, park_count = CASE WHEN ? THEN 0 ELSE park_count END, updated_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "df3ff513f89faeeb86d2af816f5b4c831aef056783b768a5793595f4ecdc9e2c"
+}

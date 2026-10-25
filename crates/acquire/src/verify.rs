@@ -3,18 +3,20 @@
 //! The checks in [`crate::import`] prove that a file decodes, lasts about as
 //! long as the wanted track and lives up to the tier its candidate claimed. A
 //! file can pass all of them and still be a different recording - a live take, a
-//! cover, the wrong track from a folder - so when
-//! `acquisition.verify.fingerprint` is on, the host computes the file's
-//! Chromaprint fingerprint and asks the first enabled instance of the
-//! verification layer whether it is the wanted recording.
+//! cover, the wrong track from a folder - so when the verification layer serves
+//! an instance, the host computes the file's Chromaprint fingerprint and asks
+//! the first instance of that layer whether it is the wanted recording. The
+//! layer is the whole switch: an instance in it verifies every download, and an
+//! empty layer verifies none.
 //!
 //! A mismatch quarantines the file's source in `source_blocklist` for
 //! `acquisition.verify.quarantine_days`, which keeps later searches from
-//! selecting it again. A `match` accepts the file; an `unknown` verdict and a
-//! provider error also accept it, because the server must not refuse an
-//! acquisition over a service that has no opinion or is down. Every such
-//! outcome is written to the acquisition's log, so an administrator can see
-//! what the check decided.
+//! selecting it again. A `match` accepts the file; an `unknown` verdict, a
+//! provider error and a file the core cannot fingerprint also accept it, because
+//! the server must not refuse an acquisition over a service that has no opinion,
+//! is down, or cannot read a container - refusing those would reject legitimate
+//! audio for a check that is advisory. Every such outcome is written to the
+//! acquisition's log, so an administrator can see what the check decided.
 //!
 //! The stage runs before the import for every priority but `play`, which a user
 //! is waiting on: that file is imported and streamed first, checked afterwards,
@@ -59,18 +61,6 @@ impl AcquisitionOrchestrator {
             .layers(Layer::Verification)
             .into_iter()
             .find_map(|instance| instance.verification().cloned())
-    }
-
-    /// Returns whether fingerprint verification is enabled.
-    ///
-    /// # Errors
-    ///
-    /// Returns the settings error when the flag cannot be read.
-    pub(crate) fn fingerprint_verification_enabled(&self) -> Result<bool, AcquireError> {
-        Ok(self
-            .settings()
-            .current()
-            .get(keys::ACQUISITION_VERIFY_FINGERPRINT)?)
     }
 
     /// Builds the recording a fingerprint is checked against from a track.
@@ -136,11 +126,11 @@ impl AcquisitionOrchestrator {
 
     /// Fingerprints one file and checks it against the wanted track.
     ///
-    /// The check only runs when fingerprint verification is enabled and the
-    /// verification layer has an enabled instance. A file the service cannot
-    /// fingerprint, a service that cannot be reached and an `unknown` verdict
-    /// all let the file through; each outcome is written to the acquisition's
-    /// log. A `mismatch` quarantines the source and is returned to the caller.
+    /// The check runs whenever the verification layer serves an instance, and is
+    /// skipped when it serves none. A file the core cannot fingerprint, a
+    /// service that cannot be reached and an `unknown` verdict all let the file
+    /// through; each outcome is written to the acquisition's log. A `mismatch`
+    /// quarantines the source and is returned to the caller.
     ///
     /// # Parameters
     ///
@@ -168,9 +158,6 @@ impl AcquisitionOrchestrator {
         source: SourceFile<'_>,
     ) -> Result<Option<String>, AcquireError> {
         let acquisition_id = row.id;
-        if !self.fingerprint_verification_enabled()? {
-            return Ok(None);
-        }
         let Some(provider) = self.verification_provider() else {
             return Ok(None);
         };
@@ -308,7 +295,7 @@ impl AcquisitionOrchestrator {
                 return;
             }
         };
-        if let Err(error) = self
+        match self
             .remove_imported_file(
                 acquisition_id,
                 track,
@@ -318,13 +305,19 @@ impl AcquisitionOrchestrator {
             )
             .await
         {
-            tracing::warn!(
-                acquisition = %acquisition_id,
-                track = %track.id,
-                %error,
-                "a mismatching play import could not be removed"
-            );
-            return;
+            Ok(Removal::Removed) => {}
+            // The kept file holds the destination name, so a re-acquire would
+            // only have to live beside it; the source is already quarantined.
+            Ok(Removal::KeptPinned) => return,
+            Err(error) => {
+                tracing::warn!(
+                    acquisition = %acquisition_id,
+                    track = %track.id,
+                    %error,
+                    "a mismatching play import could not be removed"
+                );
+                return;
+            }
         }
         if let Err(error) = self
             .request(AcquireRequest::new(
@@ -371,9 +364,6 @@ impl AcquisitionOrchestrator {
         managed: &Path,
         source: SourceFile<'_>,
     ) -> Result<Option<String>, AcquireError> {
-        if !self.fingerprint_verification_enabled()? {
-            return Ok(None);
-        }
         let Some(provider) = self.verification_provider() else {
             return Ok(None);
         };
@@ -513,10 +503,14 @@ impl AcquisitionOrchestrator {
     /// Removes a managed file a `play` acquisition imported and re-settles the
     /// track.
     ///
-    /// The row and the track's availability change in one transaction, through
-    /// the same removal path eviction uses; the file itself is removed after it
-    /// commits and the directories it emptied are pruned, and the new
-    /// availability is published.
+    /// A pinned track is the exception: a pin is the owner saying the file must
+    /// stay, so the imported file is kept as it is, nothing about the track
+    /// changes, and the log records that the source was quarantined instead
+    /// ([`Removal::KeptPinned`]). Every other track loses the file: the row and
+    /// the track's availability change in one transaction, through the same
+    /// removal path eviction uses; the file itself is removed after it commits
+    /// and the directories it emptied are pruned, and the new availability is
+    /// published ([`Removal::Removed`]).
     ///
     /// # Parameters
     ///
@@ -525,6 +519,10 @@ impl AcquisitionOrchestrator {
     /// - `managed`: the managed path the import wrote.
     /// - `media_file_id`: the `media_files` row the import wrote.
     /// - `detail`: what the verification service said, for the log.
+    ///
+    /// # Returns
+    ///
+    /// Whether the file was removed, or kept because the track is pinned.
     ///
     /// # Errors
     ///
@@ -537,7 +535,20 @@ impl AcquisitionOrchestrator {
         managed: &Path,
         media_file_id: Uuid,
         detail: &str,
-    ) -> Result<(), AcquireError> {
+    ) -> Result<Removal, AcquireError> {
+        if self.library().track_is_pinned(track.id).await? {
+            self.log_message(
+                acquisition_id,
+                hearthsound_core::AcquisitionState::Completed,
+                &format!(
+                    "kept the imported file for track {} because it is pinned; the source was \
+                     quarantined: {detail}",
+                    track.id
+                ),
+            )
+            .await?;
+            return Ok(Removal::KeptPinned);
+        }
         let mut tx = self.database().writer().begin().await?;
         let removed =
             hearthsound_library::maintenance::remove_managed_file(&mut tx, media_file_id).await?;
@@ -564,8 +575,17 @@ impl AcquisitionOrchestrator {
             ),
         )
         .await?;
-        Ok(())
+        Ok(Removal::Removed)
     }
+}
+
+/// What removing a mismatching `play` import did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Removal {
+    /// The file and its row are gone and the track was re-settled.
+    Removed,
+    /// The track is pinned, so the file stays; the source was quarantined.
+    KeptPinned,
 }
 
 /// Converts a media fingerprint into the provider-facing type.

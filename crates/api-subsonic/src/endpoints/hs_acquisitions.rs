@@ -193,6 +193,10 @@ async fn availabilities(call: &Call, ids: &[String]) -> Result<Vec<Object>, Subs
                 if let Some(eta) = row.eta_secs() {
                     entry = entry.set("etaSecs", i64::from(eta));
                 }
+                if let Some(reason) = row.park_reason {
+                    entry = entry.set("awaitingSource", true);
+                    entry = entry.set("parkReason", reason.as_str());
+                }
             }
         } else if standing.members.is_empty() && standing.entity.is_some() {
             // An album's state aggregates its member tracks, so an album that
@@ -537,8 +541,13 @@ fn acquisition_row(row: &AcquisitionRow, instances: &HashMap<Uuid, String>) -> O
     if let Some(instance) = row.instance_id.and_then(|id| instances.get(&id)) {
         object = object.set("instance", instance.clone());
     }
+
     if let Some(reason) = row.failure_reason {
         object = object.set("failureReason", reason.as_str());
+    }
+    if let Some(reason) = row.park_reason {
+        object = object.set("awaitingSource", true);
+        object = object.set("parkReason", reason.as_str());
     }
     object
 }

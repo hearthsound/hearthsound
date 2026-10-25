@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, track_id, album_id, granularity, priority, reason, state, requested_by, instance_id, candidate, plugin_token, progress, attempts, failure_reason, error_detail, media_file_id, created_at, updated_at FROM acquisitions WHERE state = 'queued' ORDER BY CASE priority WHEN 'play' THEN 0 WHEN 'next' THEN 1 WHEN 'queue' THEN 2 WHEN 'background' THEN 3 ELSE 4 END, created_at, rowid LIMIT 1",
+  "query": "SELECT id, track_id, album_id, granularity, priority, reason, state, requested_by, instance_id, candidate, plugin_token, progress, attempts, failure_reason, park_reason, park_count, retry_at, error_detail, media_file_id, created_at, updated_at FROM acquisitions WHERE state = 'queued' AND (retry_at IS NULL OR retry_at <= ?) ORDER BY CASE priority WHEN 'play' THEN 0 WHEN 'next' THEN 1 WHEN 'queue' THEN 2 WHEN 'background' THEN 3 ELSE 4 END, created_at, rowid LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -158,8 +158,41 @@
         }
       },
       {
-        "name": "error_detail",
+        "name": "park_reason",
         "ordinal": 14,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "park_reason"
+          }
+        }
+      },
+      {
+        "name": "park_count",
+        "ordinal": 15,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "park_count"
+          }
+        }
+      },
+      {
+        "name": "retry_at",
+        "ordinal": 16,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "retry_at"
+          }
+        }
+      },
+      {
+        "name": "error_detail",
+        "ordinal": 17,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -170,7 +203,7 @@
       },
       {
         "name": "media_file_id",
-        "ordinal": 15,
+        "ordinal": 18,
         "type_info": "Blob",
         "origin": {
           "Table": {
@@ -181,7 +214,7 @@
       },
       {
         "name": "created_at",
-        "ordinal": 16,
+        "ordinal": 19,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -192,7 +225,7 @@
       },
       {
         "name": "updated_at",
-        "ordinal": 17,
+        "ordinal": 20,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -203,7 +236,7 @@
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 1
     },
     "nullable": [
       false,
@@ -221,10 +254,13 @@
       false,
       true,
       true,
+      false,
+      true,
+      true,
       true,
       false,
       false
     ]
   },
-  "hash": "3e6621d2625c9bb6316504869481cbaf83ad9e36f538eaff662bf4bf0a20f878"
+  "hash": "82ae9073f6556213010d894835a11d26ca3a54adad3f637ee47614c0745b01d5"
 }

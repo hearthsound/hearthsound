@@ -484,9 +484,9 @@ pub mod keys {
     /// Cooldown in hours before an unavailable track is retried.
     pub const ACQUISITION_UNAVAILABLE_COOLDOWN_HOURS: SettingKey<i64> =
         SettingKey::new("acquisition.unavailable_cooldown_hours");
-    /// Whether acquired files are verified by fingerprint.
-    pub const ACQUISITION_VERIFY_FINGERPRINT: SettingKey<bool> =
-        SettingKey::new("acquisition.verify.fingerprint");
+    /// Longest one download attempt may run before it is abandoned.
+    pub const ACQUISITION_ATTEMPT_TIMEOUT_SECS: SettingKey<i64> =
+        SettingKey::new("acquisition.attempt_timeout_secs");
     /// How long a source that failed fingerprint verification is skipped.
     pub const ACQUISITION_VERIFY_QUARANTINE_DAYS: SettingKey<i64> =
         SettingKey::new("acquisition.verify.quarantine_days");
@@ -937,10 +937,13 @@ impl SettingsRegistry {
                     "Cooldown in hours before an unavailable track is retried",
                 ),
                 def(
-                    keys::ACQUISITION_VERIFY_FINGERPRINT,
-                    SettingKind::Bool,
-                    SettingValue::Bool(false),
-                    "Whether acquired files are verified by fingerprint",
+                    keys::ACQUISITION_ATTEMPT_TIMEOUT_SECS,
+                    SettingKind::Integer {
+                        min: 0,
+                        max: 604_800,
+                    },
+                    SettingValue::Integer(21_600),
+                    "Longest a download attempt may run before it is abandoned; 0 disables the limit",
                 ),
                 def(
                     keys::ACQUISITION_VERIFY_QUARANTINE_DAYS,
@@ -1925,6 +1928,7 @@ mod tests {
         let registry = SettingsRegistry::builtin();
         for key in [
             "acquisition.fast_start.enabled",
+            "acquisition.verify.fingerprint",
             "acquisition.fast_start.instance",
             "preacquire.max_tracks_per_run",
             "upgrades.include_cached",
@@ -1932,6 +1936,31 @@ mod tests {
             "tools.ffmpeg.path",
         ] {
             assert_eq!(registry.def(key), None, "`{key}` must not be registered");
+        }
+    }
+
+    #[test]
+    fn the_attempt_timeout_is_a_registered_acquisition_setting() {
+        let registry = SettingsRegistry::builtin();
+        let def = registry
+            .def(keys::ACQUISITION_ATTEMPT_TIMEOUT_SECS.name())
+            .unwrap();
+        assert_eq!(def.default, SettingValue::Integer(21_600));
+        assert!(!def.user_overridable);
+        assert_eq!(
+            def.kind,
+            SettingKind::Integer {
+                min: 0,
+                max: 604_800
+            }
+        );
+        for (value, accepted) in [(0, true), (21_600, true), (-1, false), (604_801, false)] {
+            assert_eq!(
+                validate(def, &SettingValue::Integer(value), SettingSource::Default).is_ok(),
+                accepted,
+                "`{}` accepted {value}",
+                def.key
+            );
         }
     }
 
