@@ -55,6 +55,22 @@ impl Sandbox {
         self.config.parent().unwrap().join("data")
     }
 
+    /// Returns a directory beside the data tree for a library folder.
+    ///
+    /// A library folder may not be, contain, or sit inside the data directory,
+    /// so the folders a command is pointed at are siblings of it.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: the directory's name.
+    ///
+    /// # Returns
+    ///
+    /// The path; the caller creates it.
+    pub fn library_dir(&self, name: &str) -> PathBuf {
+        self.config.parent().unwrap().join(name)
+    }
+
     /// Appends text to the config file.
     ///
     /// # Parameters
@@ -193,7 +209,7 @@ fn scan_reports_when_no_folders_are_configured() {
 #[test]
 fn scan_refuses_a_folder_that_was_not_added() {
     let sandbox = Sandbox::new("");
-    let music = sandbox.data().join("music");
+    let music = sandbox.library_dir("music");
     std::fs::create_dir_all(&music).unwrap();
 
     let output = sandbox.run(&["scan", "--folder", music.to_str().unwrap()]);
@@ -352,7 +368,7 @@ async fn an_app_password_created_by_the_cli_authenticates_a_rest_call() {
 #[test]
 fn add_folder_requires_exactly_one_of_owner_and_generic() {
     let sandbox = Sandbox::new("");
-    let music = sandbox.data().join("music");
+    let music = sandbox.library_dir("music");
     std::fs::create_dir_all(&music).unwrap();
     let path = music.to_str().unwrap();
 
@@ -385,7 +401,7 @@ async fn add_folder_associates_the_folder_with_its_owner() {
         &["admin", "create-user", "--admin", "--password-stdin"],
         "hunter2\n",
     ));
-    let music = sandbox.data().join("music");
+    let music = sandbox.library_dir("music");
     std::fs::create_dir_all(&music).unwrap();
 
     let added = succeeded(&sandbox.run(&[
@@ -432,7 +448,7 @@ async fn add_folder_associates_the_folder_with_its_owner() {
 #[tokio::test(flavor = "multi_thread")]
 async fn folder_watching_is_added_and_toggled() {
     let sandbox = Sandbox::new("");
-    let music = sandbox.data().join("music");
+    let music = sandbox.library_dir("music");
     std::fs::create_dir_all(&music).unwrap();
     let path = music.to_str().unwrap();
 
@@ -495,7 +511,7 @@ async fn folder_watching_is_added_and_toggled() {
 #[test]
 fn add_folder_generic_is_scanable() {
     let sandbox = Sandbox::new("");
-    let music = sandbox.data().join("music");
+    let music = sandbox.library_dir("music");
     std::fs::create_dir_all(&music).unwrap();
 
     let added = succeeded(&sandbox.run(&[
@@ -519,7 +535,7 @@ async fn scan_full_reindexes_an_unchanged_file() {
     use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
 
     let sandbox = Sandbox::new("");
-    let music = sandbox.data().join("music");
+    let music = sandbox.library_dir("music");
     std::fs::create_dir_all(&music).unwrap();
     AudioFixture::new(AudioFormat::Flac)
         .seconds(0.3)

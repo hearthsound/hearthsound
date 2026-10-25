@@ -1594,21 +1594,31 @@ async fn write_tagged(
         .unwrap()
 }
 
-/// An untagged file beside two tagged namesakes gets its own artist row.
+/// An untagged file next to two tagged namesakes gets its own artist row.
+///
+/// The order is fixed by scanning each act's file first: an untagged file that
+/// is scanned before any identified artist of its name adopts that row instead,
+/// which is the unambiguous case.
 #[tokio::test]
 async fn an_untagged_artist_beside_two_tagged_namesakes_gets_its_own_row() {
     let dir = tempfile::tempdir().unwrap();
     let db = migrated(dir.path()).await;
     let library = LibraryRepository::new(&db);
-    let music = dir.path().join("music");
-    std::fs::create_dir(&music).unwrap();
-    write_tagged(&music, "One", "Alex G", "One", 2001, Some("mb-artist-a")).await;
-    write_tagged(&music, "Two", "Alex G", "Two", 2010, Some("mb-artist-b")).await;
-    write_tagged(&music, "Three", "Alex G", "Three", 1996, None).await;
-
     let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
-    let folder = library.add_library_folder(&music, None).await.unwrap();
-    scanner.scan_folder(folder.id).await.unwrap();
+
+    // Each file is its own folder so the scan order is the test's, not the
+    // filesystem's.
+    for (name, mbid) in [
+        ("one", Some("mb-artist-a")),
+        ("two", Some("mb-artist-b")),
+        ("three", None),
+    ] {
+        let folder = dir.path().join(name);
+        std::fs::create_dir(&folder).unwrap();
+        write_tagged(&folder, &format!("Song {name}"), "Alex G", name, 2001, mbid).await;
+        let library_folder = library.add_library_folder(&folder, None).await.unwrap();
+        scanner.scan_folder(library_folder.id).await.unwrap();
+    }
 
     let artists = library.list_artists().await.unwrap();
     assert_eq!(artists.len(), 3, "two acts and one untagged row");
@@ -1616,7 +1626,7 @@ async fn an_untagged_artist_beside_two_tagged_namesakes_gets_its_own_row() {
         .iter()
         .find(|artist| artist.mb_artist_id.is_none())
         .expect("the untagged file has a row of its own");
-    let track = only_track_named(&db, "Three").await;
+    let track = only_track_named(&db, "Song three").await;
     let credits = library.list_track_artists(track).await.unwrap();
     assert_eq!(credits[0].id, untagged.id);
 }
