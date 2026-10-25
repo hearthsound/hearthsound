@@ -782,3 +782,40 @@ async fn requested_paths(server: &MockServer) -> Vec<String> {
     paths.sort();
     paths
 }
+
+/// A cover that cannot be scaled leaves no scratch file behind.
+///
+/// A sidecar that is not an image fails the encode on every request, and each
+/// attempt used to leave its temporary source copy and half-written encode in
+/// the cache directory for good. The failed request is still answered with the
+/// stored bytes.
+#[tokio::test]
+async fn a_broken_cover_leaves_no_scratch_file() {
+    let fixture = Fixture::new().await;
+    let bytes = b"this is not an image".to_vec();
+    let seeded = seed_album(&fixture, "Broken", &[Art::Sidecar(bytes.clone())]).await;
+
+    let probe = request(
+        &fixture.app(),
+        &format!(
+            "/rest/getCoverArt?id={}&size=64&apiKey={}",
+            seeded.first_track(),
+            fixture.api_key
+        ),
+        &[],
+    )
+    .await;
+
+    assert_eq!(probe.status, StatusCode::OK);
+    assert_eq!(probe.bytes, bytes, "the stored image is served unchanged");
+    let leftovers: Vec<String> = std::fs::read_dir(fixture.thumbs_dir())
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".tmp") || name.ends_with(".src"))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(leftovers.is_empty(), "the failed encode left {leftovers:?}");
+}

@@ -100,7 +100,10 @@ impl ThumbnailCache {
     /// Builds a cache over a directory.
     ///
     /// The directory is created on the first write, so a server that never
-    /// serves a local cover leaves no empty directory behind.
+    /// serves a local cover leaves no empty directory behind. Leftovers of an
+    /// earlier run - a scratch copy or a half-written encode - are removed once,
+    /// before anything can use the directory; nothing else writes there, so the
+    /// sweep cannot race a live request.
     ///
     /// # Parameters
     ///
@@ -112,10 +115,9 @@ impl ThumbnailCache {
     ///
     /// The cache.
     pub fn new(dir: impl Into<PathBuf>, ffmpeg: Arc<FfmpegRunner>) -> ThumbnailCache {
-        ThumbnailCache {
-            dir: dir.into(),
-            ffmpeg,
-        }
+        let dir = dir.into();
+        sweep_scratch(&dir);
+        ThumbnailCache { dir, ffmpeg }
     }
 
     /// Returns the bytes of a source image scaled to a size, from disk or fresh.
@@ -130,7 +132,10 @@ impl ThumbnailCache {
     ///
     /// The bytes of a JPEG whose longest side is at most `size`, or the source
     /// bytes themselves when the source is already that small, because the
-    /// filter never enlarges. A cached file is read, not re-encoded.
+    /// filter never enlarges. A cached file is read, not re-encoded. An encode
+    /// that fails is retried on the next request and leaves no scratch file
+    /// behind; the cache key is the hash of the source bytes, so a negative
+    /// entry could never be invalidated by repairing the cover.
     ///
     /// # Errors
     ///
@@ -166,7 +171,14 @@ impl ThumbnailCache {
         // The source copy is scratch either way: the caller already holds the
         // bytes, so a failed encode leaves nothing to inspect.
         let _ = tokio::fs::remove_file(&source_path).await;
-        scaled?;
+        if let Err(error) = scaled {
+            // A broken cover is asked for again on the next request - the key is
+            // the hash of the source bytes, so a negative cache entry could never
+            // be invalidated by fixing the file - but each attempt leaves no
+            // file behind.
+            let _ = tokio::fs::remove_file(&scratch_path).await;
+            return Err(error.into());
+        }
         // The rename is what publishes the file: two callers that miss the same
         // key both encode, and the second rename replaces the first, which costs
         // one encode and nothing else.
@@ -182,6 +194,44 @@ impl ThumbnailCache {
                 path: target,
                 source: error,
             })
+    }
+}
+
+/// Removes the scratch files an earlier run left in the cache directory.
+///
+/// A `.src` copy and a `.tmp` encode are written before the finished JPEG
+/// appears, and a process that stopped between the two, or an encode that failed
+/// before this module cleaned up after itself, leaves them behind. Nothing else
+/// writes into the directory, so anything with those extensions is a leftover.
+///
+/// # Parameters
+///
+/// - `dir`: the cache directory; a directory that does not exist holds nothing.
+fn sweep_scratch(dir: &Path) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            tracing::debug!(dir = %dir.display(), %error, "could not read the thumbnail directory");
+            return;
+        }
+    };
+    let mut removed = 0_u64;
+    for entry in entries.flatten() {
+        let scratch = entry
+            .path()
+            .extension()
+            .is_some_and(|extension| extension == "tmp" || extension == "src");
+        if scratch && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    if removed > 0 {
+        tracing::debug!(
+            dir = %dir.display(),
+            removed,
+            "removed the scratch files of an earlier run"
+        );
     }
 }
 
@@ -233,6 +283,36 @@ mod tests {
             None,
             "a request larger than every cached size is served the original"
         );
+    }
+
+    /// A new cache sweeps the scratch files an earlier run left behind.
+    #[test]
+    fn a_new_cache_removes_the_scratch_files_of_an_earlier_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let thumbs = dir.path().join("thumbs");
+        std::fs::create_dir_all(&thumbs).unwrap();
+        std::fs::write(thumbs.join("a.tmp"), b"half an encode").unwrap();
+        std::fs::write(thumbs.join("b.src"), b"a source copy").unwrap();
+        std::fs::write(thumbs.join("c-64.jpg"), b"a finished cover").unwrap();
+
+        let _cache = ThumbnailCache::new(&thumbs, Arc::new(FfmpegRunner::new(None, 1)));
+
+        let mut left: Vec<String> = std::fs::read_dir(&thumbs)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["c-64.jpg"]);
+    }
+
+    /// A cache over a directory that does not exist yet sweeps nothing and does
+    /// not create it.
+    #[test]
+    fn a_missing_directory_is_not_created_by_the_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let thumbs = dir.path().join("thumbs");
+        let _cache = ThumbnailCache::new(&thumbs, Arc::new(FfmpegRunner::new(None, 1)));
+        assert!(!thumbs.exists());
     }
 
     /// The same bytes always name the same file, and different bytes do not.

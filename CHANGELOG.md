@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the database file, a directory that contains one of them, or a directory inside
   them; the refusal names the protected path, from the API and from `hearthsound
   admin add-folder` alike.
+- A cover that cannot be scaled no longer leaves a scratch copy and a
+  half-written encode in the thumbnail directory: a failed encode cleans up after
+  itself, and a new cache sweeps what an earlier run left.
 - A watched folder arms one watch per directory instead of one recursive watch,
   so a directory the server may not read no longer leaves the whole folder
   unwatched, and a directory created later is watched from its creation event.
