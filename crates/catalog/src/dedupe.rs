@@ -42,11 +42,11 @@
 //! assert_eq!(normalize_isrc(hit.isrc.as_deref()).as_deref(), Some("USRC17607839"));
 //! ```
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use hearthsound_core::providers::CatalogTrack;
 use hearthsound_core::{CatalogId, EntityId, EntityKind, Slug};
-use hearthsound_library::tracks;
+use hearthsound_library::{Album, albums, artists, tracks};
 use sqlx::SqliteConnection;
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::is_combining_mark;
@@ -54,6 +54,7 @@ use unicode_normalization::char::is_combining_mark;
 use crate::aliases;
 use crate::error::CatalogError;
 use crate::materialize::{ISRC, MB_RECORDING, canonical_id};
+use crate::pages::title_match;
 use crate::service::{
     CatalogAlbumRefResult, CatalogArtistResult, CatalogSearch, CatalogService, CatalogTrackResult,
 };
@@ -415,6 +416,175 @@ impl CatalogService {
         }
         Ok(index)
     }
+
+    /// Finds the catalog artists and albums that name an entity already stored.
+    ///
+    /// A search shows the stored artists and albums first and the catalog's
+    /// after them, and the two lists may name the same act or release when the
+    /// two have never been paired: a scanned "Radiohead" and the catalog's
+    /// "Radiohead" are one entry to a user, not two. This is the name-based
+    /// pairing a browse page already uses, applied to a search result without
+    /// recording anything, so a search never writes.
+    ///
+    /// A stored row that already carries an alias for the answering instance is
+    /// skipped: the alias table has settled which provider entity it is, and a
+    /// second catalog hit of the same name is a different entity.
+    ///
+    /// # Parameters
+    ///
+    /// - `stored_artists`: the matched stored artists, as their id and name, in
+    ///   match order.
+    /// - `stored_albums`: the matched stored album ids, in match order.
+    /// - `search`: the catalog half of the response.
+    ///
+    /// # Returns
+    ///
+    /// The catalog ids to leave out of the response. A catalog id is claimed
+    /// once, by the first stored entity whose name it agrees with.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::Database`] when a read fails and
+    /// [`CatalogError::CorruptAlias`] when a stored id does not decode.
+    pub async fn name_twins(
+        &self,
+        stored_artists: &[(EntityId, String)],
+        stored_albums: &[EntityId],
+        search: &CatalogSearch,
+    ) -> Result<HashSet<CatalogId>, CatalogError> {
+        let mut twins = HashSet::new();
+        if search.artists.is_empty() && search.albums.is_empty() {
+            return Ok(twins);
+        }
+        let aliases = self.provider_alias_index(search).await?;
+        let instances: HashSet<Slug> = search
+            .artists
+            .iter()
+            .map(|hit| hit.id.slug().clone())
+            .chain(search.albums.iter().map(|hit| hit.id.slug().clone()))
+            .collect();
+
+        let mut claimed_artists = vec![false; search.artists.len()];
+        for (entity, name) in stored_artists {
+            let wanted = normalize(name);
+            if wanted.is_empty() || self.aliased_in(*entity, &instances).await? {
+                continue;
+            }
+            for (index, hit) in search.artists.iter().enumerate() {
+                if claimed_artists[index] || normalize(&hit.artist.name) != wanted {
+                    continue;
+                }
+                let key = (
+                    hit.id.slug().as_str().to_owned(),
+                    hit.id.provider_id().to_owned(),
+                );
+                if aliases.contains_key(&key) {
+                    continue;
+                }
+                claimed_artists[index] = true;
+                twins.insert(hit.id.clone());
+                break;
+            }
+        }
+
+        let mut claimed_albums = vec![false; search.albums.len()];
+        for entity in stored_albums {
+            let Some(stored) = self.stored_album(*entity).await? else {
+                continue;
+            };
+            let Some(artist) = stored.artist else {
+                continue;
+            };
+            if self.aliased_in(*entity, &instances).await? {
+                continue;
+            }
+            for (index, hit) in search.albums.iter().enumerate() {
+                if claimed_albums[index] {
+                    continue;
+                }
+                if title_match(&stored.album, &hit.album.title).is_none() {
+                    continue;
+                }
+                let credit = hit.album.artists.first().map(|credit| normalize(&credit.name));
+                if credit.as_deref() != Some(artist.as_str()) {
+                    continue;
+                }
+                let key = (
+                    hit.id.slug().as_str().to_owned(),
+                    hit.id.provider_id().to_owned(),
+                );
+                if aliases.contains_key(&key) {
+                    continue;
+                }
+                claimed_albums[index] = true;
+                twins.insert(hit.id.clone());
+                break;
+            }
+        }
+        Ok(twins)
+    }
+
+    /// Reports whether a stored row already carries an alias for one of the
+    /// instances a search named.
+    ///
+    /// # Parameters
+    ///
+    /// - `entity`: the stored row.
+    /// - `instances`: the instances that issued the search's catalog hits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::Database`] when the alias read fails.
+    async fn aliased_in(
+        &self,
+        entity: EntityId,
+        instances: &HashSet<Slug>,
+    ) -> Result<bool, CatalogError> {
+        Ok(self
+            .provider_aliases(entity)
+            .await?
+            .iter()
+            .any(|alias| instances.contains(&alias.slug)))
+    }
+
+    /// Reads a stored album with the name of its primary artist.
+    ///
+    /// # Parameters
+    ///
+    /// - `entity`: the stored album.
+    ///
+    /// # Returns
+    ///
+    /// The album and its folded primary artist name, or `None` when the album
+    /// has no row or no credited artist.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::Database`] when a read fails.
+    async fn stored_album(
+        &self,
+        entity: EntityId,
+    ) -> Result<Option<StoredAlbum>, CatalogError> {
+        let mut conn = self.database().readers().acquire().await?;
+        let Some(album) = albums::get_album(&mut conn, entity).await? else {
+            return Ok(None);
+        };
+        let credits = artists::list_album_artists(&mut conn, entity).await?;
+        let artist = credits
+            .first()
+            .map(|credit| normalize(&credit.name))
+            .or_else(|| album.display_artist.as_deref().map(normalize))
+            .filter(|name| !name.is_empty());
+        Ok(Some(StoredAlbum { album, artist }))
+    }
+}
+
+/// A stored album and the folded name of its primary artist.
+struct StoredAlbum {
+    /// The album row.
+    album: Album,
+    /// The primary artist's name, folded; `None` when the album credits nobody.
+    artist: Option<String>,
 }
 
 /// Finds the stored recording a catalog track names.

@@ -1082,11 +1082,31 @@ async fn append_catalog(
     let (_, album_window, _) = shortfalls[1];
     let (_, song_window, _) = shortfalls[2];
 
+    // A stored artist or album whose name the catalog also answers with is one
+    // entry to the user, not two: the stored row is already in the list.
+    let stored_artists: Vec<(EntityId, String)> = matches
+        .artists
+        .iter()
+        .map(|matched| (matched.artist.id, matched.artist.name.clone()))
+        .collect();
+    let stored_albums = matches.local_album_ids();
+    let twins = match catalog
+        .name_twins(&stored_artists, &stored_albums, &found)
+        .await
+    {
+        Ok(twins) => twins,
+        Err(error) => {
+            tracing::debug!(error = %error, "could not compare catalog results with stored names");
+            HashSet::new()
+        }
+    };
+
     matches.catalog_artists.extend(
         deduped
             .artists
             .iter()
             .filter(|artist| deduped.stored_entity(&artist.id).is_none())
+            .filter(|artist| !twins.contains(&artist.id))
             .take(window_limit(artist_window))
             .cloned(),
     );
@@ -1095,6 +1115,7 @@ async fn append_catalog(
             .albums
             .iter()
             .filter(|album| deduped.stored_entity(&album.id).is_none())
+            .filter(|album| !twins.contains(&album.id))
             .take(window_limit(album_window))
             .cloned(),
     );

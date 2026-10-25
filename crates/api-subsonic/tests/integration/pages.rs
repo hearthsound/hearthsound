@@ -501,6 +501,65 @@ async fn hs_resolve_needs_the_vendor_flag() {
 }
 
 #[tokio::test]
+async fn a_stored_artist_is_listed_once_in_search() {
+    let seed = seeded().await;
+    let response = get(
+        &seed.fixture.app(),
+        &format!(
+            "/rest/search3?query=Discography%20Artist&apiKey={}&f=json",
+            seed.fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&response);
+    let body = parsed(&response.body);
+    let artists = body["subsonic-response"]["searchResult3"]["artist"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        artists.len(),
+        1,
+        "the stored artist and its catalog twin are one entry: {}",
+        response.body
+    );
+    assert_eq!(
+        artists[0]["id"].as_str(),
+        Some(seed.artist.to_string().as_str())
+    );
+}
+
+#[tokio::test]
+async fn a_stored_album_is_listed_once_in_search() {
+    let seed = seeded().await;
+    let response = get(
+        &seed.fixture.app(),
+        &format!(
+            "/rest/search3?query=Second%20Wind&apiKey={}&f=json",
+            seed.fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&response);
+    let body = parsed(&response.body);
+    let albums: Vec<String> = body["subsonic-response"]["searchResult3"]["album"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|album| album["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        albums.contains(&seed.second_wind.to_string()),
+        "the stored album is listed: {}",
+        response.body
+    );
+    assert!(
+        !albums.contains(&catalog_id(EntityKind::Album, SECOND_WIND)),
+        "its catalog twin is not: {}",
+        response.body
+    );
+}
+
+#[tokio::test]
 async fn a_member_carries_the_readable_path() {
     let seed = seeded().await;
     let body = artist_page(&seed.fixture, &seed.artist.to_string(), true).await;

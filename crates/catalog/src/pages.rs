@@ -127,7 +127,7 @@ pub struct AlbumPage {
 /// The ordering is the preference order: a title that agrees once both are
 /// folded wins over one that only agrees once its edition suffix is folded away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum TitleMatch {
+pub(crate) enum TitleMatch {
     /// The titles agree once their edition suffixes are folded away too.
     Edition,
     /// The titles agree once both are folded.
@@ -1016,7 +1016,7 @@ fn match_albums(
 /// # Returns
 ///
 /// The match strength, or `None` when the titles do not agree.
-fn title_match(album: &Album, title: &str) -> Option<TitleMatch> {
+pub(crate) fn title_match(album: &Album, title: &str) -> Option<TitleMatch> {
     let exact = normalize(&album.title);
     if !exact.is_empty() && exact == normalize(title) {
         return Some(TitleMatch::Exact);
