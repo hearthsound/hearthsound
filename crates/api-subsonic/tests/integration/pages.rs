@@ -360,3 +360,174 @@ async fn a_non_administrator_sees_stored_albums_outside_their_library_by_catalog
         Some(3)
     );
 }
+
+/// Calls `hsResolve` and returns the `resolved` object of a successful answer.
+///
+/// # Parameters
+///
+/// - `fixture`: the fixture whose router answers.
+/// - `query`: the parameters, without the leading `?`.
+async fn resolve_path(fixture: &Fixture, query: &str) -> serde_json::Value {
+    let response = get(
+        &fixture.app(),
+        &format!(
+            "/rest/hsResolve?{query}&apiKey={}&f=json&hearthsound=1",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&response);
+    parsed(&response.body)["subsonic-response"]["resolved"].clone()
+}
+
+/// Calls `hsResolve` and asserts the failure code it answers with.
+///
+/// # Parameters
+///
+/// - `fixture`: the fixture whose router answers.
+/// - `query`: the parameters, without the leading `?`.
+/// - `code`: the Subsonic error code the request must answer with.
+async fn resolve_fails(fixture: &Fixture, query: &str, code: i32) {
+    let response = get(
+        &fixture.app(),
+        &format!(
+            "/rest/hsResolve?{query}&apiKey={}&f=json&hearthsound=1",
+            fixture.api_key
+        ),
+    )
+    .await;
+    crate::common::assert_error(&response, code);
+}
+
+#[tokio::test]
+async fn an_artist_path_names_the_library_artist() {
+    let seed = seeded().await;
+    let resolved = resolve_path(&seed.fixture, "artist=discography-artist").await;
+    assert_eq!(resolved["type"].as_str(), Some("artist"));
+    assert_eq!(
+        resolved["id"].as_str(),
+        Some(seed.artist.to_string().as_str())
+    );
+    assert_eq!(resolved["path"].as_str(), Some("discography-artist"));
+
+    let spelled = resolve_path(&seed.fixture, "artist=Discography%20Artist").await;
+    assert_eq!(
+        spelled["id"].as_str(),
+        Some(seed.artist.to_string().as_str()),
+        "a name resolves the way its segment does"
+    );
+    assert_eq!(spelled["path"].as_str(), Some("discography-artist"));
+}
+
+#[tokio::test]
+async fn an_album_path_names_the_album_the_artist_page_lists() {
+    let seed = seeded().await;
+    let stored = resolve_path(
+        &seed.fixture,
+        "artist=discography-artist&album=second-wind",
+    )
+    .await;
+    assert_eq!(stored["type"].as_str(), Some("album"));
+    assert_eq!(
+        stored["id"].as_str(),
+        Some(seed.second_wind.to_string().as_str())
+    );
+    assert_eq!(stored["path"].as_str(), Some("discography-artist/second-wind"));
+
+    let catalog = resolve_path(&seed.fixture, "artist=discography-artist&album=first-light").await;
+    let first_light = catalog_id(EntityKind::Album, "disco-album-1");
+    assert_eq!(catalog["id"].as_str(), Some(first_light.as_str()));
+    assert_eq!(catalog["path"].as_str(), Some("discography-artist/first-light"));
+
+    let basement = resolve_path(
+        &seed.fixture,
+        "artist=discography-artist&album=basement-tapes",
+    )
+    .await;
+    assert_eq!(
+        basement["id"].as_str(),
+        Some(seed.basement.to_string().as_str()),
+        "an album the catalog does not list is still found"
+    );
+}
+
+#[tokio::test]
+async fn an_id_resolves_to_its_canonical_path() {
+    let seed = seeded().await;
+    let artist_id = catalog_id(EntityKind::Artist, ARTIST);
+    let artist = resolve_path(&seed.fixture, &format!("id={artist_id}")).await;
+    assert_eq!(
+        artist["id"].as_str(),
+        Some(seed.artist.to_string().as_str()),
+        "a catalog artist resolves to the stored artist it pairs with"
+    );
+    assert_eq!(artist["path"].as_str(), Some("discography-artist"));
+
+    let album_id = catalog_id(EntityKind::Album, THIRD_SINGLE);
+    let album = resolve_path(&seed.fixture, &format!("id={album_id}")).await;
+    assert_eq!(album["id"].as_str(), Some(album_id.as_str()));
+    assert_eq!(album["type"].as_str(), Some("album"));
+    assert_eq!(
+        album["path"].as_str(),
+        Some("discography-artist/third-single")
+    );
+}
+
+#[tokio::test]
+async fn a_path_nothing_answers_to_is_not_found() {
+    let seed = seeded().await;
+    resolve_fails(&seed.fixture, "artist=discography-artist--2", 70).await;
+    resolve_fails(&seed.fixture, "artist=nobody-at-all", 70).await;
+    resolve_fails(
+        &seed.fixture,
+        "artist=discography-artist&album=nobody-at-all",
+        70,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn hs_resolve_needs_the_vendor_flag() {
+    let seed = seeded().await;
+    let response = get(
+        &seed.fixture.app(),
+        &format!(
+            "/rest/hsResolve?artist=discography-artist&apiKey={}&f=json",
+            seed.fixture.api_key
+        ),
+    )
+    .await;
+    crate::common::assert_error(&response, 70);
+}
+
+#[tokio::test]
+async fn a_member_carries_the_readable_path() {
+    let seed = seeded().await;
+    let body = artist_page(&seed.fixture, &seed.artist.to_string(), true).await;
+    let artist = &body["subsonic-response"]["artist"];
+    assert_eq!(artist["hearthsound"]["path"].as_str(), Some("discography-artist"));
+    let first_light = &artist["album"][0];
+    assert_eq!(
+        first_light["hearthsound"]["path"].as_str(),
+        Some("discography-artist/first-light")
+    );
+    let second_wind = &artist["album"][1];
+    assert_eq!(
+        second_wind["hearthsound"]["path"].as_str(),
+        Some("discography-artist/second-wind"),
+        "a title the listing disambiguates keeps both segments"
+    );
+
+    let body = album_page(&seed.fixture, &seed.second_wind.to_string()).await;
+    let gust = &body["subsonic-response"]["album"]["song"][0];
+    assert_eq!(gust["id"].as_str(), Some(seed.gust.to_string().as_str()));
+    assert_eq!(
+        gust["hearthsound"]["artistPath"].as_str(),
+        Some("discography-artist")
+    );
+    assert_eq!(
+        gust["hearthsound"]["albumPath"].as_str(),
+        Some("discography-artist/second-wind"),
+        "a stored song's album path is built from the album's own title"
+    );
+}

@@ -64,6 +64,7 @@ mod error;
 mod identity;
 mod materialize;
 pub mod pages;
+pub mod paths;
 pub mod relevance;
 mod service;
 mod wire;
@@ -81,6 +82,7 @@ pub use materialize::{MaterializedAlbum, ProviderAlias, materialize_entity};
 pub use pages::{
     AlbumHead, AlbumPage, ArtistHead, ArtistPage, MAX_PAGE_ALBUMS, PageAlbum, PageDepth, PageTrack,
 };
+pub use paths::ResolvedPath;
 pub use service::{
     CatalogAlbumRefResult, CatalogAlbumResult, CatalogArtistResult, CatalogSearch, CatalogService,
     CatalogTrackResult,

@@ -133,6 +133,7 @@
 //! | `hsGetAcquisitions` | the acquisitions of the caller's account, or of every account for an administrator |
 //! | `hsCancelAcquisition` | ends one acquisition, idempotently |
 //! | `hsSetQueue` | takes the queue a client is playing and prefetches its next items |
+//! | `hsResolve` | resolves an entity's readable path to its id, or its id to the canonical path |
 //! | `hsSave` | adds the named tracks, albums and artists to the caller's personal library |
 //! | `hsUnsave` | removes the named entities from the caller's personal library |
 //! | `hsSetFeedback` | records a like, a dislike, or neither, for the named entities |

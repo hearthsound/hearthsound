@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use hearthsound_acquire::repo::{AcquisitionRow, active_for_tracks};
 use hearthsound_activity::disliked_ids;
 use hearthsound_catalog::aliases::provider_namespace;
+use hearthsound_catalog::paths::segment;
 use hearthsound_core::{Availability, ClientId, EntityId, EntityKind, IdPrefix};
 use hearthsound_library::query::{
     album_member_tracks, artist_member_tracks, personal_album_ids, personal_artist_ids,
@@ -607,27 +608,109 @@ fn collect_value(value: &Value, ids: &mut HashSet<String>) {
     }
 }
 
-/// The string `id` member of an object, when it has one.
-fn id_of(object: &Object) -> Option<&str> {
-    object
-        .members()
-        .iter()
-        .find(|(name, _)| name.as_ref() == "id")
-        .and_then(|(_, value)| match value {
-            Value::Str(id) => Some(id.as_str()),
-            _ => None,
-        })
-}
-
 /// Appends the decorated `hearthsound` member to every matching object, depth first.
 fn apply_object(object: &mut Object, members: &HashMap<String, Object>) {
     for (_, value) in object.members_mut() {
         apply_value(value, members);
     }
-    let member = id_of(object).and_then(|id| members.get(id)).cloned();
-    if let Some(member) = member {
-        *object = std::mem::take(object).set("hearthsound", member);
+    let Some(member) = id_of(object).and_then(|id| members.get(id)).cloned() else {
+        return;
+    };
+    let member = with_path(object, member);
+    *object = std::mem::take(object).set("hearthsound", member);
+}
+
+/// Adds the readable path of the object to its `hearthsound` member.
+///
+/// The path is read off the object itself, so a listing never pays for a
+/// lookup: an artist carries its segment, an album the artist's segment and its
+/// own, and a track the segments of its artist and its album. A name the object
+/// does not carry leaves the matching field out rather than inventing one.
+///
+/// # Parameters
+///
+/// - `object`: the payload object the member belongs to.
+/// - `member`: the member built from the entity's standing.
+///
+/// # Returns
+///
+/// The member, with `path` on an artist and an album and `artistPath` and
+/// `albumPath` on a track.
+fn with_path(object: &Object, member: Object) -> Object {
+    let Some(id) = id_of(object) else {
+        return member;
+    };
+    let kind = match ClientId::parse(id) {
+        Ok(ClientId::Entity(entity)) => entity.kind().entity_kind(),
+        Ok(ClientId::Catalog(catalog)) => Some(catalog.kind()),
+        Err(_) => None,
+    };
+    match kind {
+        Some(EntityKind::Artist) => match str_member(object, "name") {
+            Some(name) => member.set("path", segment(name)),
+            None => member,
+        },
+        Some(EntityKind::Album) => {
+            let title = str_member(object, "name").or_else(|| str_member(object, "title"));
+            let artist = first_name(object, "artists").or_else(|| str_member(object, "artist"));
+            match (title, artist) {
+                (Some(title), Some(artist)) => {
+                    member.set("path", format!("{}/{}", segment(artist), segment(title)))
+                }
+                _ => member,
+            }
+        }
+        Some(EntityKind::Track) => {
+            let artist = first_name(object, "artists").or_else(|| str_member(object, "artist"));
+            let album_artist =
+                first_name(object, "albumArtists").or(artist);
+            let mut member = member;
+            if let Some(artist) = artist {
+                member = member.set("artistPath", segment(artist));
+            }
+            if let (Some(album), Some(album_artist)) = (str_member(object, "album"), album_artist) {
+                member = member.set(
+                    "albumPath",
+                    format!("{}/{}", segment(album_artist), segment(album)),
+                );
+            }
+            member
+        }
+        _ => member,
     }
+}
+
+/// The non-empty string member of an object, when it has one.
+fn str_member<'a>(object: &'a Object, name: &str) -> Option<&'a str> {
+    object
+        .members()
+        .iter()
+        .find(|(key, _)| key.as_ref() == name)
+        .and_then(|(_, value)| match value {
+            Value::Str(text) if !text.is_empty() => Some(text.as_str()),
+            _ => None,
+        })
+}
+
+/// The `name` of the first object of an array member.
+fn first_name<'a>(object: &'a Object, array: &str) -> Option<&'a str> {
+    let value = object
+        .members()
+        .iter()
+        .find(|(key, _)| key.as_ref() == array)
+        .map(|(_, value)| value)?;
+    match value {
+        Value::Array(items) => match items.values().first()? {
+            Value::Object(first) => str_member(first, "name"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The string `id` member of an object, when it has one.
+fn id_of(object: &Object) -> Option<&str> {
+    str_member(object, "id")
 }
 
 /// Decorates the objects nested in one value.
