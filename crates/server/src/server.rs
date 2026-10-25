@@ -318,11 +318,17 @@ async fn wake_on_new_files(events: Arc<EventBus>, signal: MaintenanceSignal, shu
     }
 }
 
-/// Watches the folders flagged for watching, scanning each once at startup.
+/// Watches the folders flagged for watching and scans every folder once.
 ///
-/// A filesystem watcher only reports what happens while it runs, so every
-/// watched folder is scanned once when the server starts: whatever changed
-/// while it was stopped is found by that incremental scan.
+/// A filesystem watcher only reports what happens while it runs, and the `watch`
+/// switch controls live detection rather than whether a folder is ever indexed,
+/// so one incremental scan of every folder is requested when the server starts:
+/// whatever changed while it was stopped is found then, watched or not. The
+/// scan is incremental, so an unchanged folder costs a walk and no probes.
+///
+/// The first start after an upgrade runs the library identity pass instead: it
+/// scans every folder in full, so the startup scan would be a second walk of the
+/// same files, and it is skipped while the pass is queued.
 ///
 /// # Parameters
 ///
@@ -333,29 +339,25 @@ async fn watch_folders(services: Arc<Services>, shutdown: Shutdown) {
     if let Err(error) = watcher.reconcile().await {
         tracing::error!(%error, "could not reconcile the folder watchers");
     }
-    let folders = match hearthsound_library::LibraryRepository::new(services.database())
-        .list_library_folders()
-        .await
+    let identity_pass = match hearthsound_library::identity::enqueue_if_pending(
+        services.database(),
+        services.queue(),
+    )
+    .await
     {
-        Ok(folders) => folders,
+        Ok(enqueued) => enqueued,
         Err(error) => {
-            tracing::error!(%error, "could not list the library folders for a startup scan");
-            Vec::new()
+            tracing::warn!(%error, "could not queue the library identity pass");
+            false
         }
     };
-    for folder in folders.iter().filter(|folder| folder.watch) {
-        let request = ScanRequest::folder(folder.id);
-        if let Err(error) = services
+    if !identity_pass
+        && let Err(error) = services
             .scanner()
-            .request_scan(services.queue(), &request)
+            .request_scan(services.queue(), &ScanRequest::all())
             .await
-        {
-            tracing::warn!(
-                folder = %folder.id,
-                %error,
-                "could not request the startup scan of a watched folder"
-            );
-        }
+    {
+        tracing::warn!(%error, "could not request the startup scan of the library folders");
     }
 
     shutdown.wait().await;

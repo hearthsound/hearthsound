@@ -136,3 +136,59 @@ async fn a_watched_folder_is_scanned_when_the_server_starts() {
         outcome.err()
     );
 }
+
+/// A restart indexes every folder, including the ones with watching off.
+///
+/// The `watch` switch controls live change detection, not whether a folder is
+/// ever indexed: a folder added with `--no-watch` is brought up to date by the
+/// startup scan, which is incremental, so an unchanged folder costs a walk and
+/// no probes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_indexes_a_folder_that_is_not_watched() {
+    let fixture = Fixture::new().await;
+    let api_key = fixture.api_key.clone();
+    let directory = fixture.library_dir("music-unwatched");
+    write_album(&directory.join("First Album")).await;
+
+    let library = LibraryRepository::new(fixture.services.database());
+    let folder = library.add_library_folder(&directory, None).await.unwrap();
+    library
+        .set_library_folder_watch(folder.id, false)
+        .await
+        .unwrap();
+    // The identity pass already ran, so a restart takes the startup-scan path.
+    hearthsound_library::identity::mark_maintenance_complete(
+        fixture.services.database(),
+        hearthsound_library::identity::REIDENTITY_PASS,
+    )
+    .await
+    .unwrap();
+
+    let tracks = |db: std::sync::Arc<Database>, expected: i64| async move {
+        let started = Instant::now();
+        loop {
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks")
+                .fetch_one(db.readers())
+                .await
+                .unwrap_or(0);
+            if count == expected {
+                return;
+            }
+            assert!(
+                started.elapsed() < WATCH_BUDGET,
+                "expected {expected} tracks, the library holds {count}"
+            );
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+    };
+    let db = std::sync::Arc::clone(fixture.services.database());
+
+    // A restart is a new process over the same data directory, and the folder
+    // gains an album while nothing is watching it.
+    let dir = fixture.stop().await;
+    write_album(&directory.join("Second Album")).await;
+    let fixture = Fixture::reopen(dir, api_key).await;
+    tracks(std::sync::Arc::clone(&db), 6).await;
+
+    fixture.stop().await;
+}

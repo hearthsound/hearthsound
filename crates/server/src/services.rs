@@ -73,6 +73,7 @@ use hearthsound_jobs::{
     SchedulerOptions,
 };
 use hearthsound_library::StorageRoots;
+use hearthsound_library::identity::{REIDENTITY_JOB_KIND, ReidentityJobHandler};
 use hearthsound_library::maintenance::{
     MAINTENANCE_JOB_KIND, MAINTENANCE_SCHEDULE, MaintenanceJobHandler, MaintenanceSignal,
     StorageMaintainer,
@@ -390,6 +391,13 @@ impl Services {
         runner.register(
             SCAN_JOB_KIND,
             Arc::new(ScanJobHandler::new(Arc::clone(&scanner))),
+        );
+        runner.register(
+            REIDENTITY_JOB_KIND,
+            Arc::new(ReidentityJobHandler::new(
+                Arc::clone(&scanner),
+                Arc::clone(&database),
+            )),
         );
         runner.register(
             PLUGIN_KV_SWEEP_JOB_KIND,
