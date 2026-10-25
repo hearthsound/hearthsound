@@ -119,6 +119,14 @@ impl Services {
     /// cancellation is written straight to the database, and only the running
     /// process can stop the worker that still serves that acquisition.
     ///
+    /// The settings the services cache a copy of are reapplied here as well,
+    /// not only in the settings arm of
+    /// [`Services::watch_external_changes`]. The server's own write wakes both
+    /// arms at once - the polling connection sees the commit and the store
+    /// publishes its new snapshot - and a notification a `select!` branch
+    /// observed but did not run is gone, so a reload must not depend on the
+    /// other arm still firing.
+    ///
     /// # Parameters
     ///
     /// - `self`: the services whose stored layers are re-read.
@@ -127,6 +135,7 @@ impl Services {
             Ok(()) => {}
             Err(error) => tracing::error!(%error, "could not reload the runtime settings"),
         }
+        self.apply_cached_settings();
         match self.registry().rebuild_or_mark_stale().await {
             Ok(report) => log_rebuild(&report),
             Err(error) => tracing::error!(%error, "could not rebuild the provider registry"),
