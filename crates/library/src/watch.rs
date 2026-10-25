@@ -1,6 +1,10 @@
 //! Watching library folders for changes and scanning what changed.
 //!
-//! A folder whose `watch` column is set gets one recursive filesystem watcher.
+//! A folder whose `watch` column is set gets one filesystem watcher per
+//! directory it holds: a recursive watch gives up on the first directory the
+//! process may not read, which would leave a whole folder unwatched, while a
+//! directory that cannot be watched on its own only loses itself. A directory
+//! created while the watcher runs is watched from its creation event onward.
 //! Changes are debounced - a burst of writes from one copy or one tagger is
 //! reported once, after the quiet period in `library.watch.debounce_ms` - and
 //! each batch turns into one incremental scan of the folders that changed, never
@@ -49,6 +53,8 @@ struct WatchBatch {
     folder_id: uuid::Uuid,
     /// The folder's root, which the paths are made relative to.
     root: PathBuf,
+    /// The nested library folders, which are not watched by this folder.
+    skip: Vec<PathBuf>,
     /// The paths the filesystem reported.
     paths: Vec<PathBuf>,
 }
@@ -91,7 +97,10 @@ pub struct LibraryWatcher {
     /// The settings service the debounce period is read from.
     settings: Settings,
     /// One watcher per watched folder, keyed by folder id.
-    watchers: Mutex<HashMap<uuid::Uuid, FolderWatcher>>,
+    ///
+    /// Shared with the draining task, so a directory that appears after the
+    /// folder was armed is watched from its creation event onward.
+    watchers: Arc<Mutex<HashMap<uuid::Uuid, FolderWatcher>>>,
     /// The sender the debouncer threads forward their batches on.
     sender: mpsc::UnboundedSender<WatchBatch>,
 }
@@ -120,9 +129,12 @@ impl LibraryWatcher {
         settings: Settings,
     ) -> LibraryWatcher {
         let (sender, mut receiver) = mpsc::unbounded_channel::<WatchBatch>();
+        let watchers: Arc<Mutex<HashMap<uuid::Uuid, FolderWatcher>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let drain = Drain {
             scanner: Arc::clone(&scanner),
             queue: Arc::clone(&queue),
+            watchers: Arc::clone(&watchers),
         };
         tokio::spawn(async move {
             while let Some(batch) = receiver.recv().await {
@@ -132,7 +144,7 @@ impl LibraryWatcher {
         LibraryWatcher {
             readers: db.readers().clone(),
             settings,
-            watchers: Mutex::new(HashMap::new()),
+            watchers,
             sender,
         }
     }
@@ -188,7 +200,8 @@ impl LibraryWatcher {
             if !folder.watch || watchers.contains_key(&folder.id) {
                 continue;
             }
-            match self.start(folder, debounce) {
+            let skip = folders::nested_roots(&folders, folder);
+            match self.start(folder, debounce, &skip) {
                 Ok(watcher) => {
                     tracing::info!(
                         folder = %folder.id,
@@ -237,10 +250,17 @@ impl LibraryWatcher {
 
     /// Starts the watcher of one folder.
     ///
+    /// Watches are armed per directory rather than recursively: the recursive
+    /// mode of the inotify backend walks the tree and gives up on the first
+    /// directory it may not watch, which would leave a folder with one closed
+    /// subdirectory unwatched. A directory that cannot be read or watched is
+    /// logged and skipped instead, and the next scan still finds its files.
+    ///
     /// # Parameters
     ///
     /// - `folder`: the folder to watch; its path must be a directory.
     /// - `debounce`: the quiet period before a batch is reported.
+    /// - `skip`: the nested library folders, which this folder does not watch.
     ///
     /// # Returns
     ///
@@ -248,17 +268,20 @@ impl LibraryWatcher {
     ///
     /// # Errors
     ///
-    /// Returns [`notify::Error`] when the debouncer cannot be built or the path
-    /// cannot be watched, which is what an exhausted inotify budget looks like.
+    /// Returns [`notify::Error`] when the debouncer cannot be built or the folder
+    /// root itself cannot be watched, which is what an exhausted inotify budget
+    /// looks like.
     fn start(
         &self,
         folder: &LibraryFolder,
         debounce: Duration,
+        skip: &[PathBuf],
     ) -> Result<FolderWatcher, notify::Error> {
         let root = folder.path.clone();
         let folder_id = folder.id;
         let sender = self.sender.clone();
         let handler_root = root.clone();
+        let handler_skip = skip.to_vec();
         let events = move |result: DebounceEventResult| {
             let paths = match result {
                 Ok(events) => paths_of(&events),
@@ -277,11 +300,23 @@ impl LibraryWatcher {
             let _ = sender.send(WatchBatch {
                 folder_id,
                 root: handler_root.clone(),
+                skip: handler_skip.clone(),
                 paths,
             });
         };
         let mut debouncer = new_debouncer(debounce, None, events)?;
-        debouncer.watch(&root, RecursiveMode::Recursive)?;
+        // A root that cannot be watched still fails the folder, as before.
+        debouncer.watch(&root, RecursiveMode::NonRecursive)?;
+        let (directories, unreadable) = readable_directories(&root, skip);
+        let unwatched = register_directories(&mut debouncer, &directories);
+        tracing::info!(
+            folder = %folder.id,
+            path = %folder.path.display(),
+            watched = directories.len(),
+            unreadable,
+            unwatched,
+            "watching a library folder"
+        );
         Ok(FolderWatcher {
             debouncer,
             debounce,
@@ -290,21 +325,155 @@ impl LibraryWatcher {
     }
 }
 
+/// Collects every directory the watcher should arm.
+///
+/// The walk reads each directory, follows symlinks the way a scan does, and
+/// stops where it has been before, so a link cycle cannot loop. A directory it
+/// cannot read is counted and logged: its files are found by the next scan, and
+/// the rest of the folder stays watched.
+///
+/// # Parameters
+///
+/// - `root`: the folder root.
+/// - `skip`: the nested library folders, which are not descended into.
+///
+/// # Returns
+///
+/// The directories to arm, and how many could not be read.
+fn readable_directories(root: &Path, skip: &[PathBuf]) -> (Vec<PathBuf>, u64) {
+    let mut directories: Vec<PathBuf> = Vec::new();
+    let mut unreadable = 0_u64;
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        let canonical = match std::fs::canonicalize(&directory) {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                tracing::warn!(
+                    path = %directory.display(),
+                    %error,
+                    "could not read a directory while arming the watcher; its changes are \
+                     picked up by the next scan"
+                );
+                unreadable += 1;
+                continue;
+            }
+        };
+        if skip.iter().any(|nested| canonical == *nested) {
+            continue;
+        }
+        if !visited.insert(canonical) {
+            continue;
+        }
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(
+                    path = %directory.display(),
+                    %error,
+                    "could not read a directory while arming the watcher; its changes are \
+                     picked up by the next scan"
+                );
+                unreadable += 1;
+                continue;
+            }
+        };
+        directories.push(directory);
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.as_encoded_bytes().first() == Some(&b'.') {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    (directories, unreadable)
+}
+
+/// Arms one non-recursive watch per directory.
+///
+/// # Parameters
+///
+/// - `debouncer`: the folder's debouncer.
+/// - `directories`: the directories to watch.
+///
+/// # Returns
+///
+/// How many directories could not be watched.
+fn register_directories(
+    debouncer: &mut Debouncer<notify::RecommendedWatcher, RecommendedCache>,
+    directories: &[PathBuf],
+) -> u64 {
+    let mut failed = 0_u64;
+    for directory in directories {
+        if let Err(error) = debouncer.watch(directory, RecursiveMode::NonRecursive) {
+            failed += 1;
+            tracing::warn!(
+                path = %directory.display(),
+                %error,
+                "could not watch a directory while arming the watcher; its changes are picked \
+                 up by the next scan"
+            );
+        }
+    }
+    failed
+}
+
 /// Turns one debounced batch into scans.
 struct Drain {
     /// The scanner a batch is scanned through.
     scanner: Arc<LibraryScanner>,
     /// The queue a scan is requested on.
     queue: Arc<JobQueue>,
+    /// The live watchers, shared with the area that started them.
+    watchers: Arc<Mutex<HashMap<uuid::Uuid, FolderWatcher>>>,
 }
 
 impl Drain {
+    /// Arms the watcher on every reported directory it does not watch yet.
+    ///
+    /// A directory that appears after the folder was armed has no watch of its
+    /// own, so without this a file written into a brand-new album folder would
+    /// wait for the next scan. The scan of the reported subtree is what indexes
+    /// the files, so a directory that cannot be watched still loses nothing.
+    ///
+    /// # Parameters
+    ///
+    /// - `batch`: the paths one folder's debouncer reported.
+    fn arm_directories(&self, batch: &WatchBatch) {
+        let directories: Vec<PathBuf> = batch
+            .paths
+            .iter()
+            .filter(|path| path.is_dir())
+            .filter(|path| {
+                !batch.skip.iter().any(|nested| {
+                    *path == nested || std::fs::canonicalize(path).is_ok_and(|real| real == *nested)
+                })
+            })
+            .cloned()
+            .collect();
+        if directories.is_empty() {
+            return;
+        }
+        let mut watchers = self
+            .watchers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(watcher) = watchers.get_mut(&batch.folder_id) {
+            register_directories(&mut watcher.debouncer, &directories);
+        }
+    }
+
     /// Requests one scan for the directories a batch reported.
     ///
     /// # Parameters
     ///
     /// - `batch`: the paths one folder's debouncer reported.
     async fn handle(&self, batch: WatchBatch) {
+        self.arm_directories(&batch);
         let subtrees = relative_subtrees(&batch.root, &batch.paths);
         let request = ScanRequest {
             folder_id: Some(batch.folder_id),

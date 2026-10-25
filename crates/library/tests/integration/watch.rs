@@ -215,3 +215,208 @@ async fn a_scan_does_not_request_another_scan() {
 
     watcher.stop();
 }
+
+/// A watched folder whose subtree cannot be read is still watched.
+///
+/// The recursive mode of the inotify backend gives up on the first directory it
+/// may not watch, which used to leave the whole folder unwatched; the per
+/// directory registration skips that directory alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreadable_subdirectory_does_not_stop_the_watch() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let settings = settings(&db).await;
+    let music = dir.path().join("music");
+    let locked = music.join("locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    write_album(&music.join("Watched Album")).await;
+    library.add_library_folder(&music, None).await.unwrap();
+
+    // The recursive mode of the inotify backend fails the whole folder on this
+    // directory; per-directory registration skips it alone.
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let queue = Arc::new(JobQueue::new(&db, QueueOptions::default()));
+    let scanner = Arc::new(LibraryScanner::new(
+        &db,
+        Arc::new(EventBus::new()),
+        settings.clone(),
+    ));
+    let watcher = LibraryWatcher::new(&db, Arc::clone(&scanner), Arc::clone(&queue), settings);
+    watcher.reconcile().await.unwrap();
+    assert_eq!(
+        watcher.watched_folders(),
+        1,
+        "the folder keeps its watcher despite the locked directory"
+    );
+
+    let mut runner = JobRunner::new(Arc::clone(&queue), JobRunnerOptions::default());
+    runner.register(
+        SCAN_JOB_KIND,
+        Arc::new(ScanJobHandler::new(Arc::clone(&scanner))),
+    );
+    let runner = Arc::new(runner);
+    let shutdown = Shutdown::new();
+    let running = {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move { runner.run(shutdown).await })
+    };
+
+    // A file written into the readable album is still picked up.
+    let late = music.join("Watched Album").join("04 - Track 4.flac");
+    std::fs::copy(music.join("Watched Album").join("01 - Track 1.flac"), &late).unwrap();
+    let indexed = wait_for(Duration::from_secs(20), || async {
+        library
+            .list_artists()
+            .await
+            .map(|artists| artists.len() == 1)
+            .unwrap_or(false)
+    })
+    .await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        indexed,
+        "the album next to the locked directory was indexed"
+    );
+
+    watcher.stop();
+    shutdown.trigger();
+    running.await.unwrap();
+}
+
+/// A directory created after the watcher started is watched.
+///
+/// The creation event arms the new directory, so a file that lands inside it
+/// later is scanned without waiting for a restart or a manual scan.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_directory_created_later_is_watched() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let settings = settings(&db).await;
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    library.add_library_folder(&music, None).await.unwrap();
+
+    let queue = Arc::new(JobQueue::new(&db, QueueOptions::default()));
+    let scanner = Arc::new(LibraryScanner::new(
+        &db,
+        Arc::new(EventBus::new()),
+        settings.clone(),
+    ));
+    let watcher = LibraryWatcher::new(&db, Arc::clone(&scanner), Arc::clone(&queue), settings);
+    watcher.reconcile().await.unwrap();
+    assert_eq!(watcher.watched_folders(), 1);
+
+    let mut runner = JobRunner::new(Arc::clone(&queue), JobRunnerOptions::default());
+    runner.register(
+        SCAN_JOB_KIND,
+        Arc::new(ScanJobHandler::new(Arc::clone(&scanner))),
+    );
+    let runner = Arc::new(runner);
+    let shutdown = Shutdown::new();
+    let running = {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move { runner.run(shutdown).await })
+    };
+
+    let staged = dir.path().join("staged");
+    write_album(&staged.join("Later Album")).await;
+    copy_tree(&staged.join("Later Album"), &music.join("Later Album"));
+
+    let tracks = |db: &Database| {
+        let readers = db.readers().clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tracks")
+                .fetch_one(&readers)
+                .await
+                .unwrap_or(0)
+        }
+    };
+    assert!(
+        wait_for(Duration::from_secs(20), || async { tracks(&db).await == 3 }).await,
+        "the album in the new directory was indexed"
+    );
+
+    // Nothing but a watch on the new directory reports this file.
+    let late = music.join("Later Album").join("04 - Track 4.flac");
+    std::fs::copy(music.join("Later Album").join("01 - Track 1.flac"), &late).unwrap();
+    assert!(
+        wait_for(Duration::from_secs(20), || async { tracks(&db).await == 4 }).await,
+        "the new directory is watched"
+    );
+
+    watcher.stop();
+    shutdown.trigger();
+    running.await.unwrap();
+}
+
+/// A watched directory that is a symlink is watched through the link.
+///
+/// The scan follows the link, so the watcher has to as well; otherwise a change
+/// on the other side waits for a manual scan.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_symlinked_directory_is_watched() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let settings = settings(&db).await;
+    let music = dir.path().join("music");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir(&music).unwrap();
+    write_album(&outside).await;
+    std::os::unix::fs::symlink(&outside, music.join("link")).unwrap();
+    library.add_library_folder(&music, None).await.unwrap();
+
+    let queue = Arc::new(JobQueue::new(&db, QueueOptions::default()));
+    let scanner = Arc::new(LibraryScanner::new(
+        &db,
+        Arc::new(EventBus::new()),
+        settings.clone(),
+    ));
+    let watcher = LibraryWatcher::new(&db, Arc::clone(&scanner), Arc::clone(&queue), settings);
+    watcher.reconcile().await.unwrap();
+
+    let mut runner = JobRunner::new(Arc::clone(&queue), JobRunnerOptions::default());
+    runner.register(
+        SCAN_JOB_KIND,
+        Arc::new(ScanJobHandler::new(Arc::clone(&scanner))),
+    );
+    let runner = Arc::new(runner);
+    let shutdown = Shutdown::new();
+    let running = {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move { runner.run(shutdown).await })
+    };
+
+    let report = scanner.scan(&ScanRequest::all()).await.unwrap().remove(0);
+    assert_eq!(report.files_seen, 3, "the link is followed by the scan");
+
+    // A new file on the far side of the link is reported through it.
+    std::fs::copy(
+        music.join("link").join("01 - Track 1.flac"),
+        music.join("link").join("04 - Track 4.flac"),
+    )
+    .unwrap();
+
+    let tracks = |db: &Database| {
+        let readers = db.readers().clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tracks")
+                .fetch_one(&readers)
+                .await
+                .unwrap_or(0)
+        }
+    };
+    assert!(
+        wait_for(Duration::from_secs(20), || async { tracks(&db).await == 4 }).await,
+        "the linked directory is watched"
+    );
+
+    watcher.stop();
+    shutdown.trigger();
+    running.await.unwrap();
+}

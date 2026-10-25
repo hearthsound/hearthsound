@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the database file, a directory that contains one of them, or a directory inside
   them; the refusal names the protected path, from the API and from `hearthsound
   admin add-folder` alike.
+- A watched folder arms one watch per directory instead of one recursive watch,
+  so a directory the server may not read no longer leaves the whole folder
+  unwatched, and a directory created later is watched from its creation event.
 - Library folders may overlap. Each file now belongs to the deepest folder that
   contains it: an outer folder's scan skips the folders inside it, and the
   duplicates an earlier scan left are pruned by that folder's next scan.
