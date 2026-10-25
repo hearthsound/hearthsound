@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the database file, a directory that contains one of them, or a directory inside
   them; the refusal names the protected path, from the API and from `hearthsound
   admin add-folder` alike.
+- Library folders may overlap. Each file now belongs to the deepest folder that
+  contains it: an outer folder's scan skips the folders inside it, and the
+  duplicates an earlier scan left are pruned by that folder's next scan.
 - Scans follow symlinks inside a folder, including links out of it, and skip a
   directory the walk already visited so a link cycle cannot loop. A file whose
   name is not valid UTF-8 is skipped instead of being stored lossily.

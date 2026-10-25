@@ -491,11 +491,7 @@ async fn audience_routing_decides_which_streams_see_an_event() {
 #[tokio::test]
 async fn a_scan_that_refused_to_prune_ends_with_a_done_event_carrying_the_reason() {
     let fixture = Fixture::new().await;
-    let root = fixture
-        .database_path()
-        .parent()
-        .unwrap()
-        .join("music-scan-event");
+    let root = fixture.library_dir("music-scan-event");
     crate::native::write_album(&root, "Event Artist", "Event Album").await;
 
     let created = bearer(

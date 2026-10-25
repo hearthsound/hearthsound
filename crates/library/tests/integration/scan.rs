@@ -1448,3 +1448,107 @@ async fn a_malformed_scan_payload_releases_the_scan_status() {
     );
     assert!(!scanner.status().scanning, "the counter was released");
 }
+
+/// Overlapping folders are allowed, and each file is indexed once.
+///
+/// A file belongs to the deepest folder that contains it, so the outer folder's
+/// walk never descends into the inner one.
+#[tokio::test]
+async fn a_nested_folder_indexes_each_file_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    let inner = music.join("Alex G");
+    std::fs::create_dir_all(&inner).unwrap();
+    write_song(&inner, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+    write_song(&music, "Sunset", "Someone Else", "Evening").await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let outer = library.add_library_folder(&music, None).await.unwrap();
+    let nested = library.add_library_folder(&inner, None).await.unwrap();
+
+    let outer_report = scanner.scan_folder(outer.id).await.unwrap();
+    assert_eq!(
+        outer_report.files_seen, 1,
+        "the outer scan skips the inner root"
+    );
+    let nested_report = scanner.scan_folder(nested.id).await.unwrap();
+    assert_eq!(nested_report.files_seen, 1);
+
+    let tracks: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks")
+        .fetch_one(db.readers())
+        .await
+        .unwrap();
+    assert_eq!(tracks, 2, "one track per file");
+    let stray: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM media_files WHERE storage = 'folder' AND folder_id = ?",
+    )
+    .bind(outer.id.as_bytes().as_slice())
+    .fetch_one(db.readers())
+    .await
+    .unwrap();
+    assert_eq!(stray, 1, "the outer folder holds only the file it owns");
+}
+
+/// An outer folder's stale duplicates are pruned once the inner folder exists.
+#[tokio::test]
+async fn an_outer_folder_prunes_rows_a_nested_folder_owns() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    let inner = music.join("Alex G");
+    std::fs::create_dir_all(&inner).unwrap();
+    write_song(&inner, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+    write_song(&music, "Sunset", "Someone Else", "Evening").await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let outer = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(outer.id).await.unwrap();
+    assert_eq!(library.list_artists().await.unwrap().len(), 2);
+
+    // The inner folder is added after the outer one indexed its file too, so the
+    // same file now has one track per folder.
+    let nested = library.add_library_folder(&inner, None).await.unwrap();
+    scanner.scan_folder(nested.id).await.unwrap();
+    let tracks_of = |album: hearthsound_core::EntityId| {
+        let library = &library;
+        async move { library.list_tracks_for_album(album).await.unwrap() }
+    };
+    let energy = library
+        .list_artists()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|artist| artist.name == "Energy 52")
+        .unwrap();
+    let album = library.list_albums_for_artist(energy.id).await.unwrap()[0].id;
+    assert_eq!(
+        tracks_of(album).await.len(),
+        2,
+        "the folder was indexed twice"
+    );
+
+    let report = scanner.scan_folder(outer.id).await.unwrap();
+    assert_eq!(report.files_removed, 1, "the outer duplicate went");
+    assert_eq!(report.tracks_removed, 1);
+
+    let tracks = tracks_of(album).await;
+    assert_eq!(tracks.len(), 1, "the inner folder's track survives");
+    let files = library
+        .list_media_files_for_track(tracks[0].id)
+        .await
+        .unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].folder_id, Some(nested.id));
+    let stray: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM media_files WHERE storage = 'folder' AND folder_id = ?",
+    )
+    .bind(outer.id.as_bytes().as_slice())
+    .fetch_one(db.readers())
+    .await
+    .unwrap();
+    assert_eq!(stray, 1, "the outer folder kept only the file it owns");
+    assert_eq!(library.list_artists().await.unwrap().len(), 2);
+}

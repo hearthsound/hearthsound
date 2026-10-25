@@ -150,6 +150,29 @@ impl Fixture {
         &self.services.config().database.path
     }
 
+    /// Returns a directory beside the data tree for the files a library folder
+    /// holds.
+    ///
+    /// A library folder may not be, contain, or sit inside the server's own data
+    /// directory, so the folders a test adds are siblings of it.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: the directory's name, unique within the test.
+    ///
+    /// # Returns
+    ///
+    /// The path; the caller creates it.
+    pub fn library_dir(&self, name: &str) -> PathBuf {
+        self.services
+            .config()
+            .paths
+            .data
+            .parent()
+            .expect("the data directory has a parent")
+            .join(name)
+    }
+
     /// Stops the server and hands the data directory back.
     ///
     /// This is what a restart looks like to a test: the data tree, the config

@@ -713,13 +713,17 @@ impl LibraryScanner {
         let folder = folders::get_library_folder(&mut read, folder_id)
             .await?
             .ok_or(LibraryError::UnknownFolder { folder_id })?;
+        // Overlapping folders are allowed, and a file belongs to the deepest
+        // folder that contains it, so this folder's walk skips the roots of the
+        // folders inside it.
+        let all_folders = folders::list_library_folders(&mut read).await?;
         // One read of the folder's rows replaces a lookup per walked file.
         let stored = media_files::list_folder_media_files(&mut read, folder.id).await?;
         drop(read);
 
         let walk_root = folder.path.clone();
         let walk_subtrees = subtrees.clone();
-        let skip: Vec<PathBuf> = Vec::new();
+        let skip = folders::nested_roots(&all_folders, &folder);
         let outcome =
             tokio::task::spawn_blocking(move || walk(&walk_root, &walk_subtrees, &skip)).await??;
         let found = outcome.found;
@@ -1306,8 +1310,9 @@ impl WalkOutcome {
 /// - `subtrees`: the directories to walk, relative to the root and already
 ///   normalized; empty walks the whole folder. A subtree that does not exist or
 ///   is not a directory contributes nothing.
-/// - `skip`: the absolute paths of nested library folders, which the walk does
-///   not descend into.
+/// - `skip`: the absolute canonical paths of the nested library folders of
+///   other folders, which the walk does not descend into, so each file is
+///   indexed by the deepest folder that contains it.
 ///
 /// # Returns
 ///
@@ -1338,7 +1343,14 @@ fn walk(root: &Path, subtrees: &[String], skip: &[PathBuf]) -> Result<WalkOutcom
     } else {
         for subtree in subtrees {
             let start = root.join(subtree);
-            if !start.is_dir() || skip.iter().any(|nested| start == *nested) {
+            if !start.is_dir() {
+                continue;
+            }
+            let canonical = std::fs::canonicalize(&start).unwrap_or_else(|_| start.clone());
+            if skip
+                .iter()
+                .any(|nested| start == *nested || canonical == *nested)
+            {
                 continue;
             }
             walk_into(&start, root, skip, &mut visited, &mut outcome);
@@ -1446,6 +1458,11 @@ fn walk_into(
                         continue;
                     }
                 };
+                // A nested folder that is itself a link is skipped by the
+                // canonical path as well.
+                if skip.iter().any(|nested| canonical == *nested) {
+                    continue;
+                }
                 if !visited.insert(canonical) {
                     tracing::debug!(
                         path = %path.display(),

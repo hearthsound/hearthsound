@@ -871,11 +871,7 @@ pub(crate) async fn albums_in(fixture: &Fixture, api_key: &str, folder: u8) -> V
 #[tokio::test]
 async fn folders_are_added_with_an_owner_or_as_generic() {
     let fixture = Fixture::new().await;
-    let root = fixture
-        .database_path()
-        .parent()
-        .unwrap()
-        .join("music-owned");
+    let root = fixture.library_dir("music-owned");
     write_album(&root, "Folder Artist", "Owned Album").await;
     let me =
         hearthsound_core::EntityId::from_uuid(hearthsound_core::IdPrefix::User, fixture.user_id);
@@ -3459,11 +3455,7 @@ mod provider_admin {
 #[tokio::test]
 async fn a_folder_reports_a_scan_that_refused_to_prune() {
     let fixture = Fixture::new().await;
-    let root = fixture
-        .database_path()
-        .parent()
-        .unwrap()
-        .join("music-unmounted");
+    let root = fixture.library_dir("music-unmounted");
     write_album(&root, "Folder Artist", "Mounted Album").await;
 
     let created = bearer(
@@ -3610,6 +3602,79 @@ async fn a_folder_cannot_be_or_contain_the_servers_own_paths() {
     .await;
     assert_eq!(own.status(), StatusCode::BAD_REQUEST);
     assert_eq!(json(own).await["code"], "invalid-request");
+
+    fixture.stop().await;
+}
+
+/// A folder that holds another library folder reports the duplicate cleanup.
+///
+/// The outer folder indexed its inner folder's files before the inner folder was
+/// added; once it exists, the outer scan skips it and prunes what it had, so a
+/// file is indexed by the deepest folder alone.
+#[tokio::test]
+async fn the_folder_scan_reports_the_duplicate_cleanup() {
+    let fixture = Fixture::new().await;
+    let music = fixture.library_dir("music-overlap");
+    let inner = music.join("Inner");
+    write_album(&inner, "Inner Artist", "Inner Album").await;
+    write_album(&music, "Outer Artist", "Outer Album").await;
+
+    // The outer folder is added first, so its scan indexes the inner files too.
+    let created = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/folders",
+        Some(serde_json::json!({ "path": music, "generic": true, "watch": false })),
+    )
+    .await;
+    let status = created.status();
+    let body = json(created).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let outer = hearthsound_api_native::views::parse_id(
+        body["id"].as_str().unwrap(),
+        hearthsound_core::IdPrefix::LibraryFolder,
+    )
+    .unwrap();
+
+    let report = fixture.services.scanner().scan_folder(outer).await.unwrap();
+    assert_eq!(
+        report.files_seen, 4,
+        "both albums are under the outer folder"
+    );
+
+    let created = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/folders",
+        Some(serde_json::json!({ "path": inner, "generic": true, "watch": false })),
+    )
+    .await;
+    let status = created.status();
+    let body = json(created).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let nested = hearthsound_api_native::views::parse_id(
+        body["id"].as_str().unwrap(),
+        hearthsound_core::IdPrefix::LibraryFolder,
+    )
+    .unwrap();
+    let report = fixture
+        .services
+        .scanner()
+        .scan_folder(nested)
+        .await
+        .unwrap();
+    assert_eq!(report.files_seen, 2, "the inner folder owns its files");
+
+    let report = fixture.services.scanner().scan_folder(outer).await.unwrap();
+    assert_eq!(report.files_seen, 2, "the outer scan skips the inner root");
+    assert_eq!(report.files_removed, 2, "the outer duplicates went");
+    assert_eq!(report.tracks_removed, 2);
+
+    let tracks: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks")
+        .fetch_one(fixture.services.database().readers())
+        .await
+        .unwrap();
+    assert_eq!(tracks, 4, "one track per file");
 
     fixture.stop().await;
 }
