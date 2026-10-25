@@ -1,0 +1,3 @@
+# Previous plugin API minors the host still loads, one `X.Y.Z` version per
+# line. The directory is wit/since_v0.<minor>/.
+0.3.0

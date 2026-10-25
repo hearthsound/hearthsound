@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The WIT tree keeps the previous API minor under `wit/since_v0.3/`, named by
+  `wit/SINCE`, so the host can load `hearthsound:plugin@0.4.0` and `0.3.0`; the
+  0.4.0 package is pinned.
+
+### Changed
+
+- A `host-kv` read failure reaches a 0.4.0 plugin as an error string instead of
+  a silent miss.
+- A plugin whose component disagrees with its manifest's `api` is refused with
+  the component's version named.
+- A plugin's artist results may carry the provider's album count.
+
 ## [0.1.6] - 2026-10-24
 
 ### Added

@@ -1,0 +1,26 @@
+package hearthsound:plugin@0.3.0;
+
+/// Checks that a downloaded file is the recording the server asked for.
+interface verification {
+  use types.{id-pair, provider-error};
+  record expected-track { title: string, artists: list<string>, album: option<string>, duration-ms: option<u32>, ids: list<id-pair> }
+  /// A Chromaprint fingerprint the host computed from the first 120 seconds of the decoded file.
+  record fingerprint {
+    /// The compressed fingerprint, URL-safe base64 without padding, exactly as fpcalc prints it.
+    value: string,
+    /// The file's full duration in whole seconds.
+    duration-secs: u32,
+  }
+  /// match: it is the expected recording; mismatch: it is a different one; unknown: the service cannot tell.
+  enum verdict { match, mismatch, unknown }
+  record verification-result {
+    verdict: verdict,
+    /// Confidence of the verdict from 0 to 1.
+    score: f32,
+    /// A short reason for the acquisition log.
+    detail: option<string>,
+    /// Ids of the recording the fingerprint identified.
+    identified: list<id-pair>,
+  }
+  verify: func(expected: expected-track, print: fingerprint) -> result<verification-result, provider-error>;
+}

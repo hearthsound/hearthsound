@@ -1,4 +1,4 @@
-package hearthsound:plugin@0.3.0;
+package hearthsound:plugin@0.4.0;
 
 interface host-log {
   enum level { trace, debug, info, warn, error }
@@ -13,7 +13,12 @@ interface host-http {
 }
 
 interface host-kv {
-  get: func(key: string) -> option<list<u8>>;
+  /// Reads `key`.
+  ///
+  /// Returns `ok(none)` when the key is absent or has expired. Returns
+  /// `err(reason)` when the store cannot be read, so a guest can tell a miss
+  /// from a failure.
+  get: func(key: string) -> result<option<list<u8>>, string>;
   set: func(key: string, value: list<u8>, ttl-ms: option<u64>) -> result<_, string>;
   delete: func(key: string);
 }

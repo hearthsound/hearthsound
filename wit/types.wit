@@ -1,4 +1,4 @@
-package hearthsound:plugin@0.3.0;
+package hearthsound:plugin@0.4.0;
 
 interface types {
   enum entity-kind { track, album, artist, playlist }
@@ -17,7 +17,13 @@ interface types {
     album-type: option<string>, upc: option<string>, genres: list<string>,
     images: list<image>, tracks: list<track>, ids: list<id-pair>,
   }
-  record artist { id: string, name: string, images: list<image>, ids: list<id-pair> }
+  record artist {
+    id: string, name: string, images: list<image>, ids: list<id-pair>,
+    /// Albums the provider reports for this artist, when it reports a count.
+    /// This is the provider's own count, not the number of albums the server
+    /// stores.
+    album-count: option<u32>,
+  }
   variant provider-error {
     not-found, rate-limited(u32), unauthorized(string), invalid-config(string),
     unavailable(string), internal(string),

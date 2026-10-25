@@ -1,4 +1,4 @@
-package hearthsound:plugin@0.3.0;
+package hearthsound:plugin@0.4.0;
 
 /// Links a listener's account on the service to their Hearthsound account.
 interface account-link {

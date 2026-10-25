@@ -1,4 +1,4 @@
-package hearthsound:plugin@0.3.0;
+package hearthsound:plugin@0.4.0;
 
 /// Listening history: now playing, finished listens and love/hate feedback.
 interface scrobble {

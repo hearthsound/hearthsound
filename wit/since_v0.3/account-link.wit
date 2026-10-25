@@ -1,0 +1,17 @@
+package hearthsound:plugin@0.3.0;
+
+/// Links a listener's account on the service to their Hearthsound account.
+interface account-link {
+  use types.{provider-error, user-context};
+  /// A linked account: the name to show and the user config to store for later calls.
+  record account { name: string, config: string }
+  /// config: the user enters the fields of the plugin's user config schema; browser: the user approves access on the service's site.
+  enum link-method { config, browser }
+  get-link-method: func() -> link-method;
+  /// Checks a user config the user entered and names the account (config method).
+  verify-account: func(user: user-context) -> result<account, provider-error>;
+  /// Starts a browser flow and returns the URL to open; callback-url is where the service must send the user back.
+  begin-link: func(user: user-context, callback-url: string) -> result<string, provider-error>;
+  /// Finishes a browser flow from the query parameters the callback received.
+  complete-link: func(user: user-context, query: list<tuple<string, string>>) -> result<account, provider-error>;
+}

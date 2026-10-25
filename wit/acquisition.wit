@@ -1,4 +1,4 @@
-package hearthsound:plugin@0.3.0;
+package hearthsound:plugin@0.4.0;
 
 interface acquisition {
   use types.{id-pair, provider-error};
