@@ -387,3 +387,123 @@ async fn plugin_upgrade_rows_follow_their_plugin_and_repository() {
 
     db.close().await;
 }
+
+/// Deleting a track cleans the rows that name it without a foreign key.
+///
+/// `external_ids`, `user_library`, `user_feedback` and `user_ratings` hold a
+/// polymorphic reference, so no `REFERENCES` clause can reach them; the delete
+/// trigger is what keeps an alias, a save, a like or a rating from pointing at an
+/// id that no longer exists, whichever path deleted the row.
+#[tokio::test]
+async fn deleting_a_track_cleans_the_rows_that_name_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let pool = db.writer();
+
+    let user = insert_user(pool, "liker", &[0x11; 16]).await;
+    insert_track(pool, &[1], "Harmony", "Nobody").await;
+    for statement in [
+        "INSERT INTO external_ids (namespace, value, entity_kind, entity_id) \
+         VALUES ('p:deezer', '3135556', 'track', x'01')",
+        "INSERT INTO user_library (user_id, entity_kind, entity_id, origin, added_at) \
+         VALUES (?, 'track', x'01', 'saved', 0)",
+        "INSERT INTO user_feedback (user_id, entity_kind, entity_id, value, at) \
+         VALUES (?, 'track', x'01', 'like', 0)",
+        "INSERT INTO user_ratings (user_id, entity_kind, entity_id, rating, at) \
+         VALUES (?, 'track', x'01', 4, 0)",
+    ] {
+        sqlx::query(statement)
+            .bind(user.as_slice())
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    sqlx::query("DELETE FROM tracks WHERE id = x'01'")
+        .execute(pool)
+        .await
+        .unwrap();
+
+    for (table, statement) in [
+        ("external_ids", "SELECT count(*) FROM external_ids"),
+        ("user_library", "SELECT count(*) FROM user_library"),
+        ("user_feedback", "SELECT count(*) FROM user_feedback"),
+        ("user_ratings", "SELECT count(*) FROM user_ratings"),
+    ] {
+        let count: i64 = sqlx::query_scalar(statement).fetch_one(pool).await.unwrap();
+        assert_eq!(count, 0, "{table} kept a row for a deleted track");
+    }
+
+    db.close().await;
+}
+
+/// Deleting a track deletes its plays and its playlist entries.
+///
+/// The cascades are the design: a play row holds no copy of the title, artist or
+/// duration, so a play cannot be shown without its track. This test pins them so
+/// a later schema change is deliberate.
+#[tokio::test]
+async fn deleting_a_track_deletes_its_plays_and_playlist_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let pool = db.writer();
+
+    let user = insert_user(pool, "player", &[0x12; 16]).await;
+    let playlist = [0x21_u8; 16];
+    sqlx::query(
+        "INSERT INTO playlists (id, owner_user_id, name, is_public, is_temporary, created_at, \
+                                updated_at) VALUES (?, ?, 'Mix', 0, 0, 0, 0)",
+    )
+    .bind(playlist.as_slice())
+    .bind(user.as_slice())
+    .execute(pool)
+    .await
+    .unwrap();
+    insert_track(pool, &[1], "Harmony", "Nobody").await;
+    sqlx::query(
+        "INSERT INTO plays (id, user_id, track_id, started_at, listened_ms, audio_delivered) \
+         VALUES (?, ?, x'01', 0, 1000, 1)",
+    )
+    .bind([0x22_u8; 16].as_slice())
+    .bind(user.as_slice())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO playlist_tracks (playlist_id, position, track_id, added_at) \
+         VALUES (?, 0, x'01', 0)",
+    )
+    .bind(playlist.as_slice())
+    .execute(pool)
+    .await
+    .unwrap();
+
+    sqlx::query("DELETE FROM tracks WHERE id = x'01'")
+        .execute(pool)
+        .await
+        .unwrap();
+
+    for (table, statement) in [
+        ("plays", "SELECT count(*) FROM plays"),
+        ("playlist_tracks", "SELECT count(*) FROM playlist_tracks"),
+    ] {
+        let count: i64 = sqlx::query_scalar(statement).fetch_one(pool).await.unwrap();
+        assert_eq!(count, 0, "{table} kept a row for a deleted track");
+    }
+
+    db.close().await;
+}
+
+/// Inserts an account row and returns its raw id.
+async fn insert_user(pool: &SqlitePool, username: &str, id: &[u8]) -> Vec<u8> {
+    sqlx::query(
+        "INSERT INTO users (id, username, display_name, password_hash, created_at, updated_at) \
+         VALUES (?, ?, 'User', 'x', 0, 0)",
+    )
+    .bind(id)
+    .bind(username)
+    .execute(pool)
+    .await
+    .unwrap();
+    id.to_vec()
+}

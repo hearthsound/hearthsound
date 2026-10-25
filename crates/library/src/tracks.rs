@@ -688,8 +688,11 @@ pub async fn set_track_mb_recording_id(
 /// Deletes a track and everything that hangs off it.
 ///
 /// The `ON DELETE CASCADE` clauses remove the track's credits, genres,
-/// retention row, and media files, and the delete trigger removes its search
-/// index entry.
+/// retention row, media files, plays and playlist entries, and the delete
+/// triggers remove its search index entry and the rows that name it without a
+/// foreign key: its `external_ids` aliases, its `user_library` saves, its
+/// `user_feedback` likes and dislikes, and its `user_ratings`. Nothing is left
+/// pointing at an id that no longer exists, whatever path deleted the row.
 ///
 /// # Parameters
 ///
