@@ -13,10 +13,17 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{ArgGroup, Args, Parser, Subcommand};
+use semver::Version;
 use sha2::{Digest, Sha256};
 
 /// The repository the WebAssembly interface files are owned by.
 const PLUGIN_SDK_URL: &str = "https://github.com/hearthsound/plugin-sdk";
+
+/// The file inside `wit/` naming the plugin API version it holds.
+const WIT_VERSION: &str = "VERSION";
+
+/// The file inside `wit/` naming the previous plugin API minors the host loads.
+const WIT_SINCE: &str = "SINCE";
 
 /// The lock file that pins the bundled first-party plugins.
 const BUNDLED_PLUGINS_LOCK: &str = "bundled-plugins.lock";
@@ -75,13 +82,19 @@ struct FetchPluginsArgs {
 
 #[derive(Debug, Args)]
 #[command(disable_version_flag = true)]
-#[command(group(ArgGroup::new("mode").required(true).args(["version", "check"])))]
+#[command(group(ArgGroup::new("mode").required(true).multiple(true).args(["version", "check"])))]
 struct SyncWitArgs {
     /// The plugin-sdk version to copy the interface files from.
     #[arg(long, value_name = "V")]
     version: Option<String>,
-    /// Verify the committed interface files against the version in
-    /// `wit/VERSION`.
+    /// A previous plugin API version to pin beside the primary one.
+    ///
+    /// May be repeated; each version is written to `wit/since_v0.<minor>/`.
+    /// Ignored with `--check`, which reads `wit/SINCE`.
+    #[arg(long, value_name = "V")]
+    since: Vec<String>,
+    /// Verify the committed interface files against the versions pinned in
+    /// `wit/VERSION` and `wit/SINCE`.
     #[arg(long)]
     check: bool,
 }
@@ -107,54 +120,80 @@ fn repo_root() -> Result<PathBuf> {
 }
 
 /// Copies or verifies the `wit/` directory against plugin-sdk.
+///
+/// `wit/` holds the package named by `wit/VERSION`. Each version passed to
+/// `--since` is pinned beside it in `wit/since_v0.<minor>/` and named by
+/// `wit/SINCE`, because the host still loads those previous minors. Check mode
+/// reads both files and verifies every directory they name.
 fn sync_wit(args: SyncWitArgs) -> Result<()> {
     let root = repo_root()?;
     let wit_dir = root.join("wit");
-
-    let version = if args.check {
-        let raw = fs::read_to_string(wit_dir.join("VERSION"))
-            .context("reading wit/VERSION for the pinned plugin-sdk version")?;
-        raw.trim().to_owned()
-    } else {
-        match args.version {
-            Some(version) => version,
-            None => bail!("pass either --version or --check"),
-        }
-    };
-
     let checkout = tempfile::tempdir().context("creating a temporary directory")?;
-    let clone_dir = checkout.path().join("plugin-sdk");
-
-    let status = Command::new("git")
-        .args(["clone", "--quiet", "--depth", "1", "--branch"])
-        .arg(format!("v{version}"))
-        .arg(PLUGIN_SDK_URL)
-        .arg(&clone_dir)
-        .status()
-        .context("running git clone")?;
-    if !status.success() {
-        bail!("git clone of plugin-sdk v{version} failed");
-    }
-
-    let source = clone_dir.join("wit");
-    let files = read_wit_files(&source)?;
-    if files.is_empty() {
-        bail!("{} contains no .wit files", source.display());
-    }
 
     if args.check {
-        check_wit(&wit_dir, &source, &files, &version)
-    } else {
-        write_wit(&wit_dir, &source, &files, &version)
+        return check_wit(&root, &wit_dir, checkout.path());
     }
+
+    let version = match args.version {
+        Some(version) => version,
+        None => bail!("pass either --version or --check"),
+    };
+    parse_version(&version, "--version")?;
+    let since = sorted_versions(&args.since)?;
+
+    let (source, files) = fetch_package(checkout.path(), &version)?;
+    write_wit(&wit_dir, &source, &files, &version)?;
+
+    for legacy in &since {
+        let (source, files) = fetch_package(checkout.path(), legacy)?;
+        let dir = legacy_dir(&wit_dir, legacy)?;
+        write_package(&dir, &source, &files)?;
+        println!(
+            "{}/ synced from plugin-sdk v{legacy}",
+            report_label(&root, &dir)
+        );
+    }
+    if !since.is_empty() {
+        write_since(&wit_dir, &since)?;
+    }
+    Ok(())
 }
 
-/// Lists the `.wit` file names in a directory.
+/// Verifies `wit/` and every directory `wit/SINCE` names, reporting every
+/// difference and exiting non-zero when one is found.
+fn check_wit(root: &Path, wit_dir: &Path, checkout: &Path) -> Result<()> {
+    let version = read_version(wit_dir)?;
+    parse_version(&version, &format!("wit/{}", WIT_VERSION))?;
+    let since = read_since(wit_dir)?;
+
+    let (source, files) = fetch_package(checkout, &version)?;
+    let primary = report_label(root, wit_dir);
+    let mut mismatched = check_package(wit_dir, &source, &files, &primary)?;
+    let mut verified = vec![(primary, version)];
+
+    for legacy in &since {
+        let dir = legacy_dir(wit_dir, legacy)?;
+        let (source, files) = fetch_package(checkout, legacy)?;
+        let label = report_label(root, &dir);
+        mismatched |= check_package(&dir, &source, &files, &label)?;
+        verified.push((label, legacy.clone()));
+    }
+    mismatched |= check_unlisted_directories(root, wit_dir, &since)?;
+
+    if mismatched {
+        std::process::exit(1);
+    }
+    for (label, version) in verified {
+        println!("{label}/ matches plugin-sdk v{version}");
+    }
+    Ok(())
+}
+
+/// Lists the `.wit` file names of a plugin-sdk package.
 ///
-/// The directory must contain only `.wit` files; a subdirectory is an error,
-/// because the sync copies a flat package and a nested layout would silently
-/// drop files.
-fn read_wit_files(dir: &Path) -> Result<Vec<String>> {
+/// The package must be flat: a subdirectory is an error, because the sync
+/// copies the files it names and a nested layout would silently drop files.
+fn read_package_files(dir: &Path) -> Result<Vec<String>> {
     let entries =
         fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?;
 
@@ -176,27 +215,157 @@ fn read_wit_files(dir: &Path) -> Result<Vec<String>> {
     Ok(files)
 }
 
-/// Replaces `wit/` with the files from `source`.
-fn write_wit(wit_dir: &Path, source: &Path, files: &[String], version: &str) -> Result<()> {
-    fs::create_dir_all(wit_dir)
-        .with_context(|| format!("creating directory {}", wit_dir.display()))?;
+/// Lists the `.wit` file names committed at the top level of a directory.
+///
+/// Subdirectories are ignored, because `wit/` holds the legacy packages in
+/// `since_v0.<minor>/` beside its own files. A missing directory has no files.
+fn read_committed_files(dir: &Path) -> Result<Vec<String>> {
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
 
+    let mut files = Vec::new();
     for entry in
-        fs::read_dir(wit_dir).with_context(|| format!("reading directory {}", wit_dir.display()))?
+        fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?
     {
-        let path = entry?.path();
-        if path.extension().and_then(|ext| ext.to_str()) == Some("wit") {
-            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        let entry = entry.with_context(|| format!("reading directory {}", dir.display()))?;
+        if entry.file_type()?.is_dir() {
+            continue;
+        }
+        if entry.path().extension().and_then(|ext| ext.to_str()) == Some("wit") {
+            files.push(entry.file_name().to_string_lossy().into_owned());
         }
     }
+    files.sort();
+    Ok(files)
+}
 
-    for file in files {
-        let target = wit_dir.join(file);
-        fs::copy(source.join(file), &target)
-            .with_context(|| format!("copying {} to {}", file, target.display()))?;
+/// Returns the plugin API version `wit/` holds.
+fn read_version(wit_dir: &Path) -> Result<String> {
+    let path = wit_dir.join(WIT_VERSION);
+    let raw = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "reading {} for the pinned plugin-sdk version",
+            path.display()
+        )
+    })?;
+    Ok(raw.trim().to_owned())
+}
+
+/// Returns the previous plugin API versions named by `wit/SINCE`.
+///
+/// Empty lines and lines starting with `#` are skipped and every other line
+/// must be a full `X.Y.Z` version. The result is deduplicated and sorted
+/// ascending, so the file's own order never matters.
+fn read_since(wit_dir: &Path) -> Result<Vec<String>> {
+    let path = wit_dir.join(WIT_SINCE);
+    let raw = fs::read_to_string(&path).with_context(|| {
+        format!(
+            "reading {} for the pinned legacy plugin API versions",
+            path.display()
+        )
+    })?;
+
+    let mut versions = Vec::new();
+    for (index, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let origin = format!("{}:{}", path.display(), index + 1);
+        versions.push(parse_version(line, &origin)?);
+    }
+    Ok(canonical_versions(versions))
+}
+
+/// Parses a plugin API version, naming its origin in the error.
+fn parse_version(version: &str, origin: &str) -> Result<Version> {
+    Version::parse(version)
+        .with_context(|| format!("{origin}: `{version}` is not a full X.Y.Z plugin API version"))
+}
+
+/// Parses, deduplicates and sorts a list of plugin API versions ascending.
+fn sorted_versions(versions: &[String]) -> Result<Vec<String>> {
+    let mut parsed = Vec::with_capacity(versions.len());
+    for version in versions {
+        parsed.push(parse_version(version, "--since")?);
+    }
+    Ok(canonical_versions(parsed))
+}
+
+/// Sorts parsed plugin API versions ascending, drops duplicates and renders
+/// them back as `X.Y.Z` strings.
+fn canonical_versions(mut versions: Vec<Version>) -> Vec<String> {
+    versions.sort();
+    versions.dedup();
+    versions
+        .into_iter()
+        .map(|version| version.to_string())
+        .collect()
+}
+
+/// Returns the directory a previous plugin API version is pinned in.
+///
+/// The name carries the major and minor only (`wit/since_v0.3/`), so a version
+/// with a non-zero patch has no stable directory and is refused.
+fn legacy_dir(wit_dir: &Path, version: &str) -> Result<PathBuf> {
+    let parsed = parse_version(version, "legacy plugin API version")?;
+    if parsed.patch != 0 {
+        bail!(
+            "`{version}` has a non-zero patch; a legacy API is pinned in since_v{major}.{minor}/",
+            major = parsed.major,
+            minor = parsed.minor
+        );
+    }
+    Ok(wit_dir.join(format!("since_v{}.{}", parsed.major, parsed.minor)))
+}
+
+/// Clones plugin-sdk at `version` into `parent` and returns the `.wit` package
+/// it holds.
+fn fetch_package(parent: &Path, version: &str) -> Result<(PathBuf, Vec<String>)> {
+    let clone_dir = parent.join(format!("plugin-sdk-{version}"));
+
+    let status = Command::new("git")
+        .args([
+            "-c",
+            "advice.detachedHead=false",
+            "clone",
+            "--quiet",
+            "--depth",
+            "1",
+            "--branch",
+        ])
+        .arg(format!("v{version}"))
+        .arg(PLUGIN_SDK_URL)
+        .arg(&clone_dir)
+        .status()
+        .context("running git clone")?;
+    if !status.success() {
+        bail!("git clone of plugin-sdk v{version} failed");
     }
 
-    let version_file = wit_dir.join("VERSION");
+    let source = clone_dir.join("wit");
+    let files = read_package_files(&source)?;
+    if files.is_empty() {
+        bail!("{} contains no .wit files", source.display());
+    }
+    Ok((source, files))
+}
+
+/// Returns how a directory is named in the report, relative to the repository
+/// root.
+fn report_label(root: &Path, dir: &Path) -> String {
+    match dir.strip_prefix(root) {
+        Ok(relative) => relative.display().to_string(),
+        Err(_) => dir.display().to_string(),
+    }
+}
+
+/// Replaces `wit/`'s package with the files from `source` and pins the version.
+fn write_wit(wit_dir: &Path, source: &Path, files: &[String], version: &str) -> Result<()> {
+    write_package(wit_dir, source, files)?;
+
+    let version_file = wit_dir.join(WIT_VERSION);
     fs::write(&version_file, format!("{version}\n"))
         .with_context(|| format!("writing {}", version_file.display()))?;
 
@@ -204,40 +373,103 @@ fn write_wit(wit_dir: &Path, source: &Path, files: &[String], version: &str) -> 
     Ok(())
 }
 
-/// Compares `wit/` with `source`, reporting every difference.
-fn check_wit(wit_dir: &Path, source: &Path, files: &[String], version: &str) -> Result<()> {
-    let found = if wit_dir.is_dir() {
-        read_wit_files(wit_dir)?
-    } else {
-        Vec::new()
-    };
+/// Replaces the top-level `.wit` files in `dir` with the ones from `source`.
+///
+/// Only files are removed, so the `since_v0.<minor>/` subdirectories beside the
+/// primary package survive and no legacy package is ever touched.
+fn write_package(dir: &Path, source: &Path, files: &[String]) -> Result<()> {
+    fs::create_dir_all(dir).with_context(|| format!("creating directory {}", dir.display()))?;
+
+    for entry in
+        fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?
+    {
+        let path = entry?.path();
+        if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("wit") {
+            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
+    }
+
+    for file in files {
+        let target = dir.join(file);
+        fs::copy(source.join(file), &target)
+            .with_context(|| format!("copying {} to {}", file, target.display()))?;
+    }
+    Ok(())
+}
+
+/// Writes `wit/SINCE`, naming the previous plugin API minors the host loads.
+fn write_since(wit_dir: &Path, versions: &[String]) -> Result<()> {
+    let mut body = String::from(
+        "# Previous plugin API minors the host still loads, one `X.Y.Z` version per\n\
+         # line. The directory is wit/since_v0.<minor>/.\n",
+    );
+    for version in versions {
+        body.push_str(version);
+        body.push('\n');
+    }
+
+    let path = wit_dir.join(WIT_SINCE);
+    fs::write(&path, body).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Compares the package committed in `dir` with the one at `source`.
+///
+/// `label` is how the report names the directory, so a difference reads
+/// `wit/since_v0.3/host.wit: differs`. Returns whether anything differed.
+fn check_package(dir: &Path, source: &Path, files: &[String], label: &str) -> Result<bool> {
+    let found = read_committed_files(dir)?;
 
     let mut mismatched = false;
     for file in files {
-        let target = wit_dir.join(file);
+        let target = dir.join(file);
         if !target.is_file() {
-            println!("wit/{file}: missing");
+            println!("{label}/{file}: missing");
             mismatched = true;
         } else if fs::read(source.join(file)).with_context(|| format!("reading {file}"))?
             != fs::read(&target).with_context(|| format!("reading {}", target.display()))?
         {
-            println!("wit/{file}: differs");
+            println!("{label}/{file}: differs");
             mismatched = true;
         }
     }
     for file in &found {
         if !files.contains(file) {
-            println!("wit/{file}: unexpected");
+            println!("{label}/{file}: unexpected");
             mismatched = true;
         }
     }
+    Ok(mismatched)
+}
 
-    if mismatched {
-        std::process::exit(1);
+/// Reports every subdirectory of `wit/` that `wit/SINCE` does not name.
+///
+/// Only `since_v0.<minor>/` packages listed by `SINCE` belong there; anything
+/// else was pinned outside the sync. Returns whether one was found.
+fn check_unlisted_directories(root: &Path, wit_dir: &Path, since: &[String]) -> Result<bool> {
+    if !wit_dir.is_dir() {
+        return Ok(false);
     }
 
-    println!("wit/ matches plugin-sdk v{version}");
-    Ok(())
+    let mut listed = Vec::with_capacity(since.len());
+    for version in since {
+        listed.push(legacy_dir(wit_dir, version)?);
+    }
+
+    let mut mismatched = false;
+    for entry in
+        fs::read_dir(wit_dir).with_context(|| format!("reading directory {}", wit_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("reading directory {}", wit_dir.display()))?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if !listed.contains(&path) {
+            println!("{}/: unexpected directory", report_label(root, &path));
+            mismatched = true;
+        }
+    }
+    Ok(mismatched)
 }
 
 /// Regenerates the committed OpenAPI document of the native API.
@@ -715,6 +947,81 @@ mod tests {
             writer.write_all(body.as_bytes()).unwrap();
         }
         writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn read_since_skips_comments_and_blank_lines_and_sorts() {
+        let wit = tempfile::tempdir().unwrap();
+        fs::write(
+            wit.path().join(WIT_SINCE),
+            "# previous minors, one per line\n\n0.5.0\n# a comment\n0.3.0\n  0.5.0  \n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_since(wit.path()).unwrap(),
+            vec!["0.3.0".to_owned(), "0.5.0".to_owned()]
+        );
+    }
+
+    #[test]
+    fn read_since_refuses_a_line_that_is_not_a_full_version() {
+        let wit = tempfile::tempdir().unwrap();
+        fs::write(wit.path().join(WIT_SINCE), "0.3\n").unwrap();
+
+        let error = read_since(wit.path()).unwrap_err();
+        assert!(error.to_string().contains("0.3"), "{error}");
+    }
+
+    #[test]
+    fn a_legacy_api_with_a_patch_release_has_no_directory() {
+        let wit = Path::new("wit");
+
+        assert_eq!(
+            legacy_dir(wit, "0.3.0").unwrap(),
+            PathBuf::from("wit").join("since_v0.3")
+        );
+        assert!(legacy_dir(wit, "0.3.1").is_err());
+    }
+
+    #[test]
+    fn writing_the_primary_package_keeps_the_legacy_directories() {
+        let wit = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("host.wit"), "new").unwrap();
+        fs::write(wit.path().join("stale.wit"), "stale").unwrap();
+        fs::create_dir_all(wit.path().join("since_v0.3")).unwrap();
+        fs::write(wit.path().join("since_v0.3/host.wit"), "old").unwrap();
+
+        write_wit(wit.path(), source.path(), &["host.wit".to_owned()], "0.4.0").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(wit.path().join("host.wit")).unwrap(),
+            "new"
+        );
+        assert!(!wit.path().join("stale.wit").exists());
+        assert_eq!(
+            fs::read_to_string(wit.path().join("since_v0.3/host.wit")).unwrap(),
+            "old"
+        );
+        assert_eq!(
+            fs::read_to_string(wit.path().join(WIT_VERSION)).unwrap(),
+            "0.4.0\n"
+        );
+    }
+
+    #[test]
+    fn the_since_file_names_the_legacy_versions() {
+        let wit = tempfile::tempdir().unwrap();
+
+        write_since(wit.path(), &["0.3.0".to_owned()]).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(wit.path().join(WIT_SINCE)).unwrap(),
+            "# Previous plugin API minors the host still loads, one `X.Y.Z` version per\n\
+             # line. The directory is wit/since_v0.<minor>/.\n\
+             0.3.0\n"
+        );
     }
 
     #[test]
