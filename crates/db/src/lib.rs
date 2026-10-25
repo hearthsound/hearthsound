@@ -53,6 +53,7 @@ pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 pub struct Database {
     writer: SqlitePool,
     readers: SqlitePool,
+    path: PathBuf,
 }
 
 /// What [`Database::migrate`] did.
@@ -109,10 +110,19 @@ impl Database {
 
         let readers = SqlitePoolOptions::new()
             .max_connections(READER_CONNECTIONS)
-            .connect_with(base.read_only(true).create_if_missing(false))
+            .connect_with(read_only_options(path))
             .await?;
 
-        Ok(Database { writer, readers })
+        Ok(Database {
+            writer,
+            readers,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// Returns the path the database file was opened with.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Returns the single writer pool.
@@ -217,6 +227,29 @@ impl Database {
     pub async fn migration_version(&self) -> Result<i64, DbError> {
         current_version(self.readers()).await
     }
+}
+
+/// Returns the options a read-only connection to the database opens with.
+///
+/// The reader pool and the connection the data version is polled on share them,
+/// so both see the same journal mode, busy timeout and foreign-key setting, and
+/// neither can write.
+///
+/// # Parameters
+///
+/// - `path`: the database file.
+///
+/// # Returns
+///
+/// The options, with `create_if_missing` off: a reader never creates the file.
+pub fn read_only_options(path: &Path) -> SqliteConnectOptions {
+    SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(false)
+        .journal_mode(SqliteJournalMode::Wal)
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))
+        .read_only(true)
 }
 
 /// Reads the highest successfully applied migration version.

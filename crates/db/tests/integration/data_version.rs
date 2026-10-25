@@ -134,3 +134,43 @@ async fn shutdown_stops_the_watcher() {
     other.close().await;
     db.close().await;
 }
+
+/// A poll notices a foreign commit while the writer connection is busy.
+///
+/// The poll used to read the pragma on the writer connection, so a long write
+/// transaction delayed every notification - and every write that arrived while a
+/// poll waited queued behind it. The poll now owns a read-only connection, and a
+/// change it cannot attribute because the writer is busy is still reported.
+#[tokio::test]
+async fn a_poll_does_not_wait_for_the_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_temp(dir.path()).await;
+    let other = cli_pool(dir.path()).await;
+
+    let watcher = db.watch_data_version(POLL).await;
+    let mut changes = watcher.subscribe();
+
+    // The writer connection is held for as long as the assertion runs. A
+    // deferred transaction holds the connection without blocking the other
+    // connection's write, which an immediate one would.
+    let mut held = db.writer().acquire().await.unwrap();
+    sqlx::query("BEGIN").execute(&mut *held).await.unwrap();
+
+    sqlx::query("CREATE TABLE a (id INTEGER PRIMARY KEY)")
+        .execute(&other)
+        .await
+        .unwrap();
+
+    assert!(
+        tokio::time::timeout(EXPECTED, changes.changed())
+            .await
+            .expect("a foreign commit is noticed while the writer is busy"),
+        "a foreign commit is noticed while the writer is busy"
+    );
+
+    sqlx::query("COMMIT").execute(&mut *held).await.unwrap();
+    drop(held);
+    watcher.shutdown().await;
+    other.close().await;
+    db.close().await;
+}

@@ -3,9 +3,10 @@
 //! The command-line commands and the server share one SQLite file, and a
 //! command-line command has no way to reach the running process: it opens the
 //! database and writes to it. The running server therefore watches
-//! `PRAGMA data_version`, which SQLite changes only for a connection when
-//! *another* connection commits, and reloads what a command may have changed
-//! when it moves.
+//! `PRAGMA data_version` on a read-only connection of its own, which changes for
+//! every commit another connection makes - the server's own included - and asks
+//! the writer connection whether the change was its own before it reloads
+//! anything, so the server's own writes never reload it.
 //!
 //! [`Services::watch_external_changes`] is that worker. A detected commit
 //! reloads the runtime settings, rebuilds the provider registry, which

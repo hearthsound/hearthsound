@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the database file, a directory that contains one of them, or a directory inside
   them; the refusal names the protected path, from the API and from `hearthsound
   admin add-folder` alike.
+- The external-write watcher polls `PRAGMA data_version` on its own read-only
+  connection, so a poll no longer queues behind a long write transaction (and no
+  write behind a poll). The server's own commits are still attributed and never
+  reload it.
 - Deleting a track now also deletes its provider aliases, saves, likes and
   ratings: a schema trigger does it for every delete path, so none of them is
   left pointing at an id that no longer exists.
