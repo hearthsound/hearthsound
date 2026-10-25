@@ -2,4 +2,4 @@
 source: crates/api-subsonic/tests/integration/hs_acquisitions.rs
 expression: number_acquisitions(&stabilize(&xml.body))
 ---
-<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="hearthsound" serverVersion="0.1.5" openSubsonic="true"><availabilities><availability id="tr_zero" state="local" inLibrary="true"/><availability id="tr_gone" state="cached" inLibrary="false"/><availability id="al_faraway" state="remote" inLibrary="false"/><availability id="tr_faraway_1" state="remote" inLibrary="false"/><availability id="al_alpha" state="local" inLibrary="true"/></availabilities></subsonic-response>
+<subsonic-response xmlns="http://subsonic.org/restapi" status="ok" version="1.16.1" type="hearthsound" serverVersion="0.1.6" openSubsonic="true"><availabilities><availability id="tr_zero" state="local" inLibrary="true"/><availability id="tr_gone" state="cached" inLibrary="false"/><availability id="al_faraway" state="remote" inLibrary="false"/><availability id="tr_faraway_1" state="remote" inLibrary="false"/><availability id="al_alpha" state="local" inLibrary="true"/></availabilities></subsonic-response>

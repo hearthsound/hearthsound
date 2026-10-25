@@ -2,4 +2,4 @@
 source: crates/api-subsonic/tests/integration/hs_queue.rs
 expression: number_acquisitions(&probe.body)
 ---
-{"subsonic-response":{"status":"ok","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.5","openSubsonic":true}}
+{"subsonic-response":{"status":"ok","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.6","openSubsonic":true}}
