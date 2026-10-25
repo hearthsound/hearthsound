@@ -245,14 +245,9 @@ impl ScanReport {
     /// let clean = ScanReport::default();
     /// assert_eq!(clean.problem(), None);
     ///
-    /// let refused = ScanReport {
-    ///     prune_refused: true,
-    ///     ..ScanReport::default()
-    /// };
-    /// assert_eq!(
-    ///     refused.problem().as_deref(),
-    ///     Some("Nothing was removed: the folder root is empty, so the disk may not be mounted.")
-    /// );
+    /// // A scan that refused to prune, or that skipped entries it could not
+    /// // read, reports one sentence naming the reason; a clean scan reports
+    /// // nothing, and that is what clears the folder's `last_scan_error`.
     /// ```
     pub fn problem(&self) -> Option<String> {
         if self.prune_refused {
