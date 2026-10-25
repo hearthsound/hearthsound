@@ -837,3 +837,63 @@ async fn removes_lapsed_source_quarantines_only() {
             .unwrap();
     assert_eq!(rows, ["never.flac", "still-bad.flac"]);
 }
+
+/// A file that cannot be removed keeps its row, so eviction tries again.
+///
+/// Nothing looks at the managed roots except eviction, and eviction works from
+/// rows: a row that is gone while the file is still there would make the file
+/// invisible and permanent.
+#[tokio::test]
+async fn a_file_that_cannot_be_removed_keeps_its_row() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = Fixture::new().await;
+    fixture
+        .settings
+        .set(
+            keys::STORAGE_UNPIN_ACTION.name(),
+            SettingValue::String("delete".to_owned()),
+            None,
+        )
+        .await
+        .unwrap();
+    let track = fixture.track(Availability::Local).await;
+    let rel_path = "Cafe del Mar/01 - Cafe del Mar.flac";
+    let id = fixture.file(track, StorageClass::Library, rel_path).await;
+    let directory = fixture.roots.library.join("Cafe del Mar");
+
+    // A directory the process may not write to makes the unlink fail; root
+    // ignores the mode, so the test only asserts where the mode is enforced.
+    let probe = directory.join("probe");
+    std::fs::write(&probe, b"probe").unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let enforced = std::fs::remove_file(&probe).is_err();
+    if !enforced {
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let report = fixture.maintainer().relocate().await.unwrap();
+    assert_eq!(report.deleted, 0, "the removal was reported as skipped");
+    // The row came back with a fresh id, because the delete committed first.
+    assert!(fixture.row(id).await.is_none(), "the deleted row is gone");
+    let restored = fixture
+        .library
+        .list_media_files_for_track(track)
+        .await
+        .unwrap();
+    assert_eq!(restored.len(), 1, "the row is back");
+    assert_eq!(restored[0].rel_path, rel_path);
+    assert_eq!(restored[0].storage, StorageClass::Library);
+    assert!(
+        fixture.roots.library.join(rel_path).exists(),
+        "the file is still there"
+    );
+
+    // Writable again, the next eviction retries and succeeds.
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let report = fixture.maintainer().relocate().await.unwrap();
+    assert_eq!(report.deleted, 1);
+    assert!(fixture.row(id).await.is_none());
+    assert!(!fixture.roots.library.join(rel_path).exists());
+}

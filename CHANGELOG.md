@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the database file, a directory that contains one of them, or a directory inside
   them; the refusal names the protected path, from the API and from `hearthsound
   admin add-folder` alike.
+- A managed file that cannot be removed now keeps its database row, so the next
+  eviction retries instead of leaving a file nothing knows about.
 - A folder removal and a scan's prune commit in batches of 256 files instead of
   holding the single writer connection for the whole folder, so a like or a save
   made while a large folder disappears waits for one batch.

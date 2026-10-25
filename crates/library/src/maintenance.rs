@@ -59,7 +59,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::error::LibraryError;
-use crate::model::{StorageRoots, decode_entity, decode_uuid};
+use crate::model::{ManagedMediaFile, MediaFile, StorageRoots, decode_entity, decode_uuid};
 use crate::{READ_THEN_WRITE, media_files, placement, retention, tracks};
 
 /// What one relocation pass changed.
@@ -753,6 +753,11 @@ impl StorageMaintainer {
     /// itself is removed once that transaction committed, so a row never names a
     /// file that is already gone.
     ///
+    /// A file whose removal fails - a read-only directory, a file another
+    /// process holds - gets its row back, because nothing looks at the directory
+    /// again: eviction works from rows, so a row that is gone while the file is
+    /// there makes the file invisible and permanent. The next eviction retries.
+    ///
     /// # Parameters
     ///
     /// - `file`: the file to remove.
@@ -760,8 +765,9 @@ impl StorageMaintainer {
     ///
     /// # Returns
     ///
-    /// [`Relocated::Deleted`] when the row is gone, [`Relocated::Skipped`] when
-    /// the track was pinned or the row moved in the meantime.
+    /// [`Relocated::Deleted`] when the row and the file are gone,
+    /// [`Relocated::Skipped`] when the track was pinned, the row moved in the
+    /// meantime, or the file could not be removed.
     ///
     /// # Errors
     ///
@@ -776,6 +782,9 @@ impl StorageMaintainer {
             return Ok(Relocated::Skipped);
         }
         let before = self.availability(&mut tx, file.track_id).await?;
+        // Read before the delete, because the row is what a failed removal has
+        // to put back.
+        let stored = media_files::get_media_file(&mut tx, file.id).await?;
         media_files::delete_media_file(&mut tx, file.id).await?;
         let after = self.settle_availability(&mut tx, file.track_id).await?;
         tx.commit().await?;
@@ -783,12 +792,33 @@ impl StorageMaintainer {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                tracing::warn!(
-                    track = %file.track_id,
-                    path = %source.display(),
-                    %error,
-                    "removed the row of an unpinned managed file but not the file itself"
-                );
+                let restored = match &stored {
+                    Some(stored) => self.restore_managed_row(stored).await,
+                    None => Ok(()),
+                };
+                match restored {
+                    Ok(()) => tracing::warn!(
+                        track = %file.track_id,
+                        path = %source.display(),
+                        %error,
+                        "could not remove a managed file; restored its row so eviction tries again"
+                    ),
+                    Err(restore) => tracing::error!(
+                        track = %file.track_id,
+                        path = %source.display(),
+                        %error,
+                        %restore,
+                        "could not remove a managed file and could not restore its row; the file \
+                         is now unknown to the server"
+                    ),
+                }
+                self.prune(source, file.storage).await;
+                if let (Some(before), Some(after)) = (before, after)
+                    && before != after
+                {
+                    self.publish_availability(file.track_id, after);
+                }
+                return Ok(Relocated::Skipped);
             }
         }
         self.prune(source, file.storage).await;
@@ -804,6 +834,57 @@ impl StorageMaintainer {
             "deleted an unpinned managed file"
         );
         Ok(Relocated::Deleted)
+    }
+
+    /// Puts a managed file's row back after the file itself could not be
+    /// removed.
+    ///
+    /// The row keeps the track, the storage class, the path and the probe
+    /// columns and gets a fresh id, and the track's availability is settled
+    /// afterwards, because removing the row may have demoted it to `remote`. The
+    /// write is one short transaction of its own.
+    ///
+    /// # Parameters
+    ///
+    /// - `file`: the row that was deleted, as it was read before the delete.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` once the row is back.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when the row cannot be written, which leaves the
+    /// file unknown to the server.
+    async fn restore_managed_row(&self, file: &MediaFile) -> Result<(), LibraryError> {
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+        media_files::insert_managed_media_file(
+            &mut tx,
+            &ManagedMediaFile {
+                track_id: file.track_id,
+                storage: file.storage,
+                rel_path: file.rel_path.clone(),
+                size: file.size,
+                mtime_ms: file.mtime_ms,
+                format: file.format.clone(),
+                codec: file.codec.clone(),
+                bitrate_kbps: file.bitrate_kbps,
+                sample_rate: file.sample_rate,
+                bit_depth: file.bit_depth,
+                channels: file.channels,
+                duration_ms: file.duration_ms,
+                lossless: file.lossless,
+                quality_tier: file.quality_tier,
+                replaygain: file.replaygain.clone(),
+                has_embedded_art: file.has_embedded_art,
+                uploaded_by: file.uploaded_by,
+                acquisition_id: file.acquisition_id,
+            },
+        )
+        .await?;
+        self.settle_availability(&mut tx, file.track_id).await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Evicts unpinned cache files until the cache is within its limits.
