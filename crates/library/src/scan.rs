@@ -48,7 +48,9 @@ use crate::model::{
     AlbumInput, ArtistCredit, ArtistInput, LibraryFolder, Origin, ReplayGain, ScannedMediaFile,
     TrackInput,
 };
-use crate::{READ_THEN_WRITE, albums, folders, media_files, now_millis, retention, tracks};
+use crate::{
+    DELETE_BATCH, READ_THEN_WRITE, albums, folders, media_files, now_millis, retention, tracks,
+};
 
 /// The job kind a library scan is enqueued under.
 pub const SCAN_JOB_KIND: &str = "library.scan";
@@ -890,6 +892,12 @@ impl LibraryScanner {
     /// Only the rows inside the scanned subtrees are considered, so a scan of
     /// one directory never removes a row outside it.
     ///
+    /// The rows are read once and then removed in batches of [`DELETE_BATCH`],
+    /// one short transaction each: a prune of a large folder must not hold the
+    /// single writer connection while a like or a save from another request
+    /// waits for it. Each batch re-reads the row it removes, because a folder
+    /// removal may have taken it in the meantime.
+    ///
     /// # Parameters
     ///
     /// - `folder`: the folder being scanned.
@@ -908,43 +916,55 @@ impl LibraryScanner {
         subtrees: &[String],
         report: &mut ScanReport,
     ) -> Result<(), LibraryError> {
-        // The prune lists the folder's files before it removes any, so the
-        // transaction starts as a write; see [`READ_THEN_WRITE`].
-        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
-        let existing = media_files::list_folder_media_files(&mut tx, folder.id).await?;
-        let mut removed: Vec<EntityId> = Vec::new();
-        for (rel_path, state) in &existing {
-            if seen.contains(rel_path) || !in_subtrees(rel_path, subtrees) {
-                continue;
-            }
-            media_files::delete_media_file(&mut tx, state.id).await?;
-            report.files_removed += 1;
-            let remaining =
-                media_files::list_media_files_for_track(&mut tx, state.track_id).await?;
-            if !remaining.is_empty() {
-                continue;
-            }
-            match tracks::get_track(&mut tx, state.track_id).await? {
-                Some(track) if track.origin == Origin::Local => {
-                    tracks::delete_track(&mut tx, state.track_id).await?;
-                    report.tracks_removed += 1;
-                    removed.push(state.track_id);
+        let mut read = self.readers.acquire().await?;
+        let existing = media_files::list_folder_media_files(&mut read, folder.id).await?;
+        drop(read);
+        let missing: Vec<media_files::StoredFileState> = existing
+            .iter()
+            .filter(|(rel_path, _)| !seen.contains(*rel_path) && in_subtrees(rel_path, subtrees))
+            .map(|(_, state)| *state)
+            .collect();
+
+        for chunk in missing.chunks(DELETE_BATCH) {
+            // The batch reads before it writes; see [`READ_THEN_WRITE`].
+            let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+            let mut removed: Vec<EntityId> = Vec::new();
+            for state in chunk {
+                if media_files::get_media_file(&mut tx, state.id)
+                    .await?
+                    .is_none()
+                {
+                    continue;
                 }
-                Some(_) => {
-                    tracks::set_track_availability(
-                        &mut tx,
-                        state.track_id,
-                        Availability::Remote,
-                        None,
-                    )
-                    .await?;
+                media_files::delete_media_file(&mut tx, state.id).await?;
+                report.files_removed += 1;
+                let remaining =
+                    media_files::list_media_files_for_track(&mut tx, state.track_id).await?;
+                if !remaining.is_empty() {
+                    continue;
                 }
-                None => {}
+                match tracks::get_track(&mut tx, state.track_id).await? {
+                    Some(track) if track.origin == Origin::Local => {
+                        tracks::delete_track(&mut tx, state.track_id).await?;
+                        report.tracks_removed += 1;
+                        removed.push(state.track_id);
+                    }
+                    Some(_) => {
+                        tracks::set_track_availability(
+                            &mut tx,
+                            state.track_id,
+                            Availability::Remote,
+                            None,
+                        )
+                        .await?;
+                    }
+                    None => {}
+                }
             }
-        }
-        tx.commit().await?;
-        for track_id in removed {
-            self.publish_track_change(track_id, LibraryChange::Removed);
+            tx.commit().await?;
+            for track_id in removed {
+                self.publish_track_change(track_id, LibraryChange::Removed);
+            }
         }
         Ok(())
     }

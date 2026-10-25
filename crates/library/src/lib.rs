@@ -87,6 +87,14 @@ pub mod watch;
 /// taken up front and the wait is the one `busy_timeout` covers.
 pub(crate) const READ_THEN_WRITE: &str = "BEGIN IMMEDIATE";
 
+/// How many files one removal or prune transaction covers.
+///
+/// A folder removal and a scan's prune delete a track's rows per file, which is
+/// several statements each. Committing per 256 files keeps the single writer
+/// connection free for the likes and saves of other requests, and an interrupted
+/// batch is retried by listing the rows that are left.
+pub const DELETE_BATCH: usize = 256;
+
 /// Returns the current time in unix milliseconds.
 ///
 /// Every timestamp this crate writes shares one clock and one unit.

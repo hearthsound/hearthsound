@@ -25,7 +25,9 @@ use crate::model::{
     Album, AlbumInput, Artist, ArtistCredit, ArtistInput, Credit, Genre, LibraryFolder,
     ManagedMediaFile, MediaFile, MediaFileInput, Origin, ScannedMediaFile, Track, TrackInput,
 };
-use crate::{READ_THEN_WRITE, albums, artists, folders, media_files, retention, tracks};
+use crate::{
+    DELETE_BATCH, READ_THEN_WRITE, albums, artists, folders, media_files, retention, tracks,
+};
 
 /// The library tables, read and written over a database's two pools.
 ///
@@ -206,12 +208,17 @@ impl LibraryRepository {
     }
 
     /// Removes a library folder, its file records and the tracks only it held,
-    /// in its own transaction.
+    /// in batches.
     ///
     /// A track that still has a file in the library or the cache keeps its row;
     /// a local track whose last file this folder held is deleted, exactly as the
     /// scanner's pruning does, and the caller publishes the change. Nothing
     /// inside the folder on disk is removed or moved.
+    ///
+    /// The unpinning, the removals and the folder row are separate short
+    /// transactions, and the removals commit per [`DELETE_BATCH`] files, so a
+    /// write from another request never waits for the whole folder. An
+    /// interrupted removal is idempotent: a retry lists the rows that are left.
     ///
     /// # Parameters
     ///
@@ -224,37 +231,55 @@ impl LibraryRepository {
     ///
     /// # Errors
     ///
-    /// Returns [`LibraryError`] when the write fails.
+    /// Returns [`LibraryError`] when a write fails.
     pub async fn remove_library_folder(&self, id: Uuid) -> Result<Vec<EntityId>, LibraryError> {
-        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
-        // The folder's files stop pinning their tracks before they go.
-        retention::repin_folder_tracks(&mut tx, id, false).await?;
-        let files = media_files::list_folder_media_files(&mut tx, id).await?;
-        let mut removed: Vec<EntityId> = Vec::new();
-        for state in files.values() {
-            media_files::delete_media_file(&mut tx, state.id).await?;
-            let remaining =
-                media_files::list_media_files_for_track(&mut tx, state.track_id).await?;
-            if !remaining.is_empty() {
-                continue;
-            }
-            match tracks::get_track(&mut tx, state.track_id).await? {
-                Some(track) if track.origin == Origin::Local => {
-                    tracks::delete_track(&mut tx, state.track_id).await?;
-                    removed.push(state.track_id);
-                }
-                Some(_) => {
-                    tracks::set_track_availability(
-                        &mut tx,
-                        state.track_id,
-                        Availability::Remote,
-                        None,
-                    )
-                    .await?;
-                }
-                None => {}
-            }
+        {
+            let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+            // The folder's files stop pinning their tracks before they go.
+            retention::repin_folder_tracks(&mut tx, id, false).await?;
+            tx.commit().await?;
         }
+        let mut read = self.readers.acquire().await?;
+        let files = media_files::list_folder_media_files(&mut read, id).await?;
+        drop(read);
+
+        let mut removed: Vec<EntityId> = Vec::new();
+        for chunk in files.values().collect::<Vec<_>>().chunks(DELETE_BATCH) {
+            let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+            for state in chunk {
+                if media_files::get_media_file(&mut tx, state.id)
+                    .await?
+                    .is_none()
+                {
+                    continue;
+                }
+                media_files::delete_media_file(&mut tx, state.id).await?;
+                let remaining =
+                    media_files::list_media_files_for_track(&mut tx, state.track_id).await?;
+                if !remaining.is_empty() {
+                    continue;
+                }
+                match tracks::get_track(&mut tx, state.track_id).await? {
+                    Some(track) if track.origin == Origin::Local => {
+                        tracks::delete_track(&mut tx, state.track_id).await?;
+                        removed.push(state.track_id);
+                    }
+                    Some(_) => {
+                        tracks::set_track_availability(
+                            &mut tx,
+                            state.track_id,
+                            Availability::Remote,
+                            None,
+                        )
+                        .await?;
+                    }
+                    None => {}
+                }
+            }
+            tx.commit().await?;
+        }
+
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
         folders::delete_library_folder(&mut tx, id).await?;
         tx.commit().await?;
         Ok(removed)
