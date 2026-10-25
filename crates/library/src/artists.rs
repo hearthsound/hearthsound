@@ -1,10 +1,23 @@
 //! Reading and writing the `artists` table.
 //!
-//! An artist row is created by a scan, an upload, or the catalog layer. Local
-//! artists are deduped before insert: a scan that sees the same artist in two
-//! files must produce one row, so [`upsert_artist`] looks an artist up by its
-//! MusicBrainz artist id when one is known, and otherwise by its
-//! case-insensitive name, and only inserts when neither matches.
+//! An artist row is created by a scan, an upload, or the catalog layer, and the
+//! identity rule is what keeps a scan that sees one act in twenty files from
+//! writing twenty rows:
+//!
+//! - rows that share an identifier are one artist. An identifier is the
+//!   MusicBrainz artist id or any row of `external_ids` for the artist, which is
+//!   where the catalog layer stores a provider's own id for it.
+//! - a name identifies an artist only when it is unambiguous. A file whose tags
+//!   carry no id credits the one identified artist of that name; when two or
+//!   more identified artists share the name, every untagged file of that name
+//!   shares one separate row, so two acts called "Alex G" do not become one page
+//!   and neither absorbs an untagged rip; two untagged rows of one name are one
+//!   artist.
+//!
+//! A row that turns out to be a twin of another is merged into it, which moves
+//! its credits, aliases, likes, saves and ratings; see [`merge_artist`]. The
+//! one-time `library.reidentity` pass applies the same rule to rows that already
+//! exist (see [`crate::identity`]).
 //!
 //! Every function takes a [`sqlx::SqliteConnection`] so a caller can run it
 //! inside its own transaction; the pool-level convenience is on
@@ -12,6 +25,7 @@
 
 use hearthsound_core::{EntityId, IdPrefix, new_uuid_v7};
 use sqlx::SqliteConnection;
+use uuid::Uuid;
 
 use crate::error::LibraryError;
 use crate::model::{Artist, ArtistInput, decode_entity, decode_uuid, entity_key, sort_key};
@@ -50,20 +64,50 @@ impl ArtistRow {
     }
 }
 
+/// One artist row of a name group, as the identity rule sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NameGroupRow {
+    /// The row's raw primary key.
+    pub(crate) id: Uuid,
+    /// The row's MusicBrainz artist id.
+    pub(crate) mb_artist_id: Option<String>,
+    /// Whether the row carries an `external_ids` alias, which identifies it too.
+    pub(crate) aliased: bool,
+}
+
+impl NameGroupRow {
+    /// Reports whether the row is identified, by its own id or by an alias.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the row carries a MusicBrainz artist id or an alias.
+    pub(crate) fn identified(&self) -> bool {
+        self.mb_artist_id.is_some() || self.aliased
+    }
+}
+
 /// Inserts an artist, or refreshes the one that already matches.
 ///
-/// The dedupe rule is: an artist with the same MusicBrainz artist id, when the
-/// input carries one, and otherwise an artist with the same name compared
-/// case-insensitively. An input with an id no row holds yet adopts a same-named
-/// row that has no id, and an input without an id prefers a same-named row that
-/// has one, so files tagged with and without MusicBrainz ids credit one artist
-/// whichever order they are scanned in. Two same-named artists with different
-/// ids stay apart. A matching row has its name, sort key, and `updated_at`
-/// refreshed and its id returned, so a rescan of an unchanged folder does not
-/// grow the table. A MusicBrainz id the input does not carry is left in place,
-/// so a caller that knows less never clears a column the table already holds,
-/// and the `origin` of an existing row is never rewritten: an artist a scan
-/// created stays local when the catalog layer later resolves it.
+/// The identity rule is documented on this module, and it resolves to one row
+/// like this - `by_identifier` is the row the input's identifier belongs to, and
+/// "aside" counts the other identified artists of the same name:
+///
+/// | input | `by_identifier` | identified aside | target | absorbed |
+/// |---|---|---|---|---|
+/// | carries an id | a row | 0 | that row | every untagged row |
+/// | carries an id | a row | 1 or more | that row | none |
+/// | carries an id | none | 0 | the oldest untagged row (absent: insert) | the other untagged rows |
+/// | carries an id | none | 1 or more | none (insert) | none |
+/// | no id | - | exactly 1 | that artist | every untagged row |
+/// | no id | - | 0 or 2 or more | the oldest untagged row (absent: insert) | the other untagged rows |
+///
+/// Every absorbed row is merged into the target after the target is refreshed,
+/// so a scan cannot leave two rows for one artist. Two artists with different
+/// identifiers stay apart whatever their names. A MusicBrainz id the input does
+/// not carry is left in place, so a caller that knows less never clears a column
+/// the table already holds, and the `origin` of an existing row is never
+/// rewritten: an artist a scan created stays local when the catalog layer later
+/// resolves it.
 ///
 /// # Parameters
 ///
@@ -80,6 +124,20 @@ impl ArtistRow {
 ///
 /// Returns [`LibraryError::Database`] when a statement fails, and
 /// [`LibraryError::CorruptId`] when a stored id cannot be decoded.
+///
+/// # Examples
+///
+/// ```no_run
+/// use hearthsound_library::ArtistInput;
+/// use hearthsound_library::artists::upsert_artist;
+///
+/// # async fn example(conn: &mut sqlx::SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
+/// let input = ArtistInput::new("Energy 52").mb_artist_id("c2f4e6f0-8a5a-4b6c-9a54-7c4d8a0e1f21");
+/// let id = upsert_artist(conn, &input).await?;
+/// println!("{id}");
+/// # Ok(())
+/// # }
+/// ```
 pub async fn upsert_artist(
     conn: &mut SqliteConnection,
     artist: &ArtistInput,
@@ -90,41 +148,62 @@ pub async fn upsert_artist(
         .clone()
         .unwrap_or_else(|| sort_key(&artist.name));
 
-    let existing: Option<Vec<u8>> = match artist.mb_artist_id.as_deref() {
-        Some(mbid) => {
-            let identified = sqlx::query_scalar!(
-                "SELECT id FROM artists WHERE mb_artist_id = ? LIMIT 1",
-                mbid
-            )
-            .fetch_optional(&mut *conn)
-            .await?;
-            match identified {
-                Some(id) => Some(id),
-                None => {
-                    sqlx::query_scalar!(
-                        "SELECT id FROM artists \
-                         WHERE mb_artist_id IS NULL AND name = ? COLLATE NOCASE \
-                         ORDER BY id LIMIT 1",
-                        artist.name
+    let by_identifier = match artist.mb_artist_id.as_deref() {
+        Some(mbid) => row_for_mbid(conn, mbid).await?,
+        None => None,
+    };
+    let group = name_group(conn, &artist.name).await?;
+    let identified: Vec<Uuid> = group
+        .iter()
+        .filter(|row| row.identified())
+        .map(|row| row.id)
+        .collect();
+    let unidentified: Vec<Uuid> = group
+        .iter()
+        .filter(|row| !row.identified())
+        .map(|row| row.id)
+        .collect();
+
+    let (target, absorbed): (Option<Uuid>, Vec<Uuid>) =
+        match (artist.mb_artist_id.is_some(), by_identifier) {
+            // An identifier the table already knows is the artist, and it absorbs
+            // the untagged rows of its name only while no other artist is identified.
+            (_, Some(row)) => {
+                let aside = identified.iter().filter(|id| **id != row).count();
+                let absorbed = if aside == 0 {
+                    unidentified.clone()
+                } else {
+                    Vec::new()
+                };
+                (Some(row), absorbed)
+            }
+            // An identifier no row holds: the untagged rows of the name become it,
+            // unless an identified artist already owns the name.
+            (true, None) => {
+                if identified.is_empty() {
+                    (
+                        unidentified.first().copied(),
+                        unidentified.iter().skip(1).copied().collect(),
                     )
-                    .fetch_optional(&mut *conn)
-                    .await?
+                } else {
+                    (None, Vec::new())
                 }
             }
-        }
-        None => {
-            sqlx::query_scalar!(
-                "SELECT id FROM artists WHERE name = ? COLLATE NOCASE \
-                 ORDER BY mb_artist_id IS NULL, id LIMIT 1",
-                artist.name
-            )
-            .fetch_optional(&mut *conn)
-            .await?
-        }
-    };
+            // No identifier: one identified artist of the name is the artist,
+            // otherwise the untagged rows are one artist of their own.
+            (false, None) => {
+                if identified.len() == 1 {
+                    (identified.first().copied(), unidentified.clone())
+                } else {
+                    (
+                        unidentified.first().copied(),
+                        unidentified.iter().skip(1).copied().collect(),
+                    )
+                }
+            }
+        };
 
-    if let Some(id) = existing {
-        let id = decode_uuid(&id)?;
+    if let Some(id) = target {
         sqlx::query!(
             "UPDATE artists SET name = ?, sort_name = ?, \
                     mb_artist_id = COALESCE(?, mb_artist_id), updated_at = ? WHERE id = ?",
@@ -136,6 +215,9 @@ pub async fn upsert_artist(
         )
         .execute(&mut *conn)
         .await?;
+        for twin in absorbed {
+            merge_artist(conn, twin, id).await?;
+        }
         return Ok(EntityId::from_uuid(IdPrefix::Artist, id));
     }
 
@@ -155,6 +237,194 @@ pub async fn upsert_artist(
     .execute(&mut *conn)
     .await?;
     Ok(EntityId::from_uuid(IdPrefix::Artist, id))
+}
+
+/// Reads every row whose name matches, oldest first.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `name`: the artist name to match, case-insensitively.
+///
+/// # Returns
+///
+/// The rows of that name, oldest first.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when the query fails, and
+/// [`LibraryError::CorruptId`] when a stored id cannot be decoded.
+pub(crate) async fn name_group(
+    conn: &mut SqliteConnection,
+    name: &str,
+) -> Result<Vec<NameGroupRow>, LibraryError> {
+    let rows = sqlx::query!(
+        "SELECT a.id AS id, a.mb_artist_id AS mb_artist_id, \
+                EXISTS (SELECT 1 FROM external_ids e \
+                        WHERE e.entity_kind = 'artist' AND e.entity_id = a.id) AS \"aliased: bool\" \
+         FROM artists a WHERE a.name = ? COLLATE NOCASE ORDER BY a.id",
+        name,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(NameGroupRow {
+                id: decode_uuid(&row.id)?,
+                mb_artist_id: row.mb_artist_id,
+                aliased: row.aliased,
+            })
+        })
+        .collect()
+}
+
+/// Finds the row an identifier belongs to.
+///
+/// The MusicBrainz column wins over the alias table, because a row that carries
+/// the id outright is the one the catalog layer resolved to.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `mbid`: the MusicBrainz artist id.
+///
+/// # Returns
+///
+/// The row's raw primary key, or `None` when no row holds the id.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when a query fails, and
+/// [`LibraryError::CorruptId`] when a stored id cannot be decoded.
+pub(crate) async fn row_for_mbid(
+    conn: &mut SqliteConnection,
+    mbid: &str,
+) -> Result<Option<Uuid>, LibraryError> {
+    let by_column: Option<Vec<u8>> = sqlx::query_scalar!(
+        "SELECT id FROM artists WHERE mb_artist_id = ? LIMIT 1",
+        mbid
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(id) = by_column {
+        return Ok(Some(decode_uuid(&id)?));
+    }
+    let by_alias: Option<Vec<u8>> = sqlx::query_scalar!(
+        "SELECT entity_id FROM external_ids \
+         WHERE namespace = 'mb-artist' AND entity_kind = 'artist' AND value = ? LIMIT 1",
+        mbid,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    match by_alias {
+        Some(id) => Ok(Some(decode_uuid(&id)?)),
+        None => Ok(None),
+    }
+}
+
+/// Merges one artist row into another, moving everything that names it.
+///
+/// The survivor keeps an identifier only the loser had; the loser's credits,
+/// aliases, likes, dislikes, saves, uploads and ratings move to it, and the loser
+/// row is deleted. A credit the survivor already has on the same track or album
+/// is not duplicated, and a like, save or rating the same user has on both rows
+/// keeps the survivor's. The survivor's name, sort name and origin are left to
+/// the caller, which owns the write that explained why the rows are one.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `from`: the row that goes away.
+/// - `into`: the row that survives.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when a statement fails.
+pub(crate) async fn merge_artist(
+    conn: &mut SqliteConnection,
+    from: Uuid,
+    into: Uuid,
+) -> Result<(), LibraryError> {
+    let now = now_millis();
+    let from_key = from.as_bytes().to_vec();
+    let into_key = into.as_bytes().to_vec();
+    sqlx::query(
+        "UPDATE artists SET mb_artist_id = COALESCE(mb_artist_id, \
+                (SELECT mb_artist_id FROM artists WHERE id = ?)), updated_at = ? WHERE id = ?",
+    )
+    .bind(from_key.as_slice())
+    .bind(now)
+    .bind(into_key.as_slice())
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("UPDATE track_artists SET artist_id = ? WHERE artist_id = ?")
+        .bind(into_key.as_slice())
+        .bind(from_key.as_slice())
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query(
+        "DELETE FROM track_artists WHERE artist_id = ? AND rowid NOT IN (\
+             SELECT MIN(rowid) FROM track_artists WHERE artist_id = ? GROUP BY track_id)",
+    )
+    .bind(into_key.as_slice())
+    .bind(into_key.as_slice())
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("UPDATE album_artists SET artist_id = ? WHERE artist_id = ?")
+        .bind(into_key.as_slice())
+        .bind(from_key.as_slice())
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query(
+        "DELETE FROM album_artists WHERE artist_id = ? AND rowid NOT IN (\
+             SELECT MIN(rowid) FROM album_artists WHERE artist_id = ? GROUP BY album_id)",
+    )
+    .bind(into_key.as_slice())
+    .bind(into_key.as_slice())
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "UPDATE external_ids SET entity_id = ? WHERE entity_kind = 'artist' AND entity_id = ?",
+    )
+    .bind(into_key.as_slice())
+    .bind(from_key.as_slice())
+    .execute(&mut *conn)
+    .await?;
+    for (insert, delete) in [
+        (
+            "INSERT OR IGNORE INTO user_feedback (user_id, entity_kind, entity_id, value, at) \
+             SELECT user_id, entity_kind, ?, value, at FROM user_feedback \
+             WHERE entity_kind = 'artist' AND entity_id = ?",
+            "DELETE FROM user_feedback WHERE entity_kind = 'artist' AND entity_id = ?",
+        ),
+        (
+            "INSERT OR IGNORE INTO user_library (user_id, entity_kind, entity_id, origin, added_at) \
+             SELECT user_id, entity_kind, ?, origin, added_at FROM user_library \
+             WHERE entity_kind = 'artist' AND entity_id = ?",
+            "DELETE FROM user_library WHERE entity_kind = 'artist' AND entity_id = ?",
+        ),
+        (
+            "INSERT OR IGNORE INTO user_ratings (user_id, entity_kind, entity_id, rating, at) \
+             SELECT user_id, entity_kind, ?, rating, at FROM user_ratings \
+             WHERE entity_kind = 'artist' AND entity_id = ?",
+            "DELETE FROM user_ratings WHERE entity_kind = 'artist' AND entity_id = ?",
+        ),
+    ] {
+        sqlx::query(insert)
+            .bind(into_key.as_slice())
+            .bind(from_key.as_slice())
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query(delete)
+            .bind(from_key.as_slice())
+            .execute(&mut *conn)
+            .await?;
+    }
+    sqlx::query("DELETE FROM artists WHERE id = ?")
+        .bind(from_key.as_slice())
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
 }
 
 /// Reads an artist by its client id.

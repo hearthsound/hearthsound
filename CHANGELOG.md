@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The server loads plugins built for `hearthsound:plugin@0.4.0` and keeps loading
   `0.3.0` adapters, from `wit/since_v0.3/`.
+- The first start after this version scans every library folder in full once and
+  merges the duplicate artists and albums older versions left behind, through
+  the `library.reidentity` job and the `library_maintenance` marker.
 - `GET /api/v1/admin/folders` answers `lastScanError`, the reason a folder's last
   scan failed or ended with a warning.
 
@@ -46,6 +49,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection, so a poll no longer queues behind a long write transaction (and no
   write behind a poll). The server's own commits are still attributed and never
   reload it.
+- An artist is identified by its MusicBrainz id or a provider alias, and a name
+  identifies an artist only when it is unambiguous: two identified acts sharing a
+  name no longer absorb an untagged file, and two untagged rows of one name are
+  one artist.
+- An album without a release id is identified by its title, primary artist and
+  year, so two years of one title are two albums; a release id is adopted by the
+  id-less row of the same title, and the year and release date are written once.
 - Deleting a track now also deletes its provider aliases, saves, likes and
   ratings: a schema trigger does it for every delete path, so none of them is
   left pointing at an id that no longer exists.

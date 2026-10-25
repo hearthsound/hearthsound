@@ -1552,3 +1552,216 @@ async fn an_outer_folder_prunes_rows_a_nested_folder_owns() {
     assert_eq!(stray, 1, "the outer folder kept only the file it owns");
     assert_eq!(library.list_artists().await.unwrap().len(), 2);
 }
+
+/// Writes a short FLAC with an explicit year and artist id.
+///
+/// # Parameters
+///
+/// - `dir`: the directory to write into.
+/// - `stem`: the file name stem.
+/// - `artist`: the credited artist.
+/// - `album`: the album title.
+/// - `year`: the release year the tags carry.
+/// - `artist_mbid`: the MusicBrainz artist id, when the tags carry one.
+async fn write_tagged(
+    dir: &Path,
+    stem: &str,
+    artist: &str,
+    album: &str,
+    year: u32,
+    artist_mbid: Option<&str>,
+) -> std::path::PathBuf {
+    let mut tags = TrackTags::new(stem, artist)
+        .album(album)
+        .album_artist(artist)
+        .track(1, 1)
+        .year(year);
+    if let Some(mbid) = artist_mbid {
+        tags = tags.mb_ids(
+            format!("mb-recording-{stem}"),
+            format!("mb-release-{album}-{year}"),
+            format!("mb-group-{album}"),
+            [mbid.to_owned()],
+            [mbid.to_owned()],
+        );
+    }
+    AudioFixture::new(AudioFormat::Flac)
+        .seconds(0.3)
+        .file_name(format!("{stem}.flac"))
+        .tags(tags)
+        .write_into(dir)
+        .await
+        .unwrap()
+}
+
+/// An untagged file beside two tagged namesakes gets its own artist row.
+#[tokio::test]
+async fn an_untagged_artist_beside_two_tagged_namesakes_gets_its_own_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    write_tagged(&music, "One", "Alex G", "One", 2001, Some("mb-artist-a")).await;
+    write_tagged(&music, "Two", "Alex G", "Two", 2010, Some("mb-artist-b")).await;
+    write_tagged(&music, "Three", "Alex G", "Three", 1996, None).await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(folder.id).await.unwrap();
+
+    let artists = library.list_artists().await.unwrap();
+    assert_eq!(artists.len(), 3, "two acts and one untagged row");
+    let untagged = artists
+        .iter()
+        .find(|artist| artist.mb_artist_id.is_none())
+        .expect("the untagged file has a row of its own");
+    let track = only_track_named(&db, "Three").await;
+    let credits = library.list_track_artists(track).await.unwrap();
+    assert_eq!(credits[0].id, untagged.id);
+}
+
+/// Two files of one album title and artist but different years are two albums.
+#[tokio::test]
+async fn two_years_of_one_title_in_one_folder_are_two_albums() {
+    for backwards in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = migrated(dir.path()).await;
+        let library = LibraryRepository::new(&db);
+        let music = dir.path().join("music");
+        std::fs::create_dir(&music).unwrap();
+        let years = if backwards {
+            [2010, 2001]
+        } else {
+            [2001, 2010]
+        };
+        for (index, year) in years.iter().enumerate() {
+            write_tagged(
+                &music,
+                &format!("Song {index}"),
+                "Greatest Hits Band",
+                "Greatest Hits",
+                *year,
+                None,
+            )
+            .await;
+        }
+
+        let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+        let folder = library.add_library_folder(&music, None).await.unwrap();
+        scanner.scan_folder(folder.id).await.unwrap();
+
+        let artist = library
+            .list_artists()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|artist| artist.name == "Greatest Hits Band")
+            .unwrap();
+        let mut albums = library.list_albums_for_artist(artist.id).await.unwrap();
+        albums.sort_by_key(|album| album.year);
+        assert_eq!(albums.len(), 2, "the year is part of the identity");
+        assert_eq!(albums[0].year, Some(2001));
+        assert_eq!(albums[1].year, Some(2010));
+        for album in &albums {
+            assert_eq!(
+                library.list_tracks_for_album(album.id).await.unwrap().len(),
+                1
+            );
+        }
+    }
+}
+
+/// A file re-tagged with a release id stays the album it was.
+#[tokio::test]
+async fn a_re_tagged_file_keeps_its_album() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    let path = write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(folder.id).await.unwrap();
+    let artist = library
+        .list_artists()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|artist| artist.name == "Energy 52")
+        .unwrap();
+    assert_eq!(
+        library
+            .list_albums_for_artist(artist.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // The same path, re-tagged with a release id and the year it had.
+    let tags = TrackTags::new("Cafe del Mar", "Energy 52")
+        .album("Cafe del Mar")
+        .album_artist("Energy 52")
+        .track(1, 2)
+        .year(1993)
+        .mb_ids(
+            "mb-recording-cafe",
+            "mb-release-cafe",
+            "mb-group-cafe",
+            ["mb-artist-energy-52"],
+            ["mb-artist-energy-52"],
+        );
+    AudioFixture::new(AudioFormat::Flac)
+        .seconds(0.3)
+        .file_name("Cafe del Mar.flac")
+        .tags(tags)
+        .write_into(&music)
+        .await
+        .unwrap();
+    assert_eq!(path.file_name().unwrap(), "Cafe del Mar.flac");
+    scanner.scan_folder(folder.id).await.unwrap();
+
+    let albums = library.list_albums_for_artist(artist.id).await.unwrap();
+    assert_eq!(albums.len(), 1, "the album adopted the release id");
+    assert_eq!(albums[0].mb_release_id.as_deref(), Some("mb-release-cafe"));
+    assert_eq!(albums[0].year, Some(1993), "the first year stayed");
+}
+
+/// Two folders with the same artist name share one artist.
+///
+/// An artist is one act across the library, so a folder boundary never splits
+/// it; the folder identity questions live in `04-data-model.md`.
+#[tokio::test]
+async fn two_folders_with_the_same_artist_name_share_one_artist() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let first = dir.path().join("first");
+    let second = dir.path().join("second");
+    std::fs::create_dir(&first).unwrap();
+    std::fs::create_dir(&second).unwrap();
+    write_song(&first, "One", "Alex G", "First Album").await;
+    write_song(&second, "Two", "Alex G", "Second Album").await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let one = library.add_library_folder(&first, None).await.unwrap();
+    let two = library.add_library_folder(&second, None).await.unwrap();
+    scanner.scan_folder(one.id).await.unwrap();
+    scanner.scan_folder(two.id).await.unwrap();
+
+    assert_eq!(library.list_artists().await.unwrap().len(), 1);
+}
+
+/// Returns the id of the track whose title is `title`.
+async fn only_track_named(db: &Database, title: &str) -> hearthsound_core::EntityId {
+    let id: Vec<u8> = sqlx::query_scalar("SELECT id FROM tracks WHERE title = ?")
+        .bind(title)
+        .fetch_one(db.readers())
+        .await
+        .unwrap();
+    let uuid = uuid::Uuid::from_slice(&id).unwrap();
+    hearthsound_core::EntityId::from_uuid(hearthsound_core::IdPrefix::Track, uuid)
+}

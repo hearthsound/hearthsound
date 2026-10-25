@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT a.id FROM albums a JOIN album_artists aa ON aa.album_id = a.id AND aa.position = 0 WHERE a.sort_title = ? AND aa.artist_id = ? LIMIT 1",
+  "query": "SELECT a.id FROM albums a JOIN album_artists aa ON aa.album_id = a.id AND aa.position = 0 WHERE a.sort_title = ? AND aa.artist_id = ? AND a.mb_release_id IS NULL ORDER BY a.id",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       false
     ]
   },
-  "hash": "2ea1c3e69d45e60cdf716f81f2e6e5b10a7e10bead4d82d0e920d8f1529d121a"
+  "hash": "8bdc85b8f548b0f9df280b120e32f9f94b43b054365245c1111684a6c91b8d7b"
 }

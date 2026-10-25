@@ -130,14 +130,28 @@ async fn albums_dedupe_by_release_id_then_by_title_and_primary_artist() {
     let first = library.upsert_album(&album, &credits).await.unwrap();
     assert_eq!(library.upsert_album(&album, &credits).await.unwrap(), first);
 
-    // The same title and primary artist, no release id, merges too.
-    let plain = AlbumInput::new("Cafe del Mar", Origin::Local);
+    // The same title, primary artist and year, without a release id, merges.
+    let mut plain = AlbumInput::new("Cafe del Mar", Origin::Local);
+    plain.year = Some(1993);
     assert_eq!(library.upsert_album(&plain, &credits).await.unwrap(), first);
 
-    // The same title by another artist is a different album.
+    // A different year is a different album.
+    let mut later = AlbumInput::new("Cafe del Mar", Origin::Local);
+    later.year = Some(2010);
+    let later = library.upsert_album(&later, &credits).await.unwrap();
+    assert_ne!(later, first);
+
+    // A different title by another artist is a different album, and so is one
+    // whose year the tags do not carry.
     let other_credits = [ArtistCredit::new("Someone Else", "main")];
     let other = library.upsert_album(&plain, &other_credits).await.unwrap();
     assert_ne!(other, first);
+    let unyearly = library
+        .upsert_album(&AlbumInput::new("Cafe del Mar", Origin::Local), &credits)
+        .await
+        .unwrap();
+    assert_ne!(unyearly, first);
+    assert_ne!(unyearly, later);
 
     let stored = library.get_album(first).await.unwrap().unwrap();
     assert_eq!(stored.year, Some(1993));
@@ -458,4 +472,182 @@ fn sort_key_folds_case_and_whitespace() {
     assert_eq!(sort_key("  The  Beatles "), "the beatles");
     assert_eq!(sort_key("CAFE\u{a0}DEL MAR"), "cafe del mar");
     assert_eq!(sort_key("   "), "");
+}
+
+/// Inserts an artist row straight into the table and returns its id.
+///
+/// The rows a provider alias points at are written by the catalog layer, which
+/// resolves an id before the library sees it; a test writes them the same way.
+async fn insert_artist_row(db: &Database, name: &str, mb_artist_id: Option<&str>) -> uuid::Uuid {
+    let id = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO artists (id, name, sort_name, mb_artist_id, origin, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, 'local', 0, 0)",
+    )
+    .bind(id.as_bytes().as_slice())
+    .bind(name)
+    .bind(hearthsound_library::sort_key(name))
+    .bind(mb_artist_id)
+    .execute(db.writer())
+    .await
+    .unwrap();
+    id
+}
+
+/// Inserts a provider alias for an artist.
+async fn insert_artist_alias(db: &Database, artist: uuid::Uuid, namespace: &str, value: &str) {
+    sqlx::query(
+        "INSERT INTO external_ids (namespace, value, entity_kind, entity_id) \
+         VALUES (?, ?, 'artist', ?)",
+    )
+    .bind(namespace)
+    .bind(value)
+    .bind(artist.as_bytes().as_slice())
+    .execute(db.writer())
+    .await
+    .unwrap();
+}
+
+/// An untagged artist stays apart when two identified artists share its name.
+///
+/// The name alone no longer says which act an untagged file belongs to, so it
+/// gets a row of its own instead of joining one of them - and every other
+/// untagged file of that name joins the same row.
+#[tokio::test]
+async fn an_unidentified_artist_stays_apart_when_two_identified_artists_share_the_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+
+    let first = library
+        .upsert_artist(&ArtistInput::new("Alex G").mb_artist_id("mbid-a"))
+        .await
+        .unwrap();
+    let second = library
+        .upsert_artist(&ArtistInput::new("Alex G").mb_artist_id("mbid-b"))
+        .await
+        .unwrap();
+    assert_ne!(first, second);
+
+    let untagged = library
+        .upsert_artist(&ArtistInput::new("Alex G"))
+        .await
+        .unwrap();
+    assert_ne!(untagged, first);
+    assert_ne!(untagged, second);
+    let again = library
+        .upsert_artist(&ArtistInput::new("alex g"))
+        .await
+        .unwrap();
+    assert_eq!(again, untagged, "untagged files of one name share one row");
+    assert_eq!(library.list_artists().await.unwrap().len(), 3);
+}
+
+/// An artist identified only by a provider alias counts as identified.
+#[tokio::test]
+async fn an_artist_identified_only_by_a_provider_alias_counts_as_identified() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+
+    let aliased = insert_artist_row(&db, "Alex G", None).await;
+    insert_artist_alias(&db, aliased, "p:deezer", "3135556").await;
+
+    // One identified artist of the name exists, so a tagged file is a new act.
+    let tagged = library
+        .upsert_artist(&ArtistInput::new("Alex G").mb_artist_id("mbid-a"))
+        .await
+        .unwrap();
+    assert_ne!(tagged.uuid(), aliased);
+
+    // Two identified artists share the name, so an untagged file gets its own.
+    let untagged = library
+        .upsert_artist(&ArtistInput::new("Alex G"))
+        .await
+        .unwrap();
+    assert_ne!(untagged.uuid(), aliased);
+    assert_ne!(untagged, tagged);
+    assert_eq!(library.list_artists().await.unwrap().len(), 3);
+}
+
+/// A MusicBrainz id stored as an alias finds its row.
+#[tokio::test]
+async fn a_music_brainz_id_stored_as_an_alias_matches_the_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+
+    let aliased = insert_artist_row(&db, "Aphex Twin", None).await;
+    insert_artist_alias(&db, aliased, "mb-artist", "mbid-aphex").await;
+
+    let tagged = library
+        .upsert_artist(&ArtistInput::new("Aphex Twin").mb_artist_id("mbid-aphex"))
+        .await
+        .unwrap();
+    assert_eq!(tagged.uuid(), aliased, "the alias is the artist");
+    let stored = library.get_artist(tagged).await.unwrap().unwrap();
+    assert_eq!(stored.mb_artist_id.as_deref(), Some("mbid-aphex"));
+    assert_eq!(library.list_artists().await.unwrap().len(), 1);
+}
+
+/// An album's year and release date are written once.
+#[tokio::test]
+async fn an_album_year_is_not_overwritten_by_a_later_upsert() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let credits = [ArtistCredit::new("Energy 52", "main")];
+
+    let mut first = AlbumInput::new("Cafe del Mar", Origin::Local);
+    first.year = Some(2001);
+    first.release_date = Some("2001-06-04".to_owned());
+    let id = library.upsert_album(&first, &credits).await.unwrap();
+
+    let mut later = AlbumInput::new("Cafe del Mar", Origin::Local);
+    later.year = Some(2010);
+    later.release_date = Some("2010-01-01".to_owned());
+    later.mb_release_id = Some("mbid-release".to_owned());
+    assert_eq!(library.upsert_album(&later, &credits).await.unwrap(), id);
+
+    let stored = library.get_album(id).await.unwrap().unwrap();
+    assert_eq!(stored.year, Some(2001), "the first year wins");
+    assert_eq!(stored.release_date.as_deref(), Some("2001-06-04"));
+    assert_eq!(
+        stored.mb_release_id.as_deref(),
+        Some("mbid-release"),
+        "the id is adopted"
+    );
+}
+
+/// An album re-tagged with a release id is the same album.
+#[tokio::test]
+async fn an_album_gains_its_music_brainz_id_without_duplicating() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let credits = [ArtistCredit::new("Energy 52", "main")];
+
+    let mut untagged = AlbumInput::new("Cafe del Mar", Origin::Local);
+    untagged.year = Some(1993);
+    let id = library.upsert_album(&untagged, &credits).await.unwrap();
+
+    let mut tagged = AlbumInput::new("Cafe del Mar", Origin::Local);
+    tagged.year = Some(1993);
+    tagged.mb_release_id = Some("mbid-release".to_owned());
+    assert_eq!(library.upsert_album(&tagged, &credits).await.unwrap(), id);
+    assert_eq!(
+        library
+            .get_album(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .mb_release_id
+            .as_deref(),
+        Some("mbid-release")
+    );
+    let albums = library
+        .list_albums_for_artist(library.list_album_artists(id).await.unwrap()[0].id)
+        .await
+        .unwrap();
+    assert_eq!(albums.len(), 1);
 }

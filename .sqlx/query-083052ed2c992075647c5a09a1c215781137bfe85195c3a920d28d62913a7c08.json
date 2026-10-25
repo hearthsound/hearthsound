@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT entity_id FROM external_ids WHERE namespace = 'mb-artist' AND entity_kind = 'artist' AND value = ? LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "entity_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "external_ids",
+            "name": "entity_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "083052ed2c992075647c5a09a1c215781137bfe85195c3a920d28d62913a7c08"
+}
