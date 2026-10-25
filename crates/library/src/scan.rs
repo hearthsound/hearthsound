@@ -1463,7 +1463,7 @@ fn walk_into(
                 }
             };
             if metadata.is_dir() {
-                if skip.iter().any(|nested| path == *nested) {
+                if skip.contains(&path) {
                     continue;
                 }
                 let canonical = match std::fs::canonicalize(&path) {
@@ -1480,7 +1480,7 @@ fn walk_into(
                 };
                 // A nested folder that is itself a link is skipped by the
                 // canonical path as well.
-                if skip.iter().any(|nested| canonical == *nested) {
+                if skip.contains(&canonical) {
                     continue;
                 }
                 if !visited.insert(canonical) {

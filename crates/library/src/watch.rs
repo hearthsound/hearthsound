@@ -359,7 +359,7 @@ fn readable_directories(root: &Path, skip: &[PathBuf]) -> (Vec<PathBuf>, u64) {
                 continue;
             }
         };
-        if skip.iter().any(|nested| canonical == *nested) {
+        if skip.contains(&canonical) {
             continue;
         }
         if !visited.insert(canonical) {
