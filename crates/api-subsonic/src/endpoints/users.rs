@@ -10,9 +10,11 @@
 //! The four Subsonic calls that create, change, or delete an account are not
 //! answered here. Accounts are managed over the native API or from the command
 //! line, which can express permissions and quotas that the base protocol has no
-//! fields for, so every one of those calls answers error 50 with
-//! [`USERS_HELP_URL`] rather than half-implementing a second way to write an
-//! account.
+//! fields for, so every one of those calls answers error 50 rather than
+//! half-implementing a second way to write an account: the three account writes
+//! with [`USERS_HELP_URL`], and `changePassword` with [`PASSWORDS_HELP_URL`],
+//! because a password is set through `POST /api/v1/me/password` or the admin
+//! API rather than from a Subsonic client.
 
 use hearthsound_auth::User;
 
