@@ -2247,7 +2247,7 @@
           "admin"
         ],
         "summary": "Changes an account.",
-        "description": "# Errors\n\nAnswers `not-found` for an unknown account, `invalid-request` for an empty\npassword, and `conflict` when administrators would remove their own\nadministrator flag or disable themselves.",
+        "description": "A new password revokes the account's credentials: every session except the\ncaller's own when an administrator changes their own password, plus every\nAPI key and app password of the account.\n\n# Errors\n\nAnswers `not-found` for an unknown account, `invalid-request` for an empty\npassword or one shorter than 8 characters, and `conflict` when the change\nwould leave no active administrator, or when administrators would remove\ntheir own administrator flag or disable themselves.",
         "operationId": "patch_user",
         "parameters": [
           {
@@ -2281,6 +2281,16 @@
               }
             }
           },
+          "400": {
+            "description": "The password is empty or shorter than 8 characters",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "404": {
             "description": "No such account",
             "content": {
@@ -2292,7 +2302,7 @@
             }
           },
           "409": {
-            "description": "The change would lock the caller out",
+            "description": "The change would leave no active administrator",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2443,7 +2453,7 @@
           "events"
         ],
         "summary": "Streams server events to the caller as Server-Sent Events.",
-        "description": "The stream is authorized by a bearer key, a session cookie, or a `ticket`\nquery parameter. Each event is forwarded when its audience admits the\ncaller; administrators see every event. When the `Last-Event-ID` header is\npresent, events after that id are replayed before the live feed starts. The\nresponse carries a comment keep-alive every 15 seconds.\n\n# Parameters\n\n- `state`: the native state, which holds the event bus and the ticket store.\n- `query`: the optional single-use `ticket`.\n- `parts`: the request head, from which the credential and the\n  `Last-Event-ID` header are read.\n\n# Returns\n\nA `text/event-stream` response that stays open until the server stops.\n\n# Errors\n\n`400 invalid-request` when `Last-Event-ID` is not an unsigned integer\n(checked before a ticket is redeemed, so a malformed request does not spend\nthe ticket). `401 unauthenticated` when the credential or ticket is missing,\nunknown, expired, or already used.",
+        "description": "The stream is authorized by a bearer key, a session cookie, or a `ticket`\nquery parameter. Each event is forwarded when its audience admits the\ncaller; administrators see every event. When the `Last-Event-ID` header is\npresent, events after that id are replayed before the live feed starts. The\nresponse carries a comment keep-alive every 15 seconds.\n\nThe credential is checked when the stream connects (and, for a ticket, again\nwhen the ticket is redeemed) and at most every five seconds afterwards, so a\nlogout, a revocation, a disable, a deletion or a role change ends the stream\n- or changes what it forwards - within that window.\n\n# Parameters\n\n- `state`: the native state, which holds the event bus and the ticket store.\n- `query`: the optional single-use `ticket`.\n- `parts`: the request head, from which the credential and the\n  `Last-Event-ID` header are read.\n\n# Returns\n\nA `text/event-stream` response that stays open until the credential stops\nbeing valid or the server stops.\n\n# Errors\n\n`400 invalid-request` when `Last-Event-ID` is not an unsigned integer\n(checked before a ticket is redeemed, so a malformed request does not spend\nthe ticket). `401 unauthenticated` when the credential or ticket is missing,\nunknown, expired, already used, or no longer valid.",
         "operationId": "stream",
         "parameters": [
           {
@@ -2514,7 +2524,7 @@
           "events"
         ],
         "summary": "Issues a single-use ticket for the event stream.",
-        "description": "The ticket authorizes one connection to `GET /api/v1/events` for 60 seconds\nand is consumed by that connection, so a client that needs to reconnect\nrequests a new one.\n\n# Parameters\n\n- `state`: the native state, which holds the ticket store.\n- `authed`: the authenticated caller; the ticket acts as this principal.\n\n# Returns\n\n`201 Created` with the ticket token and its expiry.\n\n# Errors\n\n`401 unauthenticated` when the request carries no valid credential.",
+        "description": "The ticket authorizes one connection to `GET /api/v1/events` for 60 seconds\nand is consumed by that connection, so a client that needs to reconnect\nrequests a new one. An account holds at most 8 unredeemed tickets at once.\n\n# Parameters\n\n- `state`: the native state, which holds the ticket store.\n- `authed`: the authenticated caller; the ticket acts as this principal.\n\n# Returns\n\n`201 Created` with the ticket token and its expiry.\n\n# Errors\n\n`401 unauthenticated` when the request carries no valid credential, and\n`429 rate-limited` when the account already holds its maximum number of\nunredeemed tickets; `Retry-After` is how long the oldest of them still has to\nlive.",
         "operationId": "create_ticket",
         "responses": {
           "201": {
@@ -2529,6 +2539,16 @@
           },
           "401": {
             "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The account holds too many outstanding tickets",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2699,7 +2719,17 @@
             }
           },
           "400": {
-            "description": "No name",
+            "description": "The name is empty or longer than 64 characters",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2834,7 +2864,17 @@
             }
           },
           "400": {
-            "description": "No name",
+            "description": "The name is empty or longer than 64 characters",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2879,6 +2919,79 @@
           },
           "404": {
             "description": "No such app password of the caller's",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/me/password": {
+      "post": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Changes the caller's own password.",
+        "description": "The current password has to be presented, so a stolen session cannot lock the\nowner out. A successful change ends every *other* session of the account and\nrevokes every API key and app password of it; the session that made the change\n- present only for a cookie-authenticated call - keeps working. A change made\nwith an API key keeps no session, so the key itself is revoked too: an\nAPI-key client has to create a new key afterwards.\n\nThe attempt is rate limited against the caller's address only. Charging the\nusername as well would let a stolen session spend the owner's sign-in budget\nand keep them out of the login form.\n\n# Errors\n\nAnswers `invalid-request` when the new password breaks the length rule,\n`rate-limited` when the address has spent its failure budget (with\n`Retry-After`), `unauthenticated` when the caller has no credential or the\naccount is gone or disabled, `wrong-password` when the current password does\nnot match, and `internal` when the write fails.",
+        "operationId": "change_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The password changed; every other credential of the account is revoked"
+          },
+          "400": {
+            "description": "The new password is shorter than 8 characters",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The current password does not match",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many attempts from this address",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3461,7 +3574,7 @@
           "auth"
         ],
         "summary": "Creates the first administrator from the setup link.",
-        "description": "# Errors\n\nAnswers `conflict` when an account already exists, `invalid-request` when\nthe username or the password is empty, `rate-limited` once the setup\nfailures spent the budget of the client address or of the `setup` key,\n`unauthenticated` when the token is not the one the server logged, and\n`internal` when the account cannot be created.",
+        "description": "The link is spent when the administrator is created. A failure that leaves\nno account restores it, so the wizard's retry works; a failure after the\naccount exists needs no link, because the account can sign in. The username\nand the password rules are checked before the spend, so a typo costs the\nwizard nothing.\n\n# Errors\n\nAnswers `conflict` when an account already exists, `invalid-request` when\nthe username or the password is empty or breaks its rule (a password is at\nleast 8 characters long), `rate-limited` once the client address spent its\nfailure budget, `unauthenticated` when the token is not the one the server\nlogged, and `internal` when the account cannot be created.",
         "operationId": "complete_setup",
         "requestBody": {
           "content": {
@@ -3485,7 +3598,7 @@
             }
           },
           "400": {
-            "description": "The username or the password is empty, or the username breaks the name rule",
+            "description": "The username or the password is empty, or it breaks its rule (a password is at least 8 characters long)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3515,7 +3628,7 @@
             }
           },
           "429": {
-            "description": "Too many failed setup attempts",
+            "description": "Too many failed setup attempts from this address",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -4713,6 +4826,24 @@
           "username": {
             "type": "string",
             "description": "The sign-in name, unique case-insensitively."
+          }
+        }
+      },
+      "PasswordChange": {
+        "type": "object",
+        "description": "The caller's password change.",
+        "required": [
+          "currentPassword",
+          "newPassword"
+        ],
+        "properties": {
+          "currentPassword": {
+            "type": "string",
+            "description": "The account's current password."
+          },
+          "newPassword": {
+            "type": "string",
+            "description": "The password to store; the rules are the ones every password write keeps."
           }
         }
       },

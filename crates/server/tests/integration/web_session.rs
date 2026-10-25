@@ -271,3 +271,91 @@ async fn an_unknown_or_expired_cookie_is_refused_on_a_stream() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// A rate-limited sign-in says when the budget refills, and waiting that long
+/// admits the next attempt.
+#[tokio::test]
+async fn a_rate_limited_login_says_when_to_retry() {
+    let fixture = Fixture::with_config(|config| {
+        config.settings.insert(
+            "auth.login_rate_limit_per_minute".to_owned(),
+            toml::Value::Integer(10),
+        );
+    })
+    .await;
+    let attempt = |password: &'static str| {
+        let base = fixture.base_url();
+        let client = fixture.client.clone();
+        async move {
+            client
+                .post(format!("{base}/api/v1/auth/login"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(serde_json::json!({ "username": USERNAME, "password": password }).to_string())
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    for _ in 0..10 {
+        let wrong = attempt("not-the-password").await;
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    }
+    let limited = attempt(ACCOUNT_PASSWORD).await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    let wait = limited.headers()[reqwest::header::RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    // Ten per minute refill one cell every six seconds, so the reported wait is
+    // the real one rather than a fixed minute.
+    assert!((1..=60).contains(&wait), "Retry-After is {wait}");
+    let body: Value = serde_json::from_str(&limited.text().await.unwrap()).unwrap();
+    assert_eq!(body["code"], "rate-limited");
+
+    tokio::time::sleep(Duration::from_secs(wait)).await;
+    assert_eq!(attempt(ACCOUNT_PASSWORD).await.status(), StatusCode::OK);
+
+    fixture.stop().await;
+}
+
+/// A stranger's wrong passwords for one account do not lock its owner out from
+/// another address: the limiter counts the pair of address and username.
+#[tokio::test]
+async fn a_stranger_cannot_lock_an_account_out_from_another_address() {
+    let fixture = Fixture::new().await;
+    let limiter = fixture.services.authenticator().limiter();
+    let attacker: std::net::IpAddr = "10.0.0.7".parse().unwrap();
+    let owner: std::net::IpAddr = "10.0.0.8".parse().unwrap();
+
+    for _ in 0..10 {
+        limiter.record_failure(attacker, USERNAME);
+    }
+    assert!(
+        limiter.check(attacker, USERNAME).is_err(),
+        "the attacking address is refused"
+    );
+    assert!(
+        limiter.check(owner, USERNAME).is_ok(),
+        "the owner signs in from anywhere else"
+    );
+
+    // And the same through the route.
+    assert!(sign_in_ok(&fixture).await);
+
+    fixture.stop().await;
+}
+
+/// Signs in with the fixture account and reports whether it worked.
+async fn sign_in_ok(fixture: &Fixture) -> bool {
+    fixture
+        .client
+        .post(format!("{}/api/v1/auth/login", fixture.base_url()))
+        .header(CONTENT_TYPE, "application/json")
+        .body(serde_json::json!({ "username": USERNAME, "password": ACCOUNT_PASSWORD }).to_string())
+        .send()
+        .await
+        .unwrap()
+        .status()
+        == StatusCode::OK
+}

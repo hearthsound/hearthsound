@@ -300,7 +300,7 @@ async fn a_key_created_by_the_cli_authenticates_against_a_server() {
     let sandbox = Sandbox::new("");
     succeeded(&sandbox.run_with_stdin(
         &["admin", "create-user", "--admin", "--password-stdin"],
-        "hunter2\n",
+        "hunter22\n",
     ));
     let created = succeeded(&sandbox.run(&[
         "admin",
@@ -337,7 +337,7 @@ async fn an_app_password_created_by_the_cli_authenticates_a_rest_call() {
     let sandbox = Sandbox::new("");
     succeeded(&sandbox.run_with_stdin(
         &["admin", "create-user", "--admin", "--password-stdin"],
-        "hunter2\n",
+        "hunter22\n",
     ));
     let created = succeeded(&sandbox.run(&[
         "admin",
@@ -399,7 +399,7 @@ async fn add_folder_associates_the_folder_with_its_owner() {
     let sandbox = Sandbox::new("");
     let created = succeeded(&sandbox.run_with_stdin(
         &["admin", "create-user", "--admin", "--password-stdin"],
-        "hunter2\n",
+        "hunter22\n",
     ));
     let music = sandbox.library_dir("music");
     std::fs::create_dir_all(&music).unwrap();
@@ -1602,7 +1602,7 @@ async fn create_user_stores_permissions_and_a_quota() {
             "1073741824",
             "--password-stdin",
         ],
-        "hunter2\n",
+        "hunter22\n",
     ));
     assert!(
         created.contains("created standard account `listener`"),
@@ -1657,7 +1657,7 @@ async fn create_user_stores_permissions_and_a_quota() {
             "",
             "--password-stdin",
         ],
-        "hunter2\n",
+        "hunter22\n",
     ));
     let listed = succeeded(&sandbox.run(&["admin", "list-users"]));
     assert!(
@@ -1680,7 +1680,7 @@ async fn create_user_stores_permissions_and_a_quota() {
             "acquire,fly",
             "--password-stdin",
         ],
-        "hunter2\n",
+        "hunter22\n",
     );
     assert_eq!(refused.status.code(), Some(1));
     assert!(
@@ -1704,6 +1704,19 @@ async fn create_user_stores_permissions_and_a_quota() {
 #[tokio::test(flavor = "multi_thread")]
 async fn update_user_changes_an_account() {
     let sandbox = Sandbox::new("");
+    // A second administrator, because the server refuses to disable or demote
+    // its last one and this test disables the account it edits.
+    succeeded(&sandbox.run_with_stdin(
+        &[
+            "admin",
+            "create-user",
+            "--username",
+            "root",
+            "--admin",
+            "--password-stdin",
+        ],
+        "root-2222\n",
+    ));
     succeeded(&sandbox.run_with_stdin(
         &[
             "admin",
@@ -1714,7 +1727,7 @@ async fn update_user_changes_an_account() {
             "--acquisitions-per-day",
             "2",
         ],
-        "hunter2\n",
+        "hunter22\n",
     ));
 
     let updated = succeeded(&sandbox.run_with_stdin(
@@ -1763,7 +1776,7 @@ async fn update_user_changes_an_account() {
         "the new password is stored"
     );
     assert!(
-        !hearthsound_auth::verify_password("hunter2", user.password_hash())
+        !hearthsound_auth::verify_password("hunter22", user.password_hash())
             .await
             .unwrap(),
         "the old password is gone"
@@ -1797,6 +1810,17 @@ async fn update_user_changes_an_account() {
     );
 
     // Disabling keeps the account and its data and is reported by the listing.
+    // The demotion comes first: this account is the only administrator in the
+    // sandbox, and the layer refuses to take the last flag away.
+    let demoted = succeeded(&sandbox.run(&[
+        "admin",
+        "update-user",
+        "--user",
+        "listener",
+        "--admin",
+        "false",
+    ]));
+    assert!(demoted.contains("admin=no"), "{demoted}");
     let disabled =
         succeeded(&sandbox.run(&["admin", "update-user", "--user", "listener", "--disable"]));
     assert!(disabled.contains("state=disabled"), "{disabled}");
@@ -1850,4 +1874,181 @@ fn list_users_is_empty_on_a_fresh_installation() {
         "0 account(s)",
         "{listed}"
     );
+}
+
+/// `create-user` refuses a password shorter than eight characters before it
+/// writes anything.
+#[test]
+fn create_user_refuses_a_short_password() {
+    let sandbox = Sandbox::new("");
+    let output = sandbox.run_with_stdin(
+        &["admin", "create-user", "--admin", "--password-stdin"],
+        "short22\n",
+    );
+
+    assert!(!output.status.success(), "a short password must be refused");
+    assert!(
+        stderr(&output).contains("at least 8 characters long"),
+        "stderr names the rule: {}",
+        stderr(&output)
+    );
+    // Nothing was created: `list-users` reports none.
+    assert!(succeeded(&sandbox.run(&["admin", "list-users"])).contains("0 account(s)"));
+}
+
+/// `create-user` accepts eight characters, and `update-user` refuses to shorten
+/// the password afterwards.
+#[test]
+fn create_user_accepts_eight_characters() {
+    let sandbox = Sandbox::new("");
+    let created = succeeded(&sandbox.run_with_stdin(
+        &["admin", "create-user", "--admin", "--password-stdin"],
+        "admin-22\n",
+    ));
+    assert!(
+        created.contains("created administrator account"),
+        "{created}"
+    );
+
+    let refused = sandbox.run_with_stdin(
+        &[
+            "admin",
+            "update-user",
+            "--user",
+            "admin",
+            "--password-stdin",
+        ],
+        "short22\n",
+    );
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("at least 8 characters long"),
+        "{}",
+        stderr(&refused)
+    );
+}
+
+/// The CLI refuses to disable or demote the only administrator, and leaves the
+/// account enabled.
+#[test]
+fn update_user_refuses_to_disable_or_demote_the_last_admin() {
+    let sandbox = Sandbox::new("");
+    succeeded(&sandbox.run_with_stdin(
+        &["admin", "create-user", "--admin", "--password-stdin"],
+        "admin-22\n",
+    ));
+
+    let refused = sandbox.run(&["admin", "update-user", "--user", "admin", "--disable"]);
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("last active administrator"),
+        "{}",
+        stderr(&refused)
+    );
+    let listing = succeeded(&sandbox.run(&["admin", "list-users"]));
+    assert!(
+        !listing.contains("disabled"),
+        "the account stays enabled: {listing}"
+    );
+
+    let refused = sandbox.run(&[
+        "admin",
+        "update-user",
+        "--user",
+        "admin",
+        "--admin",
+        "false",
+    ]);
+    assert!(!refused.status.success());
+    assert!(
+        stderr(&refused).contains("last active administrator"),
+        "{}",
+        stderr(&refused)
+    );
+    let listing = succeeded(&sandbox.run(&["admin", "list-users"]));
+    assert!(
+        listing.contains("admin=yes"),
+        "the flag is unchanged: {listing}"
+    );
+}
+
+/// A second administrator makes both actions possible.
+#[test]
+fn a_second_admin_allows_demotion() {
+    let sandbox = Sandbox::new("");
+    succeeded(&sandbox.run_with_stdin(
+        &["admin", "create-user", "--admin", "--password-stdin"],
+        "admin-22\n",
+    ));
+    succeeded(&sandbox.run_with_stdin(
+        &[
+            "admin",
+            "create-user",
+            "--username",
+            "ada",
+            "--password-stdin",
+        ],
+        "ada-2222\n",
+    ));
+
+    let demoted = sandbox.run(&["admin", "update-user", "--user", "ada", "--admin", "false"]);
+    succeeded(&demoted);
+    let listing = succeeded(&sandbox.run(&["admin", "list-users"]));
+    assert!(
+        listing.contains("username=ada admin=no"),
+        "ada is a standard account now: {listing}"
+    );
+    assert!(listing.contains("username=admin admin=yes"), "{listing}");
+}
+
+/// `update-user --password-stdin` revokes the account's keys and sessions.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_user_revokes_the_accounts_credentials() {
+    let sandbox = Sandbox::new("");
+    succeeded(&sandbox.run_with_stdin(
+        &["admin", "create-user", "--admin", "--password-stdin"],
+        "admin-22\n",
+    ));
+    let created = succeeded(&sandbox.run(&[
+        "admin",
+        "create-api-key",
+        "--user",
+        "admin",
+        "--name",
+        "phone",
+    ]));
+    let key = created
+        .lines()
+        .find(|line| line.starts_with("hs_"))
+        .unwrap_or_else(|| panic!("no API key in: {created}"))
+        .to_owned();
+
+    let (server, port) = serve_in_process(&sandbox).await;
+    let before = http_get(port, &format!("/rest/ping?apiKey={key}&f=json")).unwrap();
+    assert!(before.contains("\"status\":\"ok\""), "{before}");
+
+    let changed = sandbox.run_with_stdin(
+        &[
+            "admin",
+            "update-user",
+            "--user",
+            "admin",
+            "--password-stdin",
+        ],
+        "changed-22\n",
+    );
+    let changed = succeeded(&changed);
+    assert!(
+        changed.contains("revoked 0 session(s), 1 API key(s)"),
+        "{changed}"
+    );
+
+    let after = http_get(port, &format!("/rest/ping?apiKey={key}&f=json")).unwrap();
+    assert!(
+        !after.contains("\"status\":\"ok\""),
+        "the revoked key still authenticates: {after}"
+    );
+    assert!(after.contains("\"code\":44") || after.contains("\"status\":\"failed\""));
+
+    server.shutdown().await;
 }

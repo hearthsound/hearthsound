@@ -44,13 +44,16 @@ mod subsonic;
 mod user;
 mod user_settings;
 
-pub use api_key::{API_KEY_PREFIX, ApiKey, ApiKeyOwner, ApiKeys, GeneratedApiKey};
+pub use api_key::{
+    API_KEY_PREFIX, ApiKey, ApiKeyOwner, ApiKeys, GeneratedApiKey, MAX_CREDENTIAL_NAME_LENGTH,
+    validate_credential_name,
+};
 pub use app_password::{
     APP_PASSWORD_ALPHABET, APP_PASSWORD_LENGTH, AppPassword, AppPasswordSecret, AppPasswords,
     GeneratedAppPassword,
 };
 pub use error::AuthError;
-pub use password::{hash_password, verify_password};
+pub use password::{TIMING_DUMMY_HASH, hash_password, verify_password};
 pub use proxy::{InvalidProxy, TrustedProxies};
 pub use quotas::{Quotas, UserQuota};
 pub use rate_limit::{LoginKey, LoginRateLimiter, RateLimited};
@@ -63,8 +66,8 @@ pub use subsonic::{
     Principal, ResolveError, SubsonicCredentials,
 };
 pub use user::{
-    NewUser, Permission, UnknownPermission, User, UserPermissions, UserUpdate, Users,
-    validate_username,
+    NewUser, PASSWORD_MIN_LENGTH, Permission, RevokedCredentials, UnknownPermission, User,
+    UserPermissions, UserUpdate, Users, validate_password, validate_username,
 };
 pub use user_settings::{UserSettingEntry, UserSettings};
 

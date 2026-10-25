@@ -24,7 +24,7 @@ async fn complete_setup(fixture: &Fixture, token: &str, username: &str) -> reqwe
                 "token": token,
                 "username": username,
                 "displayName": "Echo",
-                "password": "hunter2",
+                "password": "hunter22",
             })
             .to_string(),
         )
@@ -174,5 +174,84 @@ async fn the_setup_refuses_a_username_that_breaks_the_rule() {
 
     let accepted = complete_setup(&fixture, &token, "echo").await;
     assert_eq!(accepted.status(), StatusCode::CREATED);
+    fixture.stop().await;
+}
+
+/// A password shorter than eight characters is refused without spending the
+/// link, and the retry with a valid one creates the administrator.
+#[tokio::test]
+async fn the_setup_refuses_a_short_password_without_spending_the_link() {
+    let fixture = Fixture::without_account().await;
+    let token = fixture.services.setup().token().await.unwrap();
+
+    let refused = fixture
+        .client
+        .post(format!("{}/api/v1/setup", fixture.base_url()))
+        .header(CONTENT_TYPE, "application/json")
+        .body(json!({ "token": token, "username": "echo", "password": "short22" }).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let refused = body(refused).await;
+    assert_eq!(refused["code"], "invalid-request");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .unwrap()
+            .contains("at least 8 characters long"),
+        "{refused}"
+    );
+    assert!(
+        fixture.services.setup().token().await.is_some(),
+        "a refused password must not spend the link"
+    );
+
+    let accepted = complete_setup(&fixture, &token, "echo").await;
+    assert_eq!(accepted.status(), StatusCode::CREATED);
+    fixture.stop().await;
+}
+
+// A route-level test of "a failed insert restores the link" needs an insert
+// that fails while the database stays usable, and every injection available to
+// an integration test - a read-only data directory, a read-only database file -
+// leaves SQLite writing through its already-open handle, so the insert
+// succeeds and the test would prove nothing. The contract is proven instead by
+// the `SetupGate::restore` unit tests (`crates/auth/src/setup.rs`), which cover
+// the restore, the wrong token, the gate that never had a token and the second
+// restore; the handler's `restore` call is the four lines between them.
+
+/// Setup failures count against the caller's address only, so a wrong token
+/// from one machine cannot block the operator's link from another.
+#[tokio::test]
+async fn a_wrong_token_only_spends_the_callers_address_budget() {
+    let fixture = Fixture::without_account_with_config(|config| {
+        config.settings.insert(
+            "auth.login_rate_limit_per_minute".to_owned(),
+            toml::Value::Integer(2),
+        );
+    })
+    .await;
+    let token = fixture.services.setup().token().await.unwrap();
+
+    for _ in 0..2 {
+        let refused = complete_setup(&fixture, "not-the-token", "echo").await;
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert!(
+        fixture.services.setup().token().await.is_some(),
+        "a wrong token never spends the link"
+    );
+
+    // The same address has spent its budget, so even the right token is
+    // refused now; the address is what binds, not a shared "setup" key.
+    let limited = complete_setup(&fixture, &token, "echo").await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    let limited = body(limited).await;
+    assert_eq!(limited["code"], "rate-limited");
+    assert!(
+        fixture.services.setup().token().await.is_some(),
+        "a refusal does not spend the link"
+    );
     fixture.stop().await;
 }

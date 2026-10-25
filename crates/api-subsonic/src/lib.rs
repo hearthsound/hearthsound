@@ -92,7 +92,8 @@
 //! | `download` | the stored file of one track, as an attachment |
 //! | `getUser` | one account's name, roles, and music folders |
 //! | `getUsers` | every account, for an administrator |
-//! | `createUser`, `updateUser`, `deleteUser`, `changePassword` | error 50: accounts are managed over the native API or the command line |
+//! | `createUser`, `updateUser`, `deleteUser` | error 50: accounts are managed over the native API or the command line |
+//! | `changePassword` | error 50 pointing at the client-credentials documentation (`POST /api/v1/me/password` for the caller's own, `/api/v1/admin/users` for somebody else's) |
 //! | `getScanStatus` | what the library scanner is doing |
 //! | `startScan` | enqueues a scan of every library folder |
 //! | `reportPlayback` | applies one OpenSubsonic playback report |

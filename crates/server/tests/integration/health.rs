@@ -82,7 +82,7 @@ async fn rest_accepts_a_key_created_after_startup() {
     let user = Users::new(fixture.services.database())
         .create(
             &fixture.services.settings().current(),
-            &NewUser::new("later", "Later", "hunter2", false),
+            &NewUser::new("later", "Later", "hunter22", false),
         )
         .await
         .unwrap();

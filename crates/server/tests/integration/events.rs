@@ -568,3 +568,442 @@ async fn a_scan_that_refused_to_prune_ends_with_a_done_event_carrying_the_reason
     drop(response);
     fixture.stop().await;
 }
+
+/// Reads the stream until it ends, or returns `false` when it is still open
+/// after the wait.
+async fn ends_within(response: &mut reqwest::Response, wait: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        match tokio::time::timeout(left, response.chunk()).await {
+            Ok(Ok(Some(_))) => continue,
+            Ok(Ok(None) | Err(_)) => return true,
+            Err(_elapsed) => return false,
+        }
+    }
+}
+
+/// Issues a ticket with a credential other than the fixture's own.
+async fn ticket_with(
+    fixture: &Fixture,
+    method: Method,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> reqwest::Response {
+    let mut request = fixture
+        .client
+        .request(method, format!("{}{path}", fixture.base_url()))
+        .header(CONTENT_TYPE, "application/json");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    request.send().await.unwrap()
+}
+
+/// A ninth outstanding ticket is refused with a rate limit that says when the
+/// oldest one expires, and redeeming one frees a slot.
+#[tokio::test]
+async fn a_client_cannot_hold_more_than_eight_tickets() {
+    let fixture = Fixture::new().await;
+
+    let mut issued = Vec::new();
+    for _ in 0..8 {
+        let response = bearer(&fixture, Method::POST, "/api/v1/events/ticket", None).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        issued.push(
+            read_json(response).await["ticket"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    let limited = bearer(&fixture, Method::POST, "/api/v1/events/ticket", None).await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry = limited.headers()[reqwest::header::RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!((1..=60).contains(&retry), "Retry-After is {retry}");
+    assert_eq!(read_json(limited).await["code"], "rate-limited");
+
+    // Redeeming one frees the slot, so a reconnecting client is not stuck.
+    let stream = fixture
+        .client
+        .get(format!("{}?ticket={}", stream_url(&fixture), issued[0]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream.status(), StatusCode::OK);
+    let again = bearer(&fixture, Method::POST, "/api/v1/events/ticket", None).await;
+    assert_eq!(again.status(), StatusCode::CREATED);
+
+    drop(stream);
+    fixture.stop().await;
+}
+
+/// A ticket issued moments before its key is revoked cannot open a stream, and
+/// stays spent.
+#[tokio::test]
+async fn a_ticket_for_a_revoked_key_cannot_open_a_stream() {
+    let fixture = Fixture::new().await;
+    let created = bearer(
+        &fixture,
+        Method::POST,
+        "/api/v1/me/api-keys",
+        Some(json!({ "name": "streamer" })),
+    )
+    .await;
+    let created = read_json(created).await;
+    let second = created["secret"].as_str().unwrap().to_owned();
+    let second_id = created["id"].as_str().unwrap().to_owned();
+
+    let issued = ticket_with(
+        &fixture,
+        Method::POST,
+        "/api/v1/events/ticket",
+        &[("authorization", &format!("Bearer {second}"))],
+    )
+    .await;
+    assert_eq!(issued.status(), StatusCode::CREATED);
+    let ticket = read_json(issued).await["ticket"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let revoked = bearer(
+        &fixture,
+        Method::DELETE,
+        &format!("/api/v1/me/api-keys/{second_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+
+    let refused = fixture
+        .client
+        .get(format!("{}?ticket={ticket}", stream_url(&fixture)))
+        .send()
+        .await
+        .unwrap();
+    assert_problem(refused, StatusCode::UNAUTHORIZED, "unauthenticated").await;
+    let spent = fixture
+        .client
+        .get(format!("{}?ticket={ticket}", stream_url(&fixture)))
+        .send()
+        .await
+        .unwrap();
+    assert_problem(spent, StatusCode::UNAUTHORIZED, "unauthenticated").await;
+
+    fixture.stop().await;
+}
+
+/// A ticket issued before a logout cannot open a stream afterwards.
+#[tokio::test]
+async fn a_ticket_for_a_logged_out_session_cannot_open_a_stream() {
+    let fixture = Fixture::new().await;
+    let signed_in = fixture
+        .client
+        .post(format!("{}/api/v1/auth/login", fixture.base_url()))
+        .header(CONTENT_TYPE, "application/json")
+        .body(json!({ "username": USERNAME, "password": ACCOUNT_PASSWORD }).to_string())
+        .send()
+        .await
+        .unwrap();
+    let cookie = signed_in.headers()[SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let csrf = read_json(signed_in).await["csrfToken"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let issued = ticket_with(
+        &fixture,
+        Method::POST,
+        "/api/v1/events/ticket",
+        &[("cookie", &cookie), ("x-hearthsound-csrf", &csrf)],
+    )
+    .await;
+    assert_eq!(issued.status(), StatusCode::CREATED);
+    let ticket = read_json(issued).await["ticket"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let out = ticket_with(
+        &fixture,
+        Method::POST,
+        "/api/v1/auth/logout",
+        &[("cookie", &cookie), ("x-hearthsound-csrf", &csrf)],
+    )
+    .await;
+    assert_eq!(out.status(), StatusCode::NO_CONTENT);
+
+    let refused = fixture
+        .client
+        .get(format!("{}?ticket={ticket}", stream_url(&fixture)))
+        .send()
+        .await
+        .unwrap();
+    assert_problem(refused, StatusCode::UNAUTHORIZED, "unauthenticated").await;
+
+    fixture.stop().await;
+}
+
+/// Revoking the key behind an open stream ends it within the re-check window.
+#[tokio::test]
+async fn a_revoked_api_key_ends_the_stream() {
+    let fixture = Fixture::new().await;
+    // A second key, which stays valid and revokes the first.
+    let created = bearer(
+        &fixture,
+        Method::POST,
+        "/api/v1/me/api-keys",
+        Some(json!({ "name": "revoker" })),
+    )
+    .await;
+    let second = read_json(created).await["secret"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let listed = bearer(&fixture, Method::GET, "/api/v1/me/api-keys", None).await;
+    let listing = read_json(listed).await;
+    let fixture_key_id = listing
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|key| {
+            key["prefix"]
+                .as_str()
+                .is_some_and(|prefix| fixture.api_key.starts_with(prefix))
+        })
+        .map(|key| key["id"].as_str().unwrap().to_owned());
+    let fixture_key_id = match fixture_key_id {
+        Some(id) => id,
+        None => {
+            // The prefix match depends on the listing order; the fixture key is
+            // the one the fixture named "test", so fall back to that.
+            listing
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|key| key["name"] == "test")
+                .map(|key| key["id"].as_str().unwrap().to_owned())
+                .unwrap()
+        }
+    };
+
+    let mut stream = fixture
+        .client
+        .get(stream_url(&fixture))
+        .header(AUTHORIZATION, bearer_value(&fixture))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream.status(), StatusCode::OK);
+
+    let revoked = ticket_with(
+        &fixture,
+        Method::DELETE,
+        &format!("/api/v1/me/api-keys/{fixture_key_id}"),
+        &[("authorization", &format!("Bearer {second}"))],
+    )
+    .await;
+    assert_eq!(revoked.status(), StatusCode::NO_CONTENT);
+
+    assert!(
+        ends_within(&mut stream, Duration::from_secs(8)).await,
+        "the stream must end once its key is revoked"
+    );
+    // And it cannot reconnect.
+    let refused = fixture
+        .client
+        .get(stream_url(&fixture))
+        .header(AUTHORIZATION, bearer_value(&fixture))
+        .send()
+        .await
+        .unwrap();
+    assert_problem(refused, StatusCode::UNAUTHORIZED, "unauthenticated").await;
+
+    drop(stream);
+    fixture.stop().await;
+}
+
+/// Signing out ends an open stream within the re-check window.
+#[tokio::test]
+async fn a_logged_out_session_ends_the_stream() {
+    let fixture = Fixture::new().await;
+    let signed_in = fixture
+        .client
+        .post(format!("{}/api/v1/auth/login", fixture.base_url()))
+        .header(CONTENT_TYPE, "application/json")
+        .body(json!({ "username": USERNAME, "password": ACCOUNT_PASSWORD }).to_string())
+        .send()
+        .await
+        .unwrap();
+    let cookie = signed_in.headers()[SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let csrf = read_json(signed_in).await["csrfToken"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let mut stream = fixture
+        .client
+        .get(stream_url(&fixture))
+        .header(COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream.status(), StatusCode::OK);
+
+    let out = ticket_with(
+        &fixture,
+        Method::POST,
+        "/api/v1/auth/logout",
+        &[("cookie", &cookie), ("x-hearthsound-csrf", &csrf)],
+    )
+    .await;
+    assert_eq!(out.status(), StatusCode::NO_CONTENT);
+
+    assert!(
+        ends_within(&mut stream, Duration::from_secs(8)).await,
+        "the stream must end once its session is gone"
+    );
+
+    drop(stream);
+    fixture.stop().await;
+}
+
+/// Reads the stream for a while and reports whether a frame arrived.
+async fn no_frame_within(response: &mut reqwest::Response, wait: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + wait;
+    let mut buffer = String::new();
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        match tokio::time::timeout(left, response.chunk()).await {
+            Ok(Ok(Some(chunk))) => {
+                buffer.push_str(std::str::from_utf8(&chunk).unwrap());
+                while let Some(end) = buffer.find("\n\n") {
+                    let block: String = buffer.drain(..end + 2).collect();
+                    if parse_frame(&block).is_some() {
+                        return false;
+                    }
+                }
+            }
+            Ok(Ok(None) | Err(_)) => return true,
+            Err(_elapsed) => return true,
+        }
+    }
+}
+
+/// A demoted administrator stops seeing administrator events within the
+/// re-check window, while a fresh administrator stream still receives them.
+#[tokio::test]
+async fn a_demoted_administrator_loses_administrator_events() {
+    use hearthsound_auth::NewUser;
+
+    let fixture = Fixture::new().await;
+    // A second administrator, created through the auth layer so its key is
+    // known, and demoted through the API afterwards.
+    let second = hearthsound_auth::Users::new(fixture.services.database())
+        .create(
+            &fixture.services.settings().current(),
+            &NewUser::new("ada", "Ada", "correct horse", true),
+        )
+        .await
+        .unwrap();
+    let key = hearthsound_auth::ApiKeys::new(fixture.services.database())
+        .generate(second.id, "streamer")
+        .await
+        .unwrap()
+        .plaintext;
+
+    let mut stream = fixture
+        .client
+        .get(stream_url(&fixture))
+        .header(AUTHORIZATION, format!("Bearer {key}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream.status(), StatusCode::OK);
+
+    // The PATCH needs the account's client id; the listing has it.
+    let listing = bearer(&fixture, Method::GET, "/api/v1/admin/users", None).await;
+    let listing = read_json(listing).await;
+    let target = listing["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|user| user["username"] == "ada")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let demoted = bearer(
+        &fixture,
+        Method::PATCH,
+        &format!("/api/v1/admin/users/{target}"),
+        Some(json!({ "isAdmin": false })),
+    )
+    .await;
+    assert_eq!(demoted.status(), StatusCode::OK);
+
+    // Give the running stream time to re-check, then publish an event only
+    // administrators see.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    fixture.services.events().publish_for(
+        Audience::Admins,
+        ServerEvent::UploadUpdated(UploadUpdated {
+            upload_id: "up_admins_only".to_owned(),
+            state: "receiving".to_owned(),
+            bytes_received: 0,
+            total_bytes: 0,
+        }),
+    );
+
+    assert!(
+        no_frame_within(&mut stream, Duration::from_secs(3)).await,
+        "a demoted administrator must not receive administrator events"
+    );
+
+    // A fresh administrator stream does receive it.
+    let mut admin = fixture
+        .client
+        .get(stream_url(&fixture))
+        .header(AUTHORIZATION, bearer_value(&fixture))
+        .send()
+        .await
+        .unwrap();
+    fixture.services.events().publish_for(
+        Audience::Admins,
+        ServerEvent::UploadUpdated(UploadUpdated {
+            upload_id: "up_admins_again".to_owned(),
+            state: "receiving".to_owned(),
+            bytes_received: 0,
+            total_bytes: 0,
+        }),
+    );
+    let frames = next_frames(&mut admin, 1).await;
+    assert_eq!(frames[0].data["data"]["uploadId"], "up_admins_again");
+
+    drop(stream);
+    drop(admin);
+    fixture.stop().await;
+}

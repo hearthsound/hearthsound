@@ -140,6 +140,7 @@ fn api_router() -> OpenApiRouter<NativeState> {
             routes::me::create_app_password
         ))
         .routes(routes!(routes::me::revoke_app_password))
+        .routes(routes!(routes::me::change_password))
         .routes(routes!(
             routes::me::get_settings,
             routes::me::patch_settings

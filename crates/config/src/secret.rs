@@ -490,6 +490,47 @@ fn warn_if_permissive(path: &Path) {
     let _ = path;
 }
 
+/// Warns when the key file sits in the data directory and no environment key is
+/// configured.
+///
+/// Stored secrets - app passwords and plugin credentials - are sealed with this
+/// key. A copy of the database alone therefore reveals nothing usable, but a
+/// copy of the whole data directory - which is what a volume snapshot or a
+/// `cp -r` takes - carries the ciphertext and the key together, so the sealing
+/// protects nothing against that. The default installation puts the key there,
+/// which is a deliberate trade for "a default install works", so the risk is
+/// stated once at startup and the way out (`HEARTHSOUND_SECRET_KEY`, or
+/// `secrets.key_file` pointing elsewhere) is documented rather than enforced.
+///
+/// # Parameters
+///
+/// - `key_file`: the resolved key file path.
+/// - `data`: the resolved data directory.
+/// - `env`: the environment to read, keyed by full variable name.
+///
+/// # Returns
+///
+/// `true` when the warning was emitted, which is what a test asserts; the
+/// message never carries the key material, only the two paths.
+pub fn warn_if_key_file_is_in_data(
+    key_file: &Path,
+    data: &Path,
+    env: &BTreeMap<String, String>,
+) -> bool {
+    let from_environment = env
+        .get(SECRET_KEY_ENV)
+        .is_some_and(|text| !text.trim().is_empty());
+    if from_environment || !key_file.starts_with(data) {
+        return false;
+    }
+    tracing::warn!(
+        key_file = %key_file.display(),
+        data = %data.display(),
+        "the secret key file is inside the data directory, so a copy of that directory also copies the key; set HEARTHSOUND_SECRET_KEY or point secrets.key_file elsewhere to keep them apart"
+    );
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,5 +724,62 @@ mod tests {
 
         let error = SecretKey::load(&path, &BTreeMap::new()).unwrap_err();
         assert!(matches!(error, SecretError::Io { .. }));
+    }
+
+    #[test]
+    fn a_key_file_in_the_data_directory_is_warned_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let key_file = data.join("secret.key");
+
+        assert!(
+            warn_if_key_file_is_in_data(&key_file, &data, &BTreeMap::new()),
+            "the default layout is the case the warning is for"
+        );
+    }
+
+    #[test]
+    fn an_environment_key_is_not_warned_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let key_file = data.join("secret.key");
+
+        assert!(
+            !warn_if_key_file_is_in_data(
+                &key_file,
+                &data,
+                &env_of(&[(
+                    SECRET_KEY_ENV,
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+                )])
+            ),
+            "the key does not come from that directory when the environment sets one"
+        );
+        // An empty variable is not a key, so the file is still the source.
+        assert!(warn_if_key_file_is_in_data(
+            &key_file,
+            &data,
+            &env_of(&[(SECRET_KEY_ENV, "  ")])
+        ));
+    }
+
+    #[test]
+    fn a_key_file_outside_the_data_directory_is_not_warned_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let key_file = dir
+            .path()
+            .join("run")
+            .join("secrets")
+            .join("hearthsound.key");
+
+        assert!(!warn_if_key_file_is_in_data(
+            &key_file,
+            &data,
+            &BTreeMap::new()
+        ));
     }
 }

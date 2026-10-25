@@ -30,7 +30,7 @@ use tokio::sync::broadcast::error::RecvError;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::auth::Authed;
-use crate::problem::Problem;
+use crate::problem::{self, Problem};
 use crate::state::NativeState;
 use crate::views::now_millis;
 
@@ -40,6 +40,14 @@ const REFETCH_NOTICE: &str = "event replay is no longer available; refetch state
 /// How often a keep-alive comment is sent on an idle stream, so proxies keep
 /// the connection open.
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
+
+/// How often an open stream re-checks the credential that opened it.
+///
+/// The trade-off is a bounded staleness of a few seconds against one small
+/// indexed read per connection per interval: a logout, a revocation, a disable
+/// or a role change ends the stream (or changes what it forwards) within this
+/// window instead of living as long as the connection does.
+const REAUTHORIZE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// A short-lived ticket that authorizes one event-stream connection.
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -65,7 +73,7 @@ pub struct StreamQuery {
 ///
 /// The ticket authorizes one connection to `GET /api/v1/events` for 60 seconds
 /// and is consumed by that connection, so a client that needs to reconnect
-/// requests a new one.
+/// requests a new one. An account holds at most 8 unredeemed tickets at once.
 ///
 /// # Parameters
 ///
@@ -78,26 +86,33 @@ pub struct StreamQuery {
 ///
 /// # Errors
 ///
-/// `401 unauthenticated` when the request carries no valid credential.
+/// `401 unauthenticated` when the request carries no valid credential, and
+/// `429 rate-limited` when the account already holds its maximum number of
+/// unredeemed tickets; `Retry-After` is how long the oldest of them still has to
+/// live.
 #[utoipa::path(
     post,
     path = "/api/v1/events/ticket",
     tag = "events",
     responses(
         (status = 201, description = "A single-use ticket for the event stream", body = StreamTicket),
-        (status = 401, description = "No valid credential", body = Problem, content_type = "application/problem+json")
+        (status = 401, description = "No valid credential", body = Problem, content_type = "application/problem+json"),
+        (status = 429, description = "The account holds too many outstanding tickets", body = Problem, content_type = "application/problem+json")
     ),
     security(("bearer" = []), ("session" = []))
 )]
 pub async fn create_ticket(
     State(state): State<NativeState>,
     authed: Authed,
-) -> (StatusCode, Json<StreamTicket>) {
-    let (ticket, expires_at) = state.tickets().issue(authed.principal);
-    (
+) -> Result<(StatusCode, Json<StreamTicket>), Problem> {
+    let (ticket, expires_at) = state
+        .tickets()
+        .issue(authed.principal)
+        .map_err(|limited| Problem::rate_limited(limited.retry_after))?;
+    Ok((
         StatusCode::CREATED,
         Json(StreamTicket { ticket, expires_at }),
-    )
+    ))
 }
 
 /// Streams server events to the caller as Server-Sent Events.
@@ -108,6 +123,11 @@ pub async fn create_ticket(
 /// present, events after that id are replayed before the live feed starts. The
 /// response carries a comment keep-alive every 15 seconds.
 ///
+/// The credential is checked when the stream connects (and, for a ticket, again
+/// when the ticket is redeemed) and at most every five seconds afterwards, so a
+/// logout, a revocation, a disable, a deletion or a role change ends the stream
+/// - or changes what it forwards - within that window.
+///
 /// # Parameters
 ///
 /// - `state`: the native state, which holds the event bus and the ticket store.
@@ -117,14 +137,15 @@ pub async fn create_ticket(
 ///
 /// # Returns
 ///
-/// A `text/event-stream` response that stays open until the server stops.
+/// A `text/event-stream` response that stays open until the credential stops
+/// being valid or the server stops.
 ///
 /// # Errors
 ///
 /// `400 invalid-request` when `Last-Event-ID` is not an unsigned integer
 /// (checked before a ticket is redeemed, so a malformed request does not spend
 /// the ticket). `401 unauthenticated` when the credential or ticket is missing,
-/// unknown, expired, or already used.
+/// unknown, expired, already used, or no longer valid.
 #[utoipa::path(
     get,
     path = "/api/v1/events",
@@ -147,13 +168,39 @@ pub async fn stream(
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Problem> {
     let last_event_id = last_event_id(&parts)?;
     let principal = match query.ticket {
-        Some(ticket) => state.tickets().redeem(&ticket).ok_or_else(|| {
-            Problem::unauthenticated("the stream ticket is unknown, expired or already used")
-        })?,
+        Some(ticket) => {
+            let principal = state.tickets().redeem(&ticket).ok_or_else(|| {
+                Problem::unauthenticated("the stream ticket is unknown, expired or already used")
+            })?;
+            // The ticket carries a snapshot of the caller, so the credential
+            // behind it is checked again here: a logout or a revocation inside
+            // the ticket's lifetime must not open a stream. The ticket is spent
+            // either way.
+            match crate::auth::reauthorize(&state, &principal).await {
+                Ok(Some(principal)) => principal,
+                Ok(None) => {
+                    return Err(Problem::unauthenticated(
+                        "the ticket belongs to a credential that is no longer valid",
+                    ));
+                }
+                Err(error) => return Err(problem::internal("checking a stream ticket", &error)),
+            }
+        }
         None => {
-            Authed::from_request_parts(&mut parts, &state)
+            let principal = Authed::from_request_parts(&mut parts, &state)
                 .await?
-                .principal
+                .principal;
+            match crate::auth::reauthorize(&state, &principal).await {
+                Ok(Some(principal)) => principal,
+                Ok(None) => {
+                    return Err(Problem::unauthenticated(
+                        "the credential that opened this stream is no longer valid",
+                    ));
+                }
+                Err(error) => {
+                    return Err(problem::internal("checking a stream credential", &error));
+                }
+            }
         }
     };
     let bus = Arc::clone(&state.services().events);
@@ -165,6 +212,8 @@ pub async fn stream(
         receiver,
         principal,
         replayed_through,
+        state,
+        checked_at: tokio::time::Instant::now(),
     };
     let frames =
         stream::iter(opening.into_iter().map(Ok)).chain(stream::unfold(live, next_live_frame));
@@ -247,17 +296,51 @@ struct Live {
     /// The subscription to the event bus.
     receiver: tokio::sync::broadcast::Receiver<EventEnvelope>,
     /// The caller the frames are filtered for.
+    ///
+    /// This is refreshed from the account every [`REAUTHORIZE_INTERVAL`], so a
+    /// role change applies to what the stream forwards.
     principal: Principal,
     /// The highest id already sent by the replay; live envelopes at or below
     /// it are skipped.
     replayed_through: u64,
+    /// The native state, which the credential re-check reads.
+    state: NativeState,
+    /// When the credential was last checked.
+    checked_at: tokio::time::Instant,
 }
 
-/// Produces the next live frame, or `None` once the bus has shut down.
+impl Live {
+    /// Re-reads the credential that opened the stream.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the account and the credential still authenticate, `false`
+    /// when the stream has to end. A failed read fails closed: a stream whose
+    /// credential cannot be checked any more is not kept open.
+    async fn revalidate(&mut self) -> bool {
+        match crate::auth::reauthorize(&self.state, &self.principal).await {
+            Ok(Some(principal)) => {
+                self.principal = principal;
+                self.checked_at = tokio::time::Instant::now();
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                tracing::debug!(%error, "re-checking a stream credential failed; ending the stream");
+                false
+            }
+        }
+    }
+}
+
+/// Produces the next live frame, or `None` once the stream has to end.
 ///
 /// Envelopes the caller may not see, and envelopes the replay already sent,
 /// are skipped. A subscriber that fell behind the bus gets one `events-lost`
-/// notice and then continues with whatever the bus still holds.
+/// notice and then continues with whatever the bus still holds. Every
+/// [`REAUTHORIZE_INTERVAL`] - on a frame or on an idle wait - the credential is
+/// checked again, so a logout, a revocation, a disable, a deletion or a role
+/// change closes an open stream within that window.
 ///
 /// # Parameters
 ///
@@ -268,8 +351,11 @@ struct Live {
 /// The next frame and the updated state, or `None` when the stream ends.
 async fn next_live_frame(mut live: Live) -> Option<(Result<Event, Infallible>, Live)> {
     loop {
-        match live.receiver.recv().await {
-            Ok(envelope) => {
+        match tokio::time::timeout(REAUTHORIZE_INTERVAL, live.receiver.recv()).await {
+            Ok(Ok(envelope)) => {
+                if live.checked_at.elapsed() >= REAUTHORIZE_INTERVAL && !live.revalidate().await {
+                    return None;
+                }
                 if envelope.id <= live.replayed_through || !visible(&envelope, &live.principal) {
                     continue;
                 }
@@ -277,8 +363,20 @@ async fn next_live_frame(mut live: Live) -> Option<(Result<Event, Infallible>, L
                     return Some((Ok(frame), live));
                 }
             }
-            Err(RecvError::Lagged(_)) => return Some((Ok(events_lost_frame()), live)),
-            Err(RecvError::Closed) => return None,
+            Ok(Err(RecvError::Lagged(_))) => {
+                if !live.revalidate().await {
+                    return None;
+                }
+                return Some((Ok(events_lost_frame()), live));
+            }
+            Ok(Err(RecvError::Closed)) => return None,
+            // Nothing arrived for one interval: check the credential and go on
+            // waiting, so an idle stream closes too.
+            Err(_elapsed) => {
+                if !live.revalidate().await {
+                    return None;
+                }
+            }
         }
     }
 }

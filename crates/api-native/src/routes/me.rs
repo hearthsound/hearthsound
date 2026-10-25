@@ -9,11 +9,12 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use hearthsound_auth::{AuthError, validate_password, verify_password};
 use hearthsound_core::IdPrefix;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::auth::Authed;
+use crate::auth::{Authed, ClientAddress};
 use crate::extract::JsonBody;
 use crate::problem::{self, Problem};
 use crate::state::NativeState;
@@ -81,13 +82,20 @@ pub struct CreatedAppPassword {
     pub secret: String,
 }
 
-/// Checks the name of a new credential.
-fn checked_name(name: &str) -> Result<&str, Problem> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(Problem::invalid_request("A credential needs a name."));
+/// Maps a credential write failure to its problem.
+///
+/// The name rules are the crate's, so every surface - this route, the CLI and any
+/// later caller - refuses the same names with the same sentence.
+fn credential_problem(context: &str, error: hearthsound_auth::AuthError) -> Problem {
+    match error {
+        hearthsound_auth::AuthError::EmptyField { .. } => {
+            Problem::invalid_request("A credential name must not be empty.")
+        }
+        hearthsound_auth::AuthError::InvalidCredentialName { rule } => {
+            Problem::invalid_request(format!("The credential name is not allowed: {rule}."))
+        }
+        error => problem::internal(context, &error),
     }
-    Ok(name)
 }
 
 /// Lists the caller's active API keys.
@@ -142,7 +150,8 @@ pub async fn list_api_keys(
     request_body = NewCredential,
     responses(
         (status = 201, description = "The new key, with its secret", body = CreatedApiKey),
-        (status = 400, description = "No name", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "The name is empty or longer than 64 characters", body = Problem, content_type = "application/problem+json"),
+        (status = 401, description = "No valid credential", body = Problem, content_type = "application/problem+json"),
     ),
     security(("bearer" = []), ("session" = []))
 )]
@@ -151,12 +160,13 @@ pub async fn create_api_key(
     State(state): State<NativeState>,
     JsonBody(request): JsonBody<NewCredential>,
 ) -> Result<(StatusCode, Json<CreatedApiKey>), Problem> {
-    let name = checked_name(&request.name)?;
+    let name = hearthsound_auth::validate_credential_name(&request.name)
+        .map_err(|error| credential_problem("validating an API key name", error))?;
     let generated = state
         .api_keys()
         .generate(authed.user_id(), name)
         .await
-        .map_err(|error| problem::internal("creating an API key", &error))?;
+        .map_err(|error| credential_problem("creating an API key", error))?;
     tracing::info!(user = %authed.user_id(), "created an API key");
     Ok((
         StatusCode::CREATED,
@@ -267,7 +277,8 @@ pub async fn list_app_passwords(
     request_body = NewCredential,
     responses(
         (status = 201, description = "The new app password, with its secret", body = CreatedAppPassword),
-        (status = 400, description = "No name", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "The name is empty or longer than 64 characters", body = Problem, content_type = "application/problem+json"),
+        (status = 401, description = "No valid credential", body = Problem, content_type = "application/problem+json"),
     ),
     security(("bearer" = []), ("session" = []))
 )]
@@ -276,12 +287,13 @@ pub async fn create_app_password(
     State(state): State<NativeState>,
     JsonBody(request): JsonBody<NewCredential>,
 ) -> Result<(StatusCode, Json<CreatedAppPassword>), Problem> {
-    let name = checked_name(&request.name)?;
+    let name = hearthsound_auth::validate_credential_name(&request.name)
+        .map_err(|error| credential_problem("validating an app password name", error))?;
     let generated = state
         .app_passwords()
         .generate(authed.user_id(), name)
         .await
-        .map_err(|error| problem::internal("creating an app password", &error))?;
+        .map_err(|error| credential_problem("creating an app password", error))?;
     tracing::info!(user = %authed.user_id(), "created an app password");
     Ok((
         StatusCode::CREATED,
@@ -338,6 +350,104 @@ pub async fn revoke_app_password(
         .await
         .map_err(|error| problem::internal("revoking an app password", &error))?;
     tracing::info!(user = %authed.user_id(), "revoked an app password");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The caller's password change.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordChange {
+    /// The account's current password.
+    pub current_password: String,
+    /// The password to store; the rules are the ones every password write keeps.
+    pub new_password: String,
+}
+
+/// Changes the caller's own password.
+///
+/// The current password has to be presented, so a stolen session cannot lock the
+/// owner out. A successful change ends every *other* session of the account and
+/// revokes every API key and app password of it; the session that made the change
+/// - present only for a cookie-authenticated call - keeps working. A change made
+/// with an API key keeps no session, so the key itself is revoked too: an
+/// API-key client has to create a new key afterwards.
+///
+/// The attempt is rate limited against the caller's address only. Charging the
+/// username as well would let a stolen session spend the owner's sign-in budget
+/// and keep them out of the login form.
+///
+/// # Errors
+///
+/// Answers `invalid-request` when the new password breaks the length rule,
+/// `rate-limited` when the address has spent its failure budget (with
+/// `Retry-After`), `unauthenticated` when the caller has no credential or the
+/// account is gone or disabled, `wrong-password` when the current password does
+/// not match, and `internal` when the write fails.
+#[utoipa::path(
+    post,
+    path = "/api/v1/me/password",
+    tag = "me",
+    request_body = PasswordChange,
+    responses(
+        (status = 204, description = "The password changed; every other credential of the account is revoked"),
+        (status = 400, description = "The new password is shorter than 8 characters", body = Problem, content_type = "application/problem+json"),
+        (status = 401, description = "No valid credential", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "The current password does not match", body = Problem, content_type = "application/problem+json"),
+        (status = 429, description = "Too many attempts from this address", body = Problem, content_type = "application/problem+json"),
+    ),
+    security(("bearer" = []), ("session" = []))
+)]
+pub async fn change_password(
+    authed: Authed,
+    ClientAddress(ip): ClientAddress,
+    State(state): State<NativeState>,
+    JsonBody(request): JsonBody<PasswordChange>,
+) -> Result<StatusCode, Problem> {
+    if let Err(error) = validate_password(&request.new_password) {
+        return Err(match error {
+            AuthError::InvalidPassword { rule } => {
+                Problem::invalid_request(format!("The password is not allowed: {rule}."))
+            }
+            error => problem::internal("validating a password", &error),
+        });
+    }
+    let limiter = state.authenticator().limiter();
+    if let Err(limited) = limiter.check_address(ip) {
+        return Err(Problem::rate_limited(limited.retry_after));
+    }
+    let user_id = authed.user_id();
+    let user = match state.users().find_by_id(user_id).await {
+        Ok(Some(user)) if !user.is_disabled() => user,
+        Ok(_) => {
+            return Err(Problem::unauthenticated(
+                "The account this credential belongs to is no longer usable.",
+            ));
+        }
+        Err(error) => return Err(problem::internal("reading an account", &error)),
+    };
+    let matches = verify_password(&request.current_password, user.password_hash())
+        .await
+        .map_err(|error| problem::internal("verifying a password", &error))?;
+    if !matches {
+        limiter.record_address_failure(ip);
+        return Err(Problem::wrong_password());
+    }
+    let revoked = state
+        .users()
+        .set_password(
+            user_id,
+            &request.new_password,
+            authed.session.as_ref().map(|session| session.id),
+        )
+        .await
+        .map_err(|error| problem::internal("changing a password", &error))?;
+    tracing::info!(
+        user = %user_id,
+        sessions = revoked.sessions,
+        api_keys = revoked.api_keys,
+        app_passwords = revoked.app_passwords,
+        "changed a password and revoked credentials"
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 

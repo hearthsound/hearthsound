@@ -32,6 +32,13 @@ const SERVER_FOLDER_ID: i64 = 2;
 /// neither `createUser` nor its three siblings is answered here.
 pub const USERS_HELP_URL: &str = "https://hearthsound.app/docs/admin/users";
 
+/// Where a client that asked to change a password is sent.
+///
+/// The client-credentials page covers both halves of that request: the caller's
+/// own password over `POST /api/v1/me/password`, and somebody else's through
+/// `/api/v1/admin/users`.
+pub const PASSWORDS_HELP_URL: &str = "https://hearthsound.app/docs/clients/app-passwords";
+
 /// Answers `getUser`: one account's name, roles, and music folders.
 ///
 /// # Parameters
@@ -129,6 +136,27 @@ pub async fn get_users(call: Call) -> Encoded {
 pub async fn unsupported_management(params: Params) -> Encoded {
     params.encode(Response::failed(
         SubsonicError::not_authorized().with_help_url(USERS_HELP_URL),
+    ))
+}
+
+/// Answers `changePassword`.
+///
+/// The caller's own password changes over the native API, where the current
+/// password is required and every other credential of the account is revoked in
+/// the same transaction; somebody else's is an administrator action. The answer
+/// is the base protocol's "not authorised" error with the documentation link
+/// that covers both.
+///
+/// # Parameters
+///
+/// - `params`: the request's parameters, which are not read.
+///
+/// # Returns
+///
+/// A failed envelope carrying Subsonic error 50 and [`PASSWORDS_HELP_URL`].
+pub async fn unsupported_change_password(params: Params) -> Encoded {
+    params.encode(Response::failed(
+        SubsonicError::not_authorized().with_help_url(PASSWORDS_HELP_URL),
     ))
 }
 

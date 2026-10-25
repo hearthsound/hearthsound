@@ -117,7 +117,11 @@ pub fn routes() -> Router<SubsonicState> {
     let router = register(router, "createUser", endpoints::unsupported_management);
     let router = register(router, "updateUser", endpoints::unsupported_management);
     let router = register(router, "deleteUser", endpoints::unsupported_management);
-    let router = register(router, "changePassword", endpoints::unsupported_management);
+    let router = register(
+        router,
+        "changePassword",
+        endpoints::unsupported_change_password,
+    );
     let router = register(router, "download", endpoints::download);
     let router = register(router, "getScanStatus", endpoints::get_scan_status);
     let router = register(router, "startScan", endpoints::start_scan);

@@ -358,7 +358,7 @@ mod tests {
             hearthsound_config::SettingsStore::resolve(&registry, &SettingSources::default())
                 .unwrap();
         let user = Users::new(&database)
-            .create(&snapshot, &NewUser::new("echo", "Echo", "hunter2", false))
+            .create(&snapshot, &NewUser::new("echo", "Echo", "hunter22", false))
             .await
             .unwrap();
         let settings = UserSettings::new(&database, registry);
@@ -474,7 +474,10 @@ mod tests {
             hearthsound_config::SettingsStore::resolve(&registry, &SettingSources::default())
                 .unwrap();
         let other = Users::new(&db)
-            .create(&snapshot, &NewUser::new("other", "Other", "hunter2", false))
+            .create(
+                &snapshot,
+                &NewUser::new("other", "Other", "hunter22", false),
+            )
             .await
             .unwrap();
 

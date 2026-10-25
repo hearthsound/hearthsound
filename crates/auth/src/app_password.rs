@@ -195,7 +195,9 @@ impl AppPasswords {
     ///
     /// - `user_id`: the account the app password belongs to. The column is a
     ///   foreign key, so an unknown user is a database error.
-    /// - `name`: the name the user gives it, for example a client name.
+    /// - `name`: the name the user gives it, for example a client name;
+    ///   trimmed, and refused when empty or longer than
+    ///   [`crate::MAX_CREDENTIAL_NAME_LENGTH`] characters.
     ///
     /// # Returns
     ///
@@ -204,8 +206,10 @@ impl AppPasswords {
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::Secret`] when the secret box refuses to seal the
-    /// value and [`AuthError::Database`] when the insert fails.
+    /// Returns [`AuthError::EmptyField`] for an empty name,
+    /// [`AuthError::InvalidCredentialName`] for one that is too long,
+    /// [`AuthError::Secret`] when the secret box refuses to seal the value, and
+    /// [`AuthError::Database`] when the insert fails.
     ///
     /// # Examples
     ///
@@ -221,6 +225,7 @@ impl AppPasswords {
         user_id: Uuid,
         name: &str,
     ) -> Result<GeneratedAppPassword, AuthError> {
+        let name = crate::api_key::validate_credential_name(name)?;
         let plaintext = random_secret();
         let (ciphertext, nonce) = self.secret_box.seal(plaintext.as_bytes())?;
 
@@ -297,6 +302,38 @@ impl AppPasswords {
         rows.into_iter()
             .map(AppPasswordRow::into_app_password)
             .collect()
+    }
+
+    /// Reports whether an app password is still active.
+    ///
+    /// This is the cheap liveness read a long-lived connection makes: it looks
+    /// at the revocation stamp only, without opening the sealed secret, so a
+    /// revoked app password ends a stream within seconds.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the app password's row id.
+    /// - `user_id`: the account it must belong to.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the row exists, is not revoked, and belongs to `user_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::Database`] when the query fails.
+    pub async fn is_active(&self, id: Uuid, user_id: Uuid) -> Result<bool, AuthError> {
+        let active = sqlx::query_scalar!(
+            "SELECT EXISTS(
+                 SELECT 1 FROM app_passwords
+                 WHERE id = ? AND user_id = ? AND revoked_at IS NULL
+             )",
+            id.as_bytes().as_slice(),
+            user_id.as_bytes().as_slice(),
+        )
+        .fetch_one(&self.readers)
+        .await?;
+        Ok(active != 0)
     }
 
     /// Opens every active app password of an account.
@@ -400,7 +437,7 @@ mod tests {
             SettingsStore::resolve(&SettingsRegistry::builtin(), &SettingSources::default())
                 .unwrap();
         let user = Users::new(&database)
-            .create(&snapshot, &NewUser::new("echo", "Echo", "hunter2", false))
+            .create(&snapshot, &NewUser::new("echo", "Echo", "hunter22", false))
             .await
             .unwrap();
         let app_passwords = AppPasswords::new(&database, SecretKey::generate().secret_box());
@@ -422,6 +459,22 @@ mod tests {
         let first = random_secret();
         let second = random_secret();
         assert_ne!(first, second);
+    }
+
+    #[tokio::test]
+    async fn an_app_password_stores_the_trimmed_name_and_refuses_a_long_one() {
+        let (_dir, _db, user_id, app_passwords) = database().await;
+
+        app_passwords.generate(user_id, "  Amperfy ").await.unwrap();
+        let stored = app_passwords.list_for_user(user_id).await.unwrap();
+        assert_eq!(stored[0].name, "Amperfy");
+
+        let error = app_passwords
+            .generate(user_id, &"a".repeat(crate::MAX_CREDENTIAL_NAME_LENGTH + 1))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AuthError::InvalidCredentialName { .. }));
+        assert_eq!(app_passwords.list_for_user(user_id).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

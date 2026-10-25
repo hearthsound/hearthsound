@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT is_admin, disabled_at FROM users WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "is_admin",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "is_admin"
+          }
+        }
+      },
+      {
+        "name": "disabled_at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "disabled_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "96e3e8f77ab9d979456c39247ca51f9b85098bc973601917554ac3201aaf910a"
+}

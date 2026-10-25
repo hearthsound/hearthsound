@@ -57,7 +57,7 @@ pub const PORTRAIT_BASE: &str = "http://images.example";
 pub const USERNAME: &str = "echo";
 
 /// The account password of the test account.
-pub const ACCOUNT_PASSWORD: &str = "hunter2";
+pub const ACCOUNT_PASSWORD: &str = "hunter22";
 
 /// The filters that make a seeded response stable across runs.
 ///

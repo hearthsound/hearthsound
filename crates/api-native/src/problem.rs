@@ -12,6 +12,7 @@
 //! | `csrf-failed` | 403 | a cookie-authenticated unsafe request without the matching `X-Hearthsound-CSRF` header |
 //! | `permission-denied` | 403 | the caller lacks the permission the action needs |
 //! | `quota-exceeded` | 403 | the caller's daily acquisition quota is spent |
+//! | `wrong-password` | 403 | the current password the caller typed does not match |
 //! | `sideload-disabled` | 403 | plugin sideloading is switched off |
 //! | `repositories-disabled` | 403 | third-party plugin repositories are switched off |
 //! | `not-found` | 404 | the resource does not exist |
@@ -34,6 +35,8 @@
 //! | `integrity-failed` | 502 | a plugin archive is not what the index declares |
 //! | `index-unavailable` | 502 | a plugin index or an archive could not be downloaded |
 
+use std::time::Duration;
+
 use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -45,9 +48,6 @@ pub const PROBLEM_JSON: &str = "application/problem+json";
 
 /// The prefix of every problem `type`.
 const TYPE_PREFIX: &str = "https://hearthsound.app/problems/";
-
-/// How long a rate-limited client is told to wait, in seconds.
-const RATE_LIMIT_RETRY_SECS: u32 = 60;
 
 /// An RFC 9457 problem document.
 ///
@@ -74,6 +74,12 @@ pub struct Problem {
     /// What happened in this occurrence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// How long a rate-limited client should wait before retrying, in seconds.
+    ///
+    /// This is not part of the problem document: it becomes the `Retry-After`
+    /// header, and the body carries the code the client branches on.
+    #[serde(skip)]
+    pub retry_after: Option<u32>,
 }
 
 impl Problem {
@@ -97,6 +103,7 @@ impl Problem {
             status: status.as_u16(),
             code: code.to_owned(),
             detail: (!detail.is_empty()).then_some(detail),
+            retry_after: None,
         }
     }
 
@@ -148,6 +155,20 @@ impl Problem {
             "quota-exceeded",
             "Acquisition quota exceeded",
             detail,
+        )
+    }
+
+    /// The current password the caller typed does not match.
+    ///
+    /// This is a 403 rather than a 401 on purpose: the caller is authenticated,
+    /// and a 401 would make a client treat the answer as an expired session and
+    /// sign the user out of the page they are using.
+    pub fn wrong_password() -> Problem {
+        Problem::new(
+            StatusCode::FORBIDDEN,
+            "wrong-password",
+            "Wrong password",
+            "The current password is not correct.",
         )
     }
 
@@ -346,13 +367,26 @@ impl Problem {
     }
 
     /// Too many failed sign-ins.
-    pub fn rate_limited() -> Problem {
-        Problem::new(
+    ///
+    /// # Parameters
+    ///
+    /// - `retry_after`: how long the caller has to wait before the budget
+    ///   admits another attempt. It is sent in `Retry-After`, rounded up to at
+    ///   least one second, so the header reports the wait the caller actually
+    ///   has rather than a guess.
+    pub fn rate_limited(retry_after: Duration) -> Problem {
+        let mut problem = Problem::new(
             StatusCode::TOO_MANY_REQUESTS,
             "rate-limited",
             "Too many attempts",
             "Too many failed sign-ins; try again later.",
-        )
+        );
+        // Rounded up, and at least one second: a client that sleeps the
+        // reported time must be admitted, so a fractional wait rounds to the
+        // next whole second rather than being truncated.
+        let whole = retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
+        problem.retry_after = Some(u32::try_from(whole.max(1)).unwrap_or(u32::MAX));
+        problem
     }
 
     /// The server failed.
@@ -394,9 +428,10 @@ impl IntoResponse for Problem {
             .headers_mut()
             .insert(CONTENT_TYPE, HeaderValue::from_static(PROBLEM_JSON));
         if status == StatusCode::TOO_MANY_REQUESTS {
+            let seconds = self.retry_after.unwrap_or(1);
             response
                 .headers_mut()
-                .insert(RETRY_AFTER, HeaderValue::from(RATE_LIMIT_RETRY_SECS));
+                .insert(RETRY_AFTER, HeaderValue::from(seconds));
         }
         response
     }
@@ -434,10 +469,14 @@ mod tests {
     }
 
     #[test]
-    fn a_rate_limit_says_when_to_retry() {
-        let response = Problem::rate_limited().into_response();
+    fn a_rate_limit_says_when_the_budget_refills() {
+        let response = Problem::rate_limited(Duration::from_secs(7)).into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(response.headers()[RETRY_AFTER], "60");
+        assert_eq!(response.headers()[RETRY_AFTER], "7");
+
+        // A sub-second wait is reported as one second, never zero.
+        let response = Problem::rate_limited(Duration::from_millis(200)).into_response();
+        assert_eq!(response.headers()[RETRY_AFTER], "1");
     }
 
     #[test]

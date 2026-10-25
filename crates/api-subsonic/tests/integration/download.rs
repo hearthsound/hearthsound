@@ -39,7 +39,7 @@ async fn account(fixture: &Fixture, username: &str, permissions: &[&str]) -> Str
     let user = Users::new(&fixture.database)
         .create(
             &fixture.settings.current(),
-            &NewUser::new(username, username, "hunter2", false),
+            &NewUser::new(username, username, "hunter22", false),
         )
         .await
         .unwrap();

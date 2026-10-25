@@ -38,6 +38,43 @@ const PREFIX_LEN: usize = 8;
 /// The lowercase RFC 4648 base32 alphabet a key payload uses.
 const PAYLOAD_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz234567";
 
+/// The longest name an API key or an app password may carry.
+///
+/// The name is what a listing shows, so it is bounded: a name is typed by a
+/// person and echoed back in every listing, and nothing needs a longer one.
+pub const MAX_CREDENTIAL_NAME_LENGTH: usize = 64;
+
+/// Checks and trims the name of an API key or an app password.
+///
+/// Both credential kinds name themselves the same way, so the rule lives once,
+/// beside the key, and [`crate::AppPasswords`] imports it.
+///
+/// # Parameters
+///
+/// - `name`: the name the caller submitted, possibly padded with spaces.
+///
+/// # Returns
+///
+/// The trimmed name, which is what the caller stores.
+///
+/// # Errors
+///
+/// Returns [`AuthError::EmptyField`] when the name is empty or only spaces, and
+/// [`AuthError::InvalidCredentialName`] when it is longer than
+/// [`MAX_CREDENTIAL_NAME_LENGTH`] characters.
+pub fn validate_credential_name(name: &str) -> Result<&str, AuthError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(AuthError::EmptyField { field: "name" });
+    }
+    if trimmed.chars().count() > MAX_CREDENTIAL_NAME_LENGTH {
+        return Err(AuthError::InvalidCredentialName {
+            rule: "a credential name is at most 64 characters long",
+        });
+    }
+    Ok(trimmed)
+}
+
 /// A freshly generated API key.
 ///
 /// The plaintext is the only copy the server ever has; it is shown to the user
@@ -200,7 +237,9 @@ impl ApiKeys {
     ///
     /// - `user_id`: the account the key belongs to. The column is a foreign
     ///   key, so an unknown user is a database error.
-    /// - `name`: the name the user gives the key, for example a client name.
+    /// - `name`: the name the user gives the key, for example a client name;
+    ///   trimmed, and refused when empty or longer than
+    ///   [`MAX_CREDENTIAL_NAME_LENGTH`] characters.
     ///
     /// # Returns
     ///
@@ -209,7 +248,9 @@ impl ApiKeys {
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::Database`] when the insert fails.
+    /// Returns [`AuthError::EmptyField`] for an empty name,
+    /// [`AuthError::InvalidCredentialName`] for one that is too long, and
+    /// [`AuthError::Database`] when the insert fails.
     ///
     /// # Examples
     ///
@@ -221,6 +262,7 @@ impl ApiKeys {
     /// # }
     /// ```
     pub async fn generate(&self, user_id: Uuid, name: &str) -> Result<GeneratedApiKey, AuthError> {
+        let name = validate_credential_name(name)?;
         let mut bytes = [0u8; KEY_BYTES];
         rand::rng().fill(&mut bytes[..]);
 
@@ -305,6 +347,37 @@ impl ApiKeys {
         .fetch_all(&self.readers)
         .await?;
         rows.into_iter().map(ApiKeyRow::into_api_key).collect()
+    }
+
+    /// Reports whether a key still authenticates its account.
+    ///
+    /// This is the cheap liveness read a long-lived connection makes: it reads
+    /// the one row, without the account join [`ApiKeys::resolve`] does, so a
+    /// revoked key ends a stream within seconds.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the key's row id.
+    /// - `user_id`: the account the key must belong to.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the key exists, is not revoked, and belongs to `user_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::Database`] when the query fails.
+    pub async fn is_active(&self, id: Uuid, user_id: Uuid) -> Result<bool, AuthError> {
+        let active = sqlx::query_scalar!(
+            "SELECT EXISTS(
+                 SELECT 1 FROM api_keys WHERE id = ? AND user_id = ? AND revoked_at IS NULL
+             )",
+            id.as_bytes().as_slice(),
+            user_id.as_bytes().as_slice(),
+        )
+        .fetch_one(&self.readers)
+        .await?;
+        Ok(active != 0)
     }
 
     /// Resolves a presented key to its owner.
@@ -413,7 +486,7 @@ mod tests {
             SettingsStore::resolve(&SettingsRegistry::builtin(), &SettingSources::default())
                 .unwrap();
         let user = Users::new(&database)
-            .create(&snapshot, &NewUser::new("echo", "Echo", "hunter2", false))
+            .create(&snapshot, &NewUser::new("echo", "Echo", "hunter22", false))
             .await
             .unwrap();
         (dir, database, user.id)
@@ -438,6 +511,44 @@ mod tests {
         assert_eq!(stored[0].key_prefix, generated.key_prefix);
         assert!(!stored[0].is_revoked());
         assert!(stored[0].last_used_at.is_none());
+    }
+
+    #[test]
+    fn a_credential_name_is_trimmed_and_capped() {
+        assert_eq!(validate_credential_name("  my phone ").unwrap(), "my phone");
+        assert_eq!(
+            validate_credential_name(&"a".repeat(MAX_CREDENTIAL_NAME_LENGTH)).unwrap(),
+            "a".repeat(MAX_CREDENTIAL_NAME_LENGTH)
+        );
+        assert!(matches!(
+            validate_credential_name(&"a".repeat(MAX_CREDENTIAL_NAME_LENGTH + 1)).unwrap_err(),
+            AuthError::InvalidCredentialName { rule } if rule.contains("64")
+        ));
+        assert!(matches!(
+            validate_credential_name("   ").unwrap_err(),
+            AuthError::EmptyField { field: "name" }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_key_stores_the_trimmed_name_and_refuses_a_long_one() {
+        let (_dir, db, user_id) = database().await;
+        let keys = ApiKeys::new(&db);
+
+        keys.generate(user_id, "  Symfonium  ").await.unwrap();
+        let stored = keys.list_for_user(user_id).await.unwrap();
+        assert_eq!(stored[0].name, "Symfonium");
+
+        let error = keys
+            .generate(user_id, &"a".repeat(MAX_CREDENTIAL_NAME_LENGTH + 1))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AuthError::InvalidCredentialName { .. }));
+        assert_eq!(
+            keys.list_for_user(user_id).await.unwrap().len(),
+            1,
+            "the refused key was not stored"
+        );
     }
 
     #[tokio::test]

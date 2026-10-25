@@ -127,11 +127,20 @@ fn write_problem(context: &str, error: AuthError) -> Problem {
         AuthError::EmptyField { field } => {
             Problem::invalid_request(format!("`{field}` must not be empty."))
         }
+        AuthError::InvalidPassword { rule } => {
+            Problem::invalid_request(format!("The password is not allowed: {rule}."))
+        }
+        AuthError::InvalidCredentialName { rule } => {
+            Problem::invalid_request(format!("The credential name is not allowed: {rule}."))
+        }
         AuthError::InvalidUsername { username, rule } => {
             Problem::invalid_request(format!("The username `{username}` is not allowed: {rule}."))
         }
         AuthError::UsernameTaken { username } => {
             Problem::conflict(format!("The username `{username}` is taken."))
+        }
+        AuthError::LastAdministrator => {
+            Problem::conflict("The last active administrator cannot be disabled or demoted.")
         }
         AuthError::UnknownUser { .. } => Problem::not_found("No such account."),
         AuthError::QuotaOutOfRange { .. } => {
@@ -340,11 +349,16 @@ pub async fn get_user(
 
 /// Changes an account.
 ///
+/// A new password revokes the account's credentials: every session except the
+/// caller's own when an administrator changes their own password, plus every
+/// API key and app password of the account.
+///
 /// # Errors
 ///
 /// Answers `not-found` for an unknown account, `invalid-request` for an empty
-/// password, and `conflict` when administrators would remove their own
-/// administrator flag or disable themselves.
+/// password or one shorter than 8 characters, and `conflict` when the change
+/// would leave no active administrator, or when administrators would remove
+/// their own administrator flag or disable themselves.
 #[utoipa::path(
     patch,
     path = "/api/v1/admin/users/{id}",
@@ -353,8 +367,9 @@ pub async fn get_user(
     request_body = UserPatch,
     responses(
         (status = 200, description = "The account after the change", body = AdminUser),
+        (status = 400, description = "The password is empty or shorter than 8 characters", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such account", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The change would lock the caller out", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The change would leave no active administrator", body = Problem, content_type = "application/problem+json"),
     ),
     security(("bearer" = []), ("session" = []))
 )]
@@ -378,12 +393,6 @@ pub async fn patch_user(
             ));
         }
     }
-    if let Some(password) = &patch.password
-        && password.is_empty()
-    {
-        return Err(Problem::invalid_request("`password` must not be empty."));
-    }
-
     let mut update = UserUpdate::default();
     if let Some(name) = &patch.display_name {
         update = update.with_display_name(name.clone());
@@ -400,10 +409,27 @@ pub async fn patch_user(
         .await
         .map_err(|error| write_problem("changing an account", error))?;
     if let Some(password) = &patch.password {
-        users
-            .set_password(id, password)
+        // An administrator changing their own password through this route is a
+        // self-change in every meaningful sense, so the session that asked for
+        // it is kept and the page they are using keeps working. Resetting
+        // somebody else's password keeps nothing.
+        let keep = if id == admin.user_id() {
+            admin.session.as_ref().map(|session| session.id)
+        } else {
+            None
+        };
+        let revoked = users
+            .set_password(id, password, keep)
             .await
             .map_err(|error| write_problem("changing a password", error))?;
+        tracing::info!(
+            admin = %admin.user_id(),
+            user = %id,
+            sessions = revoked.sessions,
+            api_keys = revoked.api_keys,
+            app_passwords = revoked.app_passwords,
+            "changed a password and revoked credentials"
+        );
     }
     if let Some(quota) = patch.quota {
         state

@@ -32,7 +32,7 @@ async fn account(fixture: &Fixture, username: &str, is_admin: bool) -> String {
     let user = Users::new(&fixture.database)
         .create(
             &fixture.settings.current(),
-            &NewUser::new(username, username, "hunter2", is_admin),
+            &NewUser::new(username, username, "hunter22", is_admin),
         )
         .await
         .unwrap();
@@ -259,14 +259,15 @@ async fn listing_the_accounts_is_for_administrators() {
     );
 }
 
-/// The four account writes point a client at how accounts are managed.
+/// The account writes point a client at how accounts are managed, and
+/// `changePassword` at the page that covers both password paths.
 #[tokio::test]
 async fn account_writes_point_at_the_documentation() {
     let fixture = fixture().await;
     let admin = account(&fixture, "root", true).await;
     let app = fixture.app();
 
-    for endpoint in ["createUser", "updateUser", "deleteUser", "changePassword"] {
+    for endpoint in ["createUser", "updateUser", "deleteUser"] {
         let refused = get(
             &app,
             &format!("/rest/{endpoint}?username=echo&apiKey={admin}&f=json"),
@@ -290,4 +291,21 @@ async fn account_writes_point_at_the_documentation() {
             xml.body
         );
     }
+
+    // `changePassword` is the one write whose documentation is the
+    // client-credentials page, because the caller's own password changes over
+    // `POST /api/v1/me/password` and somebody else's through the admin API.
+    let refused = get(
+        &app,
+        &format!("/rest/changePassword?username=echo&apiKey={admin}&f=json"),
+    )
+    .await;
+    assert_error(&refused, 50);
+    assert!(
+        refused
+            .body
+            .contains("\"helpUrl\":\"https://hearthsound.app/docs/clients/app-passwords\""),
+        "changePassword points at the password documentation: {}",
+        refused.body
+    );
 }

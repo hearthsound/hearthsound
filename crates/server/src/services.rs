@@ -249,6 +249,15 @@ impl Services {
         let snapshot = settings.current();
 
         let secret_key = SecretKey::load(&config.secrets.key_file, env)?;
+        // The default layout keeps the key beside the database, so a copy of
+        // the data directory carries both. The risk is documented once, here,
+        // rather than enforced: every existing default install would otherwise
+        // stop booting.
+        hearthsound_config::secret::warn_if_key_file_is_in_data(
+            &config.secrets.key_file,
+            &config.paths.data,
+            env,
+        );
         let secrets = secret_key.secret_box();
         let events = Arc::new(EventBus::new());
         let sessions = Sessions::new(&database);

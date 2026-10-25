@@ -21,8 +21,8 @@ use axum::http::header::{AUTHORIZATION, COOKIE};
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, Method};
 use hearthsound_auth::{
-    AuthenticationError, CSRF_HEADER, Credential, Principal, ResolveError, SESSION_COOKIE,
-    TrustedProxies, session_token,
+    AuthError, AuthenticationError, CSRF_HEADER, Credential, Principal, ResolveError,
+    SESSION_COOKIE, TrustedProxies, session_token,
 };
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
@@ -96,9 +96,9 @@ impl FromRequestParts<NativeState> for Authed {
                     principal,
                     session: None,
                 }),
-                Err(ResolveError::Rejected(AuthenticationError::TooManyAttempts)) => {
-                    Err(Problem::rate_limited())
-                }
+                Err(ResolveError::Rejected(AuthenticationError::TooManyAttempts {
+                    retry_after,
+                })) => Err(Problem::rate_limited(retry_after)),
                 Err(ResolveError::Rejected(_)) => {
                     Err(Problem::unauthenticated("The API key is not valid."))
                 }
@@ -171,6 +171,56 @@ impl FromRequestParts<NativeState> for AdminAuthed {
 /// Returns whether a method cannot change state, and so needs no CSRF token.
 fn is_safe(method: &Method) -> bool {
     matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+}
+
+/// Re-reads the account and the credential behind a principal.
+///
+/// A principal is a snapshot: it carries the role and permission flags the
+/// account had when the request resolved it. A long-lived connection - the
+/// event stream - has to look again, because a logout, a revocation, a disable,
+/// a deletion or a role change writes rows and leaves the snapshot saying what
+/// used to be true.
+///
+/// # Parameters
+///
+/// - `state`: the native state, which holds the accounts, sessions, keys and app
+///   passwords.
+/// - `principal`: the caller as the connection resolved it.
+///
+/// # Returns
+///
+/// The principal rebuilt from the current account, so a role or permission
+/// change applies at once, or `None` when the account or the credential that
+/// proved it no longer authenticates.
+///
+/// # Errors
+///
+/// Returns [`AuthError`] when a read fails; a caller that cannot tell whether
+/// the credential is still valid must fail closed.
+pub(crate) async fn reauthorize(
+    state: &NativeState,
+    principal: &Principal,
+) -> Result<Option<Principal>, AuthError> {
+    let user_id = principal.user_id.uuid();
+    let Some(user) = state.users().find_by_id(user_id).await? else {
+        return Ok(None);
+    };
+    if user.is_disabled() {
+        return Ok(None);
+    }
+    let credential = principal.credential;
+    let active = match credential {
+        Credential::Session { id } => state.sessions().is_active(id, user_id).await?,
+        Credential::ApiKey { id } => state.api_keys().is_active(id, user_id).await?,
+        Credential::AppPassword { id } => state.app_passwords().is_active(id, user_id).await?,
+        // A `/rest` password request proves the password on every call and
+        // never opens a stream, so there is no stored credential to re-check.
+        Credential::AccountPassword => true,
+    };
+    if !active {
+        return Ok(None);
+    }
+    Ok(Some(Principal::from_user(&user, credential)))
 }
 
 /// The address a request came from, as the login rate limit sees it.

@@ -88,7 +88,7 @@ async fn the_visibility_setting_hides_another_accounts_rows() {
         let user = hearthsound_auth::Users::new(&fixture.database)
             .create(
                 &fixture.settings.current(),
-                &hearthsound_auth::NewUser::new("other", "Other", "hunter2", false),
+                &hearthsound_auth::NewUser::new("other", "Other", "hunter22", false),
             )
             .await
             .unwrap();

@@ -322,8 +322,16 @@ async fn sign_ins_are_refused_when_they_should_be() {
         .unwrap();
     assert_problem(expired, StatusCode::UNAUTHORIZED, "unauthenticated").await;
 
-    // A disabled account cannot sign in.
+    // A disabled account cannot sign in. A second administrator exists so the
+    // last-admin guard does not refuse the disable.
     let users = hearthsound_auth::Users::new(fixture.services.database());
+    users
+        .create(
+            &fixture.services.settings().current(),
+            &hearthsound_auth::NewUser::new("ada", "Ada", "correct horse", true),
+        )
+        .await
+        .unwrap();
     users.disable(fixture.user_id).await.unwrap();
     let disabled = login(&fixture, common::USERNAME, common::ACCOUNT_PASSWORD).await;
     assert_problem(disabled, StatusCode::UNAUTHORIZED, "unauthenticated").await;
@@ -335,7 +343,15 @@ async fn sign_ins_are_refused_when_they_should_be() {
         login(&fixture, common::USERNAME, "still wrong").await;
     }
     let limited = login(&fixture, common::USERNAME, common::ACCOUNT_PASSWORD).await;
-    assert_eq!(limited.headers()[reqwest::header::RETRY_AFTER], "60");
+    let wait = limited.headers()[reqwest::header::RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!(
+        (1..=60).contains(&wait),
+        "Retry-After is the real wait, not a fixed minute: {wait}"
+    );
     assert_problem(limited, StatusCode::TOO_MANY_REQUESTS, "rate-limited").await;
     fixture.stop().await;
 }
@@ -565,7 +581,7 @@ async fn administrators_manage_accounts_permissions_and_quotas() {
         &fixture,
         reqwest::Method::POST,
         "/api/v1/admin/users",
-        Some(serde_json::json!({ "username": "LISTENER", "password": "x" })),
+        Some(serde_json::json!({ "username": "LISTENER", "password": "password-1" })),
     )
     .await;
     assert_problem(taken, StatusCode::CONFLICT, "conflict").await;
@@ -3938,4 +3954,489 @@ async fn the_folder_removal_impact_is_previewed_before_the_delete() {
     assert_problem(unknown, StatusCode::NOT_FOUND, "not-found").await;
 
     fixture.stop().await;
+}
+
+/// A POST/PATCH with a session cookie and its CSRF header.
+async fn session_call(
+    fixture: &Fixture,
+    method: reqwest::Method,
+    path: &str,
+    cookie: &str,
+    csrf: &str,
+    body: Option<Value>,
+) -> reqwest::Response {
+    let mut request = fixture
+        .client
+        .request(method, format!("{}{path}", fixture.base_url()))
+        .header(reqwest::header::COOKIE, cookie)
+        .header("x-hearthsound-csrf", csrf);
+    if let Some(body) = body {
+        request = request
+            .header(CONTENT_TYPE, "application/json")
+            .body(body.to_string());
+    }
+    request.send().await.unwrap()
+}
+
+/// A password shorter than eight characters is refused on every write path,
+/// and the refusal names the rule.
+#[tokio::test]
+async fn a_short_password_is_refused_on_create_and_reset() {
+    let fixture = Fixture::new().await;
+    let refused = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/users",
+        Some(serde_json::json!({
+            "username": "shorty",
+            "password": "short22",
+        })),
+    )
+    .await;
+    let body = assert_problem(refused, StatusCode::BAD_REQUEST, "invalid-request").await;
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("at least 8 characters long"),
+        "{body}"
+    );
+
+    // A valid password works, so the rule is the length and nothing else.
+    let created = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/users",
+        Some(serde_json::json!({
+            "username": "shorty",
+            "password": "short-22",
+        })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let user = json(created).await;
+    let id = user["id"].as_str().unwrap().to_owned();
+
+    // A reset to a short password is refused, and the old one still signs in.
+    let refused = bearer(
+        &fixture,
+        reqwest::Method::PATCH,
+        &format!("/api/v1/admin/users/{id}"),
+        Some(serde_json::json!({ "password": "short22" })),
+    )
+    .await;
+    let body = assert_problem(refused, StatusCode::BAD_REQUEST, "invalid-request").await;
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("at least 8 characters long"),
+        "{body}"
+    );
+    assert_eq!(
+        login(&fixture, "shorty", "short-22").await.status(),
+        StatusCode::OK
+    );
+}
+
+/// The caller changes their own password: the session that asked keeps working,
+/// every other session ends, and every API key and app password is revoked.
+#[tokio::test]
+async fn a_password_change_keeps_only_the_calling_credential() {
+    let fixture = Fixture::new().await;
+    let (cookie, csrf) = session_of(&fixture, common::USERNAME, common::ACCOUNT_PASSWORD).await;
+    // A second session of the same account, which the change must end.
+    let (other_cookie, _) = session_of(&fixture, common::USERNAME, common::ACCOUNT_PASSWORD).await;
+
+    let changed = session_call(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/me/password",
+        &cookie,
+        &csrf,
+        Some(serde_json::json!({
+            "currentPassword": common::ACCOUNT_PASSWORD,
+            "newPassword": "a-new-password",
+        })),
+    )
+    .await;
+    assert_eq!(changed.status(), StatusCode::NO_CONTENT);
+
+    // The calling session still answers.
+    let still = fixture
+        .client
+        .get(format!("{}/api/v1/auth/session", fixture.base_url()))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(still.status(), StatusCode::OK);
+    // The other session does not.
+    let gone = fixture
+        .client
+        .get(format!("{}/api/v1/auth/session", fixture.base_url()))
+        .header(reqwest::header::COOKIE, other_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gone.status(), StatusCode::UNAUTHORIZED);
+    // The key and the app password from before the change are revoked.
+    assert!(!rest_ping_ok(&fixture, &format!("apiKey={}", fixture.api_key)).await);
+    assert!(
+        !rest_ping_ok(
+            &fixture,
+            &format!("u={}&p={}", common::USERNAME, fixture.app_password)
+        )
+        .await
+    );
+    // The new password signs in, the old one does not.
+    assert_eq!(
+        login(&fixture, common::USERNAME, "a-new-password")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        login(&fixture, common::USERNAME, common::ACCOUNT_PASSWORD)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+/// The current password is required and a wrong one is a 403 with its own code,
+/// so a client does not treat the answer as an expired session.
+#[tokio::test]
+async fn a_password_change_needs_the_current_password() {
+    let fixture = Fixture::new().await;
+    let (cookie, csrf) = session_of(&fixture, common::USERNAME, common::ACCOUNT_PASSWORD).await;
+
+    let refused = session_call(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/me/password",
+        &cookie,
+        &csrf,
+        Some(serde_json::json!({
+            "currentPassword": "not-the-password",
+            "newPassword": "a-new-password",
+        })),
+    )
+    .await;
+    let body = assert_problem(refused, StatusCode::FORBIDDEN, "wrong-password").await;
+    assert_eq!(body["detail"], "The current password is not correct.");
+
+    // Nothing changed.
+    assert_eq!(
+        login(&fixture, common::USERNAME, common::ACCOUNT_PASSWORD)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+/// A short new password is refused before anything is revoked.
+#[tokio::test]
+async fn a_password_change_refuses_a_short_password() {
+    let fixture = Fixture::new().await;
+    let (cookie, csrf) = session_of(&fixture, common::USERNAME, common::ACCOUNT_PASSWORD).await;
+
+    let refused = session_call(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/me/password",
+        &cookie,
+        &csrf,
+        Some(serde_json::json!({
+            "currentPassword": common::ACCOUNT_PASSWORD,
+            "newPassword": "short22",
+        })),
+    )
+    .await;
+    let body = assert_problem(refused, StatusCode::BAD_REQUEST, "invalid-request").await;
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap()
+            .contains("at least 8 characters long"),
+        "{body}"
+    );
+    // No revocation happened: the fixture's key still authenticates.
+    assert!(rest_ping_ok(&fixture, &format!("apiKey={}", fixture.api_key)).await);
+}
+
+/// Without a credential the route is unauthenticated.
+#[tokio::test]
+async fn a_password_change_without_a_credential_is_unauthenticated() {
+    let fixture = Fixture::new().await;
+    let response = fixture
+        .client
+        .post(format!("{}/api/v1/me/password", fixture.base_url()))
+        .header(CONTENT_TYPE, "application/json")
+        .body(
+            serde_json::json!({
+                "currentPassword": "whatever",
+                "newPassword": "a-new-password",
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_problem(response, StatusCode::UNAUTHORIZED, "unauthenticated").await;
+}
+
+/// The attempt is charged to the address, and the 429 says when to retry.
+#[tokio::test]
+async fn a_password_change_is_rate_limited_per_address() {
+    let fixture = Fixture::with_config(|config| {
+        config.settings.insert(
+            "auth.login_rate_limit_per_minute".to_owned(),
+            toml::Value::Integer(2),
+        );
+    })
+    .await;
+    let (cookie, csrf) = session_of(&fixture, common::USERNAME, common::ACCOUNT_PASSWORD).await;
+
+    for _ in 0..2 {
+        let refused = session_call(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/me/password",
+            &cookie,
+            &csrf,
+            Some(serde_json::json!({
+                "currentPassword": "not-the-password",
+                "newPassword": "a-new-password",
+            })),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    }
+    let limited = session_call(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/me/password",
+        &cookie,
+        &csrf,
+        Some(serde_json::json!({
+            "currentPassword": common::ACCOUNT_PASSWORD,
+            "newPassword": "a-new-password",
+        })),
+    )
+    .await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry = limited.headers()[reqwest::header::RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!((1..=60).contains(&retry), "Retry-After is {retry}");
+    assert_problem(limited, StatusCode::TOO_MANY_REQUESTS, "rate-limited").await;
+}
+
+/// A change made with an API key revokes every credential of the account,
+/// including that key: an API-key client creates a new one afterwards.
+#[tokio::test]
+async fn a_password_change_by_a_bearer_key_revokes_every_credential() {
+    let fixture = Fixture::new().await;
+    let changed = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/me/password",
+        Some(serde_json::json!({
+            "currentPassword": common::ACCOUNT_PASSWORD,
+            "newPassword": "a-new-password",
+        })),
+    )
+    .await;
+    assert_eq!(changed.status(), StatusCode::NO_CONTENT);
+
+    assert!(!rest_ping_ok(&fixture, &format!("apiKey={}", fixture.api_key)).await);
+    assert!(
+        !rest_ping_ok(
+            &fixture,
+            &format!("u={}&p={}", common::USERNAME, fixture.app_password)
+        )
+        .await
+    );
+    // The new password signs in.
+    assert_eq!(
+        login(&fixture, common::USERNAME, "a-new-password")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+/// An administrator resetting another account's password ends that account's
+/// session, API key and app password, and the new password signs in.
+#[tokio::test]
+async fn a_password_reset_ends_the_accounts_credentials() {
+    let fixture = Fixture::new().await;
+    let created = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/users",
+        Some(serde_json::json!({
+            "username": "member",
+            "password": "member-22",
+        })),
+    )
+    .await;
+    let id = json(created).await["id"].as_str().unwrap().to_owned();
+    let (cookie, csrf) = session_of(&fixture, "member", "member-22").await;
+    // A key and an app password of that account, created by its own session.
+    let key = session_call(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/me/api-keys",
+        &cookie,
+        &csrf,
+        Some(serde_json::json!({ "name": "phone" })),
+    )
+    .await;
+    let key = json(key).await["secret"].as_str().unwrap().to_owned();
+    let app = session_call(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/me/app-passwords",
+        &cookie,
+        &csrf,
+        Some(serde_json::json!({ "name": "speaker" })),
+    )
+    .await;
+    let app = json(app).await["secret"].as_str().unwrap().to_owned();
+    assert!(rest_ping_ok(&fixture, &format!("apiKey={key}")).await);
+
+    let reset = bearer(
+        &fixture,
+        reqwest::Method::PATCH,
+        &format!("/api/v1/admin/users/{id}"),
+        Some(serde_json::json!({ "password": "reset-222" })),
+    )
+    .await;
+    assert_eq!(reset.status(), StatusCode::OK);
+
+    // The old session, the key and the app password all fail; the new password
+    // signs in.
+    let gone = fixture
+        .client
+        .get(format!("{}/api/v1/auth/session", fixture.base_url()))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gone.status(), StatusCode::UNAUTHORIZED);
+    assert!(!rest_ping_ok(&fixture, &format!("apiKey={key}")).await);
+    assert!(!rest_ping_ok(&fixture, &format!("u=member&p={app}")).await);
+    assert_eq!(
+        login(&fixture, "member", "reset-222").await.status(),
+        StatusCode::OK
+    );
+}
+
+/// An administrator changing their own password through the admin route is a
+/// self-change: the session they are using still answers.
+#[tokio::test]
+async fn a_password_reset_by_the_account_keeps_its_own_session() {
+    let fixture = Fixture::new().await;
+    let (cookie, csrf) = session_of(&fixture, common::USERNAME, common::ACCOUNT_PASSWORD).await;
+    let session = fixture
+        .client
+        .get(format!("{}/api/v1/auth/session", fixture.base_url()))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    let id = json(session).await["user"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let reset = session_call(
+        &fixture,
+        reqwest::Method::PATCH,
+        &format!("/api/v1/admin/users/{id}"),
+        &cookie,
+        &csrf,
+        Some(serde_json::json!({ "password": "self-change" })),
+    )
+    .await;
+    assert_eq!(reset.status(), StatusCode::OK);
+
+    let still = fixture
+        .client
+        .get(format!("{}/api/v1/auth/session", fixture.base_url()))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(still.status(), StatusCode::OK);
+}
+
+/// A credential name is trimmed and capped at 64 characters.
+#[tokio::test]
+async fn a_credential_name_is_capped() {
+    let fixture = Fixture::new().await;
+    let long = "a".repeat(65);
+    let refused = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/me/api-keys",
+        Some(serde_json::json!({ "name": long })),
+    )
+    .await;
+    let body = assert_problem(refused, StatusCode::BAD_REQUEST, "invalid-request").await;
+    assert!(body["detail"].as_str().unwrap().contains("64"), "{body}");
+
+    let created = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/me/api-keys",
+        Some(serde_json::json!({ "name": "  padded  " })),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    assert_eq!(json(created).await["name"], "padded");
+
+    let refused = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/me/app-passwords",
+        Some(serde_json::json!({ "name": "   " })),
+    )
+    .await;
+    assert_problem(refused, StatusCode::BAD_REQUEST, "invalid-request").await;
+}
+
+/// A wrong `/rest` apiKey is charged to the address and is answered with the
+/// rate limit once the budget is spent.
+#[tokio::test]
+async fn a_wrong_rest_api_key_is_rate_limited() {
+    let fixture = Fixture::with_config(|config| {
+        config.settings.insert(
+            "auth.login_rate_limit_per_minute".to_owned(),
+            toml::Value::Integer(2),
+        );
+    })
+    .await;
+
+    for _ in 0..2 {
+        let body = fixture
+            .get("/rest/ping?v=1.16.1&c=test&f=json&apiKey=hs_guess")
+            .await
+            .text()
+            .await
+            .unwrap();
+        assert!(body.contains("\"status\":\"failed\""), "{body}");
+        assert!(!body.contains("Too many login attempts"), "{body}");
+    }
+    let body = fixture
+        .get("/rest/ping?v=1.16.1&c=test&f=json&apiKey=hs_guess")
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(body.contains("Too many login attempts"), "{body}");
 }

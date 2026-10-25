@@ -11,6 +11,22 @@ use argon2::password_hash::{Error as PasswordHashError, PasswordHasher, Password
 
 use crate::error::AuthError;
 
+/// A hash of a throwaway password, verified against when there is no account.
+///
+/// A login for an unknown username, or for a disabled account, must cost the
+/// same as a login with a wrong password; otherwise the answer arrives tens of
+/// milliseconds sooner and tells a stranger which usernames exist. The session
+/// login and the `/rest` password login therefore verify the presented secret
+/// against this string when there is no stored hash to verify it against.
+///
+/// It was produced once with [`hash_password`] over
+/// `hearthsound-timing-dummy-never-used` - the same `Argon2::default()`
+/// parameters a stored password uses, so the cost matches - and that plaintext
+/// must never be anybody's password: it is a marker, not a secret, and nothing
+/// will ever match this hash because every verification compares against a
+/// password a client typed.
+pub const TIMING_DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$TnJthMENgUba5xkoFW20sg$XIk5Zo7F4Djs585CWBrdhWkFJgO29+5V1HcCKL2IkEw";
+
 /// Hashes a password with Argon2id.
 ///
 /// A fresh random salt is generated for every call, so hashing the same
@@ -117,5 +133,21 @@ mod tests {
     async fn rejects_a_malformed_stored_hash() {
         let error = verify_password("whatever", "not a phc string").await;
         assert!(matches!(error, Err(AuthError::Password(_))));
+    }
+
+    #[tokio::test]
+    async fn the_timing_dummy_hash_is_a_valid_phc_string() {
+        let string = TIMING_DUMMY_HASH;
+        // The parameters are the ones `hash_password` uses, so a verification
+        // against the dummy costs what a verification against a stored password
+        // costs.
+        assert!(
+            string.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"),
+            "{string} carries the default parameters"
+        );
+        // A password nobody uses does not match, and the answer is `false`, not
+        // an error: the call is a cost, not a check.
+        assert!(!verify_password("anything", string).await.unwrap());
+        assert!(!verify_password("", string).await.unwrap());
     }
 }

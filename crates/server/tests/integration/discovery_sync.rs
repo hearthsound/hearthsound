@@ -306,7 +306,7 @@ async fn the_schedule_syncs_every_linked_listener() {
     let unlinked = hearthsound_auth::Users::new(fixture.services.database())
         .create(
             &fixture.services.settings().current(),
-            &hearthsound_auth::NewUser::new("other", "Other", "hunter2", false),
+            &hearthsound_auth::NewUser::new("other", "Other", "hunter22", false),
         )
         .await
         .unwrap();

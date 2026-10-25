@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS(\n                 SELECT 1 FROM sessions WHERE id = ? AND user_id = ? AND expires_at > ?\n             )",
+  "describe": {
+    "columns": [
+      {
+        "name": "EXISTS(\n                 SELECT 1 FROM sessions WHERE id = ? AND user_id = ? AND expires_at > ?\n             )",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1f9a4886fedb07508eab486fbeed88356e95123803c988f4ea0eb154beb094db"
+}

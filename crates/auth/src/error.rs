@@ -45,6 +45,30 @@ pub enum AuthError {
         /// The rule the username broke, as a sentence.
         rule: &'static str,
     },
+    /// A password was submitted that the policy does not allow.
+    ///
+    /// The policy is a length rule only: a password is at least eight
+    /// characters long. Counting is by characters, not bytes, so a password
+    /// written with accented letters is not penalised.
+    #[error("the password is not allowed: {rule}")]
+    InvalidPassword {
+        /// The rule the password broke, as a sentence.
+        rule: &'static str,
+    },
+    /// An API key or app password name was submitted that the rules do not
+    /// allow.
+    #[error("a credential name is not allowed: {rule}")]
+    InvalidCredentialName {
+        /// The rule the name broke, as a sentence.
+        rule: &'static str,
+    },
+    /// A write would have left the server with no active administrator.
+    ///
+    /// The account still exists and is still enabled, or is still an
+    /// administrator: the whole write was refused before any field was
+    /// written.
+    #[error("the last active administrator cannot be disabled or demoted")]
+    LastAdministrator,
     /// A username was submitted that an account already uses.
     ///
     /// Usernames are compared case-insensitively, so `Echo` and `echo` name the

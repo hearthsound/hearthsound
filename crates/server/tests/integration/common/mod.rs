@@ -28,7 +28,7 @@ use uuid::Uuid;
 pub const USERNAME: &str = "echo";
 
 /// The account password of the test account.
-pub const ACCOUNT_PASSWORD: &str = "hunter2";
+pub const ACCOUNT_PASSWORD: &str = "hunter22";
 
 /// A server running over a temporary data directory.
 pub struct Fixture {
@@ -77,6 +77,19 @@ impl Fixture {
     /// account id.
     pub async fn without_account() -> Fixture {
         Fixture::build(|_| {}, false).await
+    }
+
+    /// Builds a server whose users table is empty over an adjusted bootstrap
+    /// configuration.
+    ///
+    /// This is what a test that drives the setup link with a non-default
+    /// setting uses.
+    ///
+    /// # Parameters
+    ///
+    /// - `adjust`: changes the configuration the default config file loads to.
+    pub async fn without_account_with_config(adjust: impl FnOnce(&mut BootstrapConfig)) -> Fixture {
+        Fixture::build(adjust, false).await
     }
 
     /// Builds a server, creating the test account unless `account` is false.

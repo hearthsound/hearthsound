@@ -222,8 +222,14 @@ pub enum AuthenticationError {
     InvalidApiKey,
     /// Too many login attempts for this address or username in the last minute.
     /// Subsonic error 40.
+    ///
+    /// `retry_after` is how long the client has to wait; the Subsonic envelope
+    /// cannot carry a header, so only the native surface reports it.
     #[error("too many login attempts; try again later")]
-    TooManyAttempts,
+    TooManyAttempts {
+        /// How long until the budget admits another attempt.
+        retry_after: std::time::Duration,
+    },
 }
 
 impl AuthenticationError {
@@ -246,7 +252,7 @@ impl AuthenticationError {
             AuthenticationError::MissingParameter { .. } => 10,
             AuthenticationError::WrongCredentials
             | AuthenticationError::AccountPasswordDisabled { .. }
-            | AuthenticationError::TooManyAttempts => 40,
+            | AuthenticationError::TooManyAttempts { .. } => 40,
             AuthenticationError::TokenAuthDisabled => 41,
             AuthenticationError::MultipleMechanisms => 42,
             AuthenticationError::ApiKeyWithUsername => 43,
@@ -271,7 +277,7 @@ impl AuthenticationError {
             AuthenticationError::WrongCredentials => "Wrong username or password.",
             AuthenticationError::AccountPasswordDisabled { .. } => "Wrong username or password.",
             AuthenticationError::TokenAuthDisabled => {
-                "Token authentication not supported for LDAP users."
+                "Token authentication is disabled on this server."
             }
             AuthenticationError::MultipleMechanisms => {
                 "Provided authentication mechanism not supported."
@@ -280,7 +286,9 @@ impl AuthenticationError {
                 "Multiple conflicting authentication mechanisms provided."
             }
             AuthenticationError::InvalidApiKey => "Invalid API key.",
-            AuthenticationError::TooManyAttempts => "Too many login attempts; try again later.",
+            AuthenticationError::TooManyAttempts { .. } => {
+                "Too many login attempts; try again later."
+            }
         }
     }
 
@@ -436,9 +444,10 @@ impl<C: Clock + Clone> Authenticator<C> {
     /// # Errors
     ///
     /// Returns [`ResolveError::Rejected`] with the Subsonic error to report when
-    /// the credentials are absent, contradictory, or wrong, and
-    /// [`ResolveError::Internal`] when the database, the secret box, or the
-    /// settings snapshot fails.
+    /// the credentials are absent, contradictory, or wrong,
+    /// [`AuthenticationError::TooManyAttempts`] when the address has spent its
+    /// failure budget, and [`ResolveError::Internal`] when the database, the
+    /// secret box, or the settings snapshot fails.
     pub async fn resolve(
         &self,
         settings: &SettingsStore,
@@ -459,8 +468,11 @@ impl<C: Clock + Clone> Authenticator<C> {
         }
 
         if has_key {
+            // `apiKey=` and `Authorization: Bearer` are the same credential, so
+            // they take the same limited path: a wrong key is charged to the
+            // address, exactly as a wrong bearer key is.
             let key = credentials.api_key.as_deref().unwrap_or_default();
-            return self.resolve_api_key(key).await;
+            return self.resolve_bearer(client_ip, key).await;
         }
 
         let Some(username) = credentials
@@ -484,7 +496,11 @@ impl<C: Clock + Clone> Authenticator<C> {
         Err(AuthenticationError::MissingParameter { parameter: "p" }.into())
     }
 
-    /// Resolves an API key.
+    /// Resolves an API key without limiting or charging anything.
+    ///
+    /// The rate limit belongs to the callers, which know the client address:
+    /// [`Authenticator::resolve_bearer`] checks and charges the address, and
+    /// both the `Bearer` header and `/rest`'s `apiKey=` go through it.
     ///
     /// # Errors
     ///
@@ -537,9 +553,11 @@ impl<C: Clock + Clone> Authenticator<C> {
         username: &str,
         password: &str,
     ) -> Result<User, crate::session::LoginError> {
-        self.limiter
-            .check(client_ip, username)
-            .map_err(|_| crate::session::LoginError::RateLimited)?;
+        self.limiter.check(client_ip, username).map_err(|limited| {
+            crate::session::LoginError::RateLimited {
+                retry_after: limited.retry_after,
+            }
+        })?;
         let outcome = crate::session::verify_login(&self.users, username, password).await;
         if matches!(outcome, Err(crate::session::LoginError::WrongCredentials)) {
             self.limiter.record_failure(client_ip, username);
@@ -577,9 +595,11 @@ impl<C: Clock + Clone> Authenticator<C> {
         client_ip: IpAddr,
         key: &str,
     ) -> Result<Principal, ResolveError> {
-        self.limiter
-            .check_address(client_ip)
-            .map_err(|_| AuthenticationError::TooManyAttempts)?;
+        self.limiter.check_address(client_ip).map_err(|limited| {
+            AuthenticationError::TooManyAttempts {
+                retry_after: limited.retry_after,
+            }
+        })?;
         let outcome = self.resolve_api_key(key).await;
         if matches!(outcome, Err(ResolveError::Rejected(_))) {
             self.limiter.record_address_failure(client_ip);
@@ -607,9 +627,11 @@ impl<C: Clock + Clone> Authenticator<C> {
         username: &str,
         credentials: &SubsonicCredentials,
     ) -> Result<Principal, ResolveError> {
-        self.limiter
-            .check(client_ip, username)
-            .map_err(|_| AuthenticationError::TooManyAttempts)?;
+        self.limiter.check(client_ip, username).map_err(|limited| {
+            AuthenticationError::TooManyAttempts {
+                retry_after: limited.retry_after,
+            }
+        })?;
         let outcome = self
             .verify_password_login(settings, username, credentials)
             .await;
@@ -643,9 +665,14 @@ impl<C: Clock + Clone> Authenticator<C> {
         };
 
         let Some(user) = self.users.find_by_username(username).await? else {
+            // One verification against the dummy hash, so an unknown account
+            // costs what a wrong secret costs and the timing says nothing about
+            // which usernames exist.
+            let _ = verify_password(presented, crate::TIMING_DUMMY_HASH).await?;
             return Err(self.reject_password(allow_account_password).into());
         };
         if user.is_disabled() {
+            let _ = verify_password(presented, crate::TIMING_DUMMY_HASH).await?;
             return Err(self.reject_password(allow_account_password).into());
         }
 
@@ -710,9 +737,11 @@ impl<C: Clock + Clone> Authenticator<C> {
             return Err(AuthenticationError::TokenAuthDisabled.into());
         }
 
-        self.limiter
-            .check(client_ip, username)
-            .map_err(|_| AuthenticationError::TooManyAttempts)?;
+        self.limiter.check(client_ip, username).map_err(|limited| {
+            AuthenticationError::TooManyAttempts {
+                retry_after: limited.retry_after,
+            }
+        })?;
         let outcome = self.verify_token(username, token, salt).await;
         self.charge_rejection(client_ip, username, &outcome);
         outcome
@@ -720,6 +749,14 @@ impl<C: Clock + Clone> Authenticator<C> {
 
     /// Verifies a token against `md5(secret + salt)` for each of the account's
     /// active app passwords.
+    ///
+    /// An unknown account returns before any hashing, unlike
+    /// [`Authenticator::verify_password_login`]: the work here is a symmetric
+    /// digest of a handful of bytes, measured in microseconds against a
+    /// database read and a `users` lookup, so the difference between an unknown
+    /// account and one with no app passwords is noise rather than a signal. That
+    /// is a decision, not an oversight, and it is why no dummy digest is
+    /// computed here.
     ///
     /// # Errors
     ///
@@ -886,7 +923,7 @@ mod tests {
     use crate::{ApiKeys, AppPasswords, NewUser, Users};
 
     /// The account password of the test account.
-    const ACCOUNT_PASSWORD: &str = "hunter2";
+    const ACCOUNT_PASSWORD: &str = "hunter22";
 
     /// A migrated temporary database with one account and a resolver.
     struct Fixture {
@@ -1344,7 +1381,7 @@ mod tests {
         assert_eq!(error.code(), 41);
         assert_eq!(
             error.message(),
-            "Token authentication not supported for LDAP users."
+            "Token authentication is disabled on this server."
         );
     }
 
@@ -1484,6 +1521,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_missing_account_still_verifies_a_password() {
+        let fixture = Fixture::new(10).await;
+        // An unknown name answers exactly like a wrong secret, and the answer
+        // costs one Argon2id verification against the dummy hash so the two
+        // cannot be told apart by how long they take. That the dummy hash is
+        // verifiable at all is proven by `password::tests`.
+        let error = rejection(
+            fixture
+                .authenticator
+                .resolve(
+                    &settings(true, true),
+                    Fixture::ip(),
+                    &credentials(Some("nobody"), Some("some-password"), None, None),
+                )
+                .await,
+        );
+        assert_eq!(error, AuthenticationError::WrongCredentials);
+    }
+
+    #[tokio::test]
     async fn login_attempts_are_rate_limited_and_recover() {
         let fixture = Fixture::new(2).await;
         let settings = settings(true, true);
@@ -1496,7 +1553,13 @@ mod tests {
             AuthenticationError::WrongCredentials
         );
         let limited = rejection(resolve_wrong_password(&fixture, &settings).await);
-        assert_eq!(limited, AuthenticationError::TooManyAttempts);
+        assert!(
+            matches!(
+                limited,
+                AuthenticationError::TooManyAttempts { retry_after } if retry_after > Duration::ZERO
+            ),
+            "a spent budget refuses the attempt and says how long to wait"
+        );
         assert_eq!(
             limited.code(),
             40,
@@ -1562,14 +1625,16 @@ mod tests {
                     .is_err()
             );
         }
-        assert_eq!(
-            rejection(
-                fixture
-                    .authenticator
-                    .resolve(&settings, Fixture::ip(), &password(&secret))
-                    .await
+        assert!(
+            matches!(
+                rejection(
+                    fixture
+                        .authenticator
+                        .resolve(&settings, Fixture::ip(), &password(&secret))
+                        .await
+                ),
+                AuthenticationError::TooManyAttempts { .. }
             ),
-            AuthenticationError::TooManyAttempts,
             "a guess after the budget is spent learns nothing"
         );
 
@@ -1584,7 +1649,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_api_key_path_is_not_rate_limited() {
+    async fn a_correct_api_key_never_spends_the_budget() {
         let fixture = Fixture::new(1).await;
         let settings = settings(false, true);
         let key = fixture.api_key().await;
@@ -1602,5 +1667,42 @@ mod tests {
                     .is_ok()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn an_api_key_guess_is_rate_limited_per_address() {
+        let fixture = Fixture::new(10).await;
+        let settings = settings(false, true);
+        let key = fixture.api_key().await;
+
+        // Ten wrong keys spend this address's budget; /rest used to answer
+        // error 44 forever, which made it the cheaper surface to walk.
+        for _ in 0..10 {
+            assert!(matches!(
+                rejection(resolve_key(&fixture, &settings, "hs_guess").await),
+                AuthenticationError::InvalidApiKey
+            ));
+        }
+        assert!(matches!(
+            rejection(resolve_key(&fixture, &settings, "hs_guess").await),
+            AuthenticationError::TooManyAttempts { .. }
+        ));
+
+        // Another address is unaffected, and the right key still resolves
+        // there: the limit charges the guesser, not the key.
+        let elsewhere = SubsonicCredentials {
+            api_key: Some(key),
+            ..SubsonicCredentials::default()
+        };
+        let principal = fixture
+            .authenticator
+            .resolve(
+                &settings,
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
+                &elsewhere,
+            )
+            .await
+            .unwrap();
+        assert_eq!(principal.username, "echo");
     }
 }

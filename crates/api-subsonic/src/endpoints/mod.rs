@@ -74,4 +74,4 @@ pub use system::{
     get_license, get_music_folders, get_open_subsonic_extensions, jukebox_control, ping, token_info,
 };
 pub use transcode::{get_transcode_decision, get_transcode_stream};
-pub use users::{get_user, get_users, unsupported_management};
+pub use users::{get_user, get_users, unsupported_change_password, unsupported_management};

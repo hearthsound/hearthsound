@@ -386,6 +386,21 @@ impl UserUpdate {
     }
 }
 
+/// What a password change revoked.
+///
+/// A new password means the credentials that proved the old one stop working:
+/// the sessions the account kept, its API keys and its app passwords. The
+/// counts are what the change reported, so a caller can log them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RevokedCredentials {
+    /// How many sessions ended.
+    pub sessions: u64,
+    /// How many API keys were revoked.
+    pub api_keys: u64,
+    /// How many app passwords were revoked.
+    pub app_passwords: u64,
+}
+
 /// The `users` table.
 ///
 /// Cloning is cheap: every clone shares the same two pools.
@@ -491,6 +506,40 @@ pub fn validate_username(username: &str) -> Result<(), AuthError> {
     Ok(())
 }
 
+/// The shortest password the rules allow.
+pub const PASSWORD_MIN_LENGTH: usize = 8;
+
+/// Checks a password against the rule every password write keeps.
+///
+/// The rule is a length only, as the product decision states: eight characters
+/// or more. Counting is by characters, not bytes, so a password of accented
+/// letters is measured the way a person counts it. Existing accounts whose
+/// password is shorter keep working, because verification never validates.
+///
+/// # Parameters
+///
+/// - `password`: the plaintext password about to be stored.
+///
+/// # Returns
+///
+/// `Ok(())` when the password is allowed.
+///
+/// # Errors
+///
+/// Returns [`AuthError::EmptyField`] for an empty password and
+/// [`AuthError::InvalidPassword`] naming the rule a short one breaks.
+pub fn validate_password(password: &str) -> Result<(), AuthError> {
+    if password.is_empty() {
+        return Err(AuthError::EmptyField { field: "password" });
+    }
+    if password.chars().count() < PASSWORD_MIN_LENGTH {
+        return Err(AuthError::InvalidPassword {
+            rule: "a password is at least 8 characters long",
+        });
+    }
+    Ok(())
+}
+
 impl Users {
     /// Builds the repository over a database.
     ///
@@ -537,10 +586,11 @@ impl Users {
     /// # Errors
     ///
     /// Returns [`AuthError::EmptyField`] when the username or the password is
-    /// empty, [`AuthError::UsernameTaken`] when another account already uses the
-    /// username (case-insensitively), [`AuthError::Setting`] when the stored
-    /// default permissions no longer resolve, and [`AuthError::Database`] when
-    /// the insert fails.
+    /// empty, [`AuthError::InvalidPassword`] when the password breaks the
+    /// length rule, [`AuthError::UsernameTaken`] when another account already
+    /// uses the username (case-insensitively), [`AuthError::Setting`] when the
+    /// stored default permissions no longer resolve, and [`AuthError::Database`]
+    /// when the insert fails.
     pub async fn create(&self, settings: &SettingsStore, new: &NewUser) -> Result<User, AuthError> {
         if new.username.trim().is_empty() {
             return Err(AuthError::EmptyField { field: "username" });
@@ -549,9 +599,8 @@ impl Users {
         // allow, not padding to trim away.
         validate_username(&new.username)?;
         let username = new.username.as_str();
-        if new.password.is_empty() {
-            return Err(AuthError::EmptyField { field: "password" });
-        }
+        // The one password rule every write path keeps; see `validate_password`.
+        validate_password(&new.password)?;
         let display_name = if new.display_name.trim().is_empty() {
             username
         } else {
@@ -740,6 +789,10 @@ impl Users {
     /// fails authentication exactly like an unknown one. Disabling an account
     /// that is already disabled changes nothing.
     ///
+    /// The server must always keep one way in, so the last active
+    /// administrator cannot be disabled: the write is refused and nothing
+    /// changes. A disabled administrator does not count towards that one.
+    ///
     /// # Parameters
     ///
     /// - `id`: the account to disable.
@@ -751,19 +804,68 @@ impl Users {
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::Database`] when the update fails.
+    /// Returns [`AuthError::LastAdministrator`] when the account is the only
+    /// active administrator, and [`AuthError::Database`] when the read or the
+    /// write fails.
     pub async fn disable(&self, id: Uuid) -> Result<bool, AuthError> {
         let now = crate::now_millis();
-        let affected = sqlx::query!(
+        let mut tx = self.writer.begin().await?;
+        let target = sqlx::query!(
+            "SELECT is_admin, disabled_at FROM users WHERE id = ?",
+            id.as_bytes().as_slice(),
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(target) = target else {
+            return Ok(false);
+        };
+        if target.disabled_at.is_some() {
+            return Ok(false);
+        }
+        if target.is_admin != 0 && Users::active_administrators(&mut tx, id).await? == 0 {
+            return Err(AuthError::LastAdministrator);
+        }
+        sqlx::query!(
             "UPDATE users SET disabled_at = ?, updated_at = ? WHERE id = ? AND disabled_at IS NULL",
             now,
             now,
             id.as_bytes().as_slice(),
         )
-        .execute(&self.writer)
-        .await?
-        .rows_affected();
-        Ok(affected > 0)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Counts the active administrators other than one account.
+    ///
+    /// A disabled account does not count, however it is flagged: it cannot
+    /// sign in, so it is no way into the server.
+    ///
+    /// # Parameters
+    ///
+    /// - `conn`: the connection or transaction the count runs on.
+    /// - `excluding`: the account that is the subject of the write, so the
+    ///   count answers what would remain without it.
+    ///
+    /// # Returns
+    ///
+    /// The number of active administrators other than `excluding`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::Database`] when the query fails.
+    async fn active_administrators(
+        conn: &mut sqlx::SqliteConnection,
+        excluding: Uuid,
+    ) -> Result<i64, AuthError> {
+        let count = sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM users WHERE is_admin != 0 AND disabled_at IS NULL AND id <> ?",
+            excluding.as_bytes().as_slice(),
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        Ok(count)
     }
 
     /// Changes an account's display name, admin flag, and permissions.
@@ -772,6 +874,11 @@ impl Users {
     /// and the row is written once with the resulting values. The whole update
     /// runs in one write transaction, so a concurrent change cannot be lost
     /// between the read and the write.
+    ///
+    /// The server must keep one way in, so demoting the last active
+    /// administrator is refused: the whole update is abandoned before any
+    /// field is written, which means a request that also renames the account
+    /// changes nothing at all.
     ///
     /// # Parameters
     ///
@@ -784,7 +891,9 @@ impl Users {
     ///
     /// # Errors
     ///
-    /// Returns [`AuthError::UnknownUser`] when no account has that id, and
+    /// Returns [`AuthError::UnknownUser`] when no account has that id,
+    /// [`AuthError::LastAdministrator`] when the update would demote the only
+    /// active administrator, and
     /// [`AuthError::Database`] when the read or the write fails.
     ///
     /// # Examples
@@ -813,6 +922,17 @@ impl Users {
         .await?
         .ok_or(AuthError::UnknownUser { user_id: id })?;
         let mut user = row.into_user()?;
+
+        // The server must keep one way in: demoting the last active
+        // administrator is refused before any field is written, so a batch
+        // update that also renames the account applies nothing.
+        if update.is_admin == Some(false)
+            && user.is_admin
+            && !user.is_disabled()
+            && Users::active_administrators(&mut tx, id).await? == 0
+        {
+            return Err(AuthError::LastAdministrator);
+        }
 
         if let Some(display_name) = &update.display_name {
             let trimmed = display_name.trim();
@@ -851,47 +971,101 @@ impl Users {
         Ok(user)
     }
 
-    /// Replaces an account's password.
+    /// Replaces an account's password and revokes the credentials it had.
     ///
     /// The new password is hashed with Argon2id, so the previous hash is gone
-    /// and cannot be recovered. Sessions and credentials that were issued
-    /// earlier are not touched here; a caller that wants them revoked revokes
-    /// them itself.
+    /// and cannot be recovered. A new password also means the old credentials
+    /// are gone: every other session of the account ends, and every API key and
+    /// app password of the account is revoked, because each of them proved
+    /// possession of the password the owner just replaced. The session that
+    /// asked for the change is kept, so a user changing their own password is
+    /// not signed out of the page they are using; an administrator resetting
+    /// somebody else's password keeps nothing.
+    ///
+    /// The hash write and the revocation run in one write transaction, so a
+    /// reader never sees the new password with the old credentials still
+    /// working.
     ///
     /// # Parameters
     ///
     /// - `id`: the account whose password changes.
     /// - `password`: the new plaintext password.
+    /// - `keep_session`: the session to keep, or `None` to end them all.
     ///
     /// # Returns
     ///
-    /// `Ok(())` once the hash is stored.
+    /// How many credentials were revoked, per kind.
     ///
     /// # Errors
     ///
     /// Returns [`AuthError::EmptyField`] for an empty password,
-    /// [`AuthError::UnknownUser`] when no account has that id,
-    /// [`AuthError::Password`] or [`AuthError::Join`] when hashing fails, and
-    /// [`AuthError::Database`] when the write fails.
-    pub async fn set_password(&self, id: Uuid, password: &str) -> Result<(), AuthError> {
-        if password.is_empty() {
-            return Err(AuthError::EmptyField { field: "password" });
-        }
+    /// [`AuthError::InvalidPassword`] when the password breaks the length rule,
+    /// [`AuthError::UnknownUser`] when no account has that id (nothing is
+    /// revoked then), [`AuthError::Password`] or [`AuthError::Join`] when
+    /// hashing fails, and [`AuthError::Database`] when the write fails.
+    pub async fn set_password(
+        &self,
+        id: Uuid,
+        password: &str,
+        keep_session: Option<Uuid>,
+    ) -> Result<RevokedCredentials, AuthError> {
+        validate_password(password)?;
         let password_hash = password::hash_password(password).await?;
         let now = crate::now_millis();
+        let mut tx = self.writer.begin().await?;
         let affected = sqlx::query!(
             "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
             password_hash,
             now,
             id.as_bytes().as_slice(),
         )
-        .execute(&self.writer)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
         if affected == 0 {
+            // Nothing was written, and the transaction is dropped rather than
+            // committed, so every credential keeps working.
             return Err(AuthError::UnknownUser { user_id: id });
         }
-        Ok(())
+        let api_keys = sqlx::query!(
+            "UPDATE api_keys SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+            now,
+            id.as_bytes().as_slice(),
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        let app_passwords = sqlx::query!(
+            "UPDATE app_passwords SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+            now,
+            id.as_bytes().as_slice(),
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        let sessions = match keep_session {
+            Some(kept) => sqlx::query!(
+                "DELETE FROM sessions WHERE user_id = ? AND id <> ?",
+                id.as_bytes().as_slice(),
+                kept.as_bytes().as_slice(),
+            )
+            .execute(&mut *tx)
+            .await?
+            .rows_affected(),
+            None => sqlx::query!(
+                "DELETE FROM sessions WHERE user_id = ?",
+                id.as_bytes().as_slice(),
+            )
+            .execute(&mut *tx)
+            .await?
+            .rows_affected(),
+        };
+        tx.commit().await?;
+        Ok(RevokedCredentials {
+            sessions,
+            api_keys,
+            app_passwords,
+        })
     }
 
     /// Enables a disabled account.
@@ -975,7 +1149,7 @@ mod tests {
         let settings = settings(&[]);
 
         let user = users
-            .create(&settings, &NewUser::new("echo", "Echo", "hunter2", false))
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter22", false))
             .await
             .unwrap();
 
@@ -995,7 +1169,7 @@ mod tests {
         let settings = settings(&[("HEARTHSOUND__USERS__DEFAULT_PERMISSIONS", "download")]);
 
         let user = users
-            .create(&settings, &NewUser::new("echo", "", "hunter2", false))
+            .create(&settings, &NewUser::new("echo", "", "hunter22", false))
             .await
             .unwrap();
 
@@ -1012,12 +1186,12 @@ mod tests {
         let settings = settings(&[]);
 
         users
-            .create(&settings, &NewUser::new("Echo", "Echo", "hunter2", false))
+            .create(&settings, &NewUser::new("Echo", "Echo", "hunter22", false))
             .await
             .unwrap();
 
         let error = users
-            .create(&settings, &NewUser::new("echo", "Echo", "hunter2", false))
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter22", false))
             .await
             .unwrap_err();
         assert!(matches!(error, AuthError::UsernameTaken { .. }));
@@ -1033,7 +1207,7 @@ mod tests {
         let settings = settings(&[]);
 
         let error = users
-            .create(&settings, &NewUser::new("  ", "Echo", "hunter2", false))
+            .create(&settings, &NewUser::new("  ", "Echo", "hunter22", false))
             .await
             .unwrap_err();
         assert!(matches!(error, AuthError::EmptyField { field: "username" }));
@@ -1052,11 +1226,11 @@ mod tests {
         let settings = settings(&[]);
 
         let first = users
-            .create(&settings, &NewUser::new("zoe", "Zoe", "hunter2", false))
+            .create(&settings, &NewUser::new("zoe", "Zoe", "hunter22", false))
             .await
             .unwrap();
         users
-            .create(&settings, &NewUser::new("adam", "Adam", "hunter2", true))
+            .create(&settings, &NewUser::new("adam", "Adam", "hunter22", true))
             .await
             .unwrap();
 
@@ -1102,7 +1276,7 @@ mod tests {
         let user = users
             .create(
                 &settings,
-                &NewUser::new("echo", "Echo", "hunter2", false).with_permissions(granted),
+                &NewUser::new("echo", "Echo", "hunter22", false).with_permissions(granted),
             )
             .await
             .unwrap();
@@ -1119,7 +1293,7 @@ mod tests {
         let users = Users::new(&db);
         let settings = settings(&[]);
         let user = users
-            .create(&settings, &NewUser::new("echo", "Echo", "hunter2", false))
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter22", false))
             .await
             .unwrap();
 
@@ -1180,12 +1354,15 @@ mod tests {
         let users = Users::new(&db);
         let settings = settings(&[]);
         let user = users
-            .create(&settings, &NewUser::new("echo", "Echo", "hunter2", false))
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter22", false))
             .await
             .unwrap();
         let previous = user.password_hash().to_owned();
 
-        users.set_password(user.id, "correct horse").await.unwrap();
+        users
+            .set_password(user.id, "correct horse", None)
+            .await
+            .unwrap();
 
         let stored = users.find_by_id(user.id).await.unwrap().unwrap();
         assert_ne!(stored.password_hash(), previous);
@@ -1196,20 +1373,323 @@ mod tests {
                 .unwrap()
         );
         assert!(
-            !crate::verify_password("hunter2", stored.password_hash())
+            !crate::verify_password("hunter22", stored.password_hash())
                 .await
                 .unwrap()
         );
         assert!(stored.updated_at >= user.updated_at);
 
-        let error = users.set_password(user.id, "").await.unwrap_err();
+        let error = users.set_password(user.id, "", None).await.unwrap_err();
         assert!(matches!(error, AuthError::EmptyField { field: "password" }));
 
         let error = users
-            .set_password(new_uuid_v7(), "hunter2")
+            .set_password(new_uuid_v7(), "hunter22", None)
             .await
             .unwrap_err();
         assert!(matches!(error, AuthError::UnknownUser { .. }));
+    }
+
+    #[tokio::test]
+    async fn reset_refuses_a_short_password() {
+        let (_dir, db) = database().await;
+        let users = Users::new(&db);
+        let settings = settings(&[]);
+        let user = users
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter22", false))
+            .await
+            .unwrap();
+
+        let error = users
+            .set_password(user.id, "short22", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AuthError::InvalidPassword { rule } if rule.contains("at least 8")
+        ));
+        // The stored hash is untouched, so the account still signs in.
+        let stored = users.find_by_id(user.id).await.unwrap().unwrap();
+        assert!(
+            crate::verify_password("hunter22", stored.password_hash())
+                .await
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_password_is_at_least_eight_characters() {
+        assert!(validate_password("12345678").is_ok());
+        assert!(validate_password("a longer password").is_ok());
+        let error = validate_password("1234567").unwrap_err();
+        assert!(
+            matches!(error, AuthError::InvalidPassword { rule } if rule.contains("at least 8")),
+            "{error}"
+        );
+        assert!(matches!(
+            validate_password("").unwrap_err(),
+            AuthError::EmptyField { field: "password" }
+        ));
+    }
+
+    #[test]
+    fn the_password_rule_counts_characters_not_bytes() {
+        // Seven two-character letters are fourteen bytes but seven characters,
+        // which is one short; one more letter is enough.
+        assert!(validate_password("aeioubcd").is_ok(), "nine characters");
+        assert!(validate_password("aeioubc").is_err(), "seven characters");
+        assert!(validate_password("aeioubc€").is_ok(), "eight characters");
+    }
+
+    #[tokio::test]
+    async fn create_refuses_a_short_password() {
+        let (_dir, db) = database().await;
+        let settings = settings(&[]);
+        let error = Users::new(&db)
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter2", false))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, AuthError::InvalidPassword { .. }),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_account_with_a_short_password_still_authenticates() {
+        let (_dir, db) = database().await;
+        let users = Users::new(&db);
+        // An account whose password predates the rule: written directly, the
+        // way an upgraded database holds one. Verification never validates, so
+        // it keeps working until the owner changes it.
+        let hash = crate::hash_password("hunter2").await.unwrap();
+        let id = new_uuid_v7();
+        let now = crate::now_millis();
+        sqlx::query!(
+            "INSERT INTO users (id, username, display_name, password_hash, is_admin,
+                 can_acquire, can_upload, can_download, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 0, 0, 0, 1, ?, ?)",
+            id.as_bytes().as_slice(),
+            "echo",
+            "Echo",
+            hash,
+            now,
+            now,
+        )
+        .execute(db.writer())
+        .await
+        .unwrap();
+
+        let stored = users.find_by_username("echo").await.unwrap().unwrap();
+        assert!(
+            crate::verify_password("hunter2", stored.password_hash())
+                .await
+                .unwrap()
+        );
+        // Setting a new one still keeps the rule.
+        let error = users.set_password(id, "hunter2", None).await.unwrap_err();
+        assert!(matches!(error, AuthError::InvalidPassword { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_password_change_revokes_every_other_credential() {
+        let (_dir, db) = database().await;
+        let settings = settings(&[]);
+        let users = Users::new(&db);
+        let user = users
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter22", false))
+            .await
+            .unwrap();
+        let sessions = crate::Sessions::new(&db);
+        let session = sessions
+            .create(user.id, None, std::time::Duration::from_secs(3600))
+            .await
+            .unwrap();
+        let api_keys = crate::ApiKeys::new(&db);
+        let key = api_keys.generate(user.id, "a client").await.unwrap();
+        let app_passwords = crate::AppPasswords::new(
+            &db,
+            hearthsound_config::secret::SecretKey::generate().secret_box(),
+        );
+        let app_password = app_passwords.generate(user.id, "a phone").await.unwrap();
+
+        let revoked = users
+            .set_password(user.id, "new-hunter22", None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            revoked,
+            RevokedCredentials {
+                sessions: 1,
+                api_keys: 1,
+                app_passwords: 1,
+            }
+        );
+        assert!(sessions.resolve(&session.token).await.unwrap().is_none());
+        assert!(api_keys.resolve(&key.plaintext).await.unwrap().is_none());
+        assert!(
+            app_passwords
+                .active_secrets(user.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(app_password.id != uuid::Uuid::nil());
+    }
+
+    #[tokio::test]
+    async fn a_password_change_can_keep_one_session() {
+        let (_dir, db) = database().await;
+        let settings = settings(&[]);
+        let users = Users::new(&db);
+        let user = users
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter22", false))
+            .await
+            .unwrap();
+        let sessions = crate::Sessions::new(&db);
+        let kept = sessions
+            .create(user.id, None, std::time::Duration::from_secs(3600))
+            .await
+            .unwrap();
+        let other = sessions
+            .create(user.id, None, std::time::Duration::from_secs(3600))
+            .await
+            .unwrap();
+
+        let revoked = users
+            .set_password(user.id, "new-hunter22", Some(kept.id))
+            .await
+            .unwrap();
+
+        assert_eq!(revoked.sessions, 1);
+        assert!(
+            sessions.resolve(&kept.token).await.unwrap().is_some(),
+            "the session that asked for the change keeps working"
+        );
+        assert!(sessions.resolve(&other.token).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_failed_hash_write_revokes_nothing() {
+        let (_dir, db) = database().await;
+        let settings = settings(&[]);
+        let users = Users::new(&db);
+        let user = users
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter22", false))
+            .await
+            .unwrap();
+        let api_keys = crate::ApiKeys::new(&db);
+        let key = api_keys.generate(user.id, "a client").await.unwrap();
+
+        let error = users
+            .set_password(new_uuid_v7(), "new-hunter22", None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AuthError::UnknownUser { .. }));
+        assert!(
+            api_keys.resolve(&key.plaintext).await.unwrap().is_some(),
+            "the refusal changed nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_last_administrator_cannot_be_disabled() {
+        let (_dir, db) = database().await;
+        let settings = settings(&[]);
+        let users = Users::new(&db);
+        let admin = users
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter22", true))
+            .await
+            .unwrap();
+
+        let error = users.disable(admin.id).await.unwrap_err();
+
+        assert!(matches!(error, AuthError::LastAdministrator));
+        let stored = users.find_by_id(admin.id).await.unwrap().unwrap();
+        assert!(stored.disabled_at.is_none(), "the account stays enabled");
+    }
+
+    #[tokio::test]
+    async fn the_last_administrator_cannot_be_demoted() {
+        let (_dir, db) = database().await;
+        let settings = settings(&[]);
+        let users = Users::new(&db);
+        let admin = users
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter22", true))
+            .await
+            .unwrap();
+
+        let update = UserUpdate::default()
+            .with_display_name("Renamed")
+            .with_is_admin(false);
+        let error = users.update(admin.id, &update).await.unwrap_err();
+
+        assert!(matches!(error, AuthError::LastAdministrator));
+        let stored = users.find_by_id(admin.id).await.unwrap().unwrap();
+        assert!(stored.is_admin, "the flag is unchanged");
+        assert_eq!(
+            stored.display_name, "Echo",
+            "the rename in the same update applies nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_administrator_allows_demotion_and_disable() {
+        let (_dir, db) = database().await;
+        let settings = settings(&[]);
+        let users = Users::new(&db);
+        let first = users
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter22", true))
+            .await
+            .unwrap();
+        let second = users
+            .create(&settings, &NewUser::new("ada", "Ada", "hunter22", true))
+            .await
+            .unwrap();
+        let third = users
+            .create(&settings, &NewUser::new("zoe", "Zoe", "hunter22", true))
+            .await
+            .unwrap();
+
+        let demoted = users
+            .update(first.id, &UserUpdate::default().with_is_admin(false))
+            .await
+            .unwrap();
+        assert!(!demoted.is_admin);
+        // Two administrators remain, so one of them can go too.
+        assert!(users.disable(second.id).await.unwrap());
+        // The last active one is safe.
+        let error = users
+            .update(third.id, &UserUpdate::default().with_is_admin(false))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AuthError::LastAdministrator));
+    }
+
+    #[tokio::test]
+    async fn a_disabled_administrator_does_not_count() {
+        let (_dir, db) = database().await;
+        let settings = settings(&[]);
+        let users = Users::new(&db);
+        let active = users
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter22", true))
+            .await
+            .unwrap();
+        let other = users
+            .create(&settings, &NewUser::new("ada", "Ada", "hunter22", true))
+            .await
+            .unwrap();
+        // A second administrator exists, so disabling it is allowed.
+        assert!(users.disable(other.id).await.unwrap());
+
+        // It cannot sign in any more, so the remaining active one is the last
+        // way in: demoting it is refused.
+        let error = users
+            .update(active.id, &UserUpdate::default().with_is_admin(false))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AuthError::LastAdministrator));
     }
 
     #[test]
@@ -1266,7 +1746,7 @@ mod tests {
         let error = users
             .create(
                 &settings,
-                &NewUser::new("DROP TABLE Users;", "", "hunter2", false),
+                &NewUser::new("DROP TABLE Users;", "", "hunter22", false),
             )
             .await
             .unwrap_err();
@@ -1279,7 +1759,7 @@ mod tests {
         let users = Users::new(&db);
         let settings = settings(&[]);
         let user = users
-            .create(&settings, &NewUser::new("temporary", "", "hunter2", false))
+            .create(&settings, &NewUser::new("temporary", "", "hunter22", false))
             .await
             .unwrap();
         assert!(users.delete(user.id).await.unwrap());
@@ -1293,7 +1773,7 @@ mod tests {
         let users = Users::new(&db);
         let settings = settings(&[]);
         let user = users
-            .create(&settings, &NewUser::new("echo", "Echo", "hunter2", false))
+            .create(&settings, &NewUser::new("echo", "Echo", "hunter22", false))
             .await
             .unwrap();
 

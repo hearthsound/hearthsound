@@ -17,7 +17,7 @@ use axum::http::StatusCode;
 use axum::http::header::SET_COOKIE;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
-use hearthsound_auth::{AuthError, NewUser, User, validate_username};
+use hearthsound_auth::{AuthError, NewUser, User, validate_password, validate_username};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -26,15 +26,6 @@ use crate::extract::JsonBody;
 use crate::problem::{self, Problem};
 use crate::routes::session::{LoginResponse, start_session};
 use crate::state::NativeState;
-
-/// The username the setup failures are charged against in the login rate
-/// limit.
-///
-/// The token is compared against a secret, so it is guessed like a password;
-/// counting the attempts against one key stops a token from being walked
-/// through the endpoint no matter which address the attempts come from, and
-/// contributes to the address's budget as every login failure does.
-const SETUP_USERNAME: &str = "setup";
 
 /// Whether the server still needs its first administrator.
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -80,13 +71,19 @@ pub async fn setup_status(State(state): State<NativeState>) -> Result<Json<Setup
 
 /// Creates the first administrator from the setup link.
 ///
+/// The link is spent when the administrator is created. A failure that leaves
+/// no account restores it, so the wizard's retry works; a failure after the
+/// account exists needs no link, because the account can sign in. The username
+/// and the password rules are checked before the spend, so a typo costs the
+/// wizard nothing.
+///
 /// # Errors
 ///
 /// Answers `conflict` when an account already exists, `invalid-request` when
-/// the username or the password is empty, `rate-limited` once the setup
-/// failures spent the budget of the client address or of the `setup` key,
-/// `unauthenticated` when the token is not the one the server logged, and
-/// `internal` when the account cannot be created.
+/// the username or the password is empty or breaks its rule (a password is at
+/// least 8 characters long), `rate-limited` once the client address spent its
+/// failure budget, `unauthenticated` when the token is not the one the server
+/// logged, and `internal` when the account cannot be created.
 #[utoipa::path(
     post,
     path = "/api/v1/setup",
@@ -94,10 +91,10 @@ pub async fn setup_status(State(state): State<NativeState>) -> Result<Json<Setup
     request_body = SetupRequest,
     responses(
         (status = 201, description = "The administrator exists and is signed in", body = LoginResponse),
-        (status = 400, description = "The username or the password is empty, or the username breaks the name rule", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "The username or the password is empty, or it breaks its rule (a password is at least 8 characters long)", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "The setup link is not valid", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The server already has an account", body = Problem, content_type = "application/problem+json"),
-        (status = 429, description = "Too many failed setup attempts", body = Problem, content_type = "application/problem+json"),
+        (status = 429, description = "Too many failed setup attempts from this address", body = Problem, content_type = "application/problem+json"),
     )
 )]
 pub async fn complete_setup(
@@ -114,21 +111,30 @@ pub async fn complete_setup(
             "The setup needs a username and a password.",
         ));
     }
-    // The name rule is checked before the one-time link is spent, so a typo
-    // costs the wizard nothing.
+    // The name and the password rules are checked before the one-time link is
+    // spent, so a typo costs the wizard nothing.
     if let Err(AuthError::InvalidUsername { rule, .. }) = validate_username(request.username.trim())
     {
         return Err(Problem::invalid_request(format!(
             "The username is not allowed: {rule}."
         )));
     }
+    // The empty password is refused above, so only the length rule is left.
+    if let Err(AuthError::InvalidPassword { rule }) = validate_password(&request.password) {
+        return Err(Problem::invalid_request(format!(
+            "The password is not allowed: {rule}."
+        )));
+    }
 
+    // Only the address is charged: the token is 52 random base32 characters, so
+    // walking it is pointless, and a shared key would let any stranger spend the
+    // budget the operator needs to get into a fresh server.
     let limiter = state.authenticator().limiter();
-    if limiter.check(ip, SETUP_USERNAME).is_err() {
-        return Err(Problem::rate_limited());
+    if let Err(limited) = limiter.check_address(ip) {
+        return Err(Problem::rate_limited(limited.retry_after));
     }
     if !state.setup().consume(&request.token).await {
-        limiter.record_failure(ip, SETUP_USERNAME);
+        limiter.record_address_failure(ip);
         return Err(Problem::unauthenticated("The setup link is not valid."));
     }
 
@@ -145,7 +151,20 @@ pub async fn complete_setup(
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .unwrap_or(&request.username);
-    let user = create_administrator(&state, &request, display_name).await?;
+    let user = match create_administrator(&state, &request, display_name).await {
+        Ok(user) => user,
+        Err(problem) => {
+            // No account exists, so the link is the only way in and the
+            // operator's retry has to work without restarting the server. The
+            // token is never logged.
+            if state.setup().restore(&request.token).await {
+                tracing::warn!(
+                    "the first administrator could not be created; the setup link is usable again"
+                );
+            }
+            return Err(problem);
+        }
+    };
     tracing::info!(user = %user.id, "created the first administrator");
 
     let secure = request_is_https(
@@ -157,6 +176,8 @@ pub async fn complete_setup(
         .headers
         .get(axum::http::header::USER_AGENT)
         .and_then(|value| value.to_str().ok());
+    // The account exists now, so a failure here needs no link: signing in with
+    // the password the wizard chose is the recovery.
     let (body, cookie) = start_session(&state, &user, user_agent, secure).await?;
     Ok((StatusCode::CREATED, [(SET_COOKIE, cookie)], Json(body)).into_response())
 }

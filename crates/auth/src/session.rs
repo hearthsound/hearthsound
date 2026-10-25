@@ -252,6 +252,39 @@ impl Sessions {
         }))
     }
 
+    /// Reports whether a session is still usable.
+    ///
+    /// This is the cheap liveness read a long-lived connection makes: one
+    /// indexed row, without reading the account, so a logout or a revocation
+    /// ends a stream within seconds.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the session's row id.
+    /// - `user_id`: the account it must belong to.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the session exists, belongs to `user_id`, and has not
+    /// expired.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::Database`] when the query fails.
+    pub async fn is_active(&self, id: Uuid, user_id: Uuid) -> Result<bool, AuthError> {
+        let active = sqlx::query_scalar!(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sessions WHERE id = ? AND user_id = ? AND expires_at > ?
+             )",
+            id.as_bytes().as_slice(),
+            user_id.as_bytes().as_slice(),
+            crate::now_millis(),
+        )
+        .fetch_one(&self.readers)
+        .await?;
+        Ok(active != 0)
+    }
+
     /// Revokes one session by its token.
     ///
     /// # Parameters
@@ -362,8 +395,15 @@ pub enum LoginError {
     WrongCredentials,
     /// Too many failed attempts for this address or username in the last
     /// minute.
+    ///
+    /// `retry_after` is how long the client has to wait before the budget
+    /// admits another attempt, which is what the native surface sends in
+    /// `Retry-After`.
     #[error("too many login attempts; try again later")]
-    RateLimited,
+    RateLimited {
+        /// How long until the budget admits another attempt.
+        retry_after: Duration,
+    },
     /// The check could not be completed.
     #[error(transparent)]
     Internal(#[from] AuthError),
@@ -390,15 +430,24 @@ pub enum LoginError {
 /// Returns [`LoginError::WrongCredentials`] for an unknown username, a disabled
 /// account, or a wrong password, and [`LoginError::Internal`] when the read or
 /// the verification fails.
+///
+/// An unknown account and a disabled one cost one password verification too,
+/// against [`crate::TIMING_DUMMY_HASH`]: if they returned before the check, the
+/// answer would arrive tens of milliseconds sooner than a wrong password's and
+/// would tell a stranger which usernames exist.
 pub(crate) async fn verify_login(
     users: &Users,
     username: &str,
     password: &str,
 ) -> Result<User, LoginError> {
     let Some(user) = users.find_by_username(username).await? else {
+        // One verification anyway, so a missing account costs what a wrong
+        // password costs; the answer is the same either way.
+        let _ = crate::verify_password(password, crate::TIMING_DUMMY_HASH).await?;
         return Err(LoginError::WrongCredentials);
     };
     if user.is_disabled() {
+        let _ = crate::verify_password(password, crate::TIMING_DUMMY_HASH).await?;
         return Err(LoginError::WrongCredentials);
     }
     if !crate::verify_password(password, user.password_hash()).await? {
@@ -503,7 +552,7 @@ mod tests {
             let user = Users::new(&db)
                 .create(
                     &settings(),
-                    &NewUser::new("echo", "Echo", "hunter2", false).with_permissions(
+                    &NewUser::new("echo", "Echo", "hunter22", false).with_permissions(
                         UserPermissions {
                             acquire: true,
                             upload: true,
@@ -711,10 +760,10 @@ mod tests {
         let fixture = Fixture::new().await;
         let users = Users::new(&fixture.db);
 
-        let signed_in = verify_login(&users, "ECHO", "hunter2").await.unwrap();
+        let signed_in = verify_login(&users, "ECHO", "hunter22").await.unwrap();
         assert_eq!(signed_in.id, fixture.user.id);
 
-        for (username, password) in [("echo", "wrong"), ("nobody", "hunter2")] {
+        for (username, password) in [("echo", "wrong"), ("nobody", "hunter22")] {
             let error = verify_login(&users, username, password).await.unwrap_err();
             assert!(matches!(error, LoginError::WrongCredentials));
         }
@@ -723,7 +772,7 @@ mod tests {
             .disable(fixture.user.id)
             .await
             .unwrap();
-        let error = verify_login(&users, "echo", "hunter2").await.unwrap_err();
+        let error = verify_login(&users, "echo", "hunter22").await.unwrap_err();
         assert!(
             matches!(error, LoginError::WrongCredentials),
             "a disabled account answers like an unknown one"
@@ -745,11 +794,11 @@ mod tests {
 
         let error = fixture
             .authenticator
-            .login(ip, "echo", "hunter2")
+            .login(ip, "echo", "hunter22")
             .await
             .unwrap_err();
         assert!(
-            matches!(error, LoginError::RateLimited),
+            matches!(error, LoginError::RateLimited { .. }),
             "a correct login is refused once the address has spent its budget"
         );
 
@@ -760,7 +809,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             error,
-            ResolveError::Rejected(AuthenticationError::TooManyAttempts)
+            ResolveError::Rejected(AuthenticationError::TooManyAttempts { .. })
         ));
     }
 
@@ -801,7 +850,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             error,
-            ResolveError::Rejected(AuthenticationError::TooManyAttempts)
+            ResolveError::Rejected(AuthenticationError::TooManyAttempts { .. })
         ));
     }
 }

@@ -103,7 +103,9 @@ pub async fn login(
         Err(LoginError::WrongCredentials) => {
             return Err(Problem::unauthenticated("Wrong username or password."));
         }
-        Err(LoginError::RateLimited) => return Err(Problem::rate_limited()),
+        Err(LoginError::RateLimited { retry_after }) => {
+            return Err(Problem::rate_limited(retry_after));
+        }
         Err(LoginError::Internal(error)) => return Err(problem::internal("signing in", &error)),
     };
     let secure = request_is_https(

@@ -152,8 +152,10 @@ async fn list_users(context: &Context) -> anyhow::Result<()> {
 /// # Errors
 ///
 /// Returns an error when the account does not exist, when a permission name or
-/// a quota is not one the flags accept, when the password cannot be read, or
-/// when a write fails.
+/// a quota is not one the flags accept, when the password cannot be read or is
+/// shorter than 8 characters, when a write fails, or when disabling or demoting
+/// the account would leave no active administrator (the layer refuses it and
+/// nothing is written).
 async fn update_user(context: &Context, args: UpdateUserArgs) -> anyhow::Result<()> {
     let users = Users::new(context.database());
     let quotas = Quotas::new(context.database());
@@ -188,10 +190,17 @@ async fn update_user(context: &Context, args: UpdateUserArgs) -> anyhow::Result<
     }
     if args.password_stdin {
         let password = read_password(true)?;
-        users
-            .set_password(user.id, &password)
+        let revoked = users
+            .set_password(user.id, &password, None)
             .await
             .context("could not store the new password")?;
+        // The command line has no session, so every credential of the account
+        // goes: another session, an API key or an app password would otherwise
+        // keep working with the password the operator just replaced.
+        println!(
+            "revoked {} session(s), {} API key(s) and {} app password(s)",
+            revoked.sessions, revoked.api_keys, revoked.app_passwords
+        );
     }
 
     let mut quota = quotas
@@ -500,10 +509,11 @@ async fn find_user(context: &Context, username: &str) -> anyhow::Result<hearthso
 ///
 /// # Errors
 ///
-/// Returns an error when the password is empty, the two prompted values differ,
-/// or the terminal or standard input cannot be read.
+/// Returns an error when the password is empty, shorter than the eight
+/// characters every password write keeps, the two prompted values differ, or the
+/// terminal or standard input cannot be read.
 fn read_password(from_stdin: bool) -> anyhow::Result<String> {
-    if from_stdin {
+    let password = if from_stdin {
         let mut line = String::new();
         std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line)
             .context("could not read the password from standard input")?;
@@ -511,18 +521,27 @@ fn read_password(from_stdin: bool) -> anyhow::Result<String> {
         if password.is_empty() {
             bail!("the password read from standard input is empty");
         }
-        return Ok(password);
-    }
-
-    let password = rpassword::prompt_password("Password: ")
-        .context("could not read the password from the terminal")?;
-    if password.is_empty() {
-        bail!("the password is empty");
-    }
-    let repeated = rpassword::prompt_password("Repeat password: ")
-        .context("could not read the password from the terminal")?;
-    if password != repeated {
-        bail!("the two passwords do not match");
+        password
+    } else {
+        let password = rpassword::prompt_password("Password: ")
+            .context("could not read the password from the terminal")?;
+        if password.is_empty() {
+            bail!("the password is empty");
+        }
+        let repeated = rpassword::prompt_password("Repeat password: ")
+            .context("could not read the password from the terminal")?;
+        if password != repeated {
+            bail!("the two passwords do not match");
+        }
+        password
+    };
+    // The rule every password write keeps, checked before anything is written,
+    // so the operator learns it from this command rather than from a refusal
+    // after the rest of the command has already run.
+    if let Err(hearthsound_auth::AuthError::InvalidPassword { .. }) =
+        hearthsound_auth::validate_password(&password)
+    {
+        bail!("the password is at least 8 characters long");
     }
     Ok(password)
 }

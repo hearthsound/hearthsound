@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE app_passwords SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "af034941be568fbbb9d307404a85b4ac34e67bad6a6dc8563824aa26d5d8edfa"
+}
