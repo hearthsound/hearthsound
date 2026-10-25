@@ -974,3 +974,57 @@ fn approved_permissions(plugin: &PluginRow) -> Result<Permissions, String> {
         None => Ok(Permissions::default()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use hearthsound_config::secret::SecretKey;
+    use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore};
+    use hearthsound_db::{Database, MIGRATOR};
+
+    use super::*;
+
+    /// Builds a registry over a migrated temporary database.
+    async fn registry() -> (Arc<Database>, ProviderRegistry) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hearthsound.db");
+        let database = Database::open(&path).await.unwrap();
+        MIGRATOR.run(database.writer()).await.unwrap();
+        let database = Arc::new(database);
+        let settings = Arc::new(
+            SettingsStore::resolve(&SettingsRegistry::builtin(), &SettingSources::default())
+                .unwrap(),
+        );
+        let host = Arc::new(
+            PluginHost::new(dir.path().join("plugins"), settings, Arc::clone(&database)).unwrap(),
+        );
+        let registry = ProviderRegistry::new(
+            host,
+            PluginRepository::new(&database),
+            SecretKey::generate().secret_box(),
+        );
+        // The fixture directory must outlive the call.
+        std::mem::forget(dir);
+        (database, registry)
+    }
+
+    #[tokio::test]
+    async fn a_failed_rebuild_leaves_the_registry_marked_stale() {
+        let (database, registry) = registry().await;
+
+        // A registry is stale until it has been built once.
+        assert!(registry.is_stale());
+        assert!(registry.rebuild_or_mark_stale().await.is_ok());
+        assert!(!registry.is_stale());
+
+        // A rebuild that cannot read the tables is reported and leaves the
+        // previous entries in place, with the flag set so the caller retries.
+        sqlx::query("DROP TABLE provider_instances")
+            .execute(database.writer())
+            .await
+            .unwrap();
+        assert!(registry.rebuild_or_mark_stale().await.is_err());
+        assert!(registry.is_stale());
+    }
+}

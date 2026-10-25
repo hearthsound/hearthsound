@@ -603,3 +603,114 @@ async fn an_update_that_echoes_the_placeholder_keeps_the_secret() {
     assert_eq!(results.tracks.len(), 1);
     assert_eq!(results.tracks[0].title, "Remote Song");
 }
+
+/// A configuration an older plugin version left in the clear is sealed by the
+/// next rebuild, so a plugin that starts marking a field `writeOnly` needs no
+/// operator step.
+#[tokio::test]
+async fn a_plaintext_secret_is_sealed_by_the_registry_rebuild() {
+    let env = Env::new().await;
+    env.install(HTTP_CATALOG).await;
+
+    // A row written before the manifest marked `url` write-only: the plugin is
+    // configured, and the value sits in the column as plain JSON.
+    let plain = json!({
+        "url": "http://127.0.0.1:9/search",
+        "coverUrl": "http://127.0.0.1:9/cover"
+    });
+    env.repository
+        .insert_instance(&hearthsound_plugin_host::InstanceRow {
+            id: uuid::Uuid::now_v7(),
+            plugin_id: HTTP_CATALOG_ID.to_owned(),
+            slug: "legacy".to_owned(),
+            display_name: "legacy".to_owned(),
+            server_config: Some(plain.to_string()),
+            host_config: None,
+            enabled: true,
+            health: None,
+            created_at: 1_700_000_000_000,
+            updated_at: 1_700_000_000_000,
+        })
+        .await
+        .unwrap();
+
+    let registry = env.registry();
+    let report = registry.rebuild().await.unwrap();
+    assert_eq!(report.resealed, 1, "the write-only field was not sealed");
+
+    let stored = row(&env, "legacy").await.server_config.unwrap();
+    assert!(
+        stored.contains("$secret"),
+        "the secret is not sealed: {stored}"
+    );
+    assert!(
+        !stored.contains("127.0.0.1:9/search"),
+        "the plaintext survived: {stored}"
+    );
+
+    // Every read masks it, and the field that was never a secret is untouched.
+    let view = env.service().get("legacy").await.unwrap();
+    assert_eq!(view.server_config["url"], json!(SECRET_PLACEHOLDER));
+    assert_eq!(
+        view.server_config["coverUrl"],
+        json!("http://127.0.0.1:9/cover")
+    );
+
+    // Idempotent: a second rebuild finds nothing left in the clear and leaves
+    // the row byte for byte as it is.
+    let before = row(&env, "legacy").await.server_config.unwrap();
+    assert_eq!(registry.rebuild().await.unwrap().resealed, 0);
+    assert_eq!(row(&env, "legacy").await.server_config.unwrap(), before);
+}
+
+/// The host signals an instance it disabled itself, and the registry that is
+/// rebuilt from that signal no longer serves it.
+#[tokio::test]
+async fn a_disabled_instance_is_signalled_so_the_registry_can_be_rebuilt() {
+    let env = Env::new().await;
+    env.install(SPIN_CATALOG).await;
+    let service = env.service();
+    service
+        .create(&spec("spin", SPIN_ID, json!({})))
+        .await
+        .unwrap();
+    service
+        .set_layer(Layer::Catalog, &["spin".to_owned()])
+        .await
+        .unwrap();
+
+    let mut disabled = env.host.subscribe_instance_disabled();
+    let registry = env.registry();
+    registry.rebuild().await.unwrap();
+    let provider = registry
+        .layers(Layer::Catalog)
+        .into_iter()
+        .next()
+        .unwrap()
+        .catalog()
+        .unwrap()
+        .clone();
+
+    for attempt in 0..5 {
+        assert_eq!(
+            provider.search(&query("anything")).await,
+            Err(ProviderError::Internal),
+            "call {attempt} should have trapped"
+        );
+    }
+
+    let signalled = tokio::time::timeout(Duration::from_secs(5), disabled.recv())
+        .await
+        .expect("the disable was never signalled")
+        .unwrap();
+    assert_eq!(signalled.as_str(), "spin");
+
+    // What the reload worker does on the signal: the instance leaves every
+    // layer it served.
+    registry.rebuild().await.unwrap();
+    assert!(
+        registry.instance("spin").is_none(),
+        "the disabled instance is still served"
+    );
+    assert!(registry.layers(Layer::Catalog).is_empty());
+}

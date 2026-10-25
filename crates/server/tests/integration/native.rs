@@ -2348,6 +2348,199 @@ mod plugin_admin {
         fixture.stop().await;
     }
 
+    /// The id of the http catalog fixture, whose `url` field is `writeOnly`.
+    const HTTP_CATALOG_ID: &str = "com.example.http-catalog";
+
+    /// The archive of the http catalog fixture, as `cargo xtask fixtures` built it.
+    const HTTP_CATALOG_ARCHIVE: &str = "com.example.http-catalog-0.1.0.hsplugin";
+
+    /// Repacks the http catalog fixture with an edited manifest.
+    ///
+    /// The component is unchanged, so this is the "plugin released a schema that
+    /// rejects the stored value" case without a second fixture crate.
+    fn repack_with_schema(version: &str, edit: impl Fn(&mut Value)) -> Vec<u8> {
+        let source = std::fs::read(fixture_plugin(HTTP_CATALOG_ARCHIVE)).unwrap();
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(source)).expect("the fixture is an archive");
+        let mut manifest: Value = {
+            let mut file = archive.by_name("manifest.json").unwrap();
+            let mut text = String::new();
+            file.read_to_string(&mut text).unwrap();
+            serde_json::from_str(&text).unwrap()
+        };
+        let wasm = {
+            let mut file = archive.by_name("plugin.wasm").unwrap();
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).unwrap();
+            bytes
+        };
+        manifest["version"] = json!(version);
+        edit(&mut manifest);
+
+        let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        out.start_file("manifest.json", options).unwrap();
+        out.write_all(manifest.to_string().as_bytes()).unwrap();
+        out.start_file("plugin.wasm", options).unwrap();
+        out.write_all(&wasm).unwrap();
+        out.finish().unwrap().into_inner()
+    }
+
+    #[tokio::test]
+    async fn a_validation_detail_never_carries_a_restored_secret() {
+        let fixture = Fixture::new().await;
+
+        // The version in service accepts any string as the key.
+        let installed = upload(
+            &fixture,
+            &std::fs::read(fixture_plugin(HTTP_CATALOG_ARCHIVE)).unwrap(),
+        )
+        .await;
+        assert_eq!(installed.status(), StatusCode::CREATED);
+
+        let secret = "http://127.0.0.1:9/search";
+        let created = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/providers",
+            Some(json!({
+                "slug": "httpcat",
+                "pluginId": HTTP_CATALOG_ID,
+                "serverConfig": { "url": secret }
+            })),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        // The next version tightens the schema; the stored key no longer fits
+        // it, and the plugin is handed the key in the clear.
+        let upgraded = repack_with_schema("0.2.0", |manifest| {
+            manifest["config"]["server"]["schema"]["properties"]["url"]["minLength"] = json!(500);
+        });
+        let installed = upload(&fixture, &upgraded).await;
+        assert_eq!(installed.status(), StatusCode::CREATED);
+
+        // Echoing the placeholder restores the stored secret, which now fails
+        // the schema: the answer must name the field without the secret.
+        let patched = bearer(
+            &fixture,
+            reqwest::Method::PATCH,
+            "/api/v1/admin/providers/httpcat",
+            Some(json!({ "serverConfig": { "url": "[sealed]" } })),
+        )
+        .await;
+        let problem = assert_problem(
+            patched,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid-provider",
+        )
+        .await;
+        let detail = problem["detail"].as_str().unwrap();
+        assert!(detail.contains("url"), "{problem}");
+        assert!(detail.contains("[sealed]"), "{problem}");
+        assert!(!detail.contains(secret), "{problem}");
+
+        // The instance is untouched: the secret still works for the old schema.
+        let read = bearer(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/admin/providers/httpcat",
+            None,
+        )
+        .await;
+        let view = json(read).await;
+        assert_eq!(view["serverConfig"]["url"], "[sealed]");
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn an_unusable_repository_is_refused_before_it_is_fetched() {
+        let fixture = Fixture::new().await;
+
+        let bad_url = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugin-repositories",
+            Some(json!({ "url": "not a url" })),
+        )
+        .await;
+        let problem = assert_problem(bad_url, StatusCode::BAD_REQUEST, "invalid-request").await;
+        assert!(
+            problem["detail"].as_str().unwrap().contains("not a URL"),
+            "{problem}"
+        );
+
+        let bad_key = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugin-repositories",
+            Some(json!({
+                "url": "https://plugins.example.org/v1/index.json",
+                "publicKey": "abc"
+            })),
+        )
+        .await;
+        let problem = assert_problem(bad_key, StatusCode::BAD_REQUEST, "invalid-request").await;
+        assert!(
+            problem["detail"].as_str().unwrap().contains("minisign"),
+            "{problem}"
+        );
+
+        let valid = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/plugin-repositories",
+            Some(json!({ "url": "https://plugins.example.org/v1/index.json" })),
+        )
+        .await;
+        assert_eq!(valid.status(), StatusCode::CREATED);
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn the_reserved_import_root_id_is_refused_over_the_api() {
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        let signer = Signer::new();
+        let bytes = fixture_bytes();
+        serve_bytes(&server, ARCHIVE_PATH, bytes.clone()).await;
+        let archive = format!("{}{ARCHIVE_PATH}", server.uri());
+        let index = document(&[entry(
+            PLUGIN_ID,
+            true,
+            &[version("0.1.0", API, &archive, &bytes, json!({}))],
+        )]);
+        install_from_index(&fixture, &server, &signer, &index, None).await;
+
+        let response = bearer(
+            &fixture,
+            reqwest::Method::POST,
+            "/api/v1/admin/providers",
+            Some(json!({
+                "slug": "meta",
+                "pluginId": PLUGIN_ID,
+                "hostConfig": {
+                    "importRoots": [
+                        {"id": "staging", "path": "/tmp", "mode": "copy", "readOnly": false}
+                    ]
+                }
+            })),
+        )
+        .await;
+        let problem = assert_problem(
+            response,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid-provider",
+        )
+        .await;
+        assert!(
+            problem["detail"].as_str().unwrap().contains("reserved"),
+            "{problem}"
+        );
+        fixture.stop().await;
+    }
+
     #[tokio::test]
     async fn an_unreachable_index_is_reported_and_recorded() {
         let fixture = Fixture::new().await;

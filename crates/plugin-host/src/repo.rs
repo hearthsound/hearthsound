@@ -1454,3 +1454,43 @@ pub(crate) fn now_millis() -> i64 {
     let nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
     (nanos / 1_000_000) as i64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use minisign::KeyPair;
+
+    #[test]
+    fn a_repository_url_must_be_an_http_url_without_credentials() {
+        assert!(validate_repository("https://host/v1/index.json", None).is_ok());
+        assert!(validate_repository("http://host:8080/v1/index.json", None).is_ok());
+
+        for url in [
+            "not a url",
+            "ftp://host/index.json",
+            "https://user:pw@host/index.json",
+            "https://host/index.json#fragment",
+        ] {
+            let error = validate_repository(url, None).unwrap_err();
+            assert!(
+                matches!(error, RepoError::InvalidRepository { .. }),
+                "`{url}` was accepted or reported wrongly: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_repository_key_must_parse_as_minisign() {
+        let key = KeyPair::generate_unencrypted_keypair()
+            .unwrap()
+            .pk
+            .to_base64();
+        assert!(validate_repository("https://host/v1/index.json", Some(&key)).is_ok());
+
+        let error = validate_repository("https://host/v1/index.json", Some("abc")).unwrap_err();
+        assert!(
+            matches!(&error, RepoError::InvalidRepository { reason } if reason.contains("minisign")),
+            "{error}"
+        );
+    }
+}
