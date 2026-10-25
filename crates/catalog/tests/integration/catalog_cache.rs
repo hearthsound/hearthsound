@@ -284,3 +284,24 @@ async fn the_sweep_deletes_expired_rows_and_keeps_fresh_ones() {
     assert_eq!(deleted, 1);
     assert_eq!(count_cache_rows(&env.database).await, 2);
 }
+
+#[tokio::test]
+async fn a_cache_read_failure_is_a_miss() {
+    let (env, server) = http_env(ONE_TRACK).await;
+    // The persistent tier is unreadable, which is what a transient database
+    // fault looks like from the cache's side.
+    sqlx::query("DROP TABLE catalog_cache")
+        .execute(env.database.writer())
+        .await
+        .unwrap();
+
+    let results = env.service().search(&query("world")).await.unwrap();
+
+    assert_eq!(results.tracks.len(), 1);
+    assert_eq!(results.tracks[0].track.title, "Remote Song");
+    assert_eq!(
+        requests(&server).await,
+        1,
+        "an unreadable cache must not decide which provider answers"
+    );
+}

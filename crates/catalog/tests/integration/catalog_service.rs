@@ -239,7 +239,7 @@ async fn search_falls_back_when_the_primary_errors() {
 }
 
 #[tokio::test]
-async fn search_falls_back_when_the_primary_exceeds_its_deadline() {
+async fn a_slow_primary_spends_the_one_fan_out_deadline() {
     let (server, url) = catalog_endpoint(200, "[]", Some(Duration::from_secs(2))).await;
     let env = Env::new().await;
     env.instance(
@@ -264,16 +264,133 @@ async fn search_falls_back_when_the_primary_exceeds_its_deadline() {
     .await;
 
     let started = Instant::now();
-    let results = env.service().search(&query("world")).await.unwrap();
+    let error = env.service().search(&query("world")).await.unwrap_err();
     let elapsed = started.elapsed();
+
+    assert!(
+        matches!(&error, CatalogError::Unavailable { instance } if instance == "httpcat"),
+        "{error}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "the fan-out must cost one deadline, not one per instance: {elapsed:?}"
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_fast_failure_leaves_the_deadline_to_the_fallback() {
+    let (server, url) = catalog_endpoint(500, "", None).await;
+    let env = Env::new().await;
+    env.instance(
+        "httpcat",
+        HTTP_CATALOG,
+        HTTP_CATALOG_ID,
+        json!({"url": url}),
+    )
+    .await;
+    env.instance(
+        "hello",
+        HELLO_CATALOG,
+        HELLO_CATALOG_ID,
+        json!({"greeting": "Hi"}),
+    )
+    .await;
+    env.assign(Layer::Catalog, &["httpcat", "hello"]).await;
+    env.set(
+        keys::SEARCH_CATALOG_TIMEOUT_MS.name(),
+        SettingValue::Integer(2_000),
+    )
+    .await;
+
+    let results = env.service().search(&query("world")).await.unwrap();
 
     assert_eq!(results.source, Some(Slug::new("hello").unwrap()));
     assert_eq!(results.tracks.len(), 1);
-    assert!(
-        elapsed < Duration::from_secs(1),
-        "the fallback must not wait for the slow primary: {elapsed:?}"
-    );
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn an_artist_name_beyond_the_first_results_is_still_resolved() {
+    // The provider ranks three other artists named after the query above the
+    // exact match, which is what a search that only read its first page missed.
+    let body = json!({
+        "artists": [
+            { "id": "ar-1", "name": "Night Watch" },
+            { "id": "ar-2", "name": "Night Watch Tribute" },
+            { "id": "ar-3", "name": "The Night Watch Band" },
+            { "id": "ar-4", "name": "Nightwatch" },
+        ]
+    })
+    .to_string();
+    let (server, url) = catalog_endpoint(200, &body, None).await;
+    let env = Env::new().await;
+    env.instance(
+        "httpcat",
+        HTTP_CATALOG,
+        HTTP_CATALOG_ID,
+        json!({"url": url}),
+    )
+    .await;
+    env.assign(Layer::Catalog, &["httpcat"]).await;
+
+    let found = env
+        .service()
+        .artist_by_name("Nightwatch")
+        .await
+        .unwrap()
+        .expect("the exact match must be resolved");
+
+    assert_eq!(found.id.provider_id(), "ar-4");
+    assert_eq!(found.artist.name, "Nightwatch");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_failing_name_search_is_an_error_the_page_degrades() {
+    let (_server, url) = catalog_endpoint(500, "", None).await;
+    let env = Env::new().await;
+    env.instance(
+        "httpcat",
+        HTTP_CATALOG,
+        HTTP_CATALOG_ID,
+        json!({"url": url}),
+    )
+    .await;
+    env.assign(Layer::Catalog, &["httpcat"]).await;
+    let (_, _, artist) = env
+        .stored_album_with_track("Library Album", "Nobody In Particular", 2020)
+        .await;
+
+    let error = env
+        .service()
+        .artist_by_name("Nobody In Particular")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, CatalogError::Unavailable { .. }),
+        "an outage must not look like a missing artist: {error}"
+    );
+
+    let page = env
+        .service()
+        .artist_page(
+            &hearthsound_core::ClientId::Entity(artist),
+            &[hearthsound_library::query::Scope::server_for_principal(true)],
+            hearthsound_catalog::PageDepth::Full,
+        )
+        .await
+        .unwrap()
+        .expect("the page the library holds must still answer");
+    assert!(matches!(
+        page.head,
+        hearthsound_catalog::ArtistHead::Stored(id) if id == artist
+    ));
+    assert_eq!(
+        page.albums.len(),
+        1,
+        "the page answers the album the library holds and no catalog one"
+    );
 }
 
 #[tokio::test]

@@ -409,7 +409,19 @@ impl CatalogService {
         let Some(name) = name else {
             return Ok(None);
         };
-        let found = self.artist_by_name(&name.name).await?;
+        let found = match self.artist_by_name(&name.name).await {
+            Ok(found) => found,
+            Err(error) => {
+                // A browse page degrades to the library it holds: the page the
+                // caller asked for is answerable without the catalog.
+                tracing::warn!(
+                    %error,
+                    artist = %artist,
+                    "an artist could not be resolved by name"
+                );
+                return Ok(None);
+            }
+        };
         if let Some(found) = &found {
             self.record_alias(artist, EntityKind::Artist, &found.id)
                 .await;

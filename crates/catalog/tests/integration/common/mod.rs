@@ -266,6 +266,75 @@ impl Env {
             .unwrap()
     }
 
+    /// Stores an album with one available track and returns the album, the
+    /// track and the credited artist.
+    ///
+    /// The track carries a managed file, so the artist, the album and the track
+    /// are in every server scope: a page built over these rows answers from the
+    /// library instead of degrading to nothing.
+    ///
+    /// # Parameters
+    ///
+    /// - `title`: the album title.
+    /// - `artist`: the artist name.
+    /// - `year`: the release year.
+    ///
+    /// # Returns
+    ///
+    /// The album, the track and the artist ids, in that order.
+    pub async fn stored_album_with_track(
+        &self,
+        title: &str,
+        artist: &str,
+        year: i64,
+    ) -> (EntityId, EntityId, EntityId) {
+        use hearthsound_core::{Availability, StorageClass};
+        use hearthsound_library::{
+            AlbumInput, ArtistCredit, LibraryRepository, ManagedMediaFile, Origin, TrackInput,
+        };
+        let library = LibraryRepository::new(&self.database);
+        let mut input = AlbumInput::new(title, Origin::Local);
+        input.year = Some(year);
+        let album = library
+            .upsert_album(&input, &[ArtistCredit::new(artist, "main")])
+            .await
+            .unwrap();
+        let credited = library.list_album_artists(album).await.unwrap();
+        let artist_id = credited.first().unwrap().id;
+        let mut track = TrackInput::new(
+            format!("{title} Track"),
+            Origin::Local,
+            Availability::Local,
+        );
+        track.album_id = Some(album);
+        track.duration_ms = Some(180_000);
+        let track = library.insert_track(&track, &[], &[]).await.unwrap();
+        library
+            .insert_managed_media_file(&ManagedMediaFile {
+                track_id: track,
+                storage: StorageClass::Library,
+                rel_path: format!("{artist}/{title}/01.flac"),
+                size: 1_000,
+                mtime_ms: 1,
+                format: Some("flac".to_owned()),
+                codec: Some("flac".to_owned()),
+                bitrate_kbps: Some(900),
+                sample_rate: Some(44_100),
+                bit_depth: Some(16),
+                channels: Some(2),
+                duration_ms: Some(180_000),
+                lossless: Some(true),
+                quality_tier: None,
+                replaygain: None,
+                has_embedded_art: Some(false),
+                uploaded_by: None,
+                acquisition_id: None,
+            })
+            .await
+            .unwrap();
+        (album, track, artist_id)
+    }
+
     /// Returns the id of a configured instance.
     pub fn instance_id(&self, slug: &str) -> uuid::Uuid {
         self.registry.instance(slug).unwrap().id()

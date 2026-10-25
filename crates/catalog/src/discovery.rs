@@ -1030,9 +1030,20 @@ impl DiscoveryService {
                         .await?
                     };
                     if stored.is_empty() {
-                        match self.inner.catalog.artist_by_name(&artist.name).await? {
-                            Some(catalog) => self.catalog_albums(&catalog).await?,
-                            None => Vec::new(),
+                        // A shelf is an addition to a page the server can
+                        // already answer: a catalog that cannot resolve the
+                        // name leaves this artist out instead of failing it.
+                        match self.inner.catalog.artist_by_name(&artist.name).await {
+                            Ok(Some(catalog)) => self.catalog_albums(&catalog).await?,
+                            Ok(None) => Vec::new(),
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    artist = %artist.name,
+                                    "an artist could not be resolved for a discovery shelf"
+                                );
+                                Vec::new()
+                            }
                         }
                     } else {
                         stored.into_iter().map(ResolvedAlbum::Stored).collect()

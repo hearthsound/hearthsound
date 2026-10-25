@@ -191,7 +191,11 @@ struct Inner {
 const REFUSED_IMAGE_CAPACITY: u64 = 4_096;
 
 /// How many catalog results an artist name resolution reads.
-const ARTIST_RESOLUTION_LIMIT: u32 = 3;
+///
+/// The page size of one provider request, not a fan-out: a search that answers
+/// twenty-five artists costs what one that answers three costs, and an exact
+/// match that the provider ranks fourth or lower is still seen.
+const ARTIST_RESOLUTION_LIMIT: u32 = 25;
 
 /// How many artist name resolutions the service remembers.
 ///
@@ -431,9 +435,11 @@ impl CatalogService {
     /// still has a name to search by, and the catalog is what can name the rest
     /// of that artist's work.
     ///
-    /// The first search of one name is remembered for a day; a remembered
-    /// resolution that can no longer be read back is forgotten and searched
-    /// again.
+    /// The name is searched with the page size of one provider request, so an
+    /// exact match beyond the first few results is still found; this is a
+    /// resolution of one request, not a fan-out. The first search of one name is
+    /// remembered for a day; a remembered resolution that can no longer be read
+    /// back is forgotten and searched again.
     ///
     /// # Parameters
     ///
@@ -446,8 +452,9 @@ impl CatalogService {
     /// # Errors
     ///
     /// Returns [`CatalogError`] when a remembered resolution reports a failure
-    /// the layer raises; a search failure is logged and reported as `None`, so a
-    /// provider that cannot answer does not fail the page that asked.
+    /// the layer raises, and the mapped failure of a name search that failed: an
+    /// operator has to be able to tell an outage from "no such artist", and a
+    /// caller that only wants a page degrades the error to a page it can answer.
     ///
     /// # Examples
     ///
@@ -487,29 +494,36 @@ impl CatalogService {
             limit: ARTIST_RESOLUTION_LIMIT,
             offset: 0,
         };
-        match self.search(&query).await {
-            Ok(found) => {
-                let resolved = found
-                    .artists
-                    .into_iter()
-                    .find(|result| normalize(&result.artist.name) == wanted);
-                if let Some(resolved) = &resolved {
-                    self.inner
-                        .artist_resolutions
-                        .insert(wanted, resolved.id.clone())
-                        .await;
-                }
-                Ok(resolved)
-            }
+        let found = match self.search(&query).await {
+            Ok(found) => found,
             Err(error) => {
-                tracing::debug!(
-                    %error,
-                    name,
-                    "an artist could not be found in the catalog by name"
-                );
-                Ok(None)
+                if error.is_transient() {
+                    tracing::warn!(
+                        %error,
+                        name,
+                        "an artist could not be found in the catalog by name"
+                    );
+                } else {
+                    tracing::debug!(
+                        %error,
+                        name,
+                        "an artist could not be found in the catalog by name"
+                    );
+                }
+                return Err(error);
             }
+        };
+        let resolved = found
+            .artists
+            .into_iter()
+            .find(|result| normalize(&result.artist.name) == wanted);
+        if let Some(resolved) = &resolved {
+            self.inner
+                .artist_resolutions
+                .insert(wanted, resolved.id.clone())
+                .await;
         }
+        Ok(resolved)
     }
 
     /// Lists an artist's albums.
@@ -625,10 +639,14 @@ impl CatalogService {
     /// ISRC is never [`CatalogError::NotFound`].
     pub async fn lookup_isrc(&self, isrc: &str) -> Result<Vec<CatalogTrackResult>, CatalogError> {
         let timeout = catalog_timeout(&self.settings_snapshot())?;
+        let deadline = tokio::time::Instant::now() + timeout;
         let instances = self.inner.registry.layers(Layer::Catalog);
         let mut failure: Option<CatalogError> = None;
 
         for instance in instances {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
             let Some(provider) = instance.catalog() else {
                 continue;
             };
@@ -641,7 +659,7 @@ impl CatalogService {
                     ENTITY_CACHE_TTL,
                     async {
                         let outcome =
-                            tokio::time::timeout(timeout, provider.lookup_isrc(isrc)).await;
+                            tokio::time::timeout_at(deadline, provider.lookup_isrc(isrc)).await;
                         self.finish(instance.slug(), "lookup-isrc", outcome)
                     },
                 )
@@ -667,11 +685,15 @@ impl CatalogService {
     /// Searches the catalog layer.
     ///
     /// The query goes to the primary catalog instance first. A later instance is
-    /// tried only when the one before it failed or exceeded
-    /// `search.catalog.timeout_ms`, and the first answer wins: results from two
-    /// instances are never merged. The requested limit is capped by
-    /// `search.catalog.max_results`, so a client cannot make the server hold an
-    /// unbounded provider response.
+    /// tried only when the one before it failed, and the first answer wins:
+    /// results from two instances are never merged. The requested limit is
+    /// capped by `search.catalog.max_results`, so a client cannot make the
+    /// server hold an unbounded provider response.
+    ///
+    /// The whole fan-out shares one deadline, `search.catalog.timeout_ms`, the
+    /// value whose own description is "Catalog fan-out deadline": a layer of
+    /// three instances costs at most one budget, and an instance that is tried
+    /// after the deadline has passed is not tried at all.
     ///
     /// A disabled `search.catalog.enabled` short-circuits the whole call: no
     /// instance is contacted and the returned search is empty but successful,
@@ -706,10 +728,14 @@ impl CatalogService {
         }
 
         let timeout = catalog_timeout(&settings)?;
+        let deadline = tokio::time::Instant::now() + timeout;
         let instances = self.inner.registry.layers(Layer::Catalog);
         let mut failure: Option<CatalogError> = None;
 
         for instance in instances {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
             let Some(provider) = instance.catalog() else {
                 continue;
             };
@@ -721,7 +747,8 @@ impl CatalogService {
                     &RequestKey::search(&query),
                     SEARCH_CACHE_TTL,
                     async {
-                        let outcome = tokio::time::timeout(timeout, provider.search(&query)).await;
+                        let outcome =
+                            tokio::time::timeout_at(deadline, provider.search(&query)).await;
                         self.finish(instance.slug(), "search", outcome)
                     },
                 )

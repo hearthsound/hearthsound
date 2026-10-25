@@ -372,10 +372,14 @@ impl Cache {
     ///
     /// The cached response, or the response the call produced.
     ///
+    /// A cache tier that cannot be read is a miss, not a failure: a transient
+    /// `SQLITE_BUSY` on the cache table must not decide which provider answers a
+    /// request, because the next instance in the layer may describe a different
+    /// catalog. The read is logged and the call runs instead.
+    ///
     /// # Errors
     ///
-    /// Returns what `call` returns, and a read failure of the persistent tier.
-    /// A call that failed is not cached.
+    /// Returns what `call` returns. A failed call is not cached.
     pub(crate) async fn through<T, W, F>(
         &self,
         instance: Uuid,
@@ -387,7 +391,19 @@ impl Cache {
         W: Serialize + DeserializeOwned + for<'a> From<&'a T> + Into<T>,
         F: Future<Output = Result<T, CatalogError>>,
     {
-        if let Some(cached) = self.get::<W>(instance, key).await? {
+        let cached = match self.get::<W>(instance, key).await {
+            Ok(cached) => cached,
+            Err(error) => {
+                tracing::warn!(
+                    instance = %instance,
+                    request = key.as_str(),
+                    error = %error,
+                    "a cached catalog response could not be read; asking the provider"
+                );
+                None
+            }
+        };
+        if let Some(cached) = cached {
             return Ok(cached.into());
         }
         let value = call.await?;
