@@ -99,7 +99,7 @@ pub(crate) async fn decorate_with_scores(
     if members.is_empty() {
         return Ok(());
     }
-    apply_object(payload, &members);
+    apply_object(payload, &members, &PathContext::default());
     Ok(())
 }
 
@@ -608,15 +608,63 @@ fn collect_value(value: &Value, ids: &mut HashSet<String>) {
     }
 }
 
+/// The readable paths of the objects that enclose one object.
+///
+/// A payload does not always repeat what a child needs: a catalog artist's
+/// album listing is a list of titles with no credits, so an album object there
+/// cannot name the artist its path starts with. The enclosing object knows it,
+/// and a child inherits what its parent established.
+#[derive(Debug, Clone, Default)]
+struct PathContext {
+    /// The enclosing artist's segment.
+    artist: Option<String>,
+    /// The enclosing album's path, `artist/album`.
+    album: Option<String>,
+}
+
+impl PathContext {
+    /// Returns the context the children of an object are read in.
+    ///
+    /// An artist hands its own segment down and clears the album, because a
+    /// track nested in an album it lists belongs to that album, not to the
+    /// artist's page. An album hands its own path down.
+    ///
+    /// # Parameters
+    ///
+    /// - `object`: the object whose children are about to be decorated.
+    ///
+    /// # Returns
+    ///
+    /// The context the children inherit.
+    fn under(&self, object: &Object) -> PathContext {
+        match object_kind(object) {
+            Some(EntityKind::Artist) => PathContext {
+                artist: str_member(object, "name").map(segment),
+                album: None,
+            },
+            Some(EntityKind::Album) => {
+                let artist = credited_segment(object).or_else(|| self.artist.clone());
+                let album = match (&artist, album_title(object)) {
+                    (Some(artist), Some(title)) => Some(format!("{artist}/{}", segment(title))),
+                    _ => None,
+                };
+                PathContext { artist, album }
+            }
+            _ => self.clone(),
+        }
+    }
+}
+
 /// Appends the decorated `hearthsound` member to every matching object, depth first.
-fn apply_object(object: &mut Object, members: &HashMap<String, Object>) {
+fn apply_object(object: &mut Object, members: &HashMap<String, Object>, inherited: &PathContext) {
+    let own = inherited.under(object);
     for (_, value) in object.members_mut() {
-        apply_value(value, members);
+        apply_value(value, members, &own);
     }
     let Some(member) = id_of(object).and_then(|id| members.get(id)).cloned() else {
         return;
     };
-    let member = with_path(object, member);
+    let member = with_path(object, member, inherited);
     *object = std::mem::take(object).set("hearthsound", member);
 }
 
@@ -624,59 +672,94 @@ fn apply_object(object: &mut Object, members: &HashMap<String, Object>) {
 ///
 /// The path is read off the object itself, so a listing never pays for a
 /// lookup: an artist carries its segment, an album the artist's segment and its
-/// own, and a track the segments of its artist and its album. A name the object
-/// does not carry leaves the matching field out rather than inventing one.
+/// own, and a track the segments of its artist and its album. What the object
+/// does not carry is inherited from the object that encloses it, and a path
+/// nothing establishes is left out rather than invented.
 ///
 /// # Parameters
 ///
 /// - `object`: the payload object the member belongs to.
 /// - `member`: the member built from the entity's standing.
+/// - `inherited`: the paths the enclosing objects established.
 ///
 /// # Returns
 ///
 /// The member, with `path` on an artist and an album and `artistPath` and
 /// `albumPath` on a track.
-fn with_path(object: &Object, member: Object) -> Object {
-    let Some(id) = id_of(object) else {
-        return member;
-    };
-    let kind = match ClientId::parse(id) {
-        Ok(ClientId::Entity(entity)) => entity.kind().entity_kind(),
-        Ok(ClientId::Catalog(catalog)) => Some(catalog.kind()),
-        Err(_) => None,
-    };
-    match kind {
+fn with_path(object: &Object, member: Object, inherited: &PathContext) -> Object {
+    match object_kind(object) {
         Some(EntityKind::Artist) => match str_member(object, "name") {
             Some(name) => member.set("path", segment(name)),
             None => member,
         },
         Some(EntityKind::Album) => {
-            let title = str_member(object, "name").or_else(|| str_member(object, "title"));
-            let artist = first_name(object, "artists").or_else(|| str_member(object, "artist"));
-            match (title, artist) {
-                (Some(title), Some(artist)) => {
-                    member.set("path", format!("{}/{}", segment(artist), segment(title)))
+            let artist = credited_segment(object).or_else(|| inherited.artist.clone());
+            match (artist, album_title(object)) {
+                (Some(artist), Some(title)) => {
+                    member.set("path", format!("{artist}/{}", segment(title)))
                 }
                 _ => member,
             }
         }
         Some(EntityKind::Track) => {
-            let artist = first_name(object, "artists").or_else(|| str_member(object, "artist"));
-            let album_artist = first_name(object, "albumArtists").or(artist);
             let mut member = member;
-            if let Some(artist) = artist {
-                member = member.set("artistPath", segment(artist));
+            if let Some(artist) = credited_segment(object).or_else(|| inherited.artist.clone()) {
+                member = member.set("artistPath", artist);
             }
-            if let (Some(album), Some(album_artist)) = (str_member(object, "album"), album_artist) {
-                member = member.set(
-                    "albumPath",
-                    format!("{}/{}", segment(album_artist), segment(album)),
-                );
+            if let Some(album) = track_album_path(object).or_else(|| inherited.album.clone()) {
+                member = member.set("albumPath", album);
             }
             member
         }
         _ => member,
     }
+}
+
+/// The entity kind an object's id names, when it names one of the decorable
+/// kinds.
+///
+/// # Parameters
+///
+/// - `object`: the payload object.
+fn object_kind(object: &Object) -> Option<EntityKind> {
+    match ClientId::parse(id_of(object)?) {
+        Ok(ClientId::Entity(entity)) => entity.kind().entity_kind(),
+        Ok(ClientId::Catalog(catalog)) => Some(catalog.kind()),
+        Err(_) => None,
+    }
+}
+
+/// The album's title, as an album object spells it.
+///
+/// # Parameters
+///
+/// - `object`: the album object.
+fn album_title(object: &Object) -> Option<&str> {
+    str_member(object, "name").or_else(|| str_member(object, "title"))
+}
+
+/// The segment of the first artist an artist or album object credits.
+///
+/// # Parameters
+///
+/// - `object`: the artist or album object.
+fn credited_segment(object: &Object) -> Option<String> {
+    first_name(object, "artists")
+        .or_else(|| str_member(object, "artist"))
+        .map(segment)
+}
+
+/// The album path a track object carries, `artist/album`.
+///
+/// # Parameters
+///
+/// - `object`: the track object.
+fn track_album_path(object: &Object) -> Option<String> {
+    let album = str_member(object, "album")?;
+    let artist = first_name(object, "albumArtists")
+        .or_else(|| first_name(object, "artists"))
+        .or_else(|| str_member(object, "artist"))?;
+    Some(format!("{}/{}", segment(artist), segment(album)))
 }
 
 /// The non-empty string member of an object, when it has one.
@@ -713,14 +796,130 @@ fn id_of(object: &Object) -> Option<&str> {
 }
 
 /// Decorates the objects nested in one value.
-fn apply_value(value: &mut Value, members: &HashMap<String, Object>) {
+fn apply_value(value: &mut Value, members: &HashMap<String, Object>, inherited: &PathContext) {
     match value {
-        Value::Object(object) => apply_object(object, members),
+        Value::Object(object) => apply_object(object, members, inherited),
         Value::Array(array) => {
             for value in array.values_mut() {
-                apply_value(value, members);
+                apply_value(value, members, inherited);
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value::Array;
+
+    /// The member of the given ids, all with the same standing.
+    ///
+    /// # Parameters
+    ///
+    /// - `ids`: the ids the payload carries.
+    fn members(ids: &[&str]) -> HashMap<String, Object> {
+        ids.iter()
+            .map(|id| ((*id).to_owned(), Object::new().set("inLibrary", true)))
+            .collect()
+    }
+
+    /// Returns the first object of a member, whether it is an object or a list.
+    ///
+    /// # Parameters
+    ///
+    /// - `object`: the object to read.
+    /// - `name`: the member's name.
+    fn only<'a>(object: &'a Object, name: &str) -> &'a Object {
+        let Some(value) = object
+            .members()
+            .iter()
+            .find(|(key, _)| key.as_ref() == name)
+            .map(|(_, value)| value)
+        else {
+            panic!("the payload has no {name} member");
+        };
+        match value {
+            Value::Object(nested) => nested,
+            Value::Array(items) => match items.values().first() {
+                Some(Value::Object(first)) => first,
+                _ => panic!("the first item of {name} is not an object"),
+            },
+            _ => panic!("the member {name} is neither an object nor a list"),
+        }
+    }
+
+    /// Returns the `hearthsound` member of an object.
+    ///
+    /// # Parameters
+    ///
+    /// - `object`: the decorated object.
+    fn attached(object: &Object) -> &Object {
+        let Some(Value::Object(member)) = object
+            .members()
+            .iter()
+            .find(|(key, _)| key.as_ref() == "hearthsound")
+            .map(|(_, value)| value)
+        else {
+            panic!("the object carries no hearthsound member");
+        };
+        member
+    }
+
+    #[test]
+    fn an_album_without_credits_inherits_the_artist_path() {
+        let album = Object::new()
+            .set("id", "x_deezer_a_d1jprv3f5ngprrkndmpk2")
+            .set("name", "KID A MNESIA");
+        let artist = Object::new()
+            .set("id", "x_deezer_r_d1jprv3f5ngq4x39edt2tc8")
+            .set("name", "Radiohead")
+            .set("album", Array::new([album]));
+        let mut payload = Object::new().set("artist", artist);
+        apply_object(
+            &mut payload,
+            &members(&[
+                "x_deezer_r_d1jprv3f5ngq4x39edt2tc8",
+                "x_deezer_a_d1jprv3f5ngprrkndmpk2",
+            ]),
+            &PathContext::default(),
+        );
+
+        let artist = only(&payload, "artist");
+        assert_eq!(str_member(attached(artist), "path"), Some("radiohead"));
+        let album = only(artist, "album");
+        assert_eq!(
+            str_member(attached(album), "path"),
+            Some("radiohead/kid-a-mnesia"),
+            "the listing carries no credits, so the album takes the artist's segment"
+        );
+    }
+
+    #[test]
+    fn a_track_inherits_the_album_and_artist_it_sits_under() {
+        let song = Object::new()
+            .set("id", "x_deezer_t_d1jprv3f5nt74rb3dcpk2")
+            .set("title", "Everything in Its Right Place");
+        let credit = Object::new().set("name", "Radiohead");
+        let album = Object::new()
+            .set("id", "x_deezer_a_d1jprv3f5ngprrkndmpk2")
+            .set("name", "Kid A")
+            .set("artists", Array::new([credit]))
+            .set("song", Array::new([song]));
+        let mut payload = Object::new().set("album", album);
+        apply_object(
+            &mut payload,
+            &members(&[
+                "x_deezer_a_d1jprv3f5ngprrkndmpk2",
+                "x_deezer_t_d1jprv3f5nt74rb3dcpk2",
+            ]),
+            &PathContext::default(),
+        );
+
+        let album = only(&payload, "album");
+        let song = only(album, "song");
+        let member = attached(song);
+        assert_eq!(str_member(member, "artistPath"), Some("radiohead"));
+        assert_eq!(str_member(member, "albumPath"), Some("radiohead/kid-a"));
     }
 }
