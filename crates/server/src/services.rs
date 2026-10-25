@@ -749,6 +749,11 @@ impl Services {
             maintainer: Arc::clone(&self.maintainer),
             uploads: self.uploads.clone(),
             uploads_staging: self.config.paths.uploads_staging.clone(),
+            paths: hearthsound_library::folders::ServerPaths {
+                data: self.config.paths.data.clone(),
+                storage: self.config.paths.storage.clone(),
+                database: self.config.database.path.clone(),
+            },
             scanner: Arc::clone(&self.scanner),
             jobs: Arc::clone(&self.queue),
             watcher: Arc::clone(&self.watcher),

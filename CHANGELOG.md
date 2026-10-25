@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A folder's last scan always ends with one terminal `scan.progress` event:
   `done` when it finished, with `error` when it finished with a problem, and
   `failed` when it did not finish.
+- A library folder can no longer be `/`, the server's data or storage directory,
+  the database file, a directory that contains one of them, or a directory inside
+  them; the refusal names the protected path, from the API and from `hearthsound
+  admin add-folder` alike.
 - Scans follow symlinks inside a folder, including links out of it, and skip a
   directory the walk already visited so a link cycle cannot loop. A file whose
   name is not valid UTF-8 is skipped instead of being stored lossily.

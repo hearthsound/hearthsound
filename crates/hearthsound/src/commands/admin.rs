@@ -15,6 +15,7 @@ use hearthsound_auth::{
 };
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_library::LibraryRepository;
+use hearthsound_library::folders::check_folder_path;
 
 use crate::cli::{
     AddFolderArgs, AdminArgs, AdminCommand, CreateCredentialArgs, CreateUserArgs,
@@ -391,9 +392,11 @@ async fn add_folder(context: &Context, args: AddFolderArgs) -> anyhow::Result<()
         Some(username) => Some(find_user(context, username).await?.id),
         None => None,
     };
+    let path = check_folder_path(&args.path, &context.server_paths())
+        .map_err(|rejection| anyhow::anyhow!(rejection))?;
     let repository = LibraryRepository::new(context.database());
     let folder = repository
-        .add_library_folder(&args.path, owner)
+        .add_library_folder(&path, owner)
         .await
         .with_context(|| format!("could not add {}", args.path.display()))?;
     repository

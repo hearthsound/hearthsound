@@ -14,6 +14,7 @@ use hearthsound_config::settings::Settings;
 use hearthsound_core::events::EventBus;
 use hearthsound_db::Database;
 use hearthsound_jobs::JobQueue;
+use hearthsound_library::folders::ServerPaths;
 use hearthsound_library::maintenance::StorageMaintainer;
 use hearthsound_library::scan::LibraryScanner;
 use hearthsound_library::upload::UploadIngest;
@@ -69,6 +70,9 @@ pub struct NativeServices {
     pub uploads: UploadIngest,
     /// `<storage>/uploads-staging`, where an upload is written before ingest.
     pub uploads_staging: PathBuf,
+    /// The server's own files and directories, which a library folder may not
+    /// be, contain, or sit inside.
+    pub paths: ServerPaths,
     /// The library scanner.
     pub scanner: Arc<LibraryScanner>,
     /// The job queue scans are enqueued on.
@@ -169,6 +173,14 @@ impl NativeState {
     /// Returns the open database.
     pub fn database(&self) -> &Database {
         &self.inner.services.database
+    }
+
+    /// Returns the server's own files and directories.
+    ///
+    /// The folder routes check a new path against them, so a folder can never
+    /// be the data directory, contain it, or sit inside it.
+    pub fn paths(&self) -> &ServerPaths {
+        &self.inner.services.paths
     }
 
     /// Returns the settings service.

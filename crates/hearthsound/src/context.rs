@@ -22,6 +22,7 @@ use hearthsound_config::secret::{SecretBox, SecretKey};
 use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingSources, SettingsRegistry};
 use hearthsound_db::{Database, MIGRATOR, MigrationOutcome};
+use hearthsound_library::folders::ServerPaths;
 use hearthsound_plugin_host::instances::InstanceService;
 use hearthsound_plugin_host::{
     IndexClient, PluginAdmin, PluginHost, PluginInstaller, PluginRepository,
@@ -151,6 +152,18 @@ impl Context {
     /// Returns the runtime settings service.
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// Returns the server's own files and directories.
+    ///
+    /// A library folder may not be one of them, contain one, or sit inside one,
+    /// so the folder commands check a path against them before storing it.
+    pub fn server_paths(&self) -> ServerPaths {
+        ServerPaths {
+            data: self.config.paths.data.clone(),
+            storage: self.config.paths.storage.clone(),
+            database: self.config.database.path.clone(),
+        }
     }
 
     /// Returns the directory the installed plugin trees live under.

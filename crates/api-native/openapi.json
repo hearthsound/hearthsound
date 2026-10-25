@@ -269,7 +269,7 @@
           "admin"
         ],
         "summary": "Adds a library folder, owned by one account or generic, and scans it.",
-        "description": "# Errors\n\nAnswers `invalid-request` when neither or both of `owner` and `generic` are\nnamed, the owner is unknown, or the path is not an absolute existing\ndirectory, and `conflict` when the folder is already added.",
+        "description": "# Errors\n\nAnswers `invalid-request` when neither or both of `owner` and `generic` are\nnamed, the owner is unknown, the path is not an absolute existing directory,\nor the path is `/`, is one of the server's own files or directories, contains\none, or sits inside one; and `conflict` when the folder is already added.",
         "operationId": "create_folder",
         "requestBody": {
           "content": {

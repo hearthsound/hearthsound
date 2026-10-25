@@ -239,8 +239,9 @@ pub async fn list_folders(
 /// # Errors
 ///
 /// Answers `invalid-request` when neither or both of `owner` and `generic` are
-/// named, the owner is unknown, or the path is not an absolute existing
-/// directory, and `conflict` when the folder is already added.
+/// named, the owner is unknown, the path is not an absolute existing directory,
+/// or the path is `/`, is one of the server's own files or directories, contains
+/// one, or sits inside one; and `conflict` when the folder is already added.
 #[utoipa::path(
     post,
     path = "/api/v1/admin/folders",
@@ -270,6 +271,10 @@ pub async fn create_folder(
         return Err(Problem::invalid_request("The path must be absolute."));
     }
     let canonical = canonical_directory(&path)?;
+    // A folder that is, contains, or sits inside the server's own files would
+    // index the database, the artwork or the plugin files.
+    let canonical = hearthsound_library::folders::check_folder_path(&canonical, state.paths())
+        .map_err(|rejection| Problem::invalid_request(rejection.to_string()))?;
     let library = LibraryRepository::new(state.database());
     let known = library
         .list_library_folders()

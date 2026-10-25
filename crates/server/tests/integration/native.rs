@@ -3553,3 +3553,63 @@ async fn a_folder_reports_a_scan_that_refused_to_prune() {
 
     fixture.stop().await;
 }
+
+/// A folder that would scan the server's own files is refused.
+///
+/// The data directory holds the database, the artwork and the plugin files, and
+/// `/` holds everything, so neither is a music folder the server should index.
+#[tokio::test]
+async fn a_folder_cannot_be_or_contain_the_servers_own_paths() {
+    let fixture = Fixture::new().await;
+    let data = fixture.services.config().paths.data.clone();
+    let inside = data.join("music");
+    std::fs::create_dir_all(&inside).unwrap();
+
+    let root = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/folders",
+        Some(serde_json::json!({ "path": "/", "generic": true })),
+    )
+    .await;
+    assert_eq!(root.status(), StatusCode::BAD_REQUEST);
+    let problem = json(root).await;
+    assert_eq!(problem["code"], "invalid-request");
+    assert_eq!(
+        problem["detail"],
+        "`/` cannot be a library folder: it would scan the whole server filesystem. Choose the \
+         directory that holds your music."
+    );
+
+    let inner = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/folders",
+        Some(serde_json::json!({ "path": inside, "generic": true })),
+    )
+    .await;
+    assert_eq!(inner.status(), StatusCode::BAD_REQUEST);
+    let problem = json(inner).await;
+    assert_eq!(problem["code"], "invalid-request");
+    assert_eq!(
+        problem["detail"],
+        format!(
+            "`{}` is inside `{}`, which the server uses for its own data directory. Choose a \
+             directory outside it.",
+            inside.canonicalize().unwrap().display(),
+            data.canonicalize().unwrap().display()
+        )
+    );
+
+    let own = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/folders",
+        Some(serde_json::json!({ "path": data, "generic": true })),
+    )
+    .await;
+    assert_eq!(own.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json(own).await["code"], "invalid-request");
+
+    fixture.stop().await;
+}
