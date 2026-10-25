@@ -638,12 +638,10 @@ impl CatalogService {
             .albums
             .into_iter()
             .filter_map(|album| match album {
-                PageAlbum::Stored(id) => {
-                    titles.remove(&id).map(|title| ListingAlbum {
-                        id: ClientId::Entity(id),
-                        title,
-                    })
-                }
+                PageAlbum::Stored(id) => titles.remove(&id).map(|title| ListingAlbum {
+                    id: ClientId::Entity(id),
+                    title,
+                }),
                 PageAlbum::Catalog(reference) => Some(ListingAlbum {
                     id: ClientId::Catalog(reference.id),
                     title: reference.album.title,
@@ -743,18 +741,20 @@ impl CatalogService {
                 )
                 .await?;
             let placed = match aliased {
-                Some(row) => candidates
-                    .iter()
-                    .position(|candidate| candidate.stored == Some(row) && candidate.catalog.is_none()),
-                None => candidates.iter().position(|candidate| match candidate.stored {
-                    Some(stored) => {
-                        candidate.catalog.is_none()
-                            && !claimed
-                                .get(&stored)
-                                .is_some_and(|slugs| slugs.contains(hit.id.slug()))
-                    }
-                    None => false,
+                Some(row) => candidates.iter().position(|candidate| {
+                    candidate.stored == Some(row) && candidate.catalog.is_none()
                 }),
+                None => candidates
+                    .iter()
+                    .position(|candidate| match candidate.stored {
+                        Some(stored) => {
+                            candidate.catalog.is_none()
+                                && !claimed
+                                    .get(&stored)
+                                    .is_some_and(|slugs| slugs.contains(hit.id.slug()))
+                        }
+                        None => false,
+                    }),
             };
             match placed {
                 Some(index) => candidates[index].catalog = Some(hit),
@@ -903,12 +903,12 @@ mod tests {
             vec!["weezer", "weezer--2", "pinkerton"]
         );
         assert_eq!(
-            assign_segments(["Third Single", "First Light", "Second Wind (Remastered 2009)"]),
-            vec![
-                "third-single",
-                "first-light",
-                "second-wind-remastered-2009"
-            ]
+            assign_segments([
+                "Third Single",
+                "First Light",
+                "Second Wind (Remastered 2009)"
+            ]),
+            vec!["third-single", "first-light", "second-wind-remastered-2009"]
         );
         assert!(assign_segments(Vec::<&str>::new()).is_empty());
     }
@@ -916,17 +916,11 @@ mod tests {
     #[test]
     fn an_id_names_its_kind() {
         let artist = EntityId::new(IdPrefix::Artist);
-        assert_eq!(
-            kind_of(&ClientId::Entity(artist)),
-            Some(EntityKind::Artist)
-        );
+        assert_eq!(kind_of(&ClientId::Entity(artist)), Some(EntityKind::Artist));
         let track = EntityId::new(IdPrefix::Track);
         assert_eq!(kind_of(&ClientId::Entity(track)), None);
         let slug = Slug::new("deezer").unwrap();
         let album = CatalogId::new(slug, EntityKind::Album, "1").unwrap();
-        assert_eq!(
-            kind_of(&ClientId::Catalog(album)),
-            Some(EntityKind::Album)
-        );
+        assert_eq!(kind_of(&ClientId::Catalog(album)), Some(EntityKind::Album));
     }
 }

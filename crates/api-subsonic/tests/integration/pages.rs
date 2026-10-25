@@ -422,22 +422,24 @@ async fn an_artist_path_names_the_library_artist() {
 #[tokio::test]
 async fn an_album_path_names_the_album_the_artist_page_lists() {
     let seed = seeded().await;
-    let stored = resolve_path(
-        &seed.fixture,
-        "artist=discography-artist&album=second-wind",
-    )
-    .await;
+    let stored = resolve_path(&seed.fixture, "artist=discography-artist&album=second-wind").await;
     assert_eq!(stored["type"].as_str(), Some("album"));
     assert_eq!(
         stored["id"].as_str(),
         Some(seed.second_wind.to_string().as_str())
     );
-    assert_eq!(stored["path"].as_str(), Some("discography-artist/second-wind"));
+    assert_eq!(
+        stored["path"].as_str(),
+        Some("discography-artist/second-wind")
+    );
 
     let catalog = resolve_path(&seed.fixture, "artist=discography-artist&album=first-light").await;
     let first_light = catalog_id(EntityKind::Album, "disco-album-1");
     assert_eq!(catalog["id"].as_str(), Some(first_light.as_str()));
-    assert_eq!(catalog["path"].as_str(), Some("discography-artist/first-light"));
+    assert_eq!(
+        catalog["path"].as_str(),
+        Some("discography-artist/first-light")
+    );
 
     let basement = resolve_path(
         &seed.fixture,
@@ -564,7 +566,10 @@ async fn a_member_carries_the_readable_path() {
     let seed = seeded().await;
     let body = artist_page(&seed.fixture, &seed.artist.to_string(), true).await;
     let artist = &body["subsonic-response"]["artist"];
-    assert_eq!(artist["hearthsound"]["path"].as_str(), Some("discography-artist"));
+    assert_eq!(
+        artist["hearthsound"]["path"].as_str(),
+        Some("discography-artist")
+    );
     let first_light = &artist["album"][0];
     assert_eq!(
         first_light["hearthsound"]["path"].as_str(),

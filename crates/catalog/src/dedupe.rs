@@ -505,7 +505,11 @@ impl CatalogService {
                 if title_match(&stored.album, &hit.album.title).is_none() {
                     continue;
                 }
-                let credit = hit.album.artists.first().map(|credit| normalize(&credit.name));
+                let credit = hit
+                    .album
+                    .artists
+                    .first()
+                    .map(|credit| normalize(&credit.name));
                 if credit.as_deref() != Some(artist.as_str()) {
                     continue;
                 }
@@ -561,10 +565,7 @@ impl CatalogService {
     /// # Errors
     ///
     /// Returns [`CatalogError::Database`] when a read fails.
-    async fn stored_album(
-        &self,
-        entity: EntityId,
-    ) -> Result<Option<StoredAlbum>, CatalogError> {
+    async fn stored_album(&self, entity: EntityId) -> Result<Option<StoredAlbum>, CatalogError> {
         let mut conn = self.database().readers().acquire().await?;
         let Some(album) = albums::get_album(&mut conn, entity).await? else {
             return Ok(None);

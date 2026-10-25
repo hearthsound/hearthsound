@@ -662,8 +662,7 @@ fn with_path(object: &Object, member: Object) -> Object {
         }
         Some(EntityKind::Track) => {
             let artist = first_name(object, "artists").or_else(|| str_member(object, "artist"));
-            let album_artist =
-                first_name(object, "albumArtists").or(artist);
+            let album_artist = first_name(object, "albumArtists").or(artist);
             let mut member = member;
             if let Some(artist) = artist {
                 member = member.set("artistPath", segment(artist));
