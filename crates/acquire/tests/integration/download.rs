@@ -386,3 +386,161 @@ async fn an_interactive_request_preempts_a_bulk_download() {
     assert_eq!(bulk.state, AcquisitionState::Completed);
     assert_eq!(bulk.failure_reason, None);
 }
+
+#[tokio::test]
+async fn a_trickling_transfer_is_abandoned_at_its_deadline() {
+    let trickle = config(one_candidate(), "trickle", 0, "downloads", ".flac");
+    let env = Env::new(
+        trickle,
+        InstanceLimits::default(),
+        &[("HEARTHSOUND__ACQUISITION__ATTEMPT_TIMEOUT_SECS", "1")],
+    )
+    .await;
+    place_download(&env, "01 - Hello Song.flac").await;
+    let healthy = config(one_candidate(), "normal", 0, "downloads", ".flac");
+    env.add_instance("healthy", healthy).await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    env.start();
+
+    // Bulk work searches every instance, so the plan holds the trickling
+    // candidate first and the healthy one behind it.
+    let handle = request(&env, track, Priority::Background).await;
+    let row = env.wait_for_terminal(handle.id).await;
+    assert_eq!(row.state, AcquisitionState::Completed);
+    assert!(
+        env.cancels_recorded(INSTANCE).await >= 1,
+        "the trickling candidate's transfer must be cancelled"
+    );
+    assert_eq!(env.downloads_started(INSTANCE).await, 1);
+}
+
+#[tokio::test]
+async fn the_attempt_deadline_cools_down_when_every_candidate_trickles() {
+    let trickle = config(one_candidate(), "trickle", 0, "downloads", ".flac");
+    let env = Env::new(
+        trickle,
+        InstanceLimits::default(),
+        &[("HEARTHSOUND__ACQUISITION__ATTEMPT_TIMEOUT_SECS", "1")],
+    )
+    .await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    env.start();
+
+    let handle = request(&env, track, Priority::Play).await;
+    let row = env.wait_for_terminal(handle.id).await;
+    assert_eq!(row.state, AcquisitionState::Failed);
+    assert_eq!(row.failure_reason, Some(FailureReason::Timeout));
+    assert!(
+        row.error_detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("ran past its deadline")),
+        "the detail names the deadline, was {:?}",
+        row.error_detail
+    );
+    assert!(
+        env.track(track).await.unavailable_until.is_some(),
+        "a deadline that spent every candidate is a song-specific failure"
+    );
+}
+
+#[tokio::test]
+async fn zero_disables_the_attempt_deadline() {
+    let trickle = config(one_candidate(), "trickle", 0, "downloads", ".flac");
+    let env = Env::new(
+        trickle,
+        InstanceLimits::default(),
+        &[("HEARTHSOUND__ACQUISITION__ATTEMPT_TIMEOUT_SECS", "0")],
+    )
+    .await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    env.start();
+
+    let handle = request(&env, track, Priority::Play).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+    let row = env.acquisition(handle.id).await;
+    assert_eq!(
+        row.state,
+        AcquisitionState::Downloading,
+        "with no limit the transfer keeps running"
+    );
+    assert!(row.plugin_token.is_some());
+    assert_eq!(env.cancels_recorded(INSTANCE).await, 0);
+}
+
+#[tokio::test]
+async fn a_transient_poll_error_is_retried() {
+    let mut fixture = config(one_candidate(), "normal", 0, "downloads", ".flac");
+    fixture["pollFailures"] = json!(2);
+    let env = Env::new(fixture, InstanceLimits::default(), &[]).await;
+    place_download(&env, "01 - Hello Song.flac").await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    env.start();
+
+    let handle = request(&env, track, Priority::Play).await;
+    let row = env.wait_for_terminal(handle.id).await;
+    assert_eq!(
+        row.state,
+        AcquisitionState::Completed,
+        "two failed polls must not throw the transfer away"
+    );
+}
+
+#[tokio::test]
+async fn every_poll_failing_abandons_the_candidate_and_parks() {
+    let mut fixture = config(one_candidate(), "normal", 0, "downloads", ".flac");
+    fixture["pollFailures"] = json!(10);
+    let env = Env::new(fixture, InstanceLimits::default(), &[]).await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    env.start();
+
+    let handle = request(&env, track, Priority::Play).await;
+    let row = env.wait_for_park(handle.id).await;
+    assert_eq!(row.state, AcquisitionState::Queued);
+    assert_eq!(
+        row.park_reason,
+        Some(hearthsound_core::ParkReason::SourceUnavailable)
+    );
+    assert!(
+        env.cancels_recorded(INSTANCE).await >= 1,
+        "the abandoned candidate's transfer must be cancelled"
+    );
+    assert!(
+        env.track(track).await.unavailable_until.is_none(),
+        "a backend that stops answering does not cool the song down"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_download_poll_cancels_the_candidate_transfers() {
+    let fixture = config(one_candidate(), "download-failure", 0, "downloads", ".flac");
+    let env = Env::new(fixture, InstanceLimits::default(), &[]).await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    env.start();
+
+    let handle = request(&env, track, Priority::Play).await;
+    let row = env.wait_for_terminal(handle.id).await;
+    assert_eq!(row.state, AcquisitionState::Failed);
+    assert!(
+        env.cancels_recorded(INSTANCE).await >= 1,
+        "a backend that reported a failure is told to drop the transfer"
+    );
+}
+
+#[tokio::test]
+async fn a_lost_token_cancels_the_candidate_before_searching_again() {
+    let mut fixture = config(one_candidate(), "normal", 0, "downloads", ".flac");
+    fixture["lostToken"] = json!(true);
+    let env = Env::new(fixture, InstanceLimits::default(), &[]).await;
+    place_download(&env, "01 - Hello Song.flac").await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    env.start();
+
+    let handle = request(&env, track, Priority::Play).await;
+    let row = env.wait_for_terminal(handle.id).await;
+    assert_eq!(row.state, AcquisitionState::Completed);
+    assert!(
+        env.cancels_recorded(INSTANCE).await >= 1,
+        "a lost token's transfer is cancelled before the search restarts"
+    );
+    assert!(env.downloads_started(INSTANCE).await >= 2);
+}

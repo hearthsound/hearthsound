@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An acquisition that cannot be attempted waits for a source instead of failing:
+  when the acquisition layer serves no instance, or the instance it chose does
+  not answer, the job returns to `queued` with `parkReason` `no-source` or
+  `source-unavailable` (on the SSE event, in `/api/v1/admin/acquisitions` and in
+  the vendor acquisition rows as `awaitingSource`). Nothing is written to the
+  track's cooldown. The job retries by itself - at once when an instance is
+  added, enabled or removed, otherwise a minute later, doubling up to an hour -
+  so a like made while no downloader is configured is acquired as soon as one
+  is, without a restart.
+- `acquisition.attempt_timeout_secs` (default 21600, `0` disables it) bounds one
+  candidate download from the moment its transfer starts. A transfer past it is
+  abandoned, its backend transfer cancelled, and the next candidate tried; a
+  song whose every candidate trickles fails with `timeout` and cools down as
+  before.
+- A download whose backend reports it failed, or no longer knows its token, has
+  that candidate's transfer cancelled at the backend before the acquisition
+  moves on.
+
 - `POST /api/v1/me/password` lets a signed-in user change their own password
   with the current one; the change ends every other session and revokes all of
   the account's API keys and app passwords, while the session that made it keeps
@@ -28,6 +46,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Fingerprint verification now follows the verification layer: any instance in
+  it verifies every download and an empty layer verifies none. The
+  `acquisition.verify.fingerprint` setting was removed.
+- Disabling a plugin, or removing or reordering its instances, abandons the
+  download attempts those instances were serving and re-searches; with no
+  source left the acquisition waits for one.
+- A failed candidate's files are removed from the acquisition's staging
+  directory before the next candidate starts.
+- Each in-flight download is preempted at most once per attempt, so two
+  concurrent play requests preempt two bulk downloads instead of the same one
+  twice, and an instance's `maxConcurrent` change takes effect without swapping
+  its slot pool.
+- A pin now protects a `play`-imported file: when the post-import fingerprint
+  check mismatches a pinned track, the file is kept, the source is quarantined
+  and no background re-acquisition starts.
+- An item a prefetch started and another client raised to `play` is never
+  dropped when it leaves the queue.
+- Fingerprint verification now follows the verification layer: any instance in
+  it verifies every download and an empty layer verifies none. The
+  `acquisition.verify.fingerprint` setting was removed.
+- Disabling a plugin, or removing or reordering its instances, abandons the
+  download attempts those instances were serving and re-searches; with no
+  source left the acquisition waits for one.
+- A failed candidate's files are removed from the acquisition's staging
+  directory before the next candidate starts.
+- Each in-flight download is preempted at most once per attempt, so two
+  concurrent play requests preempt two bulk downloads instead of the same one
+  twice, and an instance's `maxConcurrent` change takes effect without swapping
+  its slot pool.
+- A pin now protects a `play`-imported file: when the post-import fingerprint
+  check mismatches a pinned track, the file is kept, the source is quarantined
+  and no background re-acquisition starts.
+- An item a prefetch started and another client raised to `play` is never
+  dropped when it leaves the queue.
 - A password is at least 8 characters long wherever it is set - setup, admin
   create, admin reset, the CLI and the self-service change - and the refusal
   names the rule. An existing shorter password keeps working until it is changed,

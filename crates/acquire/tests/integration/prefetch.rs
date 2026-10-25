@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use crate::common::{Env, drain};
+use hearthsound_acquire::orchestrator::AcquireRequest;
 use hearthsound_acquire::prefetch::PrefetchScheduler;
 use hearthsound_acquire::repo::{AcquisitionRow, ListFilter};
 use hearthsound_core::events::{Audience, QueuePrefetch, ServerEvent};
@@ -544,4 +545,47 @@ async fn a_user_without_the_permission_gets_no_prefetch() {
     for track in &tracks {
         assert_eq!(env.acquisitions_for(*track).await, 0);
     }
+}
+
+/// A prefetch another client raised to `play` is never dropped.
+#[tokio::test]
+async fn a_prefetch_raised_to_play_is_never_dropped() {
+    let env = Env::normal(&[]).await;
+    let scheduler = PrefetchScheduler::new(Arc::clone(&env.orchestrator));
+    let tracks = remote_tracks(&env, 5).await;
+    let listing = listing_of(&tracks);
+    let user = env.add_user().await;
+
+    scheduler.record_listing(user, "symfonium", listing.clone());
+    scheduler
+        .note_stream(user, "symfonium", &listing[0], true)
+        .await;
+    let played = env
+        .orchestrator
+        .request(AcquireRequest::new(
+            tracks[2],
+            Priority::Play,
+            "user pressed play",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        played.acquisition_id(),
+        Some(acquisition_of(&env, tracks[2]).await.id)
+    );
+
+    scheduler
+        .note_stream(user, "symfonium", &listing[4], true)
+        .await;
+
+    assert_ne!(
+        acquisition_of(&env, tracks[2]).await.state,
+        AcquisitionState::Cancelled,
+        "an item another client raised to play is never dropped"
+    );
+    assert_eq!(
+        acquisition_of(&env, tracks[1]).await.state,
+        AcquisitionState::Cancelled,
+        "the other dropped items are cancelled, so the drop ran"
+    );
 }

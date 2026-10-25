@@ -1145,10 +1145,11 @@ pub async fn set_attempts(
 
 /// Parks an acquisition until a source can be attempted.
 ///
-/// A park is not a failure: the row goes back to [`AcquisitionState::Queued`]
-/// through [`transition`], which writes the log entry, and the three park
-/// columns say why it waits and when it may be claimed again. The track is not
-/// touched, so it keeps the availability admission gave it.
+/// A park is not a failure: the row ends in [`AcquisitionState::Queued`] - by a
+/// [`transition`] out of `searching` or `downloading`, or in place when
+/// admission already wrote it - and the three park columns say why it waits and
+/// when it may be claimed again. The track is not touched, so it keeps the
+/// availability admission gave it.
 ///
 /// The caller has already cleared the attempt's instance, candidate, token and
 /// progress, because a parked row holds no backend work.
@@ -1177,7 +1178,14 @@ pub async fn park(
     retry_at: Option<i64>,
     message: &str,
 ) -> Result<(), AcquireError> {
-    transition(conn, id, AcquisitionState::Queued, Some(message)).await?;
+    // A row that has not been claimed yet is parked where it is: admission
+    // writes the reason before any worker could try it, so the client sees the
+    // source it waits for at once.
+    if state(conn, id).await? == AcquisitionState::Queued {
+        write_log(conn, id, AcquisitionState::Queued, Some(message)).await?;
+    } else {
+        transition(conn, id, AcquisitionState::Queued, Some(message)).await?;
+    }
     sqlx::query!(
         "UPDATE acquisitions SET park_reason = ?, park_count = ?, retry_at = ?, updated_at = ? \
          WHERE id = ?",

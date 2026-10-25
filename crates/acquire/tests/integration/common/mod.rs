@@ -856,6 +856,99 @@ impl Env {
         self.orchestrator.start();
     }
 
+    /// Empties the acquisition layer and rebuilds the registry.
+    ///
+    /// This is what a server whose only acquisition instance was disabled or
+    /// removed looks like to the orchestrator: the registry it reads serves no
+    /// instance that can download.
+    pub async fn clear_acquisition_layer(&self) {
+        self.set_acquisition_layer(&[]).await;
+    }
+
+    /// Replaces the acquisition layer and rebuilds the registry.
+    ///
+    /// # Parameters
+    ///
+    /// - `slugs`: the instance slugs, in layer order.
+    pub async fn set_acquisition_layer(&self, slugs: &[&str]) {
+        let service = InstanceService::new(
+            Arc::clone(&self.host),
+            self.repository.clone(),
+            self.secrets.clone(),
+        );
+        let slugs: Vec<String> = slugs.iter().map(|slug| (*slug).to_owned()).collect();
+        service.set_layer(Layer::Acquisition, &slugs).await.unwrap();
+        self.registry.rebuild().await.unwrap();
+    }
+
+    /// Empties the verification layer and rebuilds the registry.
+    ///
+    /// Fingerprint verification follows this layer, so an empty layer is what a
+    /// server with no AcoustID instance looks like: every download is checked
+    /// by decode and duration only.
+    pub async fn clear_verification_layer(&self) {
+        let service = InstanceService::new(
+            Arc::clone(&self.host),
+            self.repository.clone(),
+            self.secrets.clone(),
+        );
+        service.set_layer(Layer::Verification, &[]).await.unwrap();
+        self.registry.rebuild().await.unwrap();
+    }
+
+    /// Makes a parked acquisition due now.
+    ///
+    /// The scheduler claims a parked row only when its `retry_at` has passed,
+    /// so a test that does not want to wait a minute moves the timer instead.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the parked acquisition.
+    pub async fn make_parked_due(&self, id: Uuid) {
+        sqlx::query("UPDATE acquisitions SET retry_at = ? WHERE id = ?")
+            .bind(now_millis())
+            .bind(id.as_bytes().to_vec())
+            .execute(self.database.writer())
+            .await
+            .unwrap();
+    }
+
+    /// Waits until an acquisition is parked, or ended anyway.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the acquisition to watch.
+    ///
+    /// # Returns
+    ///
+    /// The row, parked or terminal.
+    ///
+    /// # Panics
+    ///
+    /// Panics when neither happens within [`WAIT_TIMEOUT`].
+    pub async fn wait_for_park(&self, id: Uuid) -> hearthsound_acquire::repo::AcquisitionRow {
+        let deadline = Instant::now() + WAIT_TIMEOUT;
+        loop {
+            let row = self.acquisition(id).await;
+            if row.park_reason.is_some() || row.state.is_terminal() {
+                return row;
+            }
+            if Instant::now() >= deadline {
+                panic!("acquisition {id} stayed in {} without parking", row.state);
+            }
+            tokio::time::sleep(WAIT_POLL_INTERVAL).await;
+        }
+    }
+
+    /// Counts how many cancellations the instance with `slug` was asked for.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the instance slug.
+    pub async fn cancels_recorded(&self, slug: &str) -> u64 {
+        self.counter(slug, "counter:cancel").await
+    }
+
     /// Inserts an album and one track of it.
     ///
     /// # Parameters
@@ -953,6 +1046,37 @@ impl Env {
         .fetch_one(self.database.readers())
         .await
         .unwrap()
+    }
+
+    /// Reads one of the fixture's counters.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the instance slug.
+    /// - `key`: the plugin key the counter is stored under.
+    async fn counter(&self, slug: &str, key: &str) -> u64 {
+        // The instance is looked up in the table, not the registry: a test that
+        // took the instance out of its layer still has to read what the plugin
+        // recorded before it went.
+        let Some(instance_id): Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT id FROM provider_instances WHERE slug = ?")
+                .bind(slug)
+                .fetch_optional(self.database.readers())
+                .await
+                .unwrap()
+        else {
+            return 0;
+        };
+        let stored: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT value FROM plugin_kv WHERE instance_id = ? AND key = ?")
+                .bind(instance_id)
+                .bind(key)
+                .fetch_optional(self.database.readers())
+                .await
+                .unwrap();
+        stored
+            .map(|value| serde_json::from_slice::<u64>(&value).unwrap())
+            .unwrap_or(0)
     }
 
     /// Counts how many searches the instance with `slug` has started.
@@ -1334,4 +1458,12 @@ pub fn has_availability_event(
         }
         _ => false,
     })
+}
+
+/// Returns the current time in unix milliseconds, as the ledger stores it.
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
 }

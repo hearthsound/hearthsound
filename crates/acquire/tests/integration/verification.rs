@@ -11,7 +11,9 @@ use crate::common::{
 };
 use hearthsound_acquire::orchestrator::{AcquireRequest, AcquisitionHandle, AlbumAcquireRequest};
 use hearthsound_core::events::ServerEvent;
-use hearthsound_core::{AcquisitionState, Availability, EntityId, FailureReason, Priority};
+use hearthsound_core::{
+    AcquisitionState, Availability, EntityId, FailureReason, PinReason, Priority,
+};
 use hearthsound_media::{FfmpegRunner, fingerprint};
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat, Signal};
 use serde_json::{Value, json};
@@ -237,7 +239,7 @@ async fn a_wrong_fingerprint_quarantines_the_source() {
             ".wav",
         ),
         InstanceLimits::default(),
-        &[("HEARTHSOUND__ACQUISITION__VERIFY__FINGERPRINT", "true")],
+        &[],
     )
     .await;
     env.add_verification_instance(json!({ "rejectFingerprints": [print] }))
@@ -301,7 +303,7 @@ async fn a_wrong_staged_file_is_removed_and_one_fresh_search_follows() {
             ".flac",
         ),
         InstanceLimits::default(),
-        &[("HEARTHSOUND__ACQUISITION__VERIFY__FINGERPRINT", "true")],
+        &[],
     )
     .await;
     env.add_verification_instance(json!({ "rejectFingerprints": [print] }))
@@ -348,7 +350,7 @@ async fn the_right_candidate_is_imported_after_a_rejected_one() {
             ".wav",
         ),
         InstanceLimits::default(),
-        &[("HEARTHSOUND__ACQUISITION__VERIFY__FINGERPRINT", "true")],
+        &[],
     )
     .await;
     let (_good, good_path, _) = tone(620.0).await;
@@ -400,7 +402,7 @@ async fn a_play_import_that_mismatches_is_removed_and_acquired_again() {
     let env = Env::new(
         config(one_candidate(), "normal", 0, "downloads", ".flac"),
         InstanceLimits::default(),
-        &[("HEARTHSOUND__ACQUISITION__VERIFY__FINGERPRINT", "true")],
+        &[],
     )
     .await;
     env.add_verification_instance(json!({ "rejectFingerprints": [print] }))
@@ -452,7 +454,7 @@ async fn a_play_import_that_mismatches_is_removed_and_acquired_again() {
 }
 
 #[tokio::test]
-async fn verification_off_imports_a_mismatching_file() {
+async fn an_empty_verification_layer_imports_a_mismatching_file() {
     let (_tones, tone_path, print) = tone(500.0).await;
     let env = Env::new(
         config(one_candidate(), "normal", 0, "downloads", ".flac"),
@@ -462,6 +464,9 @@ async fn verification_off_imports_a_mismatching_file() {
     .await;
     env.add_verification_instance(json!({ "rejectFingerprints": [print] }))
         .await;
+    // The instance exists and could reject the file; it is the empty layer that
+    // turns verification off, and no setting decides it any more.
+    env.clear_verification_layer().await;
     tokio::fs::copy(&tone_path, env.downloads.join("01 - Hello Song.flac"))
         .await
         .unwrap();
@@ -487,7 +492,7 @@ async fn an_unknown_verdict_and_a_provider_error_let_the_file_pass() {
         let env = Env::new(
             config(one_candidate(), "normal", 0, "downloads", ".flac"),
             InstanceLimits::default(),
-            &[("HEARTHSOUND__ACQUISITION__VERIFY__FINGERPRINT", "true")],
+            &[],
         )
         .await;
         env.add_verification_instance(verification_config).await;
@@ -522,7 +527,7 @@ async fn an_album_file_that_mismatches_is_quarantined_while_its_siblings_import(
     let env = Env::new(
         album_instance_config(folders),
         InstanceLimits::default(),
-        &[("HEARTHSOUND__ACQUISITION__VERIFY__FINGERPRINT", "true")],
+        &[],
     )
     .await;
     env.add_verification_instance(json!({ "rejectFingerprints": [bad_print] }))
@@ -573,4 +578,55 @@ async fn an_album_file_that_mismatches_is_quarantined_while_its_siblings_import(
         .collect();
     assert_eq!(quarantined.len(), 1, "{quarantined:?} log={messages:?}");
     assert_eq!(quarantined[0].1, "02 - Hello Album 2.flac");
+}
+
+#[tokio::test]
+async fn a_pinned_play_import_that_mismatches_keeps_its_file() {
+    let (_tones, tone_path, print) = tone(500.0).await;
+    let env = Env::new(
+        config(one_candidate(), "normal", 0, "downloads", ".flac"),
+        InstanceLimits::default(),
+        &[],
+    )
+    .await;
+    env.add_verification_instance(json!({ "rejectFingerprints": [print] }))
+        .await;
+    tokio::fs::copy(&tone_path, env.downloads.join("01 - Hello Song.flac"))
+        .await
+        .unwrap();
+
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    env.library
+        .add_pin_reason(track, PinReason::UserLibrary)
+        .await
+        .unwrap();
+    let id = request(&env, track, Priority::Play).await.id;
+    env.start();
+    env.wait_for_state(id, AcquisitionState::Completed).await;
+
+    // The check runs after the import; the quarantine is what says it finished.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while env.quarantined().await.is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the mismatch was never quarantined"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    assert_eq!(env.media_files_for(track).await, 1, "a pinned file is kept");
+    let log = env.log(id).await;
+    assert!(
+        log.iter().any(|entry| entry
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("because it is pinned"))),
+        "the log says why the file stayed: {log:?}"
+    );
+    assert_eq!(
+        env.acquisitions_for(track).await,
+        1,
+        "a kept file is not acquired again"
+    );
 }

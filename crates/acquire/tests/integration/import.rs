@@ -646,3 +646,48 @@ async fn a_failed_import_fails_the_acquisition() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn a_copied_import_never_replaces_a_file_that_appeared() {
+    let env = Env::with_hardlink(
+        config(one_candidate(), "normal", 0, "downloads", ".flac"),
+        InstanceLimits::default(),
+        &[],
+        "move",
+        std::sync::Arc::new(
+            |_source: &std::path::Path, _destination: &std::path::Path| {
+                Err(std::io::Error::from(std::io::ErrorKind::CrossesDevices))
+            },
+        ),
+    )
+    .await;
+    place(&env, "01 - Hello Song.flac").await;
+    // The name the naming template renders is already taken by a file the import
+    // did not write.
+    let occupied = env.cache_root.join(RELATIVE);
+    std::fs::create_dir_all(occupied.parent().unwrap()).unwrap();
+    std::fs::write(&occupied, b"a file the import must not replace").unwrap();
+
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    let id = request(&env, track, Priority::Play).await.id;
+    env.start();
+    env.wait_for_state(id, AcquisitionState::Completed).await;
+
+    assert_eq!(
+        std::fs::read(&occupied).unwrap(),
+        b"a file the import must not replace",
+        "the file that held the name is untouched"
+    );
+    let rel_path: String =
+        sqlx::query_scalar("SELECT rel_path FROM media_files WHERE track_id = ?")
+            .bind(track.uuid().as_bytes().to_vec())
+            .fetch_one(env.database.readers())
+            .await
+            .unwrap();
+    assert_ne!(
+        rel_path, RELATIVE,
+        "the import takes the next collision suffix"
+    );
+    assert!(env.cache_root.join(&rel_path).is_file());
+    assert_eq!(env.media_files_for(track).await, 1);
+}

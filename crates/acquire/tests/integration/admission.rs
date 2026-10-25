@@ -8,14 +8,16 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use crate::common::{
-    Env, InstanceLimits, config, drain, has_acquisition_event, has_availability_event,
+    Env, INSTANCE, InstanceLimits, album_folder, album_instance_config, config, drain,
+    has_acquisition_event, has_availability_event, one_candidate,
 };
 use hearthsound_acquire::orchestrator::{
     AcquireOutcome, AcquireRequest, AcquisitionProgress, AlbumAcquireRequest,
 };
 use hearthsound_core::events::ServerEvent;
-use hearthsound_core::{AcquisitionState, Availability, FailureReason, Priority};
+use hearthsound_core::{AcquisitionState, Availability, FailureReason, ParkReason, Priority};
 use serde_json::json;
+use std::time::Duration;
 
 #[tokio::test]
 async fn admits_one_acquisition_per_track_and_raises_its_priority() {
@@ -681,4 +683,239 @@ async fn a_user_without_a_quota_is_unlimited_and_the_window_moves() {
         matches!(outcome, AcquireOutcome::Started(_)),
         "an acquisition that aged out of the window is not counted, got {outcome:?}"
     );
+}
+
+#[tokio::test]
+async fn a_request_with_no_source_parked_waits_and_resumes_when_one_appears() {
+    let env = Env::normal(&[]).await;
+    env.clear_acquisition_layer().await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    env.start();
+
+    let started = env
+        .orchestrator
+        .request(AcquireRequest::new(track, Priority::Queue, "user like"))
+        .await
+        .unwrap();
+    let AcquireOutcome::Started(handle) = &started else {
+        panic!("a request must start an acquisition, got {started:?}");
+    };
+    let id = handle.id;
+
+    let row = env.acquisition(id).await;
+    assert_eq!(row.state, AcquisitionState::Queued);
+    assert_eq!(row.park_reason, Some(ParkReason::NoSource));
+    assert_eq!(row.attempts, 0);
+    assert_eq!(row.retry_at, None, "a missing source needs no timer");
+    assert!(handle.snapshot().awaiting_source);
+    assert_eq!(handle.snapshot().park_reason, Some(ParkReason::NoSource));
+    assert_eq!(env.track(track).await.availability, Availability::Acquiring);
+    assert!(
+        env.track(track).await.unavailable_until.is_none(),
+        "a missing source must not cool the song down"
+    );
+    assert!(
+        env.log(id)
+            .await
+            .iter()
+            .all(|entry| entry.state != AcquisitionState::Failed),
+        "no log line may say the acquisition failed"
+    );
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        env.acquisition(id).await.attempts,
+        0,
+        "nothing may be attempted without a source"
+    );
+
+    env.set_acquisition_layer(&[INSTANCE]).await;
+    env.orchestrator.providers_changed().await.unwrap();
+    let row = env.wait_for_terminal(id).await;
+    assert_eq!(row.state, AcquisitionState::Completed);
+    assert!(row.park_reason.is_none());
+    assert!(env.track(track).await.unavailable_until.is_none());
+}
+
+#[tokio::test]
+async fn a_source_outage_parks_instead_of_failing() {
+    let fixture = config(one_candidate(), "unavailable", 0, "downloads", ".flac");
+    let env = Env::new(fixture, InstanceLimits::default(), &[]).await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+
+    let started = env
+        .orchestrator
+        .request(AcquireRequest::new(
+            track,
+            Priority::Play,
+            "user pressed play",
+        ))
+        .await
+        .unwrap();
+    let AcquireOutcome::Started(handle) = &started else {
+        panic!("a request must start an acquisition, got {started:?}");
+    };
+    let id = handle.id;
+
+    // Written before the scheduler exists, so the park is what removes it.
+    let marker = env.orchestrator.staging_dir(id).join("leftover.part");
+    tokio::fs::write(&marker, b"a candidate's leftovers")
+        .await
+        .unwrap();
+    env.start();
+
+    let row = env.wait_for_park(id).await;
+    assert_eq!(row.state, AcquisitionState::Queued);
+    assert_eq!(row.park_reason, Some(ParkReason::SourceUnavailable));
+    assert_eq!(row.attempts, 0);
+    let now = now_millis();
+    let retry_at = row.retry_at.expect("a source outage schedules a retry");
+    assert!(
+        retry_at > now + 50_000 && retry_at <= now + 130_000,
+        "the first retry is about a minute away, was {} ms",
+        retry_at - now
+    );
+    assert_eq!(env.track(track).await.availability, Availability::Acquiring);
+    assert!(env.track(track).await.unavailable_until.is_none());
+    assert!(
+        env.log(id)
+            .await
+            .iter()
+            .all(|entry| entry.state != AcquisitionState::Failed)
+    );
+    assert!(
+        !marker.exists(),
+        "a park removes what the candidate left in staging"
+    );
+    assert!(
+        env.orchestrator.staging_dir(id).is_dir(),
+        "the staging directory itself stays for the next attempt"
+    );
+    let progress = env.orchestrator.progress_of(id).await.unwrap().unwrap();
+    assert!(progress.awaiting_source);
+    assert_eq!(progress.park_reason, Some(ParkReason::SourceUnavailable));
+}
+
+#[tokio::test]
+async fn a_parked_acquisition_recovers_when_the_source_answers() {
+    let fixture = config(one_candidate(), "unavailable", 0, "downloads", ".flac");
+    let env = Env::new(fixture, InstanceLimits::default(), &[]).await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    env.start();
+    let id = env
+        .orchestrator
+        .request(AcquireRequest::new(track, Priority::Queue, "user like"))
+        .await
+        .unwrap()
+        .acquisition_id()
+        .unwrap();
+    env.wait_for_park(id).await;
+
+    env.place_download("01 - Hello Song.flac").await;
+    let healthy = config(one_candidate(), "normal", 0, "downloads", ".flac");
+    env.add_instance("healthy", healthy).await;
+    env.orchestrator.providers_changed().await.unwrap();
+
+    let row = env.wait_for_terminal(id).await;
+    assert_eq!(row.state, AcquisitionState::Completed);
+    assert!(env.track(track).await.unavailable_until.is_none());
+}
+
+#[tokio::test]
+async fn the_park_retry_timer_alone_wakes_a_parked_row() {
+    let fixture = config(one_candidate(), "unavailable", 0, "downloads", ".flac");
+    let env = Env::new(fixture, InstanceLimits::default(), &[]).await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    env.start();
+    let id = env
+        .orchestrator
+        .request(AcquireRequest::new(track, Priority::Queue, "user like"))
+        .await
+        .unwrap()
+        .acquisition_id()
+        .unwrap();
+    let row = env.wait_for_park(id).await;
+    assert_eq!(row.park_reason, Some(ParkReason::SourceUnavailable));
+
+    // A source appears without a registry change being announced: only the
+    // parked row's own timer brings the acquisition back.
+    env.place_download("01 - Hello Song.flac").await;
+    let healthy = config(one_candidate(), "normal", 0, "downloads", ".flac");
+    env.add_instance("healthy", healthy).await;
+    env.make_parked_due(id).await;
+
+    let row = env.wait_for_terminal(id).await;
+    assert_eq!(row.state, AcquisitionState::Completed);
+}
+
+#[tokio::test]
+async fn a_song_specific_failure_still_cools_down() {
+    let fixture = config(one_candidate(), "no-candidates", 0, "downloads", ".flac");
+    let env = Env::new(fixture, InstanceLimits::default(), &[]).await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    env.start();
+    let id = env
+        .orchestrator
+        .request(AcquireRequest::new(track, Priority::Queue, "user like"))
+        .await
+        .unwrap()
+        .acquisition_id()
+        .unwrap();
+
+    let row = env.wait_for_terminal(id).await;
+    assert_eq!(row.state, AcquisitionState::Failed);
+    assert_eq!(row.failure_reason, Some(FailureReason::NoCandidates));
+    let until = env
+        .track(track)
+        .await
+        .unavailable_until
+        .expect("a song-specific failure cools the track down");
+    assert!(until > now_millis() + 5 * 3_600_000);
+
+    let again = env
+        .orchestrator
+        .request(AcquireRequest::new(track, Priority::Queue, "user like"))
+        .await
+        .unwrap();
+    assert!(
+        matches!(again, AcquireOutcome::CoolingDown { .. }),
+        "a cooled-down track must not be searched again, got {again:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_parked_album_job_creates_no_per_track_rows() {
+    let folders = json!([album_folder(
+        "Album",
+        &[("01 - Song One.flac", "flac", None)]
+    )]);
+    let mut fixture = album_instance_config(folders);
+    fixture["scenario"] = json!("unavailable");
+    let env = Env::new(fixture, InstanceLimits::default(), &[]).await;
+    let (album, tracks) = env.add_album("Album", "Hello Artist", 2).await;
+    env.start();
+
+    let outcomes = env
+        .orchestrator
+        .request_album(AlbumAcquireRequest {
+            album_id: album,
+            priority: Priority::Queue,
+            reason: "album like".to_owned(),
+            requested_by: None,
+            can_acquire: true,
+            force: false,
+        })
+        .await
+        .unwrap();
+    let id = outcomes.first().unwrap().outcome.acquisition_id().unwrap();
+    let row = env.wait_for_park(id).await;
+    assert_eq!(row.granularity, hearthsound_core::Granularity::Album);
+    assert_eq!(row.park_reason, Some(ParkReason::SourceUnavailable));
+    for track in &tracks {
+        assert_eq!(
+            env.acquisitions_for(*track).await,
+            0,
+            "a parked album job must not hand its tracks to per-track acquisitions"
+        );
+    }
 }

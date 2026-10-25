@@ -385,13 +385,15 @@ impl FailureReason {
     /// Returns whether this failure says something about the song, and therefore
     /// cools the track down.
     ///
-    /// A song-specific failure - nothing found, nothing good enough, every
-    /// candidate failed, the wrong audio, a transfer that ran past its deadline
-    /// - is a fact about this song's sources, which is what the
+    /// A song-specific failure (nothing found, nothing good enough, every
+    /// candidate failed, the wrong audio, a transfer that ran past its deadline)
+    /// is a fact about this song's sources, which is what the
     /// `acquisition.unavailable_cooldown_hours` pause exists to stop retrying.
     /// A source outage says nothing about the song: it parks the acquisition
     /// instead (see [`ParkReason`]), so the song is immediately retryable when
-    /// the source answers again. Only [`FailureReason::NoCandidates`],
+    /// the source answers again.
+    ///
+    /// Only [`FailureReason::NoCandidates`],
     /// [`FailureReason::NoAcceptableQuality`],
     /// [`FailureReason::AllCandidatesFailed`],
     /// [`FailureReason::VerificationFailed`] and [`FailureReason::Timeout`]

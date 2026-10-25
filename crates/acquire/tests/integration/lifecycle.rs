@@ -16,7 +16,7 @@ use crate::common::{
     Env, INSTANCE, InstanceLimits, config, drain, has_acquisition_event, has_availability_event,
     one_candidate,
 };
-use hearthsound_acquire::orchestrator::AcquisitionHandle;
+use hearthsound_acquire::orchestrator::{AcquireRequest, AcquisitionHandle};
 use hearthsound_acquire::repo::{self, ListFilter};
 use hearthsound_core::{
     AcquisitionState, Availability, EntityId, FailureReason, IdPrefix, Priority,
@@ -591,4 +591,56 @@ fn a_download_the_backend_forgot_restarts_the_search_after_a_restart() {
                 .any(|message| message.contains("lost the download token"))
         );
     });
+}
+
+#[tokio::test]
+async fn disabling_the_instance_abandons_its_download_and_parks() {
+    let mut fixture = config(one_candidate(), "normal", 0, "downloads", ".flac");
+    // A transfer that never finishes keeps the attempt in flight while the
+    // instance is taken away.
+    fixture["scenario"] = json!("trickle");
+    let env = Env::new(fixture, InstanceLimits::default(), &[]).await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    env.start();
+
+    let started = env
+        .orchestrator
+        .request(AcquireRequest::new(track, Priority::Background, "bulk run"))
+        .await
+        .unwrap();
+    let id = started.acquisition_id().unwrap();
+    env.wait_for_state(id, AcquisitionState::Downloading).await;
+
+    // What a disable does: the registry no longer serves the instance, and the
+    // orchestrator is told.
+    env.clear_acquisition_layer().await;
+    env.orchestrator.providers_changed().await.unwrap();
+    env.wait_for_state(id, AcquisitionState::Queued).await;
+    let row = env.acquisition(id).await;
+    assert_eq!(
+        row.park_reason,
+        Some(hearthsound_core::ParkReason::NoSource),
+        "with the layer empty the acquisition waits for a source"
+    );
+    assert!(env.track(track).await.unavailable_until.is_none());
+    assert!(
+        env.log(id)
+            .await
+            .iter()
+            .all(|entry| entry.state != AcquisitionState::Failed)
+    );
+    assert!(
+        env.cancels_recorded(INSTANCE).await >= 1,
+        "the abandoned attempt's transfer must be cancelled"
+    );
+
+    // Another instance takes over, which is what an administrator's fix looks
+    // like: the failing one stays out of the layer.
+    env.place_download("01 - Hello Song.flac").await;
+    let healthy = config(one_candidate(), "normal", 0, "downloads", ".flac");
+    env.add_instance("healthy", healthy).await;
+    env.set_acquisition_layer(&["healthy"]).await;
+    env.orchestrator.providers_changed().await.unwrap();
+    let row = env.wait_for_terminal(id).await;
+    assert_eq!(row.state, AcquisitionState::Completed);
 }

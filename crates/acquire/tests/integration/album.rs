@@ -259,3 +259,60 @@ async fn an_instance_without_album_capability_fans_out_per_track() {
         assert_eq!(row.track_id, Some(*track));
     }
 }
+
+#[tokio::test]
+async fn a_track_in_cooldown_is_left_out_of_the_album_job() {
+    let folders = json!([
+        album_folder("Hello Album", &[("01 - Hello Album 1.flac", "flac", None)]),
+        album_folder("Hello Album", &[("02 - Hello Album 2.flac", "flac", None)]),
+    ]);
+    let env = Env::new(
+        album_instance_config(folders),
+        InstanceLimits::default(),
+        &[],
+    )
+    .await;
+    let (album, tracks) = env.add_album("Hello Album", "Hello Artist", 2).await;
+    let until = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
+        + 3_600_000;
+    sqlx::query(
+        "UPDATE tracks SET availability = 'unavailable', unavailable_until = ? WHERE id = ?",
+    )
+    .bind(until)
+    .bind(tracks[1].uuid().as_bytes().to_vec())
+    .execute(env.database.writer())
+    .await
+    .unwrap();
+
+    let outcomes = env
+        .orchestrator
+        .request_album(request(album))
+        .await
+        .unwrap();
+
+    let cooling = &outcomes[1];
+    assert!(
+        matches!(
+            cooling.outcome,
+            hearthsound_acquire::orchestrator::AcquireOutcome::CoolingDown { .. }
+        ),
+        "a cooling track keeps its own timer, got {:?}",
+        cooling.outcome
+    );
+    let stored = env.track(tracks[1]).await;
+    assert_eq!(
+        stored.unavailable_until,
+        Some(until),
+        "the album job must not clear the cooldown"
+    );
+    assert!(
+        !matches!(
+            outcomes[0].outcome,
+            hearthsound_acquire::orchestrator::AcquireOutcome::CoolingDown { .. }
+        ),
+        "the other missing track is still acquired"
+    );
+}

@@ -152,7 +152,7 @@ pub struct AcquisitionUpdated {
     ///
     /// A parked acquisition is `queued` and looks idle; this flag is what makes
     /// a client say so instead of showing a search that never starts.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub awaiting_source: bool,
     /// Why the acquisition is waiting for a source, when it is parked.
     #[serde(skip_serializing_if = "Option::is_none")]

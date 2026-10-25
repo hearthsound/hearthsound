@@ -14,8 +14,15 @@
 //! - `outputRoot` is the root the completed download lists, `staging` by
 //!   default and an import-root id when a backend downloads into one;
 //! - `scenario` is `normal`, `no-candidates` (an empty search),
-//!   `download-failure` (a download the backend reports as failed) or
-//!   `stalled` (a download that stops making progress and never finishes).
+//!   `download-failure` (a download the backend reports as failed),
+//!   `stalled` (a download that stops making progress and never finishes),
+//!   `trickle` (a download that advances one byte per poll and never
+//!   completes) or `unavailable` (every call answers that the backend is not
+//!   answering);
+//! - `pollFailures` is how many polls of a download answer an error before the
+//!   backend answers normally;
+//! - `lostToken` makes the first poll of a download report that the token is
+//!   unknown, which is what a lost transfer looks like.
 //!
 //! Polling a token the plugin never issued reports `not-found`.
 
@@ -55,6 +62,11 @@ struct Config {
     match_suffix: Option<String>,
     /// What the simulated backend does.
     scenario: Scenario,
+    /// How many polls of a download answer an error before the backend
+    /// answers normally.
+    poll_failures: u32,
+    /// Whether the first poll of a download reports an unknown token.
+    lost_token: bool,
     /// Whether the provider can deliver bytes while downloading.
     progressive: bool,
     /// The granularities the provider claims.
@@ -73,6 +85,8 @@ impl Default for Config {
             output_root: "staging".to_string(),
             match_suffix: None,
             scenario: Scenario::Normal,
+            poll_failures: 0,
+            lost_token: false,
             progressive: false,
             granularities: vec!["track".to_string()],
         }
@@ -92,6 +106,10 @@ enum Scenario {
     DownloadFailure,
     /// Downloads stop making progress and never finish.
     Stalled,
+    /// Downloads advance one byte per poll and never finish.
+    Trickle,
+    /// Every call answers that the backend is not answering.
+    Unavailable,
 }
 
 /// One configured candidate, and its persisted form.
@@ -198,6 +216,14 @@ struct DownloadRecord {
     failed: bool,
     /// Whether the download stalls instead of progressing.
     stalled: bool,
+    /// Whether the download advances one byte per poll and never finishes.
+    trickle: bool,
+    /// How many polls still answer an error.
+    poll_errors: u32,
+    /// Whether the first poll reports an unknown token.
+    lost_first: bool,
+    /// Whether that first poll was already answered.
+    lost_reported: bool,
     /// The root the completed download lists.
     output_root: String,
     /// The suffix a reported output file must have.
@@ -390,6 +416,11 @@ impl acquisition::Guest for AcquisitionFixture {
 
     fn start_search(query: Query) -> Result<String, ProviderError> {
         let config = config()?;
+        if config.scenario == Scenario::Unavailable {
+            return Err(ProviderError::Unavailable(
+                "the backend is not answering".to_string(),
+            ));
+        }
         hearthsound_plugin::info!(
             "searching {} track(s) for `{}`",
             query.tracks.len(),
@@ -434,6 +465,11 @@ impl acquisition::Guest for AcquisitionFixture {
 
     fn start_download(candidate_token: String, files: Vec<u32>) -> Result<String, ProviderError> {
         let config = config()?;
+        if config.scenario == Scenario::Unavailable {
+            return Err(ProviderError::Unavailable(
+                "the backend is not answering".to_string(),
+            ));
+        }
         hearthsound_plugin::info!("downloading {candidate_token} file(s) {files:?}");
 
         let running_polls = config.download_running_polls;
@@ -450,6 +486,12 @@ impl acquisition::Guest for AcquisitionFixture {
             total_bytes: config.download_bytes_per_poll * u64::from(running_polls),
             failed: config.scenario == Scenario::DownloadFailure,
             stalled: config.scenario == Scenario::Stalled,
+            trickle: config.scenario == Scenario::Trickle,
+            poll_errors: config.poll_failures,
+            // Only the first download loses its token; the retried one is what
+            // proves the search restarted.
+            lost_first: config.lost_token && next_token("lost")? == "lost-1",
+            lost_reported: false,
             output_root: config.output_root,
             match_suffix: config.match_suffix,
             folder,
@@ -465,6 +507,31 @@ impl acquisition::Guest for AcquisitionFixture {
         else {
             return Err(ProviderError::NotFound);
         };
+
+        if record.lost_first && !record.lost_reported {
+            record.lost_reported = true;
+            kv::set_json(&download_key(&download_token), &record, None)?;
+            return Err(ProviderError::NotFound);
+        }
+
+        if record.poll_errors > 0 {
+            record.poll_errors -= 1;
+            kv::set_json(&download_key(&download_token), &record, None)?;
+            return Err(ProviderError::Unavailable(
+                "the backend is momentarily unreachable".to_string(),
+            ));
+        }
+
+        if record.trickle {
+            record.running_left = record.running_left.saturating_sub(1);
+            let bytes = (record.running_polls - record.running_left) as u64;
+            kv::set_json(&download_key(&download_token), &record, None)?;
+            return Ok(DownloadState::Running(Progress {
+                bytes,
+                total_bytes: Some(record.total_bytes),
+                speed_bps: Some(1),
+            }));
+        }
 
         if record.stalled {
             return Ok(DownloadState::Running(Progress {
@@ -507,6 +574,9 @@ impl acquisition::Guest for AcquisitionFixture {
 
     fn cancel_download(download_token: String) {
         host_kv::delete(&download_key(&download_token));
+        // The count is what a test asserts a cancellation on: the deleted
+        // record cannot say how often it was cancelled.
+        let _ = next_token("cancel");
         hearthsound_plugin::debug!("cancelled {download_token}");
     }
 }

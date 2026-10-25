@@ -1053,6 +1053,10 @@ impl AcquisitionOrchestrator {
             None,
         )
         .await?;
+        // An acquisition the layer cannot serve is parked where it is: the
+        // scheduler would not claim it anyway, and a client has to be able to
+        // tell a request that waits for a source from one that is about to run.
+        let parked = self.park_while_unsourced(&mut tx, &new).await?;
         tx.commit().await?;
 
         // The directory belongs to an acquisition that is admitted here, so it
@@ -1087,8 +1091,8 @@ impl AcquisitionOrchestrator {
             eta_secs: None,
             instance: None,
             failure_reason: None,
-            awaiting_source: false,
-            park_reason: None,
+            awaiting_source: parked.is_some(),
+            park_reason: parked,
             file: None,
             requested_by: request.requested_by,
         };
@@ -1105,6 +1109,41 @@ impl AcquisitionOrchestrator {
         self.publish_availability(track.id, Availability::Acquiring, None);
         self.notify_work();
         Ok(AcquireOutcome::Started(handle))
+    }
+
+    /// Parks a just-admitted acquisition when the layer serves no source.
+    ///
+    /// # Parameters
+    ///
+    /// - `conn`: the admission transaction, so the park is part of the insert.
+    /// - `new`: the row that was just written.
+    ///
+    /// # Returns
+    ///
+    /// The reason the row is parked, or `None` when a source exists and the row
+    /// is a normal `queued` one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the ledger error when the park cannot be written.
+    async fn park_while_unsourced(
+        &self,
+        conn: &mut SqliteConnection,
+        new: &NewAcquisition,
+    ) -> Result<Option<ParkReason>, AcquireError> {
+        if self.has_acquisition_source() {
+            return Ok(None);
+        }
+        repo::park(
+            conn,
+            new.id,
+            ParkReason::NoSource,
+            1,
+            None,
+            "no acquisition source is configured",
+        )
+        .await?;
+        Ok(Some(ParkReason::NoSource))
     }
 
     /// Ends an admission whose staging directory could not be created.
@@ -1470,6 +1509,7 @@ impl AcquisitionOrchestrator {
             requested_by: request.requested_by,
         };
         repo::insert(&mut tx, &new).await?;
+        let parked = self.park_while_unsourced(&mut tx, &new).await?;
         let cooling = cooling_tracks(tracks, crate::now_millis());
         if !cooling.is_empty() {
             repo::write_log(
@@ -1539,8 +1579,8 @@ impl AcquisitionOrchestrator {
             eta_secs: None,
             instance: None,
             failure_reason: None,
-            awaiting_source: false,
-            park_reason: None,
+            awaiting_source: parked.is_some(),
+            park_reason: parked,
             file: None,
             requested_by: request.requested_by,
         };
@@ -1735,6 +1775,13 @@ impl AcquisitionOrchestrator {
                 self.forget(id);
                 continue;
             };
+            // A row another process ended while it was tracked is cleaned up
+            // here exactly as `reconcile` does: a cancellation still holds the
+            // track and the staging directory this process owns.
+            if row.state == AcquisitionState::Cancelled {
+                self.finish_cancelled(&row, None).await?;
+                continue;
+            }
             if row.state.is_terminal() {
                 self.forget(id);
                 continue;
@@ -2282,7 +2329,10 @@ impl AcquisitionOrchestrator {
     /// `acquiring`, so the song is not cooled down and the next like, save or
     /// play of it joins this parked row instead of starting another one.
     ///
-    /// The row is claimable again when its `retry_at` passes. A
+    /// The row is claimable again when its `retry_at` passes. It stays in the
+    /// in-flight set, because it still holds the track and its staging
+    /// directory: a cancellation another process writes has to be reconciled
+    /// here even while the acquisition waits. A
     /// [`ParkReason::NoSource`] park has none, because no amount of waiting can
     /// help it: [`AcquisitionOrchestrator::dispatch`] refuses to claim anything
     /// while the layer serves no source, and a registry change clears the
@@ -2337,9 +2387,10 @@ impl AcquisitionOrchestrator {
         progress.awaiting_source = true;
         progress.park_reason = Some(reason);
         self.announce(&progress);
-        // The pipeline task is ending, so the row must not stay tracked as in
-        // flight; the scheduler claims it again when its timer passes.
-        self.forget(row.id);
+        // The row stays tracked: it still holds the track's `acquiring`
+        // availability and its staging directory, so a cancellation another
+        // process writes has to reach this one through `reconcile`. The
+        // scheduler claims the row again when its timer passes.
         tracing::info!(
             acquisition = %row.id,
             reason = reason.as_str(),
