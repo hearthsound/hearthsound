@@ -341,12 +341,17 @@ fn describe_account(user: &hearthsound_auth::User, quota: &UserQuota) -> String 
 /// stored.
 async fn create_api_key(context: &Context, args: CreateCredentialArgs) -> anyhow::Result<()> {
     let user = find_user(context, &args.user).await?;
+    // The name rule is the crate's, so a 100 KB name is refused here exactly as
+    // it is over the API, and the reported name is the trimmed one that was
+    // stored.
+    let name = hearthsound_auth::validate_credential_name(&args.name)
+        .context("could not use the API key name")?;
     let generated = ApiKeys::new(context.database())
-        .generate(user.id, &args.name)
+        .generate(user.id, name)
         .await
         .context("could not store the API key")?;
 
-    println!("created API key `{}` for `{}`", args.name, user.username);
+    println!("created API key `{name}` for `{}`", user.username);
     println!("{}", generated.plaintext);
     println!();
     println!("Store it now: only its hash is kept, so it cannot be shown again.");
@@ -366,15 +371,14 @@ async fn create_api_key(context: &Context, args: CreateCredentialArgs) -> anyhow
 /// cannot be sealed or stored.
 async fn create_app_password(context: &Context, args: CreateCredentialArgs) -> anyhow::Result<()> {
     let user = find_user(context, &args.user).await?;
+    let name = hearthsound_auth::validate_credential_name(&args.name)
+        .context("could not use the app password name")?;
     let generated = AppPasswords::new(context.database(), context.secret_box().clone())
-        .generate(user.id, &args.name)
+        .generate(user.id, name)
         .await
         .context("could not store the app password")?;
 
-    println!(
-        "created app password `{}` for `{}`",
-        args.name, user.username
-    );
+    println!("created app password `{name}` for `{}`", user.username);
     println!("{}", generated.plaintext);
     println!();
     println!("Store it now: only its sealed form is kept, so it cannot be shown again.");
