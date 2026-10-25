@@ -122,6 +122,28 @@ pub struct FolderPatch {
     pub generic: Option<bool>,
 }
 
+/// What removing a folder would take with it.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovalImpactView {
+    /// How many tracks would be deleted from the library.
+    pub tracks: i64,
+    /// How many track likes would be lost.
+    pub likes: i64,
+    /// How many playlist entries would be lost.
+    pub playlist_entries: i64,
+}
+
+impl From<hearthsound_library::FolderRemovalImpact> for RemovalImpactView {
+    fn from(impact: hearthsound_library::FolderRemovalImpact) -> RemovalImpactView {
+        RemovalImpactView {
+            tracks: impact.tracks,
+            likes: impact.likes,
+            playlist_entries: impact.playlist_entries,
+        }
+    }
+}
+
 /// A scan to start.
 #[derive(Debug, Clone, Default, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -404,12 +426,50 @@ pub async fn patch_folder(
     Ok(Json(FolderView::from(&folder)))
 }
 
+/// Counts what removing a folder would take with it.
+///
+/// The counts describe the delete before it happens: the tracks only this folder
+/// held, and among them the likes and playlist entries that go with them. The web
+/// client asks for them before it sends the delete.
+///
+/// # Errors
+///
+/// Answers `not-found` for an unknown folder.
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/folders/{id}/removal-impact",
+    tag = "admin",
+    params(("id" = String, Path, description = "The folder's client id (`lf_...`)")),
+    responses(
+        (status = 200, description = "The counts a removal would take with it", body = RemovalImpactView),
+        (status = 404, description = "No such folder", body = Problem, content_type = "application/problem+json"),
+    ),
+    security(("bearer" = []), ("session" = []))
+)]
+pub async fn folder_removal_impact(
+    _admin: AdminAuthed,
+    State(state): State<NativeState>,
+    Path(id): Path<String>,
+) -> Result<Json<RemovalImpactView>, Problem> {
+    let id = parse_id(&id, IdPrefix::LibraryFolder)?;
+    let library = LibraryRepository::new(state.database());
+    existing(&library, id).await?;
+    let impact = library
+        .removal_impact(id)
+        .await
+        .map_err(|error| problem::internal("previewing a folder removal", &error))?;
+    Ok(Json(RemovalImpactView::from(impact)))
+}
+
 /// Removes a library folder.
 ///
 /// The folder's file records and the tracks only it held go with it, exactly as
 /// a scan's pruning removes a file the folder lost; a track that still has a
-/// file in the library or the cache stays. Nothing inside the folder on disk is
-/// removed, moved or renamed, and the folder's watcher stops.
+/// file in the library or the cache stays. The tracks' likes and playlist entries
+/// go with them, and so does their play history. Nothing inside the folder on
+/// disk is removed, moved or renamed, and the folder's watcher stops. Preview the
+/// loss with `GET /api/v1/admin/folders/{id}/removal-impact` first; the web
+/// client does.
 ///
 /// # Errors
 ///

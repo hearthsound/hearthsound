@@ -3678,3 +3678,71 @@ async fn the_folder_scan_reports_the_duplicate_cleanup() {
 
     fixture.stop().await;
 }
+
+/// A folder's removal impact is previewed before the delete.
+#[tokio::test]
+async fn the_folder_removal_impact_is_previewed_before_the_delete() {
+    let fixture = Fixture::new().await;
+    let root = fixture.library_dir("music-impact");
+    write_album(&root, "Impact Artist", "Impact Album").await;
+
+    let created = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        "/api/v1/admin/folders",
+        Some(serde_json::json!({ "path": root, "generic": true, "watch": false })),
+    )
+    .await;
+    let status = created.status();
+    let body = json(created).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let folder = body["id"].as_str().unwrap().to_owned();
+
+    // The first scan was queued by the add; the preview counts its tracks.
+    let mut impact = serde_json::Value::Null;
+    for _ in 0..250 {
+        let response = bearer(
+            &fixture,
+            reqwest::Method::GET,
+            &format!("/api/v1/admin/folders/{folder}/removal-impact"),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        impact = json(response).await;
+        if impact["tracks"].as_i64().unwrap() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    }
+    assert_eq!(impact["tracks"].as_i64(), Some(2));
+    assert_eq!(impact["likes"].as_i64(), Some(0));
+    assert_eq!(impact["playlistEntries"].as_i64(), Some(0));
+
+    let removed = bearer(
+        &fixture,
+        reqwest::Method::DELETE,
+        &format!("/api/v1/admin/folders/{folder}"),
+        None,
+    )
+    .await;
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    let after = bearer(
+        &fixture,
+        reqwest::Method::GET,
+        &format!("/api/v1/admin/folders/{folder}/removal-impact"),
+        None,
+    )
+    .await;
+    assert_problem(after, StatusCode::NOT_FOUND, "not-found").await;
+    let unknown = bearer(
+        &fixture,
+        reqwest::Method::GET,
+        "/api/v1/admin/folders/lf_00000000000000000000000000/removal-impact",
+        None,
+    )
+    .await;
+    assert_problem(unknown, StatusCode::NOT_FOUND, "not-found").await;
+
+    fixture.stop().await;
+}

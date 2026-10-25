@@ -651,3 +651,125 @@ async fn an_album_gains_its_music_brainz_id_without_duplicating() {
         .unwrap();
     assert_eq!(albums.len(), 1);
 }
+
+/// The removal preview counts the likes and playlist entries a removal loses.
+///
+/// The counts come from the delete's own predicate, so a track that still has a
+/// file in another folder keeps its likes and the preview says so.
+#[tokio::test]
+async fn removal_impact_counts_the_likes_and_playlist_entries_a_removal_would_lose() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let user = insert_user(&db).await;
+    let music = dir.path().join("music");
+    let other = dir.path().join("other");
+    std::fs::create_dir(&music).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    let elsewhere = library.add_library_folder(&other, None).await.unwrap();
+
+    let track = library
+        .insert_track(
+            &track_input("Cafe del Mar"),
+            &[ArtistCredit::new("Energy 52", "main")],
+            &[],
+        )
+        .await
+        .unwrap();
+    library
+        .insert_media_file(&MediaFileInput {
+            track_id: track,
+            storage: StorageClass::Folder,
+            folder_id: Some(folder.id),
+            rel_path: "Cafe del Mar.flac".to_owned(),
+            size: 1,
+            mtime_ms: 0,
+            format: None,
+            codec: None,
+            bitrate_kbps: None,
+            sample_rate: None,
+            bit_depth: None,
+            channels: None,
+            duration_ms: None,
+            lossless: None,
+            quality_tier: None,
+            replaygain: None,
+            has_embedded_art: None,
+            uploaded_by: None,
+            acquisition_id: None,
+        })
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO user_feedback (user_id, entity_kind, entity_id, value, at) \
+         VALUES (?, 'track', ?, 'like', 0)",
+    )
+    .bind(user.as_bytes().as_slice())
+    .bind(track.uuid().as_bytes().as_slice())
+    .execute(db.writer())
+    .await
+    .unwrap();
+    let playlist = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO playlists (id, owner_user_id, name, is_public, is_temporary, created_at, \
+                                updated_at) VALUES (?, ?, 'Mix', 0, 0, 0, 0)",
+    )
+    .bind(playlist.as_bytes().as_slice())
+    .bind(user.as_bytes().as_slice())
+    .execute(db.writer())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO playlist_tracks (playlist_id, position, track_id, added_at) \
+         VALUES (?, 0, ?, 0)",
+    )
+    .bind(playlist.as_bytes().as_slice())
+    .bind(track.uuid().as_bytes().as_slice())
+    .execute(db.writer())
+    .await
+    .unwrap();
+
+    let impact = library.removal_impact(folder.id).await.unwrap();
+    assert_eq!(impact.tracks, 1);
+    assert_eq!(impact.likes, 1);
+    assert_eq!(impact.playlist_entries, 1);
+
+    // A second file of the same track outside the folder keeps it, so a removal
+    // would take nothing.
+    library
+        .insert_media_file(&MediaFileInput {
+            track_id: track,
+            storage: StorageClass::Folder,
+            folder_id: Some(elsewhere.id),
+            rel_path: "Copy.flac".to_owned(),
+            size: 1,
+            mtime_ms: 0,
+            format: None,
+            codec: None,
+            bitrate_kbps: None,
+            sample_rate: None,
+            bit_depth: None,
+            channels: None,
+            duration_ms: None,
+            lossless: None,
+            quality_tier: None,
+            replaygain: None,
+            has_embedded_art: None,
+            uploaded_by: None,
+            acquisition_id: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        library.removal_impact(folder.id).await.unwrap(),
+        hearthsound_library::FolderRemovalImpact::default()
+    );
+
+    library.remove_library_folder(folder.id).await.unwrap();
+    assert_eq!(
+        library.removal_impact(folder.id).await.unwrap(),
+        hearthsound_library::FolderRemovalImpact::default(),
+        "a removed folder has nothing left to lose"
+    );
+}

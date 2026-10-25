@@ -423,6 +423,9 @@ pub mod keys {
     /// Quiet period after a filesystem change, in milliseconds.
     pub const LIBRARY_WATCH_DEBOUNCE_MS: SettingKey<i64> =
         SettingKey::new("library.watch.debounce_ms");
+    /// Whether removing a music folder asks for confirmation first.
+    pub const LIBRARY_CONFIRM_FOLDER_REMOVAL: SettingKey<bool> =
+        SettingKey::new("library.confirm_folder_removal");
 
     /// Upper bound on the total size of the cache directory, in bytes.
     pub const STORAGE_CACHE_MAX_BYTES: SettingKey<i64> = SettingKey::new("storage.cache.max_bytes");
@@ -766,6 +769,13 @@ impl SettingsRegistry {
                     },
                     SettingValue::Integer(2_000),
                     "Quiet period after a filesystem change before a watched folder is rescanned",
+                ),
+                def(
+                    keys::LIBRARY_CONFIRM_FOLDER_REMOVAL,
+                    SettingKind::Bool,
+                    SettingValue::Bool(true),
+                    "Whether removing a music folder asks first and names the likes and playlist \
+                     entries it takes with it",
                 ),
                 unit_def(
                     keys::STORAGE_CACHE_MAX_BYTES,
@@ -1678,6 +1688,23 @@ mod tests {
         assert_eq!(
             store.source(keys::PLUGINS_MAX_MEMORY_MB.name()),
             Some(SettingSource::Default)
+        );
+    }
+
+    /// The folder-removal confirmation is a boolean that defaults to asking.
+    #[test]
+    fn the_folder_removal_confirmation_is_a_builtin_boolean() {
+        let registry = SettingsRegistry::builtin();
+        let def = registry
+            .def(keys::LIBRARY_CONFIRM_FOLDER_REMOVAL.name())
+            .expect("the setting is registered");
+        assert_eq!(def.kind, SettingKind::Bool);
+        assert_eq!(def.default, SettingValue::Bool(true));
+        assert!(!def.user_overridable);
+        assert_eq!(
+            def.description,
+            "Whether removing a music folder asks first and names the likes and playlist entries \
+             it takes with it"
         );
     }
 

@@ -49,6 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   connection, so a poll no longer queues behind a long write transaction (and no
   write behind a poll). The server's own commits are still attributed and never
   reload it.
+- `GET /api/v1/admin/folders/{id}/removal-impact` reports the tracks a folder
+  removal would delete and, among them, the likes and playlist entries it takes
+  with them, so an interface can show the loss before confirming.
+- A new `library.confirm_folder_removal` setting (default `true`) says whether
+  removing a music folder asks first.
 - An artist is identified by its MusicBrainz id or a provider alias, and a name
   identifies an artist only when it is unambiguous: two identified acts sharing a
   name no longer absorb an untagged file, and two untagged rows of one name are

@@ -329,7 +329,7 @@
           "admin"
         ],
         "summary": "Removes a library folder.",
-        "description": "The folder's file records and the tracks only it held go with it, exactly as\na scan's pruning removes a file the folder lost; a track that still has a\nfile in the library or the cache stays. Nothing inside the folder on disk is\nremoved, moved or renamed, and the folder's watcher stops.\n\n# Errors\n\nAnswers `not-found` for an unknown folder.",
+        "description": "The folder's file records and the tracks only it held go with it, exactly as\na scan's pruning removes a file the folder lost; a track that still has a\nfile in the library or the cache stays. The tracks' likes and playlist entries\ngo with them, and so does their play history. Nothing inside the folder on\ndisk is removed, moved or renamed, and the folder's watcher stops. Preview the\nloss with `GET /api/v1/admin/folders/{id}/removal-impact` first; the web\nclient does.\n\n# Errors\n\nAnswers `not-found` for an unknown folder.",
         "operationId": "delete_folder",
         "parameters": [
           {
@@ -411,6 +411,57 @@
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such folder",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/folders/{id}/removal-impact": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Counts what removing a folder would take with it.",
+        "description": "The counts describe the delete before it happens: the tracks only this folder\nheld, and among them the likes and playlist entries that go with them. The web\nclient asks for them before it sends the delete.\n\n# Errors\n\nAnswers `not-found` for an unknown folder.",
+        "operationId": "folder_removal_impact",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The folder's client id (`lf_...`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The counts a removal would take with it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemovalImpactView"
                 }
               }
             }
@@ -5303,6 +5354,32 @@
             "format": "int64",
             "description": "Files moved from the cache to the library because their track is pinned.",
             "minimum": 0
+          }
+        }
+      },
+      "RemovalImpactView": {
+        "type": "object",
+        "description": "What removing a folder would take with it.",
+        "required": [
+          "tracks",
+          "likes",
+          "playlistEntries"
+        ],
+        "properties": {
+          "likes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many track likes would be lost."
+          },
+          "playlistEntries": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many playlist entries would be lost."
+          },
+          "tracks": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many tracks would be deleted from the library."
           }
         }
       },

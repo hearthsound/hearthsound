@@ -716,3 +716,56 @@ pub async fn delete_track(
         .rows_affected();
     Ok(affected > 0)
 }
+
+/// Counts what deleting one folder's tracks would take with it.
+///
+/// The predicate is exactly the delete condition of
+/// [`crate::LibraryRepository::remove_library_folder`] and of the scanner's
+/// pruning - a locally created track that has a file in this folder and no file
+/// anywhere else - so the preview and the delete cannot disagree. The likes and
+/// playlist entries are counted among those tracks only, because they are the
+/// rows the delete takes with them.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `folder_id`: the folder a removal is being previewed for.
+///
+/// # Returns
+///
+/// The tracks, likes and playlist entries a removal would delete.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when the query fails.
+pub async fn removal_impact(
+    conn: &mut SqliteConnection,
+    folder_id: Uuid,
+) -> Result<crate::model::FolderRemovalImpact, LibraryError> {
+    let folder = folder_id.as_bytes().as_slice();
+    let row = sqlx::query!(
+        "WITH doomed AS ( \
+             SELECT t.id FROM tracks t \
+              WHERE t.origin = 'local' \
+                AND EXISTS (SELECT 1 FROM media_files mf \
+                             WHERE mf.track_id = t.id AND mf.folder_id = ?) \
+                AND NOT EXISTS (SELECT 1 FROM media_files mf \
+                                 WHERE mf.track_id = t.id \
+                                   AND (mf.folder_id IS NULL OR mf.folder_id <> ?)) \
+         ) \
+         SELECT (SELECT COUNT(*) FROM doomed) AS tracks, \
+                (SELECT COUNT(*) FROM user_feedback f JOIN doomed d ON d.id = f.entity_id \
+                  WHERE f.entity_kind = 'track' AND f.value = 'like') AS likes, \
+                (SELECT COUNT(*) FROM playlist_tracks pt JOIN doomed d ON d.id = pt.track_id) \
+                    AS playlist_entries",
+        folder,
+        folder,
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(crate::model::FolderRemovalImpact {
+        tracks: row.tracks,
+        likes: row.likes,
+        playlist_entries: row.playlist_entries,
+    })
+}

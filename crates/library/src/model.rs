@@ -312,6 +312,22 @@ pub struct LibraryFolder {
     pub last_scan_error: Option<String>,
 }
 
+/// What removing a library folder would take with it.
+///
+/// The counts describe the delete before it happens: `remove_library_folder`
+/// deletes the tracks that only a folder's files held, and a track's likes, saves,
+/// ratings, plays and playlist entries go with it. The counts come from the same
+/// predicate the delete uses, so a preview cannot disagree with it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FolderRemovalImpact {
+    /// How many tracks would be deleted from the library.
+    pub tracks: i64,
+    /// How many likes of those tracks would be lost.
+    pub likes: i64,
+    /// How many playlist entries of those tracks would be lost.
+    pub playlist_entries: i64,
+}
+
 /// One row of the `media_files` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaFile {

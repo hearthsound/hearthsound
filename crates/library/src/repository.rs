@@ -207,6 +207,31 @@ impl LibraryRepository {
         Ok(folder)
     }
 
+    /// Counts what removing a library folder would take with it.
+    ///
+    /// The counts come from the predicate the removal itself uses, so an
+    /// interface can show the loss before the administrator confirms it.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the folder's UUIDv7 primary key.
+    ///
+    /// # Returns
+    ///
+    /// The tracks a removal would delete, and among them the likes and playlist
+    /// entries that go with them; all zero for an unknown or empty folder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when the read fails.
+    pub async fn removal_impact(
+        &self,
+        id: Uuid,
+    ) -> Result<crate::FolderRemovalImpact, LibraryError> {
+        let mut conn = self.readers.acquire().await?;
+        tracks::removal_impact(&mut conn, id).await
+    }
+
     /// Removes a library folder, its file records and the tracks only it held,
     /// in batches.
     ///
