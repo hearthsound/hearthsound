@@ -221,6 +221,58 @@ impl CatalogService {
         Ok(Vec::new())
     }
 
+    /// Reads the portrait renditions the artwork layer already described.
+    ///
+    /// No instance is asked: the subject is built from the stored row, or from the
+    /// cached artist for a catalog id, and the first cached answer in the
+    /// administrator's order wins.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: a stored artist id, or the catalog id of an artist.
+    ///
+    /// # Returns
+    ///
+    /// The cached renditions, or `None` when no instance answered for the artist
+    /// yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::NotFound`] when the id names no artist and
+    /// [`CatalogError::Database`] when the stored artist cannot be read.
+    pub async fn cached_artist_portraits(
+        &self,
+        id: &ClientId,
+    ) -> Result<Option<Vec<Image>>, CatalogError> {
+        let subject = match id {
+            ClientId::Entity(entity) => Some(self.stored_subject(*entity).await?),
+            ClientId::Catalog(catalog) => {
+                self.cached_artist(catalog)
+                    .await?
+                    .map(|found| ArtworkSubject {
+                        kind: EntityKind::Artist,
+                        provider_id: Some(catalog.provider_id().to_owned()),
+                        ids: found.artist.ids,
+                        title: found.artist.name,
+                        artists: Vec::new(),
+                    })
+            }
+        };
+        let Some(subject) = subject else {
+            return Ok(None);
+        };
+        if subject.kind != EntityKind::Artist {
+            return Err(CatalogError::NotFound);
+        }
+        let key = RequestKey::artwork(subject.kind, &subject);
+        for instance in self.registry().layers(Layer::Artwork) {
+            if let Some(images) = self.cache().read::<WireImages>(instance.id(), &key).await {
+                return Ok(Some(images.0.into_iter().map(Image::from).collect()));
+            }
+        }
+        Ok(None)
+    }
+
     /// Asks the artwork layer for an entity's picture.
     ///
     /// Every instance is asked in layer order until one delivers an image. An

@@ -207,7 +207,12 @@ impl CatalogService {
     /// - `entity`: the stored row.
     /// - `kind`: the kind of the row.
     /// - `catalog`: the catalog id that names the same entity.
-    pub(crate) async fn record_alias(&self, entity: EntityId, kind: EntityKind, catalog: &CatalogId) {
+    pub(crate) async fn record_alias(
+        &self,
+        entity: EntityId,
+        kind: EntityKind,
+        catalog: &CatalogId,
+    ) {
         let namespace = provider_namespace(catalog.slug());
         let outcome = async {
             let mut tx = self.database().writer().begin().await?;

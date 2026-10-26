@@ -386,7 +386,10 @@ impl CatalogService {
     ) -> Result<Option<ResolvedPath>, CatalogError> {
         let (base, ordinal) = parse_segment(album_segment);
         let (artist_base, _) = parse_segment(artist_segment);
-        let Some(artist) = self.resolve_artist_path(artist_segment, scopes, mode).await? else {
+        let Some(artist) = self
+            .resolve_artist_path(artist_segment, scopes, mode)
+            .await?
+        else {
             return Ok(None);
         };
         let listing = self.album_listing(&artist.id, scopes, mode).await?;
@@ -867,7 +870,10 @@ impl CatalogService {
         // A path needs the title and the credits, which the reference a search or
         // an artist listing promoted already carries; the tracklist is not part
         // of a path.
-        let reference = self.cached_album_ref(id).await?.ok_or(CatalogError::NotFound)?;
+        let reference = self
+            .cached_album_ref(id)
+            .await?
+            .ok_or(CatalogError::NotFound)?;
         Ok(crate::service::CatalogAlbumResult {
             id: reference.id,
             album: hearthsound_core::providers::CatalogAlbum {

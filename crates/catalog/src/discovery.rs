@@ -690,6 +690,55 @@ impl DiscoveryService {
         Ok(Vec::new())
     }
 
+    /// Reads an artist's cached popular tracks, without asking a provider.
+    ///
+    /// The panel of a first-party top-songs request answers from this: the run
+    /// that fetched the artist's chart cached it under
+    /// [`TOP_TRACKS_CACHE_LIMIT`](crate::TOP_TRACKS_CACHE_LIMIT), and a request
+    /// for fewer tracks truncates that entry.
+    ///
+    /// # Parameters
+    ///
+    /// - `seed`: the artist the panel is about.
+    /// - `limit`: how many suggestions the caller wants.
+    ///
+    /// # Returns
+    ///
+    /// The cached suggestions, or `None` when no instance answered yet.
+    pub async fn cached_artist_top_tracks(
+        &self,
+        user: Uuid,
+        seed: &ArtistSeed,
+        limit: u32,
+    ) -> Option<Vec<SuggestedTrack>> {
+        if limit == 0 {
+            return None;
+        }
+        let wanted = usize::try_from(limit).unwrap_or(usize::MAX);
+        for instance in self.inner.registry.layers(Layer::Discovery) {
+            for (arguments, take) in [
+                (artist_arguments(seed, limit), wanted),
+                (
+                    artist_arguments(seed, crate::enrichment::TOP_TRACKS_CACHE_LIMIT),
+                    wanted,
+                ),
+            ] {
+                let key = DiscoveryKey {
+                    instance: instance.id(),
+                    operation: "artist-top-tracks",
+                    arguments,
+                    user,
+                };
+                if let Some(DiscoveryAnswer::Tracks(cached)) = self.inner.cache.get(&key).await
+                    && !cached.is_empty()
+                {
+                    return Some(cached.into_iter().take(take).collect());
+                }
+            }
+        }
+        None
+    }
+
     /// Suggests tracks recommended for a listener.
     ///
     /// Only instances the listener linked are asked, because a recommendation

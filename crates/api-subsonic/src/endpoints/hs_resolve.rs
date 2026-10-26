@@ -10,8 +10,8 @@
 //! only when the request carries `hearthsound=1` and answers Subsonic error 70
 //! without it.
 
-use hearthsound_catalog::paths::PathMode;
 use hearthsound_catalog::ResolvedPath;
+use hearthsound_catalog::paths::PathMode;
 use hearthsound_core::{ClientId, EntityKind};
 
 use crate::auth::Call;
@@ -64,7 +64,9 @@ pub async fn hs_resolve(call: Call) -> Encoded {
             catalog.path_of(&id, &scopes, PathMode::Cached).await
         }
         (None, Some(artist), Some(album)) => {
-            catalog.resolve_album_path(artist, album, &scopes, PathMode::Cached).await
+            catalog
+                .resolve_album_path(artist, album, &scopes, PathMode::Cached)
+                .await
         }
         (None, Some(artist), None) => {
             catalog

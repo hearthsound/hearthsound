@@ -248,6 +248,7 @@ pub async fn get_top_songs(call: Call) -> Encoded {
         Err(error) => return call.encode(Response::failed(error)),
     };
 
+    let vendor = call.params().vendor_enabled();
     let discovery = if count > 0 {
         call.state().discovery()
     } else {
@@ -256,8 +257,9 @@ pub async fn get_top_songs(call: Call) -> Encoded {
     if let Some(discovery) = discovery {
         let limit = u32::try_from(count).unwrap_or(u32::MAX);
         let user = call.principal().user_id.uuid();
-        match discovery.artist_top_tracks(user, &seed, limit).await {
-            Ok(suggestions) if !suggestions.is_empty() => {
+        if vendor {
+            if let Some(suggestions) = discovery.cached_artist_top_tracks(user, &seed, limit).await
+            {
                 match discovery.resolve_tracks(&suggestions, limit).await {
                     Ok(resolved) if !resolved.is_empty() => {
                         let songs = match resolved_song_objects(&call, resolved).await {
@@ -279,11 +281,39 @@ pub async fn get_top_songs(call: Call) -> Encoded {
                     }
                 }
             }
-            Ok(_) => {}
-            Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
+        } else {
+            match discovery.artist_top_tracks(user, &seed, limit).await {
+                Ok(suggestions) if !suggestions.is_empty() => {
+                    match discovery.resolve_tracks(&suggestions, limit).await {
+                        Ok(resolved) if !resolved.is_empty() => {
+                            let songs = match resolved_song_objects(&call, resolved).await {
+                                Ok(songs) => songs,
+                                Err(error) => return call.encode(Response::failed(error)),
+                            };
+                            return call
+                                .respond(Response::ok().member(
+                                    "topSongs",
+                                    Object::new().set("song", Array::new(songs)),
+                                ))
+                                .await;
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            return call.encode(Response::failed(catalog::failure(&error)));
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
+            }
         }
     }
 
+    // The id the panel is about, resolved before the read consumes the request.
+    let enriched = match &requested {
+        RequestedArtist::Stored(id) => ClientId::Entity(*id),
+        RequestedArtist::Catalog(id) => ClientId::Catalog(id.clone()),
+    };
     let songs = match requested {
         RequestedArtist::Stored(id) => {
             let database = call.state().database();
@@ -300,8 +330,13 @@ pub async fn get_top_songs(call: Call) -> Encoded {
         RequestedArtist::Catalog(id) => {
             let catalog = call.state().catalog();
             let limit = u32::try_from(count.max(0)).unwrap_or(u32::MAX);
-            match catalog.artist_top_tracks(&id, limit).await {
-                Ok(tracks) => {
+            let lookup = if vendor {
+                catalog.cached_artist_top_tracks(&id, limit).await
+            } else {
+                catalog.artist_top_tracks(&id, limit).await.map(Some)
+            };
+            match lookup {
+                Ok(Some(tracks)) => {
                     let suffix = match catalog::title_suffix(&call.state().settings_snapshot()) {
                         Ok(suffix) => suffix,
                         Err(error) => return call.encode(Response::failed(error)),
@@ -311,12 +346,18 @@ pub async fn get_top_songs(call: Call) -> Encoded {
                         .map(|track| projection::catalog_child(&track.id, &track.track, &suffix))
                         .collect()
                 }
+                Ok(None) => Vec::new(),
                 Err(error) => {
                     return call.encode(Response::failed(catalog::failure(&error)));
                 }
             }
         }
     };
+    // A first-party page asks for the rest of the panel through a job and answers
+    // with what is cached now.
+    if vendor {
+        catalog::request_enrichment(&call, &enriched).await;
+    }
     call.respond(Response::ok().member("topSongs", Object::new().set("song", Array::new(songs))))
         .await
 }

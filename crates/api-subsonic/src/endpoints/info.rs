@@ -146,18 +146,24 @@ async fn artist_info(call: &Call, member: &'static str) -> Encoded {
         return call.encode(Response::failed(SubsonicError::not_found()));
     };
 
-    let info = match call
-        .state()
-        .catalog()
-        .artist_info(&ArtistInfoRequest {
-            name: name.clone(),
-            ids: ids.clone(),
-        })
-        .await
-    {
-        Ok(info) => info,
-        Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
+    let vendor = call.params().vendor_enabled();
+    let request = ArtistInfoRequest {
+        name: name.clone(),
+        ids: ids.clone(),
     };
+    // A first-party page never waits for the metadata or artwork layers: it shows
+    // what is already cached and asks for the rest through an enrichment job.
+    let info = if vendor {
+        call.state().catalog().cached_artist_info(&request).await
+    } else {
+        match call.state().catalog().artist_info(&request).await {
+            Ok(info) => info,
+            Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
+        }
+    };
+    if vendor {
+        catalog::request_enrichment(call, &client).await;
+    }
     let biography = info
         .as_ref()
         .and_then(|info| info.biography.clone())
@@ -187,11 +193,26 @@ async fn artist_info(call: &Call, member: &'static str) -> Encoded {
         })
         .unwrap_or_default();
 
-    let portraits = match call.state().catalog().artist_portraits(&client).await {
-        Ok(images) => images,
-        Err(error) => {
-            tracing::debug!(%error, "no artwork instance described an artist portrait");
-            Vec::new()
+    let portraits = if vendor {
+        match call
+            .state()
+            .catalog()
+            .cached_artist_portraits(&client)
+            .await
+        {
+            Ok(images) => images.unwrap_or_default(),
+            Err(error) => {
+                tracing::debug!(%error, "no cached artist portrait was found");
+                Vec::new()
+            }
+        }
+    } else {
+        match call.state().catalog().artist_portraits(&client).await {
+            Ok(images) => images,
+            Err(error) => {
+                tracing::debug!(%error, "no artwork instance described an artist portrait");
+                Vec::new()
+            }
         }
     };
     let (small, medium, large) = portrait_urls(&portraits);
@@ -392,6 +413,11 @@ async fn album_info(call: &Call, member: &'static str) -> Encoded {
     let Some(mbid) = mbid else {
         return call.encode(Response::failed(SubsonicError::not_found()));
     };
+    if call.params().vendor_enabled()
+        && let Ok(id) = ClientId::parse(value)
+    {
+        catalog::request_enrichment(call, &id).await;
+    }
 
     let answer = Object::new()
         .set_element("notes", String::new())
@@ -447,6 +473,18 @@ async fn named_artist(
             }))
         }
         Ok(ClientId::Catalog(id)) if id.kind() == EntityKind::Artist => {
+            if call.params().vendor_enabled() {
+                let artist = match call.state().catalog().cached_artist(&id).await {
+                    Ok(Some(artist)) => artist,
+                    Ok(None) => return Err(SubsonicError::not_found()),
+                    Err(error) => return Err(catalog::failure(&error)),
+                };
+                return Ok(Some((
+                    ClientId::Catalog(id),
+                    artist.artist.name,
+                    artist.artist.ids,
+                )));
+            }
             match call.state().catalog().artist(&id).await {
                 Ok(artist) => Ok(Some((
                     ClientId::Catalog(id),
@@ -507,6 +545,32 @@ async fn named_album(call: &Call, value: &str) -> Result<Option<String>, Subsoni
                 Err(SubsonicError::not_found())
             }
         },
+        Ok(ClientId::Catalog(id))
+            if id.kind() == EntityKind::Album && call.params().vendor_enabled() =>
+        {
+            // A cached reference carries the title and the credits, not the
+            // album's identifiers, so a cached tracklist answers the id and a
+            // reference alone answers an empty one.
+            match call.state().catalog().cached_album(&id).await {
+                Ok(Some(album)) => Ok(Some(
+                    album
+                        .album
+                        .ids
+                        .iter()
+                        .find(|external| {
+                            external.namespace == hearthsound_core::providers::MB_RELEASE
+                        })
+                        .map(|external| external.value.clone())
+                        .unwrap_or_default(),
+                )),
+                Ok(None) => match call.state().catalog().cached_album_ref(&id).await {
+                    Ok(Some(_)) => Ok(Some(String::new())),
+                    Ok(None) => Err(SubsonicError::not_found()),
+                    Err(error) => Err(catalog::failure(&error)),
+                },
+                Err(error) => Err(catalog::failure(&error)),
+            }
+        }
         Ok(ClientId::Catalog(id)) if id.kind() == EntityKind::Album => {
             match call.state().catalog().album(&id).await {
                 Ok(album) => Ok(Some(
