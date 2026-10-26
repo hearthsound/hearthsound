@@ -21,11 +21,27 @@
 //! command-line change takes effect within about a second without a restart.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use hearthsound_db::DATA_VERSION_POLL_INTERVAL;
 use hearthsound_jobs::Shutdown;
 
+use crate::error::ServerError;
+use crate::server::with_retries;
 use crate::services::{Services, log_rebuild, max_concurrent_transcodes};
+
+/// The waits before a failed reload is tried again.
+///
+/// An external write can land while the database is busy, or while a plugin host
+/// is being rebuilt; without a retry the process would serve the previous
+/// settings and registry until the next write from another connection, which may
+/// never come. The waits are short enough to stay inside one operator action and
+/// long enough to outlast a contended write.
+const RELOAD_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(5),
+    Duration::from_secs(30),
+];
 
 impl Services {
     /// Runs until `shutdown`, reloading what another connection changed.
@@ -73,7 +89,7 @@ impl Services {
                     if !changed {
                         break;
                     }
-                    self.reload().await;
+                    Arc::clone(&self).reload_with_retries(&shutdown).await;
                 }
                 changed = settings_changes.changed() => {
                     if changed.is_err() {
@@ -89,12 +105,12 @@ impl Services {
                                 instance = %slug,
                                 "an instance was switched off, so the registry is rebuilt"
                             );
-                            self.reload().await;
+                            Arc::clone(&self).reload_with_retries(&shutdown).await;
                         }
                         // A lagging receiver missed events; the rebuild below
                         // covers all of them.
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            self.reload().await;
+                            Arc::clone(&self).reload_with_retries(&shutdown).await;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
@@ -102,7 +118,7 @@ impl Services {
                 () = tokio::time::sleep(retry_period) => {
                     if self.registry().is_stale() {
                         tracing::info!("retrying a provider registry rebuild that failed");
-                        self.reload().await;
+                        Arc::clone(&self).reload_with_retries(&shutdown).await;
                     }
                 }
                 () = shutdown.wait() => break,
@@ -131,32 +147,81 @@ impl Services {
     ///
     /// - `self`: the services whose stored layers are re-read.
     pub async fn reload(&self) {
-        match self.settings().reload().await {
-            Ok(()) => {}
-            Err(error) => tracing::error!(%error, "could not reload the runtime settings"),
+        if let Err(error) = self.reload_once().await {
+            tracing::error!(%error, "the reload failed");
+        }
+    }
+
+    /// Reloads, retrying a failure before leaving it to the next external write.
+    ///
+    /// The retries run on [`RELOAD_RETRY_DELAYS`], and a stop signal abandons
+    /// them. After the last delay the failure is logged once and the watcher goes
+    /// back to waiting for the next write from another connection.
+    ///
+    /// # Parameters
+    ///
+    /// - `self`: the services whose stored layers are re-read.
+    /// - `shutdown`: the signal that abandons the retries.
+    async fn reload_with_retries(self: Arc<Self>, shutdown: &Shutdown) {
+        let reloaded = with_retries(
+            &RELOAD_RETRY_DELAYS,
+            shutdown,
+            "could not reload after an external write",
+            |_attempt| {
+                let services = Arc::clone(&self);
+                async move { services.reload_once().await }
+            },
+        )
+        .await;
+        if reloaded.is_none() {
+            tracing::error!("the reload still fails; waiting for the next external write");
+        }
+    }
+
+    /// Runs one reload and reports the first step that failed.
+    ///
+    /// Every step runs even after a failure, because they are independent: a
+    /// settings reload that failed must not stop the provider registry from
+    /// catching up with the plugin tables.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when every step succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first failure, after the later steps ran.
+    async fn reload_once(&self) -> Result<(), ServerError> {
+        let mut failure = None;
+        if let Err(error) = self.settings().reload().await {
+            failure.get_or_insert(error.into());
         }
         self.apply_cached_settings();
         match self.registry().rebuild_or_mark_stale().await {
             Ok(report) => {
                 log_rebuild(&report);
                 if let Err(error) = self.orchestrator().providers_changed().await {
-                    tracing::error!(
-                        %error,
-                        "could not bring the acquisitions in line with the registry"
-                    );
+                    failure.get_or_insert(error.into());
                 }
             }
-            Err(error) => tracing::error!(%error, "could not rebuild the provider registry"),
+            Err(error) => {
+                failure.get_or_insert(error.into());
+            }
         }
-        match self.orchestrator().reconcile().await {
-            Ok(()) => {}
-            Err(error) => tracing::error!(%error, "could not reconcile the acquisitions"),
+        if let Err(error) = self.orchestrator().reconcile().await {
+            failure.get_or_insert(error.into());
         }
         self.reconcile_watchers().await;
         // A folder owner, a like or a setting written elsewhere can change where
         // a managed file belongs.
         self.maintenance().notify();
-        tracing::info!("reloaded the settings and providers after an external write");
+        match failure {
+            Some(error) => Err(error),
+            None => {
+                tracing::info!("reloaded the settings and providers after an external write");
+                Ok(())
+            }
+        }
     }
 
     /// Brings the folder watchers in line with the stored folders.
@@ -200,5 +265,76 @@ impl Services {
             }
         }
         self.maintenance().notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::*;
+
+    /// Waits as short as the retry helper allows while keeping the schedule's
+    /// length, so a test does not wait the real half minute.
+    fn short_retry_delays() -> Vec<Duration> {
+        vec![Duration::from_millis(1); RELOAD_RETRY_DELAYS.len()]
+    }
+
+    #[test]
+    fn the_reload_retry_schedule_is_the_documented_one() {
+        assert_eq!(
+            RELOAD_RETRY_DELAYS,
+            [
+                Duration::from_secs(1),
+                Duration::from_secs(5),
+                Duration::from_secs(30)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_reload_is_retried_within_one_commit() {
+        let shutdown = Shutdown::new();
+        let calls = AtomicU32::new(0);
+        let reloaded: Option<()> = with_retries(
+            &short_retry_delays(),
+            &shutdown,
+            "could not reload after an external write",
+            |_attempt| {
+                let attempt = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                async move {
+                    if attempt == 1 {
+                        Err("the database is busy")
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+        )
+        .await;
+        assert_eq!(reloaded, Some(()), "the second attempt succeeds");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_reload_that_never_succeeds_uses_up_its_attempts() {
+        let shutdown = Shutdown::new();
+        let calls = AtomicU32::new(0);
+        let reloaded: Option<()> = with_retries(
+            &short_retry_delays(),
+            &shutdown,
+            "could not reload after an external write",
+            |_attempt| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async move { Err("the database is busy") }
+            },
+        )
+        .await;
+        assert_eq!(reloaded, None);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            u32::try_from(RELOAD_RETRY_DELAYS.len()).unwrap() + 1,
+            "one delay per retry, plus the first attempt"
+        );
     }
 }

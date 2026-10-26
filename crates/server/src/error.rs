@@ -22,6 +22,9 @@ pub enum ServerError {
     /// The database could not be opened, migrated, or queried.
     #[error(transparent)]
     Database(#[from] hearthsound_db::DbError),
+    /// The acquisition ledger could not be reconciled with the provider registry.
+    #[error(transparent)]
+    Acquire(#[from] hearthsound_acquire::AcquireError),
     /// The runtime settings could not be loaded from their layers.
     #[error(transparent)]
     Settings(#[from] hearthsound_config::settings::SettingsError),
