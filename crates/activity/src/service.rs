@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use hearthsound_core::events::{Audience, EventBus, LibraryChange, LibraryChanged, ServerEvent};
 use hearthsound_core::providers::FeedbackValue;
 use hearthsound_core::{EntityId, EntityKind, IdPrefix};
 use hearthsound_db::Database;
@@ -142,7 +143,7 @@ pub enum Feedback {
 /// # let _ = activity;
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ActivityService {
     /// The writer pool every mutation goes through.
     writer: SqlitePool,
@@ -163,9 +164,21 @@ pub struct ActivityService {
     /// The scrobble outbox plays, now-playing reports and feedback are queued
     /// in, when the server runs one.
     scrobble_outbox: Option<Arc<ScrobbleOutbox>>,
+    /// The event bus a changed like or save is published on, when the server
+    /// runs one.
+    events: Option<Arc<EventBus>>,
     /// Woken after every like, unlike, playlist edit and recorded play, so the
     /// storage maintenance worker acts on the pins they change.
     signal: MaintenanceSignal,
+}
+
+impl std::fmt::Debug for ActivityService {
+    /// Renders the service without its repositories or the outbox.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActivityService")
+            .finish_non_exhaustive()
+    }
 }
 
 impl ActivityService {
@@ -249,6 +262,25 @@ impl ActivityService {
         self.scrobble_outbox.as_ref()
     }
 
+    /// Publishes a changed like or save on an event bus.
+    ///
+    /// Without a bus the service records opinions and library membership
+    /// locally only, which is what a test or a tool that serves no clients
+    /// wants.
+    ///
+    /// # Parameters
+    ///
+    /// - `events`: the bus to publish on.
+    ///
+    /// # Returns
+    ///
+    /// The service, publishing every membership change to the account it
+    /// belongs to.
+    pub fn with_events(mut self, events: Arc<EventBus>) -> ActivityService {
+        self.events = Some(events);
+        self
+    }
+
     /// Builds the service with one maintenance signal shared by every
     /// repository that changes a pin or records a play.
     fn build(db: &Database, sessions: StreamSessions) -> ActivityService {
@@ -263,6 +295,7 @@ impl ActivityService {
             reports: Arc::new(InMemoryReports::new(db).with_signal(signal.clone())),
             sessions,
             scrobble_outbox: None,
+            events: None,
             signal,
         }
     }
@@ -495,11 +528,17 @@ impl ActivityService {
     ) -> Result<(), ActivityError> {
         let at = now_millis();
         let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+        let mut changed = Vec::with_capacity(entities.len());
         for (kind, entity_id) in entities {
-            feedback::like(&mut tx, user_id, *kind, *entity_id, at).await?;
+            if feedback::like(&mut tx, user_id, *kind, *entity_id, at).await? {
+                changed.push((*kind, *entity_id));
+            }
         }
         tx.commit().await?;
         self.signal.notify();
+        for (kind, entity_id) in changed {
+            self.publish_library_change(user_id, kind, entity_id, LibraryChange::Added);
+        }
         self.queue_feedback(user_id, entities, FeedbackValue::Love);
         Ok(())
     }
@@ -523,11 +562,17 @@ impl ActivityService {
         entities: &[(EntityKind, Uuid)],
     ) -> Result<(), ActivityError> {
         let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+        let mut changed = Vec::with_capacity(entities.len());
         for (kind, entity_id) in entities {
-            feedback::unlike(&mut tx, user_id, *kind, *entity_id).await?;
+            if feedback::unlike(&mut tx, user_id, *kind, *entity_id).await? {
+                changed.push((*kind, *entity_id));
+            }
         }
         tx.commit().await?;
         self.signal.notify();
+        for (kind, entity_id) in changed {
+            self.publish_library_change(user_id, kind, entity_id, LibraryChange::Removed);
+        }
         self.queue_feedback(user_id, entities, FeedbackValue::Clear);
         Ok(())
     }
@@ -561,13 +606,23 @@ impl ActivityService {
     ) -> Result<(), ActivityError> {
         let at = now_millis();
         let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
-        match feedback {
+        let changed = match feedback {
             Feedback::Like => feedback::like(&mut tx, user_id, kind, entity_id, at).await?,
             Feedback::Dislike => feedback::dislike(&mut tx, user_id, kind, entity_id, at).await?,
             Feedback::None => feedback::clear(&mut tx, user_id, kind, entity_id).await?,
-        }
+        };
         tx.commit().await?;
         self.signal.notify();
+        if changed {
+            // A like adds the entity to the user's library; a dislike or a
+            // clearing removes the like that pinned it. Either way the
+            // membership changed, which is what the event reports.
+            let change = match feedback {
+                Feedback::Like => LibraryChange::Added,
+                Feedback::Dislike | Feedback::None => LibraryChange::Removed,
+            };
+            self.publish_library_change(user_id, kind, entity_id, change);
+        }
         if kind == EntityKind::Track {
             let value = match feedback {
                 Feedback::Like => FeedbackValue::Love,
@@ -602,11 +657,17 @@ impl ActivityService {
     ) -> Result<(), ActivityError> {
         let at = now_millis();
         let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+        let mut changed = Vec::with_capacity(entities.len());
         for (kind, entity_id) in entities {
-            feedback::save(&mut tx, user_id, *kind, *entity_id, at).await?;
+            if feedback::save(&mut tx, user_id, *kind, *entity_id, at).await? {
+                changed.push((*kind, *entity_id));
+            }
         }
         tx.commit().await?;
         self.signal.notify();
+        for (kind, entity_id) in changed {
+            self.publish_library_change(user_id, kind, entity_id, LibraryChange::Added);
+        }
         Ok(())
     }
 
@@ -631,12 +692,50 @@ impl ActivityService {
         entities: &[(EntityKind, Uuid)],
     ) -> Result<(), ActivityError> {
         let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+        let mut changed = Vec::with_capacity(entities.len());
         for (kind, entity_id) in entities {
-            feedback::unsave(&mut tx, user_id, *kind, *entity_id).await?;
+            if feedback::unsave(&mut tx, user_id, *kind, *entity_id).await? {
+                changed.push((*kind, *entity_id));
+            }
         }
         tx.commit().await?;
         self.signal.notify();
+        for (kind, entity_id) in changed {
+            self.publish_library_change(user_id, kind, entity_id, LibraryChange::Removed);
+        }
         Ok(())
+    }
+
+    /// Publishes one account's library change, when the server runs a bus.
+    ///
+    /// The event goes to the account it belongs to and to administrators, which
+    /// is the audience rule every personal event follows; it carries the entity's
+    /// client id, so a client can reload what it shows.
+    ///
+    /// # Parameters
+    ///
+    /// - `user`: the account whose library changed.
+    /// - `kind`: the kind of entity that changed.
+    /// - `entity_id`: the entity's id.
+    /// - `change`: whether the entity was added to or removed from that library.
+    fn publish_library_change(
+        &self,
+        user: Uuid,
+        kind: EntityKind,
+        entity_id: Uuid,
+        change: LibraryChange,
+    ) {
+        let Some(events) = &self.events else {
+            return;
+        };
+        events.publish_for(
+            Audience::User(user),
+            ServerEvent::LibraryChanged(LibraryChanged {
+                entity_kind: kind,
+                entity_id: client_id(kind, entity_id),
+                change,
+            }),
+        );
     }
 
     /// Queues a now-playing report, logging rather than failing the request.
@@ -726,4 +825,24 @@ impl ActivityService {
             }
         });
     }
+}
+
+/// Returns the client id of an entity of a kind.
+///
+/// # Parameters
+///
+/// - `kind`: the kind of entity.
+/// - `id`: the entity's stored id.
+///
+/// # Returns
+///
+/// The prefixed id a client and an event carry, such as `tr_...` or `al_...`.
+fn client_id(kind: EntityKind, id: Uuid) -> String {
+    let prefix = match kind {
+        EntityKind::Track => IdPrefix::Track,
+        EntityKind::Album => IdPrefix::Album,
+        EntityKind::Artist => IdPrefix::Artist,
+        EntityKind::Playlist => IdPrefix::Playlist,
+    };
+    EntityId::from_uuid(prefix, id).to_string()
 }

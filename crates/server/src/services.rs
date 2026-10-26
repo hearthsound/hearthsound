@@ -387,7 +387,9 @@ impl Services {
             user_configs.clone(),
         ));
         let activity = Arc::new(
-            ActivityService::new(&database).with_scrobble_outbox(Arc::clone(&scrobble_outbox)),
+            ActivityService::new(&database)
+                .with_scrobble_outbox(Arc::clone(&scrobble_outbox))
+                .with_events(Arc::clone(&events)),
         );
         // A restart mid-track keeps the listen: the sessions the previous run
         // stored are restored, and the ones whose client went quiet record the

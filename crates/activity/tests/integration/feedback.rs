@@ -2,10 +2,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use hearthsound_activity::{ActivityService, Feedback};
-use hearthsound_core::EntityKind;
+use hearthsound_core::events::{Audience, EventBus, LibraryChange, ServerEvent};
+use hearthsound_core::{EntityId, EntityKind, IdPrefix};
 use hearthsound_db::Database;
 use hearthsound_library::LibraryRepository;
 use uuid::Uuid;
@@ -348,5 +350,132 @@ async fn one_users_dislike_keeps_another_users_like() {
     assert!(
         is_pinned(&library, tracks[0]).await,
         "the other user still likes the track"
+    );
+}
+
+/// Reads one `library.changed` event off a bus, asserting its audience.
+fn library_change(
+    received: &mut tokio::sync::broadcast::Receiver<hearthsound_core::events::EventEnvelope>,
+    user: Uuid,
+) -> (EntityKind, String, LibraryChange) {
+    let envelope = received.try_recv().expect("an event was published");
+    assert_eq!(envelope.audience, Audience::User(user));
+    match envelope.event {
+        ServerEvent::LibraryChanged(change) => {
+            (change.entity_kind, change.entity_id, change.change)
+        }
+        other => panic!("expected a library change, got {other:?}"),
+    }
+}
+
+/// Liking a track publishes one library change to its own account; a repeated
+/// like publishes nothing, and unliking publishes the removal.
+#[tokio::test]
+async fn a_like_publishes_a_library_change_to_its_user() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let events = Arc::new(EventBus::new());
+    let mut received = events.subscribe();
+    let activity = ActivityService::new(&database).with_events(Arc::clone(&events));
+
+    activity
+        .star(user, &[(EntityKind::Track, tracks[0])])
+        .await
+        .unwrap();
+    let (kind, id, change) = library_change(&mut received, user);
+    assert_eq!(kind, EntityKind::Track);
+    assert_eq!(
+        id,
+        EntityId::from_uuid(IdPrefix::Track, tracks[0]).to_string()
+    );
+    assert_eq!(change, LibraryChange::Added);
+
+    // A second like of the same track changes nothing, so nothing is published.
+    activity
+        .star(user, &[(EntityKind::Track, tracks[0])])
+        .await
+        .unwrap();
+    assert!(
+        received.try_recv().is_err(),
+        "a repeated like published an event"
+    );
+
+    activity
+        .unstar(user, &[(EntityKind::Track, tracks[0])])
+        .await
+        .unwrap();
+    let (kind, id, change) = library_change(&mut received, user);
+    assert_eq!(kind, EntityKind::Track);
+    assert_eq!(
+        id,
+        EntityId::from_uuid(IdPrefix::Track, tracks[0]).to_string()
+    );
+    assert_eq!(change, LibraryChange::Removed);
+
+    // Unliking something that was not liked is not a change either.
+    activity
+        .unstar(user, &[(EntityKind::Track, tracks[0])])
+        .await
+        .unwrap();
+    assert!(received.try_recv().is_err());
+}
+
+/// Saving an album and unsaving it each publish one library change for the
+/// album, and a dislike of a never-liked track publishes nothing.
+#[tokio::test]
+async fn a_save_and_an_unsave_publish_library_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let user = insert_user(&database).await;
+    let (album, tracks) = insert_album(&library).await;
+    let events = Arc::new(EventBus::new());
+    let mut received = events.subscribe();
+    let activity = ActivityService::new(&database).with_events(Arc::clone(&events));
+
+    activity
+        .save(user, &[(EntityKind::Album, album)])
+        .await
+        .unwrap();
+    let (kind, id, change) = library_change(&mut received, user);
+    assert_eq!(kind, EntityKind::Album);
+    assert_eq!(id, EntityId::from_uuid(IdPrefix::Album, album).to_string());
+    assert_eq!(change, LibraryChange::Added);
+
+    activity
+        .unsave(user, &[(EntityKind::Album, album)])
+        .await
+        .unwrap();
+    let (kind, _id, change) = library_change(&mut received, user);
+    assert_eq!(kind, EntityKind::Album);
+    assert_eq!(change, LibraryChange::Removed);
+
+    // A dislike of a track the user never liked removes nothing from the
+    // library, so it publishes nothing.
+    activity
+        .set_feedback(user, EntityKind::Track, tracks[0], Feedback::Dislike)
+        .await
+        .unwrap();
+    assert!(
+        received.try_recv().is_err(),
+        "a dislike of an unliked track published an event"
+    );
+
+    // Liking it and then clearing it are the two membership changes.
+    activity
+        .set_feedback(user, EntityKind::Track, tracks[0], Feedback::Like)
+        .await
+        .unwrap();
+    assert_eq!(library_change(&mut received, user).2, LibraryChange::Added);
+    activity
+        .set_feedback(user, EntityKind::Track, tracks[0], Feedback::None)
+        .await
+        .unwrap();
+    assert_eq!(
+        library_change(&mut received, user).2,
+        LibraryChange::Removed
     );
 }

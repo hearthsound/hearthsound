@@ -7,6 +7,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hearthsound_core::events::{Audience, PlaylistChanged, ServerEvent, UploadUpdated};
+use hearthsound_core::{Availability, EntityId};
+use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, Origin, TrackInput};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, SET_COOKIE};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -1109,4 +1111,91 @@ async fn a_finished_enrichment_is_announced_to_its_listener_once() {
 
     shutdown.trigger();
     handle.await.unwrap();
+}
+
+/// Inserts one stored track and returns its client id.
+///
+/// # Parameters
+///
+/// - `fixture`: the running server.
+async fn seed_track(fixture: &Fixture) -> EntityId {
+    let library = LibraryRepository::new(fixture.services.database());
+    let album = library
+        .upsert_album(
+            &AlbumInput::new("Event Album", Origin::Local),
+            &[ArtistCredit::new("Event Artist", "main")],
+        )
+        .await
+        .unwrap();
+    let mut input = TrackInput::new("Event Song", Origin::Local, Availability::Local);
+    input.album_id = Some(album);
+    input.display_artist = Some("Event Artist".to_owned());
+    input.duration_ms = Some(180_000);
+    library
+        .insert_track(&input, &[ArtistCredit::new("Event Artist", "main")], &[])
+        .await
+        .unwrap()
+}
+
+/// Opens a stream with one credential.
+///
+/// # Parameters
+///
+/// - `fixture`: the running server.
+/// - `key`: the API key the stream is opened with.
+async fn open_stream(fixture: &Fixture, key: &str) -> reqwest::Response {
+    let response = fixture
+        .client
+        .get(stream_url(fixture))
+        .header(AUTHORIZATION, format!("Bearer {key}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response
+}
+
+/// Liking a song over the Subsonic surface publishes `library.changed` to that
+/// account and to administrators, not to another ordinary user.
+#[tokio::test]
+async fn a_like_reaches_its_own_account_and_admins_only() {
+    let fixture = Fixture::new().await;
+    let track = seed_track(&fixture).await.to_string();
+    let (owner_id, owner_key) = create_user(&fixture, "owner", false).await;
+    let (_other_id, other_key) = create_user(&fixture, "bystander", false).await;
+
+    let mut owner = open_stream(&fixture, &owner_key).await;
+    let mut admin = open_stream(&fixture, &fixture.api_key).await;
+    let mut other = open_stream(&fixture, &other_key).await;
+
+    let starred = fixture
+        .get(&format!("/rest/star?id={track}&apiKey={owner_key}&f=json"))
+        .await;
+    assert_eq!(starred.status(), StatusCode::OK);
+
+    let owner_frame = next_frames(&mut owner, 1).await.remove(0);
+    assert_eq!(owner_frame.event, "library.changed");
+    assert_eq!(owner_frame.data["data"]["entityKind"], "track");
+    assert_eq!(owner_frame.data["data"]["entityId"], track.as_str());
+    assert_eq!(owner_frame.data["data"]["change"], "added");
+
+    let admin_frame = next_frames(&mut admin, 1).await.remove(0);
+    assert_eq!(admin_frame.event, "library.changed");
+    assert_eq!(admin_frame.data["data"]["entityId"], track.as_str());
+
+    // The bystander's stream stays silent: the next frame it sees is the marker
+    // published after the like.
+    publish_playlist(&fixture, "pl_after_like");
+    let other_frames = next_frames(&mut other, 1).await;
+    assert_eq!(other_frames[0].event, "playlist.changed");
+    assert_eq!(
+        other_frames[0].data["data"]["playlistId"], "pl_after_like",
+        "the bystander received an event that was not addressed to it"
+    );
+
+    let _ = owner_id;
+    drop(owner);
+    drop(admin);
+    drop(other);
+    fixture.stop().await;
 }

@@ -16,6 +16,11 @@
 //! (`subsonic.rating_one_is_dislike`) and leaves a like in place, while the
 //! dislike a user asks for directly replaces whatever they held; clearing
 //! removes either.
+//!
+//! Each write answers whether it changed what the user's library holds, which is
+//! what the activity service turns into a `library.changed` event for that user:
+//! liking something already liked, or disliking something that was never liked,
+//! changes nothing and publishes nothing.
 
 use hearthsound_core::{EntityId, EntityKind, IdPrefix, PinReason};
 use hearthsound_library::retention;
@@ -37,6 +42,10 @@ use crate::error::ActivityError;
 /// - `entity_id`: the entity's id.
 /// - `at`: when the like happened, in unix milliseconds.
 ///
+/// # Returns
+///
+/// `true` when the user did not already like the entity, so the like is new.
+///
 /// # Errors
 ///
 /// Returns [`ActivityError::Database`] when the row cannot be written and
@@ -47,7 +56,8 @@ pub async fn like(
     kind: EntityKind,
     entity_id: Uuid,
     at: i64,
-) -> Result<(), ActivityError> {
+) -> Result<bool, ActivityError> {
+    let previous = value_of(conn, user_id, kind, entity_id).await?;
     sqlx::query!(
         "INSERT INTO user_feedback (user_id, entity_kind, entity_id, value, at) \
          VALUES (?, ?, ?, 'like', ?) \
@@ -60,7 +70,8 @@ pub async fn like(
     )
     .execute(&mut *conn)
     .await?;
-    refresh_pins(conn, kind, entity_id).await
+    refresh_pins(conn, kind, entity_id).await?;
+    Ok(previous.as_deref() != Some("like"))
 }
 
 /// Removes a user's like of an entity.
@@ -121,6 +132,10 @@ pub async fn unlike(
 /// - `entity_id`: the entity's id.
 /// - `at`: when the dislike happened, in unix milliseconds.
 ///
+/// # Returns
+///
+/// `true` when the user liked the entity before, so a like left their library.
+///
 /// # Errors
 ///
 /// Returns [`ActivityError::Database`] when the row cannot be written and
@@ -131,7 +146,8 @@ pub async fn dislike(
     kind: EntityKind,
     entity_id: Uuid,
     at: i64,
-) -> Result<(), ActivityError> {
+) -> Result<bool, ActivityError> {
+    let previous = value_of(conn, user_id, kind, entity_id).await?;
     sqlx::query!(
         "INSERT INTO user_feedback (user_id, entity_kind, entity_id, value, at) \
          VALUES (?, ?, ?, 'dislike', ?) \
@@ -144,7 +160,8 @@ pub async fn dislike(
     )
     .execute(&mut *conn)
     .await?;
-    refresh_pins(conn, kind, entity_id).await
+    refresh_pins(conn, kind, entity_id).await?;
+    Ok(previous.as_deref() == Some("like"))
 }
 
 /// Removes whatever feedback a user holds about an entity.
@@ -161,6 +178,11 @@ pub async fn dislike(
 /// - `kind`: the kind of entity.
 /// - `entity_id`: the entity's id.
 ///
+/// # Returns
+///
+/// `true` when the user liked the entity, so clearing removed it from their
+/// library. Clearing a dislike alone changes no membership and answers `false`.
+///
 /// # Errors
 ///
 /// Returns [`ActivityError::Database`] when the rows cannot be removed and
@@ -170,7 +192,8 @@ pub async fn clear(
     user_id: Uuid,
     kind: EntityKind,
     entity_id: Uuid,
-) -> Result<(), ActivityError> {
+) -> Result<bool, ActivityError> {
+    let previous = value_of(conn, user_id, kind, entity_id).await?;
     sqlx::query!(
         "DELETE FROM user_feedback \
          WHERE user_id = ? AND entity_kind = ? AND entity_id = ?",
@@ -180,7 +203,8 @@ pub async fn clear(
     )
     .execute(&mut *conn)
     .await?;
-    refresh_pins(conn, kind, entity_id).await
+    refresh_pins(conn, kind, entity_id).await?;
+    Ok(previous.as_deref() == Some("like"))
 }
 
 /// Saves an entity into a user's personal library.
@@ -199,6 +223,10 @@ pub async fn clear(
 /// - `entity_id`: the entity's id.
 /// - `at`: when the save happened, in unix milliseconds.
 ///
+/// # Returns
+///
+/// `true` when the user had not saved the entity, so the save is new.
+///
 /// # Errors
 ///
 /// Returns [`ActivityError::Database`] when the row cannot be written and
@@ -209,7 +237,16 @@ pub(crate) async fn save(
     kind: EntityKind,
     entity_id: Uuid,
     at: i64,
-) -> Result<(), ActivityError> {
+) -> Result<bool, ActivityError> {
+    let existed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM user_library \
+         WHERE user_id = ? AND entity_kind = ? AND entity_id = ? AND origin = 'saved'",
+    )
+    .bind(user_id.as_bytes().as_slice())
+    .bind(kind_literal(kind))
+    .bind(entity_id.as_bytes().as_slice())
+    .fetch_one(&mut *conn)
+    .await?;
     sqlx::query!(
         "INSERT INTO user_library (user_id, entity_kind, entity_id, origin, added_at) \
          VALUES (?, ?, ?, 'saved', ?) \
@@ -222,7 +259,8 @@ pub(crate) async fn save(
     )
     .execute(&mut *conn)
     .await?;
-    refresh_pins(conn, kind, entity_id).await
+    refresh_pins(conn, kind, entity_id).await?;
+    Ok(existed == 0)
 }
 
 /// Removes an entity from a user's personal library.
@@ -240,6 +278,10 @@ pub(crate) async fn save(
 /// - `kind`: the kind of entity that was saved.
 /// - `entity_id`: the entity's id.
 ///
+/// # Returns
+///
+/// `true` when a saved row was removed.
+///
 /// # Errors
 ///
 /// Returns [`ActivityError::Database`] when the rows cannot be removed and
@@ -249,8 +291,8 @@ pub(crate) async fn unsave(
     user_id: Uuid,
     kind: EntityKind,
     entity_id: Uuid,
-) -> Result<(), ActivityError> {
-    sqlx::query!(
+) -> Result<bool, ActivityError> {
+    let removed = sqlx::query!(
         "DELETE FROM user_library \
          WHERE user_id = ? AND entity_kind = ? AND entity_id = ? AND origin = 'saved'",
         user_id.as_bytes().as_slice(),
@@ -258,8 +300,44 @@ pub(crate) async fn unsave(
         entity_id.as_bytes().as_slice(),
     )
     .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    refresh_pins(conn, kind, entity_id).await?;
+    Ok(removed > 0)
+}
+
+/// Returns the feedback a user holds about one entity, when any.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `user_id`: the account whose feedback is read.
+/// - `kind`: the kind of entity.
+/// - `entity_id`: the entity's id.
+///
+/// # Returns
+///
+/// `like`, `dislike`, or `None` when the user holds no opinion of it.
+///
+/// # Errors
+///
+/// Returns [`ActivityError::Database`] when the row cannot be read.
+async fn value_of(
+    conn: &mut SqliteConnection,
+    user_id: Uuid,
+    kind: EntityKind,
+    entity_id: Uuid,
+) -> Result<Option<String>, ActivityError> {
+    let value = sqlx::query_scalar(
+        "SELECT value FROM user_feedback \
+         WHERE user_id = ? AND entity_kind = ? AND entity_id = ?",
+    )
+    .bind(user_id.as_bytes().as_slice())
+    .bind(kind_literal(kind))
+    .bind(entity_id.as_bytes().as_slice())
+    .fetch_optional(&mut *conn)
     .await?;
-    refresh_pins(conn, kind, entity_id).await
+    Ok(value)
 }
 
 /// Brings the personal-library pin of every track a like or a save affects up to
