@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT track_id, started_at, listened_ms FROM plays ORDER BY started_at",
+  "describe": {
+    "columns": [
+      {
+        "name": "track_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "track_id"
+          }
+        }
+      },
+      {
+        "name": "started_at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "started_at"
+          }
+        }
+      },
+      {
+        "name": "listened_ms",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "listened_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a9387663836bbd343b441af46b2c46e95a5e95eb07e7dfb967423df3e02e84ce"
+}

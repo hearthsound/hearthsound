@@ -664,6 +664,11 @@ impl InMemoryReports {
                 inner.sessions.insert(key, session);
             }
             PlaybackState::Playing | PlaybackState::Paused => {
+                // A report for another track than the open session's closes that
+                // session first, so the play it earned is not lost and the
+                // listening time stops accruing to a track the client left. A
+                // client that reports `playing` for a new track instead of
+                // `starting` therefore still shows and records the right track.
                 let fresh = ListenSession {
                     track_id: report.track_id,
                     duration_ms: report.duration_ms,
@@ -674,7 +679,22 @@ impl InMemoryReports {
                     ignore_scrobble: report.ignore_scrobble,
                     persisted_at: 0,
                 };
-                let mut session = previous.unwrap_or(fresh);
+                let mut session = match previous {
+                    Some(session) if session.track_id == report.track_id => session,
+                    Some(mut session) => {
+                        session.accumulate(report.now, report.rate);
+                        session.ignore_scrobble |= report.ignore_scrobble;
+                        if report.duration_ms > 0 {
+                            session.duration_ms = report.duration_ms;
+                        }
+                        if session.earned() {
+                            plan.record =
+                                Some((session.track_id, session.started_at, session.listened_ms));
+                        }
+                        fresh
+                    }
+                    None => fresh,
+                };
                 let state_changed = session.state != report.state;
                 let was_threshold = session.reached_threshold();
                 session.accumulate(report.now, report.rate);

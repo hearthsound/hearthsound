@@ -1538,3 +1538,77 @@ async fn an_ignored_stop_after_the_threshold_records_no_play() {
         .unwrap();
     assert_eq!(rows, 0, "the stop removed the stored session");
 }
+
+/// A playing report for a track other than the open session's starts a new
+/// session for the track it names, and closes the old one.
+#[tokio::test]
+async fn a_playing_report_for_another_track_starts_a_new_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let reports = activity.reports();
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let (one, two) = (track_id(tracks[0]), track_id(tracks[1]));
+
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            100_000,
+            PlaybackState::Starting,
+            START,
+        ))
+        .await
+        .unwrap();
+    // No `starting` for the second track: the client reports that it is playing
+    // it, which closes the first session and opens this one.
+    let outcome = reports
+        .report(&report(
+            user,
+            "dsub",
+            two,
+            100_000,
+            PlaybackState::Playing,
+            START + 60_000,
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, PlaybackOutcome::Recorded(_)),
+        "the first session earned its play: {outcome:?}"
+    );
+
+    // The now-playing row names the track the client is playing.
+    let stored: Vec<u8> = sqlx::query_scalar("SELECT track_id FROM now_playing")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(stored, two.uuid().as_bytes().to_vec());
+
+    // The first track's play carries its own listening time, and the second
+    // session's clock starts at the report that opened it.
+    let rows =
+        sqlx::query!("SELECT track_id, started_at, listened_ms FROM plays ORDER BY started_at")
+            .fetch_all(database.readers())
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].track_id, one.uuid().as_bytes().to_vec());
+    assert_eq!(rows[0].listened_ms, 60_000);
+
+    let duration: i64 =
+        sqlx::query_scalar("SELECT duration_ms FROM listen_sessions WHERE client = 'dsub'")
+            .fetch_one(database.readers())
+            .await
+            .unwrap();
+    assert_eq!(duration, 100_000, "the new session holds the new track");
+    let started: i64 =
+        sqlx::query_scalar("SELECT started_at FROM listen_sessions WHERE client = 'dsub'")
+            .fetch_one(database.readers())
+            .await
+            .unwrap();
+    assert_eq!(started, START + 60_000);
+}
