@@ -95,7 +95,8 @@ mod session;
 pub use annotations::{Annotation, MAX_IDS_PER_QUERY, disliked_ids, load as load_annotations};
 pub use bookmarks::{Bookmark, Bookmarks};
 pub use discovery_sync::{
-    DISCOVERY_SYNC_JOB_KIND, DISCOVERY_SYNC_SCHEDULE, DiscoverySyncJobHandler, DiscoverySyncPayload,
+    DISCOVERY_SYNC_JOB_KIND, DISCOVERY_SYNC_SCHEDULE, DiscoverySyncJobHandler,
+    DiscoverySyncPayload, SyncReport,
 };
 pub use error::ActivityError;
 pub use feedback::{clear, dislike, like, refresh_user_library_pin, unlike};

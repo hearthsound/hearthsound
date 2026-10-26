@@ -84,6 +84,19 @@ pub struct DiscoverySyncPayload {
     pub user_id: Option<Uuid>,
 }
 
+/// What one sync pass wrote, and which listeners it could not sync.
+///
+/// One listener's failure is not another's: a service that rejects one account's
+/// link must not keep the rest of the household's playlists from refreshing, so
+/// the pass collects the failures and carries on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SyncReport {
+    /// How many playlists were written.
+    pub written: usize,
+    /// The listeners whose sync failed, in the order they were tried.
+    pub failed_users: Vec<Uuid>,
+}
+
 /// The generated-playlist sync.
 ///
 /// One handler is built by the composition root and registered for the job
@@ -173,20 +186,35 @@ impl DiscoverySyncJobHandler {
 
     /// Syncs the generated playlists of every linked listener.
     ///
+    /// A listener whose sync fails is counted and logged, and the pass moves on
+    /// to the next one, so one service's rejected link cannot stop the rest of
+    /// the household from refreshing. The failure resurfaces at the next
+    /// scheduled pass.
+    ///
     /// # Returns
     ///
-    /// How many playlists were written.
+    /// What the pass wrote and which listeners it could not sync.
     ///
     /// # Errors
     ///
-    /// Returns [`ActivityError`] when a link, a discovery answer, a catalog
-    /// lookup or a playlist write fails.
-    pub async fn sync_all(&self) -> Result<usize, ActivityError> {
-        let mut written = 0;
+    /// Returns [`ActivityError`] only when the linked listeners themselves
+    /// cannot be read.
+    pub async fn sync_all(&self) -> Result<SyncReport, ActivityError> {
+        let mut report = SyncReport::default();
         for user in self.linked_users().await? {
-            written += self.sync_user(user).await?;
+            match self.sync_user(user).await {
+                Ok(written) => report.written += written,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        user = %user,
+                        "could not sync a listener's generated playlists"
+                    );
+                    report.failed_users.push(user);
+                }
+            }
         }
-        Ok(written)
+        Ok(report)
     }
 
     /// Syncs the generated playlists of one listener.
@@ -293,7 +321,19 @@ impl DiscoverySyncJobHandler {
             // A playlist the listener has edited is no longer the service's:
             // the slot is recognised and skipped, with nothing written and
             // nothing published.
-            let Some(playlist) = self.playlists.upsert_generated(&write, now).await? else {
+            let stored = match self.playlists.upsert_generated(&write, now).await {
+                Ok(written) => written,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        playlist = summary.reference.as_str(),
+                        user = %user,
+                        "a generated playlist could not be written"
+                    );
+                    continue;
+                }
+            };
+            let Some(playlist) = stored else {
                 continue;
             };
             self.events.publish_for(
@@ -339,17 +379,27 @@ impl JobHandler for DiscoverySyncJobHandler {
             })?,
             None => DiscoverySyncPayload { user_id: None },
         };
-        let written = match payload.user_id {
-            Some(user) => self
-                .sync_user(user)
-                .await
-                .map_err(|error| JobError::new(error.to_string()))?,
+        let report = match payload.user_id {
+            Some(user) => SyncReport {
+                written: self
+                    .sync_user(user)
+                    .await
+                    .map_err(|error| JobError::new(error.to_string()))?,
+                failed_users: Vec::new(),
+            },
+            // A pass that synced most listeners must not be retried wholesale
+            // because one of them failed; its failure resurfaces tomorrow.
             None => self
                 .sync_all()
                 .await
                 .map_err(|error| JobError::new(error.to_string()))?,
         };
-        tracing::debug!(kind = %job.kind, written, "synced generated playlists");
+        tracing::debug!(
+            kind = %job.kind,
+            written = report.written,
+            failed = report.failed_users.len(),
+            "synced generated playlists"
+        );
         Ok(())
     }
 }

@@ -485,3 +485,151 @@ async fn a_catalog_error_keeps_the_previous_entries() {
         "a skipped playlist publishes nothing"
     );
 }
+
+/// A playlist that cannot be written does not stop the rest of that listener's
+/// playlists, and neither does it stop the next listener.
+#[tokio::test]
+async fn a_failing_playlist_does_not_block_the_rest() {
+    let fixture = Fixture::new().await;
+    let working_plugin = install_plugin(&fixture, SCROBBLE_FIXTURE).await;
+    fixture
+        .services
+        .instances()
+        .create(&InstanceSpec {
+            slug: "working".to_owned(),
+            plugin_id: working_plugin.clone(),
+            display_name: "Working Service".to_owned(),
+            server_config: json!({
+                "endpoint": "http://127.0.0.1:9",
+                "playlists": [{
+                    "reference": "weekly-jams",
+                    "name": "Weekly Jams",
+                    "tracks": [{ "title": "Fixture Song 1", "artists": ["Fixture Artist"] }]
+                }]
+            }),
+            host_config: Value::Null,
+        })
+        .await
+        .unwrap();
+    // A name the repository refuses, so writing this instance's playlist fails.
+    fixture
+        .services
+        .instances()
+        .create(&InstanceSpec {
+            slug: "badname".to_owned(),
+            plugin_id: working_plugin,
+            display_name: "Bad Name Service".to_owned(),
+            server_config: json!({
+                "endpoint": "http://127.0.0.1:9",
+                "playlists": [{
+                    "reference": "broken",
+                    "name": "x".repeat(400),
+                    "tracks": [{ "title": "Fixture Song 1", "artists": ["Fixture Artist"] }]
+                }]
+            }),
+            host_config: Value::Null,
+        })
+        .await
+        .unwrap();
+    let catalog_plugin = install_plugin(&fixture, ALBUM_CATALOG).await;
+    fixture
+        .services
+        .instances()
+        .create(&InstanceSpec {
+            slug: "album".to_owned(),
+            plugin_id: catalog_plugin,
+            display_name: "Album catalog".to_owned(),
+            server_config: json!({
+                "searchResults": [
+                    { "text": "song 1", "track": 1 },
+                    { "text": "song 2", "track": 2 }
+                ]
+            }),
+            host_config: Value::Null,
+        })
+        .await
+        .unwrap();
+    fixture
+        .services
+        .instances()
+        .set_layer(Layer::Catalog, &["album".to_owned()])
+        .await
+        .unwrap();
+    fixture
+        .services
+        .instances()
+        .set_layer(
+            Layer::Discovery,
+            &["working".to_owned(), "badname".to_owned()],
+        )
+        .await
+        .unwrap();
+    fixture.services.registry().rebuild().await.unwrap();
+
+    // Both listeners link both instances; the failing playlist is one of each
+    // listener's two.
+    let (_, key) = create_listener(&fixture, "blocked").await;
+    let (_, other_key) = create_listener(&fixture, "healthy").await;
+    for account in [&key, &other_key] {
+        link_with(&fixture, account, "working").await;
+        link_with(&fixture, account, "badname").await;
+    }
+
+    let report = fixture.services.discovery_sync().sync_all().await.unwrap();
+
+    assert!(
+        report.failed_users.is_empty(),
+        "a refused write is not a failed listener: {:?}",
+        report.failed_users
+    );
+    assert_eq!(
+        report.written, 2,
+        "each listener's writable playlist was written"
+    );
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM playlists WHERE name = 'Weekly Jams' AND source_ref = 'weekly-jams'",
+    )
+    .fetch_one(fixture.services.database().readers())
+    .await
+    .unwrap();
+    assert_eq!(rows, 2, "both listeners hold the working playlist");
+    let refused: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM playlists WHERE source_ref = 'broken'")
+            .fetch_one(fixture.services.database().readers())
+            .await
+            .unwrap();
+    assert_eq!(refused, 0, "the refused playlist was not stored");
+}
+
+/// Creates a listener that may not acquire and returns its id and API key.
+///
+/// # Parameters
+///
+/// - `fixture`: the running server.
+/// - `username`: the login name.
+async fn create_listener(fixture: &Fixture, username: &str) -> (Uuid, String) {
+    crate::multi_user::create_user(fixture, username, false).await
+}
+
+/// Links one account to one discovery instance.
+///
+/// # Parameters
+///
+/// - `fixture`: the running server.
+/// - `key`: the account's API key.
+/// - `slug`: the instance slug.
+async fn link_with(fixture: &Fixture, key: &str, slug: &str) {
+    let response = fixture
+        .client
+        .put(format!(
+            "{}/api/v1/me/providers/{slug}/config",
+            fixture.base_url()
+        ))
+        .header(AUTHORIZATION, format!("Bearer {key}"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(json!({ "config": { "token": "good" } }).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
