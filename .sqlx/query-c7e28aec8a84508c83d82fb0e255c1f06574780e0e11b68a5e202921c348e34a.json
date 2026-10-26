@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO listen_sessions (\n                 user_id, client, track_id, duration_ms, state, started_at, last_at,\n                 listened_ms, ignore_scrobble, persisted_at\n             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n             ON CONFLICT (user_id, client) DO UPDATE SET\n                 track_id = excluded.track_id,\n                 duration_ms = excluded.duration_ms,\n                 state = excluded.state,\n                 started_at = excluded.started_at,\n                 last_at = excluded.last_at,\n                 listened_ms = excluded.listened_ms,\n                 ignore_scrobble = excluded.ignore_scrobble,\n                 persisted_at = excluded.persisted_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": []
+  },
+  "hash": "c7e28aec8a84508c83d82fb0e255c1f06574780e0e11b68a5e202921c348e34a"
+}

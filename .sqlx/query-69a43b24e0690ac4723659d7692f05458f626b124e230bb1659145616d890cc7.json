@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT listened_ms, persisted_at FROM listen_sessions",
+  "describe": {
+    "columns": [
+      {
+        "name": "listened_ms",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "listened_ms"
+          }
+        }
+      },
+      {
+        "name": "persisted_at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "persisted_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "69a43b24e0690ac4723659d7692f05458f626b124e230bb1659145616d890cc7"
+}

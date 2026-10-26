@@ -30,7 +30,8 @@
 //! each client saved so another client can pick it up, [`Bookmarks`] stores
 //! the position a user left a track at, and [`NowPlaying`] stores what each
 //! client is playing, which [`InMemoryReports`] keeps current from the playback
-//! reports that also earn plays. [`load_annotations`] reads what a user has done
+//! reports that also earn plays. A report's open session is a [`ListenSession`],
+//! stored in the database so a restart mid-track keeps the listen. [`load_annotations`] reads what a user has done
 //! with a whole page of entities at once, for the listing endpoints that report
 //! stars, ratings, and play counts.
 //!
@@ -80,6 +81,7 @@ mod bookmarks;
 mod discovery_sync;
 mod error;
 mod feedback;
+mod listen_session;
 mod now_playing;
 mod play;
 mod play_queues;
@@ -97,6 +99,9 @@ pub use discovery_sync::{
 };
 pub use error::ActivityError;
 pub use feedback::{clear, dislike, like, refresh_user_library_pin, unlike};
+pub use listen_session::{
+    LISTEN_SESSION_PERSIST_MS, ListenSession, ListenSessions, StoredSession,
+};
 pub use now_playing::{
     DEFAULT_CLIENT, NowPlaying, NowPlayingEntry, PLAYING_GRACE_MS, PLAYING_GRACE_UNKNOWN_MS,
 };
@@ -109,7 +114,7 @@ pub use playlists::{
 pub use ratings::{MAX_RATING, set_rating};
 pub use reports::{
     InMemoryReports, LISTENED_HALF_MS, MIN_TRACK_MS, PlaybackOutcome, PlaybackReport,
-    PlaybackState, SCROBBLE_DEDUPE_MS,
+    PlaybackState, Recovery, SCROBBLE_DEDUPE_MS,
 };
 pub use scrobble::{
     DeliveryReport, NOW_PLAYING_TTL_MS, OUTBOX_MAX_AGE_MS, OutboxCounters,
@@ -129,12 +134,14 @@ pub(crate) const READ_THEN_WRITE: &str = "BEGIN IMMEDIATE";
 
 /// Returns the current time in unix milliseconds.
 ///
-/// Every timestamp this crate writes shares one clock and one unit.
+/// Every timestamp this crate writes shares one clock and one unit, so a caller
+/// that drives a repository from outside - the server starting up and recovering
+/// the open playback sessions, for example - stamps the same way.
 ///
 /// # Returns
 ///
 /// The number of milliseconds since the Unix epoch.
-pub(crate) fn now_millis() -> i64 {
+pub fn now_millis() -> i64 {
     let nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
     (nanos / 1_000_000) as i64
 }

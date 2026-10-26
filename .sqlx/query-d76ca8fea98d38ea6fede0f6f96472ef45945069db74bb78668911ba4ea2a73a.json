@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT listened_ms FROM plays",
+  "describe": {
+    "columns": [
+      {
+        "name": "listened_ms",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "listened_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d76ca8fea98d38ea6fede0f6f96472ef45945069db74bb78668911ba4ea2a73a"
+}

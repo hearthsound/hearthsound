@@ -1,0 +1,134 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT user_id, client, track_id, duration_ms, state, started_at, last_at,\n                    listened_ms, ignore_scrobble, persisted_at\n             FROM listen_sessions ORDER BY last_at",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "name": "client",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "client"
+          }
+        }
+      },
+      {
+        "name": "track_id",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "track_id"
+          }
+        }
+      },
+      {
+        "name": "duration_ms",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "duration_ms"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "started_at",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "started_at"
+          }
+        }
+      },
+      {
+        "name": "last_at",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "last_at"
+          }
+        }
+      },
+      {
+        "name": "listened_ms",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "listened_ms"
+          }
+        }
+      },
+      {
+        "name": "ignore_scrobble",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "ignore_scrobble"
+          }
+        }
+      },
+      {
+        "name": "persisted_at",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "persisted_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0bf7cd76a5c5e5e67b6af6367d7b070a97faefc3dc897ba4c0ed59855535ff9a"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM listen_sessions WHERE user_id = ? AND client = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "9d6343516103fca87985a68559febb00ab5848580a437d9453957dfc6b67855e"
+}

@@ -389,6 +389,17 @@ impl Services {
         let activity = Arc::new(
             ActivityService::new(&database).with_scrobble_outbox(Arc::clone(&scrobble_outbox)),
         );
+        // A restart mid-track keeps the listen: the sessions the previous run
+        // stored are restored, and the ones whose client went quiet record the
+        // play they earned. A failure is logged rather than fatal, because a
+        // session table problem must not keep the server down.
+        if let Err(error) = activity
+            .reports()
+            .recover(hearthsound_activity::now_millis())
+            .await
+        {
+            tracing::error!(%error, "could not recover playback sessions");
+        }
         let scrobble_deliverer = Arc::new(ScrobbleDeliverer::new(Arc::clone(&scrobble_outbox)));
         let storage_roots =
             StorageRoots::new(config.paths.library.clone(), config.paths.cache.clone());

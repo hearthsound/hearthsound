@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT state, persisted_at FROM listen_sessions",
+  "describe": {
+    "columns": [
+      {
+        "name": "state",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "persisted_at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "persisted_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "300cdb714197bac6d314001e7967106e0d5515b8a8993405f27a6f400c4eb612"
+}

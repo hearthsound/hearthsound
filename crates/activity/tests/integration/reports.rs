@@ -1019,3 +1019,443 @@ async fn a_seek_back_after_the_threshold_starts_a_new_play() {
         1
     );
 }
+
+/// The instant the stored-session tests report at, recent enough that the
+/// scrobble a recovery seeds is still inside its dedupe window.
+fn session_start() -> i64 {
+    recent(3 * 60 * 60 * 1000)
+}
+
+/// A report writes the session it keeps, so a restart can restore it.
+#[tokio::test]
+async fn a_report_stores_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let reports = activity.reports();
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let one = track_id(tracks[0]);
+    let start = session_start();
+
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Starting,
+            start,
+        ))
+        .await
+        .unwrap();
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Playing,
+            start + 6_000,
+        ))
+        .await
+        .unwrap();
+
+    let rows = sqlx::query!(
+        "SELECT client, track_id, duration_ms, state, started_at, last_at, listened_ms,
+                ignore_scrobble, persisted_at
+         FROM listen_sessions"
+    )
+    .fetch_all(database.readers())
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].client, "dsub");
+    assert_eq!(rows[0].track_id, one.uuid().as_bytes().to_vec());
+    assert_eq!(rows[0].duration_ms, 240_000);
+    assert_eq!(rows[0].state, "playing");
+    assert_eq!(rows[0].started_at, start);
+    assert_eq!(rows[0].last_at, start + 6_000);
+    assert_eq!(rows[0].listened_ms, 6_000);
+    assert_eq!(rows[0].ignore_scrobble, 0);
+    assert_eq!(rows[0].persisted_at, start + 6_000);
+}
+
+/// A session in progress is written at most once per interval.
+#[tokio::test]
+async fn a_session_in_progress_is_written_at_most_once_per_interval() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let reports = activity.reports();
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let one = track_id(tracks[0]);
+    let start = session_start();
+
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Starting,
+            start,
+        ))
+        .await
+        .unwrap();
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Playing,
+            start + 6_000,
+        ))
+        .await
+        .unwrap();
+    for offset in [7_000, 8_000] {
+        reports
+            .report(&report(
+                user,
+                "dsub",
+                one,
+                240_000,
+                PlaybackState::Playing,
+                start + offset,
+            ))
+            .await
+            .unwrap();
+        let stored = sqlx::query!("SELECT listened_ms, persisted_at FROM listen_sessions")
+            .fetch_one(database.readers())
+            .await
+            .unwrap();
+        assert_eq!(stored.listened_ms, 6_000, "the row was not rewritten");
+        assert_eq!(stored.persisted_at, start + 6_000);
+    }
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Playing,
+            start + 11_000,
+        ))
+        .await
+        .unwrap();
+    let stored = sqlx::query!("SELECT listened_ms, persisted_at FROM listen_sessions")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(stored.listened_ms, 11_000);
+    assert_eq!(stored.persisted_at, start + 11_000);
+}
+
+/// A state change is written at once, without waiting for the interval.
+#[tokio::test]
+async fn a_state_change_is_written_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let reports = activity.reports();
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let one = track_id(tracks[0]);
+    let start = session_start();
+
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Starting,
+            start,
+        ))
+        .await
+        .unwrap();
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Playing,
+            start + 6_000,
+        ))
+        .await
+        .unwrap();
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Paused,
+            start + 8_000,
+        ))
+        .await
+        .unwrap();
+
+    let stored = sqlx::query!("SELECT state, persisted_at FROM listen_sessions")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(stored.state, "paused");
+    assert_eq!(stored.persisted_at, start + 8_000);
+}
+
+/// A restart restores a session that was still open, and the client's next
+/// report continues it.
+#[tokio::test]
+async fn a_restart_restores_an_in_progress_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let one = track_id(tracks[0]);
+    let start = session_start();
+
+    let first = ActivityService::new(&database);
+    first
+        .reports()
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Starting,
+            start,
+        ))
+        .await
+        .unwrap();
+    first
+        .reports()
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Playing,
+            start + 100_000,
+        ))
+        .await
+        .unwrap();
+
+    // A second process over the same database is what a restart looks like.
+    let second = ActivityService::new(&database);
+    let recovery = second.reports().recover(start + 110_000).await.unwrap();
+    assert_eq!(recovery.restored, 1);
+    assert_eq!(recovery.recorded, 0);
+    assert_eq!(recovery.dropped, 0);
+
+    let outcome = second
+        .reports()
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Stopped,
+            start + 130_000,
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, PlaybackOutcome::Recorded(_)), "{outcome:?}");
+    assert_eq!(
+        second.plays().play_count(user, one.uuid()).await.unwrap(),
+        1
+    );
+    let stored = sqlx::query!("SELECT listened_ms FROM plays")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert!(stored.listened_ms >= 130_000, "{stored:?}");
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM listen_sessions")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(rows, 0, "the stopped report removed the row");
+}
+
+/// A restart after the grace window records the play the session earned and
+/// removes the row.
+#[tokio::test]
+async fn a_restart_after_the_grace_window_records_the_earned_play() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let one = track_id(tracks[0]);
+    let start = session_start();
+
+    let first = ActivityService::new(&database);
+    first
+        .reports()
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Starting,
+            start,
+        ))
+        .await
+        .unwrap();
+    first
+        .reports()
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Playing,
+            start + 130_000,
+        ))
+        .await
+        .unwrap();
+
+    let second = ActivityService::new(&database);
+    // Five minutes ago: long after the session's grace window, and recent
+    // enough that the dedupe it seeds still suppresses the client's scrobble.
+    let recovery = second.reports().recover(recent(5 * 60 * 1000)).await.unwrap();
+    assert_eq!(recovery.recorded, 1);
+    assert_eq!(recovery.dropped, 1);
+    assert_eq!(recovery.restored, 0);
+    assert_eq!(
+        second.plays().play_count(user, one.uuid()).await.unwrap(),
+        1
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM listen_sessions")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+
+    // The recovery seeded the dedupe map, so the client's own scrobble of that
+    // play is dropped.
+    let scrobble = Scrobble {
+        user_id: user,
+        track_id: one.uuid(),
+        client: Some("dsub"),
+        submission: true,
+        started_at: start,
+        listened_ms: 130_000,
+    };
+    assert_eq!(
+        second.scrobble(&scrobble).await.unwrap(),
+        ScrobbleOutcome::AlreadyRecorded
+    );
+}
+
+/// A restart drops a session that earned nothing, recording no play.
+#[tokio::test]
+async fn a_restart_drops_a_session_that_earned_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let one = track_id(tracks[0]);
+    let start = session_start();
+
+    let first = ActivityService::new(&database);
+    first
+        .reports()
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Starting,
+            start,
+        ))
+        .await
+        .unwrap();
+    first
+        .reports()
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Playing,
+            start + 10_000,
+        ))
+        .await
+        .unwrap();
+
+    let second = ActivityService::new(&database);
+    let recovery = second
+        .reports()
+        .recover(start + 2 * 60 * 60 * 1000)
+        .await
+        .unwrap();
+    assert_eq!(recovery.recorded, 0);
+    assert_eq!(recovery.restored, 0);
+    assert_eq!(recovery.dropped, 1);
+    assert_eq!(
+        second.plays().play_count(user, one.uuid()).await.unwrap(),
+        0
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM listen_sessions")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+}
+
+/// A stopped report removes the stored session.
+#[tokio::test]
+async fn a_stopped_report_removes_the_session_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let reports = activity.reports();
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let one = track_id(tracks[0]);
+    let start = session_start();
+
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Starting,
+            start,
+        ))
+        .await
+        .unwrap();
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM listen_sessions")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Stopped,
+            start + 200_000,
+        ))
+        .await
+        .unwrap();
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM listen_sessions")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+}

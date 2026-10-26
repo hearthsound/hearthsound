@@ -1,0 +1,122 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT client, track_id, duration_ms, state, started_at, last_at, listened_ms,\n                ignore_scrobble, persisted_at\n         FROM listen_sessions",
+  "describe": {
+    "columns": [
+      {
+        "name": "client",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "client"
+          }
+        }
+      },
+      {
+        "name": "track_id",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "track_id"
+          }
+        }
+      },
+      {
+        "name": "duration_ms",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "duration_ms"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "started_at",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "started_at"
+          }
+        }
+      },
+      {
+        "name": "last_at",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "last_at"
+          }
+        }
+      },
+      {
+        "name": "listened_ms",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "listened_ms"
+          }
+        }
+      },
+      {
+        "name": "ignore_scrobble",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "ignore_scrobble"
+          }
+        }
+      },
+      {
+        "name": "persisted_at",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "listen_sessions",
+            "name": "persisted_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "9658e2fe331f244fb2f87e24a691ccb37e46a6d49b7754afc078e61b61df831f"
+}
