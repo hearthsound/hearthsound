@@ -1454,7 +1454,7 @@ fn layer_cache_key(
     for id in &subject.ids {
         digest.update([0]);
         digest.update(id.namespace.as_bytes());
-        digest.update([b'=']);
+        digest.update(b"=");
         digest.update(id.value.as_bytes());
     }
     let hash = digest.finalize();
