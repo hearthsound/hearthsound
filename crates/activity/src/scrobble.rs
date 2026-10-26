@@ -61,7 +61,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use hearthsound_core::providers::{
-    ExternalId, FeedbackValue, Listen, ScrobbleProvider, UserContext,
+    ExternalId, FeedbackValue, Listen, ScrobbleLimits, ScrobbleProvider, UserContext,
 };
 use hearthsound_core::{Layer, new_uuid_v7};
 use hearthsound_db::Database;
@@ -101,6 +101,14 @@ const BACKOFF_MS: [i64; 5] = [
 
 /// How often the delivery worker runs a pass when nothing rings its kick.
 const IDLE_PASS_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How long a service's limits are reused, in milliseconds.
+///
+/// Ten minutes. The limits are a property of the service's configuration and
+/// change at most when an administrator reconfigures the instance, so asking
+/// again on every like would spend a plugin call - and up to the instance's
+/// whole call deadline - to learn the same answer.
+const LIMITS_TTL_MS: i64 = 10 * 60 * 1000;
 
 /// The stored reason of a listen whose queued row this host cannot read.
 ///
@@ -216,6 +224,11 @@ pub struct ScrobbleOutbox {
     targets: Arc<dyn ScrobbleTargets>,
     /// The links that decide who may be scrobbled for.
     user_configs: UserConfigService,
+    /// The limits of each instance, with the instant they were read.
+    ///
+    /// Filled by the delivery pass and reused by the feedback enqueue, so a
+    /// like never waits on a plugin call for an answer the pass already has.
+    limits: Arc<tokio::sync::Mutex<HashMap<Uuid, (ScrobbleLimits, i64)>>>,
     /// Rung after every enqueue, so the delivery worker starts a pass.
     kick: Arc<Notify>,
 }
@@ -252,8 +265,47 @@ impl ScrobbleOutbox {
             readers: db.readers().clone(),
             targets,
             user_configs,
+            limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             kick: Arc::new(Notify::new()),
         }
+    }
+
+    /// Returns one instance's limits, reading them at most once per
+    /// [`LIMITS_TTL_MS`].
+    ///
+    /// # Parameters
+    ///
+    /// - `target`: the instance as the registry knows it.
+    /// - `now`: the instant to compare the stored read against, in unix
+    ///   milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// The limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the provider's error, which is not cached: a plugin that could
+    /// not answer is asked again on the next call.
+    async fn limits_of(
+        &self,
+        target: &ScrobbleTarget,
+        now: i64,
+    ) -> Result<ScrobbleLimits, hearthsound_core::ProviderError> {
+        {
+            let limits = self.limits.lock().await;
+            if let Some((limits, at)) = limits.get(&target.instance_id)
+                && now - *at < LIMITS_TTL_MS
+            {
+                return Ok(*limits);
+            }
+        }
+        let limits = target.provider.get_limits().await?;
+        self.limits
+            .lock()
+            .await
+            .insert(target.instance_id, (limits, now));
+        Ok(limits)
     }
 
     /// Returns a handle that is rung after every enqueue.
@@ -394,7 +446,9 @@ impl ScrobbleOutbox {
     /// Queues one feedback report for every linked instance that accepts it.
     ///
     /// An instance whose limits cannot be read, or that does not accept
-    /// feedback, is skipped.
+    /// feedback, is skipped. The limits are the cached ones when the delivery
+    /// pass read them recently, so the caller - a like on the request path -
+    /// usually does not wait on a plugin call at all.
     ///
     /// # Parameters
     ///
@@ -427,8 +481,9 @@ impl ScrobbleOutbox {
             value: feedback_name(value),
         })?;
         let mut accepting = Vec::new();
+        let at = now_millis();
         for target in targets {
-            match target.provider.get_limits().await {
+            match self.limits_of(&target, at).await {
                 Ok(limits) if limits.feedback => accepting.push(target),
                 Ok(_) => {}
                 Err(error) => {
@@ -443,7 +498,6 @@ impl ScrobbleOutbox {
         if accepting.is_empty() {
             return Ok(0);
         }
-        let at = now_millis();
         let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
         for target in &accepting {
             insert_row(
@@ -809,7 +863,7 @@ impl ScrobbleDeliverer {
             }
             return Ok(());
         };
-        let limits = match target.provider.get_limits().await {
+        let limits = match self.outbox.limits_of(&target, now).await {
             Ok(limits) => limits,
             Err(error) => {
                 for row in &rows {

@@ -497,8 +497,7 @@ impl ActivityService {
         }
         tx.commit().await?;
         self.signal.notify();
-        self.queue_feedback(user_id, entities, FeedbackValue::Love)
-            .await;
+        self.queue_feedback(user_id, entities, FeedbackValue::Love);
         Ok(())
     }
 
@@ -526,8 +525,7 @@ impl ActivityService {
         }
         tx.commit().await?;
         self.signal.notify();
-        self.queue_feedback(user_id, entities, FeedbackValue::Clear)
-            .await;
+        self.queue_feedback(user_id, entities, FeedbackValue::Clear);
         Ok(())
     }
 
@@ -573,8 +571,7 @@ impl ActivityService {
                 Feedback::Dislike => FeedbackValue::Hate,
                 Feedback::None => FeedbackValue::Clear,
             };
-            self.queue_feedback(user_id, &[(kind, entity_id)], value)
-                .await;
+            self.queue_feedback(user_id, &[(kind, entity_id)], value);
         }
         Ok(())
     }
@@ -695,27 +692,35 @@ impl ActivityService {
     /// An album, an artist or any other kind carries no listen, so it produces
     /// no feedback row.
     ///
+    /// The enqueue runs off the request path in a task of its own: it may have
+    /// to ask a plugin whether it accepts feedback, which can take as long as
+    /// the instance's call deadline, and a like must answer as soon as its own
+    /// transaction committed. A failure is logged, which is the same contract
+    /// the enqueue has when it runs inline.
+    ///
     /// # Parameters
     ///
     /// - `user_id`: the listener whose opinion changed.
     /// - `entities`: the entities the request named, each with its kind.
     /// - `value`: the opinion to report.
-    async fn queue_feedback(
-        &self,
-        user_id: Uuid,
-        entities: &[(EntityKind, Uuid)],
-        value: FeedbackValue,
-    ) {
-        let Some(outbox) = &self.scrobble_outbox else {
+    fn queue_feedback(&self, user_id: Uuid, entities: &[(EntityKind, Uuid)], value: FeedbackValue) {
+        let Some(outbox) = self.scrobble_outbox.clone() else {
             return;
         };
-        for (kind, entity_id) in entities {
-            if *kind != EntityKind::Track {
-                continue;
-            }
-            if let Err(error) = outbox.feedback(user_id, *entity_id, value).await {
-                tracing::warn!(%error, "could not queue feedback");
-            }
+        let tracks: Vec<Uuid> = entities
+            .iter()
+            .filter(|(kind, _)| *kind == EntityKind::Track)
+            .map(|(_, entity_id)| *entity_id)
+            .collect();
+        if tracks.is_empty() {
+            return;
         }
+        tokio::spawn(async move {
+            for track_id in tracks {
+                if let Err(error) = outbox.feedback(user_id, track_id, value).await {
+                    tracing::warn!(%error, "could not queue feedback");
+                }
+            }
+        });
     }
 }

@@ -8,6 +8,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -80,6 +81,11 @@ struct FakeProvider {
     /// listen with it, the way a service that refuses one item rejects the
     /// call that carries it.
     rejects: Arc<Mutex<Option<String>>>,
+    /// How long reading the limits takes, so a test can tell whether a caller
+    /// waited on it.
+    limits_delay: Arc<Mutex<Option<Duration>>>,
+    /// How many times the limits were asked for.
+    limits_calls: Arc<AtomicUsize>,
     /// What it was asked.
     recorded: Arc<Mutex<Recorded>>,
 }
@@ -91,8 +97,24 @@ impl FakeProvider {
             limits,
             error: Arc::new(Mutex::new(None)),
             rejects: Arc::new(Mutex::new(None)),
+            limits_delay: Arc::new(Mutex::new(None)),
+            limits_calls: Arc::new(AtomicUsize::new(0)),
             recorded: Arc::new(Mutex::new(Recorded::default())),
         }
+    }
+
+    /// Makes reading the limits take `delay`.
+    ///
+    /// # Parameters
+    ///
+    /// - `delay`: how long the call stalls.
+    fn stall_limits(&self, delay: Duration) {
+        *self.limits_delay.lock().unwrap() = Some(delay);
+    }
+
+    /// Returns how many times the limits were asked for.
+    fn limits_calls(&self) -> usize {
+        self.limits_calls.load(Ordering::SeqCst)
     }
 
     /// Makes the provider reject any submission of more than one listen, and
@@ -142,6 +164,11 @@ impl ProviderLifecycle for FakeProvider {
 #[async_trait]
 impl ScrobbleProvider for FakeProvider {
     async fn get_limits(&self) -> Result<ScrobbleLimits, ProviderError> {
+        self.limits_calls.fetch_add(1, Ordering::SeqCst);
+        let delay = *self.limits_delay.lock().unwrap();
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         Ok(self.limits)
     }
 
@@ -350,6 +377,34 @@ impl Harness {
     }
 }
 
+/// Waits until the outbox holds at least `count` rows and returns them.
+///
+/// The feedback enqueue runs in a task of its own, so a test that liked or
+/// starred something waits for the row instead of reading it immediately.
+///
+/// # Parameters
+///
+/// - `harness`: the harness whose outbox is read.
+/// - `count`: the number of rows to wait for.
+///
+/// # Panics
+///
+/// When the rows do not appear within ten seconds.
+async fn wait_for_rows(harness: &Harness, count: usize) -> Vec<StoredRow> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let rows = harness.rows().await;
+        if rows.len() >= count {
+            return rows;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the enqueue did not write {count} rows in time"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// Inserts one enabled provider instance with its plugin row.
 ///
 /// # Parameters
@@ -539,7 +594,7 @@ async fn feedback_is_queued_only_for_services_that_accept_it() {
         )
         .await
         .unwrap();
-    let rows = harness.rows().await;
+    let rows = wait_for_rows(&harness, 1).await;
     assert_eq!(rows.len(), 1, "only the accepting service gets feedback");
     assert_eq!(rows[0].instance_id, harness.instances[0].id);
     assert_eq!(rows[0].kind, "feedback");
@@ -563,7 +618,7 @@ async fn a_starred_track_reports_love_and_an_unstarred_one_clear() {
         .star(harness.user, &[(EntityKind::Track, harness.track)])
         .await
         .unwrap();
-    let rows = harness.rows().await;
+    let rows = wait_for_rows(&harness, 1).await;
     assert_eq!(rows.len(), 1);
     let payload: serde_json::Value = serde_json::from_str(&rows[0].payload).unwrap();
     assert_eq!(payload["value"], "love");
@@ -572,8 +627,7 @@ async fn a_starred_track_reports_love_and_an_unstarred_one_clear() {
         .unstar(harness.user, &[(EntityKind::Track, harness.track)])
         .await
         .unwrap();
-    let values: Vec<String> = harness
-        .rows()
+    let values: Vec<String> = wait_for_rows(&harness, 2)
         .await
         .iter()
         .map(|row| {
@@ -1147,4 +1201,60 @@ async fn insert_listen_row(harness: &Harness, created: i64, due: i64, payload: &
     .execute(harness.database.writer())
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn a_stalled_plugin_does_not_delay_a_like() {
+    let harness = Harness::new(&[limits(10, true)]).await;
+    harness.link_all().await;
+    harness.instance().provider.stall_limits(Duration::from_secs(3));
+    let activity = ActivityService::new(&harness.database)
+        .with_scrobble_outbox(Arc::new(harness.outbox.clone()));
+
+    // The like answers without waiting for the plugin: the enqueue that has to
+    // ask it runs in its own task.
+    let started = Instant::now();
+    activity
+        .star(harness.user, &[(EntityKind::Track, harness.track)])
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the like waited {:?} on a plugin",
+        started.elapsed()
+    );
+
+    let rows = wait_for_rows(&harness, 1).await;
+    assert_eq!(rows[0].kind, "feedback");
+}
+
+#[tokio::test]
+async fn limits_are_read_once_within_their_ttl() {
+    let harness = Harness::new(&[limits(10, true)]).await;
+    harness.link_all().await;
+    let provider = harness.instance().provider.clone();
+    let activity = ActivityService::new(&harness.database)
+        .with_scrobble_outbox(Arc::new(harness.outbox.clone()));
+
+    activity
+        .star(harness.user, &[(EntityKind::Track, harness.track)])
+        .await
+        .unwrap();
+    wait_for_rows(&harness, 1).await;
+    activity
+        .set_feedback(
+            harness.user,
+            EntityKind::Track,
+            harness.track,
+            Feedback::Dislike,
+        )
+        .await
+        .unwrap();
+    wait_for_rows(&harness, 2).await;
+
+    assert_eq!(
+        provider.limits_calls(),
+        1,
+        "the second enqueue reused the cached limits"
+    );
 }
