@@ -34,8 +34,9 @@
 //! An album is dropped when the caller's own albums already hold the stored row
 //! its alias names, and an artist likewise. A stored album and a catalog album of
 //! the same name may legitimately be different releases, so the name fold that
-//! pairs them ([`CatalogService::name_twins`]) is a separate, display-only rule;
-//! this module only reports what is actually stored.
+//! pairs them ([`CatalogService::name_twins`]) is a separate, display-only rule
+//! which folds two albums only when their years are unknown or no more than one
+//! apart; this module only reports what is actually stored.
 //!
 //! # Examples
 //!
@@ -511,6 +512,10 @@ impl CatalogService {
     /// skipped: the alias table has settled which provider entity it is, and a
     /// second catalog hit of the same name is a different entity.
     ///
+    /// Two albums fold only when their release years are unknown or no more than
+    /// one apart: a remaster or a deluxe pressing is the same album, while a
+    /// release two or more years away is a different one.
+    ///
     /// # Parameters
     ///
     /// - `stored_artists`: the matched stored artists, as their id and name, in
@@ -584,6 +589,9 @@ impl CatalogService {
                     continue;
                 }
                 if title_match(&stored.album, &hit.album.title).is_none() {
+                    continue;
+                }
+                if !crate::pages::years_fold(stored.album.year, hit.album.year) {
                     continue;
                 }
                 let credit = hit

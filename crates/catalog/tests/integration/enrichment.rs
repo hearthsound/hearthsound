@@ -140,3 +140,74 @@ async fn one_enrichment_per_entity_and_listener_is_claimed_at_a_time() {
         "a completed run can be asked for again"
     );
 }
+
+/// Two albums whose release years are two or more apart are different releases;
+/// one year apart, or an unknown year, is the same album.
+#[tokio::test]
+async fn a_stored_and_a_catalog_album_are_paired_by_their_years() {
+    use hearthsound_core::{CatalogId, EntityKind, Slug};
+
+    let env = discography_env().await;
+    let album = CatalogId::new(
+        Slug::new("disco").unwrap(),
+        EntityKind::Album,
+        "disco-album-2",
+    )
+    .unwrap();
+
+    // The catalog's album is "Second Wind (Remastered 2009)", released in 2009.
+    for (year, pairs) in [
+        (Some(2008), true),
+        (Some(2009), true),
+        (Some(1998), false),
+        (Some(2011), false),
+        (None, true),
+    ] {
+        // A stored album with a playable track is in the server scope, which is
+        // what lets its page show the stored row rather than the catalog one.
+        let (stored, track, _) = env
+            .stored_album_with_track("Second Wind", "Discography Artist", year.unwrap_or(2001))
+            .await;
+        if year.is_none() {
+            sqlx::query("UPDATE albums SET year = NULL WHERE id = ?")
+                .bind(stored.uuid().as_bytes().as_slice())
+                .execute(env.database.writer())
+                .await
+                .unwrap();
+        }
+
+        let page = env
+            .service()
+            .album_page(
+                &ClientId::Catalog(album.clone()),
+                &scopes(),
+                hearthsound_catalog::PageDepth::Full,
+            )
+            .await
+            .unwrap()
+            .expect("the catalog album answers");
+        let paired = matches!(page.head, hearthsound_catalog::AlbumHead::Stored(_));
+        assert_eq!(
+            paired, pairs,
+            "a stored album released in {year:?} against the catalog's 2009 release"
+        );
+
+        // The page recorded the pairing, so the alias goes with the row: a
+        // dangling alias would answer the next iteration with a deleted album.
+        sqlx::query("DELETE FROM external_ids WHERE namespace = 'p:disco' AND value = ?")
+            .bind("disco-album-2")
+            .execute(env.database.writer())
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM tracks WHERE id = ?")
+            .bind(track.uuid().as_bytes().as_slice())
+            .execute(env.database.writer())
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM albums WHERE id = ?")
+            .bind(stored.uuid().as_bytes().as_slice())
+            .execute(env.database.writer())
+            .await
+            .unwrap();
+    }
+}

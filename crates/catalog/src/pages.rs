@@ -1139,7 +1139,8 @@ impl CatalogService {
 /// belongs to is known. The remaining stored albums are compared with the
 /// candidate titles in stored order, an exact folded title first and an
 /// edition-folded one second, and a candidate whose year agrees wins over one
-/// whose year does not.
+/// whose year does not. A candidate whose year is two or more years away is not
+/// the same release and is never paired.
 ///
 /// # Parameters
 ///
@@ -1164,6 +1165,7 @@ fn match_albums(
         let chosen = candidates
             .iter()
             .filter(|candidate| !taken[candidate.index])
+            .filter(|candidate| years_fold(album.year, candidate.year))
             .filter_map(|candidate| {
                 title_match(album, candidate.title).map(|strength| (strength, candidate))
             })
@@ -1202,6 +1204,27 @@ pub(crate) fn title_match(album: &Album, title: &str) -> Option<TitleMatch> {
         return Some(TitleMatch::Edition);
     }
     None
+}
+
+/// Reports whether two release years may name one album.
+///
+/// A remaster, a deluxe edition and a local tag disagree by the pressing, not by
+/// the album, so a gap of one year still folds. Two years or more is a different
+/// release, and a year nobody stated never separates two albums.
+///
+/// # Parameters
+///
+/// - `stored`: the stored album's year.
+/// - `catalog`: the catalog album's year.
+///
+/// # Returns
+///
+/// `true` when the two may be one album.
+pub(crate) fn years_fold(stored: Option<i64>, catalog: Option<u16>) -> bool {
+    match (stored, catalog) {
+        (Some(stored), Some(catalog)) => (stored - i64::from(catalog)).abs() <= 1,
+        _ => true,
+    }
 }
 
 /// Reports whether a stored year and a catalog year name the same release year.
