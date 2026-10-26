@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, user_id, track_id, client, started_at FROM plays WHERE scrobbled = 0 AND started_at >= ? AND started_at <= ? ORDER BY started_at LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "user_id",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "name": "track_id",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "track_id"
+          }
+        }
+      },
+      {
+        "name": "client",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "client"
+          }
+        }
+      },
+      {
+        "name": "started_at",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "plays",
+            "name": "started_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "6294bdfe73cea86fe234c2fb5765f978e1561c8f2742744ba8ac4640ee87a96c"
+}

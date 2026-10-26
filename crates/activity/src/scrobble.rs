@@ -32,16 +32,29 @@
 //!
 //! # What is retried and what is parked
 //!
-//! A delivery outcome has two classes. `Unavailable` and a rate limit are
-//! transient: the row keeps its place in the queue and is tried again on the
-//! backoff schedule. `NotFound`, `Unauthorized`, `InvalidConfig` and `Internal`
-//! are terminal - a service that does not know the listen, a revoked token, a
-//! configuration it rejects, or a plugin that failed internally will answer the
-//! same way next time - so the row is parked at once: its state is `failed`,
-//! its `last_error` names the class, and it is never retried. The counters
-//! [`ScrobbleOutbox::counters`] returns and the link view an administrator
-//! reads show a parked row, so a revoked token is visible immediately instead
-//! of after a week of silent retries.
+//! A delivery outcome has two classes, and the class is the one
+//! [`hearthsound_core::ProviderError`] documents. **Retried** outcomes keep the
+//! row in the queue and try it again on the backoff schedule:
+//!
+//! - `Unavailable`: the service is down or unreachable;
+//! - a rate limit, which reschedules the row for the delay the service asked
+//!   for without counting an attempt.
+//!
+//! **Parked** outcomes write the row to `failed` at once, with the class in
+//! `last_error`, and never try it again:
+//!
+//! - `NotFound`: the service does not know the listen (Last.fm answers this for
+//!   a batch it ignored);
+//! - `Unauthorized`: the credential was revoked or rejected;
+//! - `InvalidConfig`: the instance configuration is unusable;
+//! - `Internal`: the plugin failed internally, which the plugin host does not
+//!   retry either.
+//!
+//! Parking is what makes a revoked token visible: the counters
+//! [`ScrobbleOutbox::counters`] returns and the link view an administrator reads
+//! show the parked row with its reason immediately, instead of a week of silent
+//! retries that cannot succeed. A parked row stays visible for
+//! [`FAILED_RETENTION_MS`] and is then swept away by the next pass.
 //!
 //! A service that rejects a whole batch can still accept most of it, so a
 //! terminal failure of a batch of more than one listen is re-submitted one row
@@ -49,6 +62,17 @@
 //! rejects are parked. A queued row this host cannot read at all (a payload
 //! that is not valid JSON) is parked on its own, so one bad row never blocks
 //! the rows behind it.
+//!
+//! # Delivery is at-least-once
+//!
+//! A row is deleted only after the service accepted it, and the delete is a
+//! separate statement from the call, so a crash between the provider's answer
+//! and the delete sends that listen again on the next pass. The trade is
+//! deliberate: a duplicate listen is visible in the external history, a lost one
+//! is not recoverable, and the services deduplicate identical timestamps in
+//! practice. The outbox never loses a listen: a row is removed only after
+//! acceptance, and a parked row is removed only after its week, with its failure
+//! recorded.
 //!
 //! The server runs one delivery pass a minute through the `scrobble.deliver`
 //! job and starts another pass whenever an enqueue rings the outbox's
@@ -85,6 +109,30 @@ pub const NOW_PLAYING_TTL_MS: i64 = 10 * 60 * 1000;
 /// The backoff schedule ends after a day, so the deadline is what eventually
 /// moves a row that keeps failing out of the way.
 pub const OUTBOX_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// How long a parked row stays visible, in milliseconds.
+///
+/// Seven days after it was given up on: long enough for the listener to see what
+/// a service rejected and fix it, short enough that a queue nobody reads does
+/// not grow forever.
+pub const FAILED_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// How far back a play is still queued for a listener, in milliseconds.
+///
+/// One hour. Only recent plays are backfilled, because providers reject old
+/// listens and a listener who links a service should not receive a day of
+/// history at once.
+pub const BACKFILL_WINDOW_MS: i64 = 60 * 60 * 1000;
+
+/// How many plays one pass backfills.
+const BACKFILL_BATCH: i64 = 100;
+
+/// How long an instance's rows wait when its limits cannot be read.
+///
+/// Five minutes. The limits are a property of the plugin, not of the row, so a
+/// plugin that could not be asked must not burn an attempt on every row it
+/// owns.
+const LIMITS_RETRY_MS: i64 = 5 * 60 * 1000;
 
 /// The delays between two attempts at a row that keeps failing, in
 /// milliseconds.
@@ -547,6 +595,67 @@ impl ScrobbleOutbox {
         Ok(outcome.rows_affected())
     }
 
+    /// Queues the recent plays nothing has scrobbled yet.
+    ///
+    /// Two cases leave a recorded play unqueued: a play whose enqueue failed,
+    /// and a play for a listener who linked a service afterwards. Both leave
+    /// `plays.scrobbled = 0`, and both are fixed the same way - the next pass
+    /// offers the play to the services the listener has now.
+    ///
+    /// Only the last [`BACKFILL_WINDOW_MS`] is offered, and a play from the last
+    /// minute is left to its own enqueue, so a listener who links a service is
+    /// not sent a week of history and a play is never queued twice.
+    ///
+    /// # Parameters
+    ///
+    /// - `now`: the instant the pass considers current, in unix milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// How many plays were queued.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActivityError::Database`] when the plays cannot be read, and
+    /// the errors of [`ScrobbleOutbox::listen`] when a play cannot be queued.
+    async fn backfill(&self, now: i64) -> Result<u32, ActivityError> {
+        let rows = sqlx::query!(
+            "SELECT id, user_id, track_id, client, started_at FROM plays \
+             WHERE scrobbled = 0 AND started_at >= ? AND started_at <= ? \
+             ORDER BY started_at LIMIT ?",
+            now.saturating_sub(BACKFILL_WINDOW_MS),
+            now.saturating_sub(60_000),
+            BACKFILL_BATCH,
+        )
+        .fetch_all(&self.readers)
+        .await?;
+        let mut queued = 0;
+        for row in rows {
+            let user_id = Uuid::from_slice(&row.user_id)?;
+            if self.linked_targets(user_id).await?.is_empty() {
+                continue;
+            }
+            let track_id = Uuid::from_slice(&row.track_id)?;
+            let play_id = Uuid::from_slice(&row.id)?;
+            // The enqueue marks the play scrobbled in its own transaction, so a
+            // play is offered once even if two passes race the read.
+            if self
+                .listen(
+                    user_id,
+                    play_id,
+                    track_id,
+                    row.client.as_deref(),
+                    row.started_at,
+                )
+                .await?
+                > 0
+            {
+                queued += 1;
+            }
+        }
+        Ok(queued)
+    }
+
     /// Returns how many scrobbles are waiting for one listener and instance,
     /// and the most recent delivery error.
     ///
@@ -793,6 +902,17 @@ impl ScrobbleDeliverer {
     /// updated.
     pub async fn deliver_due(&self, now: i64) -> Result<DeliveryReport, ActivityError> {
         let _pass = self.pass.lock().await;
+        let mut report = DeliveryReport::default();
+        // A play whose enqueue failed, or one recorded before the listener
+        // linked a service, still reaches that service: the flag says it was
+        // never queued, and this pass queues it. It runs inside the pass lock,
+        // so two passes cannot enqueue the same play twice.
+        match self.outbox.backfill(now).await {
+            Ok(queued) => report.backfilled = queued,
+            Err(error) => {
+                tracing::warn!(%error, "could not queue the plays that were never scrobbled");
+            }
+        }
         let rows = sqlx::query!(
             "SELECT id, user_id, instance_id, kind, payload, attempts
              FROM scrobble_outbox
@@ -823,13 +943,58 @@ impl ScrobbleDeliverer {
                 }
             }
         }
-        let mut report = DeliveryReport::default();
         for instance_id in order {
             let rows = grouped.remove(&instance_id).unwrap_or_default();
             self.deliver_instance(instance_id, rows, now, &mut report)
                 .await?;
         }
+        match self.purge_failed(now).await {
+            Ok(purged) => report.purged += purged,
+            Err(error) => tracing::warn!(%error, "could not sweep the parked scrobbles"),
+        }
         Ok(report)
+    }
+
+    /// Deletes the parked rows that have been visible for long enough.
+    ///
+    /// A parked row is shown to the listener for [`FAILED_RETENTION_MS`] so they
+    /// can see what a service rejected; after that it is only growth, so the
+    /// pass removes it. The age is counted from the instant the row was parked,
+    /// which is what its `next_attempt_at` holds, so a row that spent its week
+    /// being retried still gets its week on display.
+    ///
+    /// # Parameters
+    ///
+    /// - `now`: the instant the pass considers current, in unix milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// How many rows were removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActivityError::Database`] when the rows cannot be read or
+    /// deleted.
+    async fn purge_failed(&self, now: i64) -> Result<u32, ActivityError> {
+        let rows = sqlx::query!(
+            "SELECT id FROM scrobble_outbox \
+             WHERE state = 'failed' AND next_attempt_at < ? \
+             LIMIT 1000",
+            now.saturating_sub(FAILED_RETENTION_MS),
+        )
+        .fetch_all(&self.outbox.readers)
+        .await?;
+        let mut purged = 0;
+        for row in rows {
+            sqlx::query!(
+                "DELETE FROM scrobble_outbox WHERE id = ?",
+                row.id.as_slice()
+            )
+            .execute(&self.outbox.writer)
+            .await?;
+            purged += 1;
+        }
+        Ok(purged)
     }
 
     /// Delivers the due rows of one instance.
@@ -866,8 +1031,17 @@ impl ScrobbleDeliverer {
         let limits = match self.outbox.limits_of(&target, now).await {
             Ok(limits) => limits,
             Err(error) => {
+                // The limits belong to the plugin, not to the rows: a plugin
+                // that could not be asked has not rejected anything, so the
+                // rows wait instead of spending an attempt each.
+                tracing::warn!(
+                    instance = %target.slug,
+                    %error,
+                    "could not read a service's limits; its queued rows wait"
+                );
+                let at = now.saturating_add(LIMITS_RETRY_MS);
                 for row in &rows {
-                    self.fail(row, &error.to_string(), now, report).await?;
+                    self.defer(row, at).await?;
                 }
                 return Ok(());
             }
@@ -1349,9 +1523,11 @@ pub struct DeliveryReport {
     pub gave_up: u32,
     /// The rows a service asked to delay.
     pub deferred: u32,
-    /// The rows deleted without a call: stale now-playing reports and rows of
-    /// listeners who unlinked the service.
+    /// The rows deleted without a call: stale now-playing reports, rows of
+    /// listeners who unlinked the service, and parked rows past their retention.
     pub purged: u32,
+    /// The plays this pass queued because nothing had scrobbled them yet.
+    pub backfilled: u32,
 }
 
 /// The job kind and schedule of the delivery pass, as the server registers it.
@@ -1399,6 +1575,9 @@ impl JobHandler for ScrobbleDeliverJobHandler {
                     delivered = report.delivered,
                     failed = report.failed,
                     deferred = report.deferred,
+                    gave_up = report.gave_up,
+                    purged = report.purged,
+                    backfilled = report.backfilled,
                     "delivered queued scrobbles"
                 );
                 Ok(())

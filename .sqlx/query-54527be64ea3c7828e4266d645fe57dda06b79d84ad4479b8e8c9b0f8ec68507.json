@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id FROM scrobble_outbox WHERE state = 'failed' AND next_attempt_at < ? LIMIT 1000",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "scrobble_outbox",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "54527be64ea3c7828e4266d645fe57dda06b79d84ad4479b8e8c9b0f8ec68507"
+}

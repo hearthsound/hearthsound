@@ -86,6 +86,8 @@ struct FakeProvider {
     limits_delay: Arc<Mutex<Option<Duration>>>,
     /// How many times the limits were asked for.
     limits_calls: Arc<AtomicUsize>,
+    /// A failure reading the limits, when the test set one.
+    limits_error: Arc<Mutex<Option<ProviderError>>>,
     /// What it was asked.
     recorded: Arc<Mutex<Recorded>>,
 }
@@ -99,6 +101,7 @@ impl FakeProvider {
             rejects: Arc::new(Mutex::new(None)),
             limits_delay: Arc::new(Mutex::new(None)),
             limits_calls: Arc::new(AtomicUsize::new(0)),
+            limits_error: Arc::new(Mutex::new(None)),
             recorded: Arc::new(Mutex::new(Recorded::default())),
         }
     }
@@ -115,6 +118,15 @@ impl FakeProvider {
     /// Returns how many times the limits were asked for.
     fn limits_calls(&self) -> usize {
         self.limits_calls.load(Ordering::SeqCst)
+    }
+
+    /// Makes reading the limits fail with `error`.
+    ///
+    /// # Parameters
+    ///
+    /// - `error`: what the limits read answers.
+    fn fail_limits(&self, error: ProviderError) {
+        *self.limits_error.lock().unwrap() = Some(error);
     }
 
     /// Makes the provider reject any submission of more than one listen, and
@@ -165,6 +177,10 @@ impl ProviderLifecycle for FakeProvider {
 impl ScrobbleProvider for FakeProvider {
     async fn get_limits(&self) -> Result<ScrobbleLimits, ProviderError> {
         self.limits_calls.fetch_add(1, Ordering::SeqCst);
+        let failure = self.limits_error.lock().unwrap().clone();
+        if let Some(error) = failure {
+            return Err(error);
+        }
         let delay = *self.limits_delay.lock().unwrap();
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
@@ -1257,4 +1273,176 @@ async fn limits_are_read_once_within_their_ttl() {
         1,
         "the second enqueue reused the cached limits"
     );
+}
+
+#[tokio::test]
+async fn a_parked_row_is_purged_after_a_week() {
+    let harness = Harness::new(&[limits(10, false)]).await;
+    harness.link_all().await;
+    harness
+        .instance()
+        .provider
+        .fail(ProviderError::Unauthorized);
+    harness
+        .outbox
+        .listen(
+            harness.user,
+            Uuid::now_v7(),
+            harness.track,
+            Some("dsub"),
+            1_700_000_000_000,
+        )
+        .await
+        .unwrap();
+    // The instant is read after the enqueue, so the row is due at it.
+    let start = current_time();
+    harness.deliverer.deliver_due(start).await.unwrap();
+    assert_eq!(harness.rows().await[0].state, "failed");
+
+    // A week later the parked row is only growth, so the pass removes it.
+    let report = harness
+        .deliverer
+        .deliver_due(start + 8 * 24 * 60 * 60 * 1000)
+        .await
+        .unwrap();
+    assert_eq!(report.purged, 1);
+    assert_eq!(harness.row_count().await, 0);
+    let instance = harness.instances[0].id;
+    let counters = harness
+        .outbox
+        .counters(harness.user, instance)
+        .await
+        .unwrap();
+    assert_eq!(counters.failed, 0);
+
+    // A row parked a moment ago is still shown.
+    harness
+        .outbox
+        .listen(
+            harness.user,
+            Uuid::now_v7(),
+            harness.track,
+            Some("dsub"),
+            1_700_000_000_000,
+        )
+        .await
+        .unwrap();
+    harness
+        .deliverer
+        .deliver_due(start + 8 * 24 * 60 * 60 * 1000)
+        .await
+        .unwrap();
+    assert_eq!(harness.row_count().await, 1, "a fresh rejection is kept");
+    assert_eq!(harness.rows().await[0].state, "failed");
+}
+
+#[tokio::test]
+async fn a_limits_error_does_not_burn_an_attempt() {
+    let harness = Harness::new(&[limits(10, false)]).await;
+    harness.link_all().await;
+    harness
+        .instance()
+        .provider
+        .fail_limits(ProviderError::Unavailable);
+    harness
+        .outbox
+        .listen(
+            harness.user,
+            Uuid::now_v7(),
+            harness.track,
+            Some("dsub"),
+            1_700_000_000_000,
+        )
+        .await
+        .unwrap();
+
+    let start = current_time();
+    harness.deliverer.deliver_due(start).await.unwrap();
+
+    let rows = harness.rows().await;
+    assert_eq!(rows[0].attempts, 0, "the row was never submitted");
+    assert_eq!(rows[0].state, "pending");
+    assert_eq!(rows[0].next_attempt_at, start + 5 * 60 * 1000);
+    assert!(
+        rows[0].last_error.is_none(),
+        "a limits read is not a rejection of the listen"
+    );
+}
+
+#[tokio::test]
+async fn an_unscrobbled_play_is_queued_by_the_next_pass() {
+    let harness = Harness::new(&[limits(10, false)]).await;
+    harness.link_all().await;
+    let now = current_time();
+    insert_play(&harness, now - 5 * 60 * 1000, 0).await;
+
+    let report = harness.deliverer.deliver_due(now).await.unwrap();
+
+    assert_eq!(report.backfilled, 1);
+    let rows = harness.rows().await;
+    assert_eq!(rows.len(), 1, "the play is queued");
+    assert_eq!(rows[0].kind, "listen");
+    assert_eq!(payload_listen(&rows[0].payload).title, "First");
+    assert_eq!(scrobbled(&harness).await, 1, "the play is marked");
+
+    // A second pass queues nothing again.
+    let report = harness.deliverer.deliver_due(now).await.unwrap();
+    assert_eq!(report.backfilled, 0);
+    assert_eq!(harness.row_count().await, 1);
+}
+
+#[tokio::test]
+async fn an_old_or_unlinked_play_is_not_backfilled() {
+    let harness = Harness::new(&[limits(10, false)]).await;
+    let now = current_time();
+    // Older than the backfill window.
+    insert_play(&harness, now - 3 * 60 * 60 * 1000, 0).await;
+    harness.deliverer.deliver_due(now).await.unwrap();
+    assert_eq!(harness.row_count().await, 0);
+    assert_eq!(scrobbled(&harness).await, 0);
+
+    // Recent, but the listener linked nothing.
+    insert_play(&harness, now - 5 * 60 * 1000, 0).await;
+    let report = harness.deliverer.deliver_due(now).await.unwrap();
+    assert_eq!(report.backfilled, 0);
+    assert_eq!(harness.row_count().await, 0);
+    assert_eq!(scrobbled(&harness).await, 0);
+
+    // Once the listener links a service, the same play is offered.
+    harness.link_all().await;
+    let report = harness.deliverer.deliver_due(now).await.unwrap();
+    assert_eq!(report.backfilled, 1);
+    assert_eq!(harness.row_count().await, 1);
+}
+
+/// Inserts a recorded play with a chosen start instant.
+///
+/// # Parameters
+///
+/// - `harness`: the harness whose listener and track the play belongs to.
+/// - `started_at`: when playback started, in unix milliseconds.
+/// - `scrobbled`: whether the play is already queued.
+async fn insert_play(harness: &Harness, started_at: i64, scrobbled: i64) {
+    sqlx::query(
+        "INSERT INTO plays (
+             id, user_id, track_id, client, started_at, listened_ms, audio_delivered,
+             scrobbled
+         ) VALUES (?, ?, ?, 'dsub', ?, 180000, 1, ?)",
+    )
+    .bind(Uuid::now_v7().as_bytes().as_slice())
+    .bind(harness.user.as_bytes().as_slice())
+    .bind(harness.track.as_bytes().as_slice())
+    .bind(started_at)
+    .bind(scrobbled)
+    .execute(harness.database.writer())
+    .await
+    .unwrap();
+}
+
+/// Returns the flags of the recorded plays, newest last.
+async fn scrobbled(harness: &Harness) -> i64 {
+    sqlx::query_scalar("SELECT COALESCE(MAX(scrobbled), 0) FROM plays")
+        .fetch_one(harness.database.readers())
+        .await
+        .unwrap()
 }
