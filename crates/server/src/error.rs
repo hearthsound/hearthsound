@@ -97,6 +97,21 @@ pub enum ServerError {
     /// The server stopped but its HTTP task panicked or was cancelled.
     #[error("the HTTP task did not finish: {0}")]
     HttpTask(#[source] tokio::task::JoinError),
+    /// The data directory is locked by another Hearthsound process.
+    #[error("another Hearthsound process holds `{path}`")]
+    Locked {
+        /// The lock file the other process holds.
+        path: PathBuf,
+    },
+    /// The lock file of the data directory cannot be used.
+    #[error("could not use the lock `{path}`: {source}")]
+    LockFile {
+        /// The lock file that could not be opened or locked.
+        path: PathBuf,
+        /// The underlying filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
     /// One or more background workers panicked before the process stopped.
     #[error("{failed} server worker(s) did not finish cleanly")]
     Workers {

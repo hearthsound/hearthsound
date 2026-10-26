@@ -106,6 +106,8 @@ use crate::web::WebAssets;
 pub struct Services {
     /// The bootstrap configuration the process was started with.
     config: BootstrapConfig,
+    /// The lock on the data directory, held for the life of the process.
+    _serve_lock: crate::serve_lock::ServeLock,
     /// The open database, with its writer and reader pools.
     database: Arc<Database>,
     /// The runtime settings service.
@@ -238,6 +240,23 @@ impl Services {
         // disk.
         let web = WebAssets::resolve(config.web.root.as_deref())?;
         crate::paths::prepare(&config)?;
+
+        // A second server over one data directory would migrate the schema under
+        // the first, so the lock is taken before the database is touched. The
+        // lock is advisory and dies with the process, so a crash leaves no stale
+        // state behind.
+        let lock_path = crate::serve_lock::lock_path(&config.paths.data);
+        let data = config.paths.data.clone();
+        let held =
+            tokio::task::spawn_blocking(move || crate::serve_lock::ServeLock::try_acquire(&data))
+                .await
+                .map_err(|error| ServerError::LockFile {
+                    path: lock_path.clone(),
+                    source: std::io::Error::other(error),
+                })??;
+        let Some(serve_lock) = held else {
+            return Err(ServerError::Locked { path: lock_path });
+        };
 
         let database = Arc::new(Database::open(&config.database.path).await?);
         let outcome = database.migrate(&MIGRATOR, &config.paths.backups).await?;
@@ -563,6 +582,7 @@ impl Services {
 
         Ok(Arc::new(Services {
             config,
+            _serve_lock: serve_lock,
             database,
             settings,
             events,

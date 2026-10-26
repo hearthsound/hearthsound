@@ -2052,3 +2052,29 @@ async fn update_user_revokes_the_accounts_credentials() {
 
     server.shutdown().await.unwrap();
 }
+
+/// A command that needs no migration runs beside a running server, which holds
+/// the data directory lock.
+#[tokio::test]
+async fn a_read_only_command_runs_beside_a_server() {
+    let sandbox = Sandbox::new("");
+    let (server, _port) = serve_in_process(&sandbox).await;
+
+    let listed = sandbox.run(&["admin", "list-users"]);
+    succeeded(&listed);
+
+    // The second server over the same data directory refuses, because the first
+    // one holds the lock.
+    let config = bootstrap_config(&sandbox);
+    let second =
+        hearthsound_server::Services::build(config, &std::collections::BTreeMap::new()).await;
+    match second {
+        Err(hearthsound_server::ServerError::Locked { path }) => {
+            assert_eq!(path, sandbox.data().join("server.lock"));
+        }
+        Err(other) => panic!("the second server failed for another reason: {other}"),
+        Ok(_) => panic!("a second server took the data directory of a running one"),
+    }
+
+    server.shutdown().await.unwrap();
+}

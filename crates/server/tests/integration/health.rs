@@ -178,15 +178,18 @@ async fn a_restart_keeps_the_secret_key() {
     let key_file = fixture.services.config().secrets.key_file.clone();
     let first = std::fs::read(&key_file).unwrap();
 
-    let services = Services::build(
-        fixture.services.config().clone(),
-        &std::collections::BTreeMap::new(),
-    )
-    .await
-    .unwrap();
+    // A restart is the previous process gone: the serving process holds the data
+    // directory's lock, so the second build waits until the first stopped.
+    let config = fixture.services.config().clone();
+    let dir = fixture.stop().await;
+    let services = Services::build(config, &std::collections::BTreeMap::new())
+        .await
+        .unwrap();
 
     assert_eq!(std::fs::read(&key_file).unwrap(), first);
     assert!(services.is_ready().await);
+    drop(services);
+    drop(dir);
 }
 
 /// The server root answers the JSON body a client probes it with.

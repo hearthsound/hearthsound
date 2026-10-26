@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The serving process holds `<data>/server.lock` for its lifetime: a command that would migrate the database refuses while a server runs, a command that needs no migration runs normally beside one, and a database migrated by a newer binary is refused instead of served.
 - A host name that resolves to several addresses - `localhost` on a dual-stack host - is served on all of them, and an address that cannot be bound no longer stops the server.
 - The startup scan retries the library folder listing five times over eight seconds and logs that the scan was skipped, instead of treating a failed listing as "no folders".
 - Dropping a transcode kills ffmpeg at once even when it has produced no output yet, so a client that disconnects from a stalled source no longer holds a transcode slot.

@@ -1803,6 +1803,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "croner",
+ "futures-util",
  "hearthsound-core",
  "hearthsound-db",
  "serde",

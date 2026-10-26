@@ -6,6 +6,13 @@
 //! data gets. A command therefore works on a fresh installation without a prior
 //! `migrate` or `serve`.
 //!
+//! A command that would migrate the schema first takes the server's lock on the
+//! data directory, so a newer binary cannot move the schema under a running
+//! server (the server holds `<data>/server.lock` for its lifetime). A database a
+//! newer binary migrated is refused outright: migrations are forward-only, so
+//! the binary has to be upgraded. A command that needs no migration at all takes
+//! no lock, which is why the read-only commands work beside a running server.
+//!
 //! [`Context`] adds the two things a command needs to write rows that the server
 //! can read back: the runtime settings (a new account's permissions come from
 //! `users.default_permissions`) and the secret box (`create-app-password` seals
@@ -56,15 +63,91 @@ pub async fn open_database(
     let database = Database::open(&config.database.path)
         .await
         .with_context(|| format!("could not open {}", config.database.path.display()))?;
-    let outcome = database
-        .migrate(&MIGRATOR, &config.paths.backups)
-        .await
-        .context("could not migrate the database")?;
-    if outcome.to != outcome.from {
-        tracing::info!(from = outcome.from, to = outcome.to, "applied migrations");
-    }
 
-    Ok((database, outcome))
+    let applied = database
+        .migration_version()
+        .await
+        .context("could not read the schema version")?;
+    let bundled = bundled_migration_version();
+    match schema_state(applied, bundled) {
+        // Nothing to do: no lock is taken, so a read-only command keeps working
+        // beside a running server.
+        SchemaState::Current => Ok((
+            database,
+            MigrationOutcome {
+                from: applied,
+                to: applied,
+                backup: None,
+            },
+        )),
+        SchemaState::Newer => Err(anyhow::anyhow!(
+            "the database was migrated by a newer Hearthsound (schema {applied}, this binary \
+             bundles {bundled}); upgrade this binary"
+        )),
+        SchemaState::Older => {
+            let lock_path = hearthsound_server::serve_lock_path(&config.paths.data);
+            let Some(lock) = hearthsound_server::ServeLock::try_acquire(&config.paths.data)
+                .context("could not take the data directory lock")?
+            else {
+                return Err(anyhow::anyhow!(
+                    "a server is running (it holds {}); stop it before this command migrates \
+                     the database",
+                    lock_path.display()
+                ));
+            };
+            let outcome = database
+                .migrate(&MIGRATOR, &config.paths.backups)
+                .await
+                .context("could not migrate the database")?;
+            if outcome.to != outcome.from {
+                tracing::info!(from = outcome.from, to = outcome.to, "applied migrations");
+            }
+            drop(lock);
+            Ok((database, outcome))
+        }
+    }
+}
+
+/// What a database's schema version says about a command's work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaState {
+    /// The database is at the bundled version: nothing to migrate.
+    Current,
+    /// A newer binary migrated the database past what this one bundles.
+    Newer,
+    /// The database is behind the bundled version, so a command would migrate.
+    Older,
+}
+
+/// Compares the applied schema version with the bundled one.
+///
+/// # Parameters
+///
+/// - `applied`: the version the database is at.
+/// - `bundled`: the highest version the binary ships.
+///
+/// # Returns
+///
+/// Which of the three states the pair is in.
+fn schema_state(applied: i64, bundled: i64) -> SchemaState {
+    match applied.cmp(&bundled) {
+        std::cmp::Ordering::Equal => SchemaState::Current,
+        std::cmp::Ordering::Greater => SchemaState::Newer,
+        std::cmp::Ordering::Less => SchemaState::Older,
+    }
+}
+
+/// The schema version the bundled migrations bring a database to.
+///
+/// # Returns
+///
+/// The highest version in [`MIGRATOR`], or zero when the migrator is empty.
+fn bundled_migration_version() -> i64 {
+    MIGRATOR
+        .iter()
+        .map(|migration| migration.version)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Loads the runtime settings of one command.
@@ -277,5 +360,17 @@ impl Context {
             PluginRepository::new(&self.database),
             self.secret_box.clone(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_schema_state_names_which_side_is_ahead() {
+        assert_eq!(schema_state(17, 17), SchemaState::Current);
+        assert_eq!(schema_state(16, 17), SchemaState::Older);
+        assert_eq!(schema_state(18, 17), SchemaState::Newer);
     }
 }

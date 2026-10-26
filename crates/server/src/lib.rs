@@ -5,8 +5,10 @@
 //! loads or creates the secret key, and constructs every long-lived service
 //! (settings, authentication, the plugin host and provider registry, the ffmpeg
 //! runner, the library scanner, the job runner and scheduler, and activity).
-//! [`Services`] is that set of services; [`Server`] adds the HTTP listener, the
-//! background workers, and shutdown.
+//! [`Services`] is that set of services; [`Server`] adds the HTTP listeners, the
+//! background workers, and shutdown. While it runs, the process holds
+//! [`ServeLock`] on the data directory, which is how a command-line command knows
+//! that a server would fight it over the schema.
 //!
 //! Mounted surfaces are `/rest` (the Subsonic router), `/api/v1` (the native
 //! API), `/healthz` and `/readyz` (liveness and readiness), and the server root,
@@ -56,11 +58,13 @@ pub mod http;
 pub mod jobs;
 pub mod paths;
 mod reload;
+mod serve_lock;
 mod server;
 mod services;
 pub mod web;
 
 pub use error::ServerError;
+pub use serve_lock::{ServeLock, lock_path as serve_lock_path};
 pub use server::Server;
 pub use services::Services;
 pub use web::WebAssets;
