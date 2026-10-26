@@ -267,3 +267,48 @@ async fn the_playback_report_extension_is_advertised() {
         listed.body
     );
 }
+
+/// A report and a scrobble from an unnamed client key the same now-playing row.
+#[tokio::test]
+async fn an_unnamed_client_reports_under_the_default_name() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+    let track = seeded.alpha_tracks[0];
+
+    let reported = get(
+        &app,
+        &format!(
+            "/rest/reportPlayback?mediaId={track}&mediaType=song&positionMs=0&state=playing&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&reported);
+    let scrobbled = get(
+        &app,
+        &format!(
+            "/rest/scrobble?id={track}&submission=false&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&scrobbled);
+
+    let now = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()) as i64;
+    let listed = fixture
+        .state
+        .activity()
+        .now_playing()
+        .visible(&[fixture.user_id.uuid()], now)
+        .await
+        .unwrap();
+    assert_eq!(
+        listed.len(),
+        1,
+        "one client is one row, whatever it calls itself: {listed:?}"
+    );
+    assert_eq!(listed[0].client, hearthsound_activity::DEFAULT_CLIENT);
+}

@@ -119,7 +119,13 @@ pub async fn report_playback(call: Call) -> Encoded {
         }
     };
 
-    let client = call.params().client_name().unwrap_or_default();
+    // A report and a scrobble of the same client must key the same row, so an
+    // unnamed client is stored under the name the activity layer defaults to
+    // rather than under an empty one.
+    let client = call
+        .params()
+        .client_name()
+        .unwrap_or(hearthsound_activity::DEFAULT_CLIENT);
     let report = PlaybackReport {
         user_id: call.principal().user_id.uuid(),
         client,
