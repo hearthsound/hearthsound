@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, al.created_at, al.updated_at FROM albums al WHERE (EXISTS (SELECT 1 FROM album_artists aa WHERE aa.album_id = al.id AND aa.artist_id = ?) OR EXISTS (SELECT 1 FROM tracks t JOIN track_artists ta ON ta.track_id = t.id WHERE t.album_id = al.id AND ta.artist_id = ?)) ORDER BY al.year IS NULL, al.year, al.sort_title, al.id",
+  "query": "WITH scope_tracks(track_id) AS ( SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'track' UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'track' AND value = 'like' UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id WHERE p.owner_user_id = ? AND p.is_temporary = 0 UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id WHERE mf.storage = 'folder' AND lf.owner_user_id = ? UNION SELECT t.id FROM tracks t WHERE t.album_id IN ( SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'album' UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' AND value = 'like') ) SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.edition, al.origin, al.created_at, al.updated_at FROM albums al WHERE (EXISTS (SELECT 1 FROM album_artists aa WHERE aa.album_id = al.id AND aa.artist_id = ?) OR EXISTS (SELECT 1 FROM tracks t JOIN track_artists ta ON ta.track_id = t.id WHERE t.album_id = al.id AND ta.artist_id = ?)) AND (al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id) OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ? AND entity_kind = 'album' AND entity_id = al.id) OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' AND value = 'like' AND entity_id = al.id)) ORDER BY al.year IS NULL, al.year, al.sort_title, al.id",
   "describe": {
     "columns": [
       {
@@ -114,8 +114,19 @@
         }
       },
       {
-        "name": "origin",
+        "name": "edition",
         "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "edition"
+          }
+        }
+      },
+      {
+        "name": "origin",
+        "ordinal": 11,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -126,7 +137,7 @@
       },
       {
         "name": "created_at",
-        "ordinal": 11,
+        "ordinal": 12,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -137,7 +148,7 @@
       },
       {
         "name": "updated_at",
-        "ordinal": 12,
+        "ordinal": 13,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -148,7 +159,7 @@
       }
     ],
     "parameters": {
-      "Right": 2
+      "Right": 10
     },
     "nullable": [
       false,
@@ -161,10 +172,11 @@
       true,
       true,
       true,
+      true,
       false,
       false,
       false
     ]
   },
-  "hash": "a2222773f50264f6406157c20de241c766ba6674f849bfe7132a0c6b98e69c60"
+  "hash": "987af42798c669057a5c16da1129d3d3de0e2533ada14ff53872d8558b3f8c3a"
 }

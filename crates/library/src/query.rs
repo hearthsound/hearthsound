@@ -837,7 +837,7 @@ pub async fn list_albums(
     push_album_scope(&mut builder, scope);
     builder.push(
         "SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
-         al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, \
+         al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.edition, al.origin, \
          al.created_at, al.updated_at \
          FROM albums al \
          WHERE ",
@@ -1710,8 +1710,8 @@ pub async fn list_albums_for_artist(
                              AND value = 'like') \
                  ) \
                  SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
-                        al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, \
-                        al.created_at, al.updated_at \
+                        al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.edition, \
+                        al.origin, al.created_at, al.updated_at \
                  FROM albums al \
                  WHERE (EXISTS (SELECT 1 FROM album_artists aa \
                                 WHERE aa.album_id = al.id AND aa.artist_id = ?) \
@@ -1745,8 +1745,8 @@ pub async fn list_albums_for_artist(
                 albums::AlbumRow,
                 "WITH scope_tracks(track_id) AS (SELECT id FROM tracks WHERE availability IN (?, ?)) \
                  SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
-                        al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, \
-                        al.created_at, al.updated_at \
+                        al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.edition, \
+                        al.origin, al.created_at, al.updated_at \
                  FROM albums al \
                  WHERE (EXISTS (SELECT 1 FROM album_artists aa \
                                 WHERE aa.album_id = al.id AND aa.artist_id = ?) \

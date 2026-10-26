@@ -22,18 +22,30 @@
 //! # }
 //! ```
 
+use std::borrow::Cow;
 use std::fs::File;
 use std::future::Future;
 use std::io::BufReader;
 use std::path::Path;
 use std::time::Duration;
 
+use lofty::aac::AacFile;
+use lofty::ape::{ApeFile, ApeTag};
 use lofty::config::ParseOptions;
 use lofty::file::{AudioFile, FileType, TaggedFile, TaggedFileExt};
-use lofty::mp4::{Mp4Codec, Mp4File};
+use lofty::flac::FlacFile;
+use lofty::id3::v2::{Frame, Id3v2Tag};
+use lofty::iff::aiff::AiffFile;
+use lofty::iff::wav::WavFile;
+use lofty::mp4::{AtomData, AtomIdent, DataType, Mp4Codec, Mp4File};
+use lofty::mpeg::MpegFile;
+use lofty::musepack::MpcFile;
+use lofty::ogg::tag::VorbisComments;
+use lofty::ogg::{OpusFile, SpeexFile, VorbisFile};
 use lofty::prelude::Accessor;
 use lofty::probe::Probe;
-use lofty::tag::{ItemKey, Tag};
+use lofty::tag::{ItemKey, Tag, TagType};
+use lofty::wavpack::WavPackFile;
 
 use crate::error::MediaError;
 use crate::ffmpeg::FfmpegRunner;
@@ -205,6 +217,13 @@ pub struct ProbeResult {
     pub duration_ms: u64,
     /// The tags found in the file's primary tag.
     pub tags: TrackTags,
+    /// The release's own disambiguation comment, as MusicBrainz Picard writes
+    /// it, when the file carries one.
+    ///
+    /// `lofty` has no [`ItemKey`] for the field, so it is read from the raw tag
+    /// of the container rather than from the tag set in [`ProbeResult::tags`];
+    /// see [`read_release_comment`].
+    pub release_comment: Option<String>,
     /// Whether the file carries an embedded picture.
     pub has_embedded_art: bool,
 }
@@ -307,6 +326,7 @@ fn probe_blocking(path: &Path) -> Result<ProbeResult, MediaError> {
         channels: properties.channels(),
         duration_ms: u64::try_from(properties.duration().as_millis()).unwrap_or(u64::MAX),
         tags: read_tags(&tagged),
+        release_comment: read_release_comment(path, file_type),
         has_embedded_art: tagged.tags().iter().any(|tag| !tag.pictures().is_empty()),
     })
 }
@@ -840,6 +860,202 @@ fn read_tags(tagged: &TaggedFile) -> TrackTags {
         replaygain_album_peak: text(tag, ItemKey::ReplayGainAlbumPeak),
         acquired_via: None,
     }
+}
+
+/// The Vorbis comment key the release disambiguation is written under.
+const VORBIS_RELEASE_COMMENT_KEY: &str = "MUSICBRAINZ_ALBUMCOMMENT";
+
+/// The description the release disambiguation is written under everywhere else.
+///
+/// An APE item is keyed by it, an ID3v2 `TXXX` frame carries it as its
+/// description, and an MP4 freeform atom carries it as its name.
+const RELEASE_COMMENT_NAME: &str = "MusicBrainz Album Comment";
+
+/// The mean of the MP4 freeform atoms Picard writes into.
+const ITUNES_MEAN: &str = "com.apple.iTunes";
+
+/// Reads the release's own disambiguation comment out of a file's raw tag.
+///
+/// MusicBrainz Picard writes the release's disambiguation into a field the
+/// generic tag model has no key for, so `lofty` drops it when it splits a
+/// container tag into the [`Tag`] a probe reads: it stays in the container's own
+/// tag type, which is what this reads. The file is opened a second time and only
+/// its tag is parsed - the properties and the pictures are skipped - so the cost
+/// is one tag block per file, not a second probe.
+///
+/// The comment is read from the container's primary tag only, which is the tag
+/// [`read_tags`] reads as well.
+///
+/// # Parameters
+///
+/// - `path`: the file to read.
+/// - `file_type`: the container `lofty` detected.
+///
+/// # Returns
+///
+/// The trimmed comment, or `None` when the file carries none. A file that cannot
+/// be read a second time yields `None` rather than an error: the comment is
+/// supplementary metadata, and the first read already proved the file parses.
+fn read_release_comment(path: &Path, file_type: FileType) -> Option<String> {
+    let comment = match file_type.primary_tag_type() {
+        TagType::VorbisComments => vorbis_release_comment(path, file_type),
+        TagType::Ape => ape_release_comment(path, file_type),
+        TagType::Id3v2 => id3v2_release_comment(path, file_type),
+        TagType::Mp4Ilst => mp4_release_comment(path),
+        _ => None,
+    }?;
+    let comment = comment.trim();
+    (!comment.is_empty()).then(|| comment.to_owned())
+}
+
+/// Reads a file's tag alone, skipping its properties and its pictures.
+///
+/// # Parameters
+///
+/// - `path`: the file to read.
+///
+/// # Returns
+///
+/// The container's own type with its tags filled in, or `None` when the file
+/// cannot be opened or parsed.
+fn tags_only<T: AudioFile>(path: &Path) -> Option<T> {
+    let file = File::open(path).ok()?;
+    T::read_from(
+        &mut BufReader::new(file),
+        ParseOptions::new().read_properties(false),
+    )
+    .ok()
+}
+
+/// Reads the release comment of a container that keeps a Vorbis comment block.
+///
+/// # Parameters
+///
+/// - `path`: the file to read.
+/// - `file_type`: the container `lofty` detected.
+///
+/// # Returns
+///
+/// The comment, or `None` when the block does not carry it.
+fn vorbis_release_comment(path: &Path, file_type: FileType) -> Option<String> {
+    /// Reads the comment out of one comment block.
+    ///
+    /// # Parameters
+    ///
+    /// - `tag`: the block to read.
+    ///
+    /// # Returns
+    ///
+    /// The comment, or `None` when the block does not carry it.
+    fn read(tag: &VorbisComments) -> Option<String> {
+        tag.get(VORBIS_RELEASE_COMMENT_KEY).map(str::to_owned)
+    }
+    match file_type {
+        FileType::Flac => tags_only::<FlacFile>(path)?
+            .vorbis_comments()
+            .and_then(read),
+        FileType::Vorbis => read(tags_only::<VorbisFile>(path)?.vorbis_comments()),
+        FileType::Opus => read(tags_only::<OpusFile>(path)?.vorbis_comments()),
+        FileType::Speex => read(tags_only::<SpeexFile>(path)?.vorbis_comments()),
+        _ => None,
+    }
+}
+
+/// Reads the release comment of a container that keeps an APE tag.
+///
+/// # Parameters
+///
+/// - `path`: the file to read.
+/// - `file_type`: the container `lofty` detected.
+///
+/// # Returns
+///
+/// The comment, or `None` when the tag does not carry it.
+fn ape_release_comment(path: &Path, file_type: FileType) -> Option<String> {
+    /// Reads the comment out of one APE tag.
+    ///
+    /// # Parameters
+    ///
+    /// - `tag`: the tag to read.
+    ///
+    /// # Returns
+    ///
+    /// The comment, or `None` when the tag does not carry it.
+    fn read(tag: &ApeTag) -> Option<String> {
+        tag.get(RELEASE_COMMENT_NAME)
+            .and_then(|item| item.value().text())
+            .map(str::to_owned)
+    }
+    match file_type {
+        FileType::WavPack => tags_only::<WavPackFile>(path)?.ape().and_then(read),
+        FileType::Ape => tags_only::<ApeFile>(path)?.ape().and_then(read),
+        FileType::Mpc => tags_only::<MpcFile>(path)?.ape().and_then(read),
+        _ => None,
+    }
+}
+
+/// Reads the release comment of a container that keeps an ID3v2 tag.
+///
+/// # Parameters
+///
+/// - `path`: the file to read.
+/// - `file_type`: the container `lofty` detected.
+///
+/// # Returns
+///
+/// The comment, or `None` when the tag does not carry the frame.
+fn id3v2_release_comment(path: &Path, file_type: FileType) -> Option<String> {
+    /// Reads the comment out of one ID3v2 tag.
+    ///
+    /// # Parameters
+    ///
+    /// - `tag`: the tag to read.
+    ///
+    /// # Returns
+    ///
+    /// The comment, or `None` when the tag does not carry the frame.
+    fn read(tag: &Id3v2Tag) -> Option<String> {
+        tag.into_iter().find_map(|frame| match frame {
+            Frame::UserText(user)
+                if user.description.eq_ignore_ascii_case(RELEASE_COMMENT_NAME) =>
+            {
+                Some(user.content.to_string())
+            }
+            _ => None,
+        })
+    }
+    match file_type {
+        FileType::Mpeg => tags_only::<MpegFile>(path)?.id3v2().and_then(read),
+        FileType::Aac => tags_only::<AacFile>(path)?.id3v2().and_then(read),
+        FileType::Aiff => tags_only::<AiffFile>(path)?.id3v2().and_then(read),
+        FileType::Wav => tags_only::<WavFile>(path)?.id3v2().and_then(read),
+        _ => None,
+    }
+}
+
+/// Reads the release comment of an MP4 file.
+///
+/// # Parameters
+///
+/// - `path`: the file to read.
+///
+/// # Returns
+///
+/// The comment, or `None` when the `ilst` atom does not carry the freeform atom.
+fn mp4_release_comment(path: &Path) -> Option<String> {
+    let file = tags_only::<Mp4File>(path)?;
+    let atom = file.ilst()?.get(&AtomIdent::Freeform {
+        mean: Cow::Borrowed(ITUNES_MEAN),
+        name: Cow::Borrowed(RELEASE_COMMENT_NAME),
+    })?;
+    atom.data().find_map(|data| match data {
+        AtomData::UTF8(text) | AtomData::UTF16(text) => Some(text.clone()),
+        AtomData::Unknown {
+            code: DataType::Utf8,
+            data,
+        } => String::from_utf8(data.clone()).ok(),
+        _ => None,
+    })
 }
 
 /// Reads one text tag.

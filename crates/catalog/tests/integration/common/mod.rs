@@ -231,6 +231,7 @@ impl Env {
                     mb_release_id: Some("22222222-2222-4222-8222-222222222222".to_owned()),
                     mb_release_group_id: None,
                     upc: None,
+                    edition: hearthsound_library::EditionInput::default(),
                     origin: Origin::Catalog,
                 },
                 &[ArtistCredit {

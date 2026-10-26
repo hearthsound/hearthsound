@@ -953,6 +953,7 @@ mod tests {
             mb_release_id: mb_release_id.map(str::to_owned),
             mb_release_group_id: mb_release_group_id.map(str::to_owned),
             upc: upc.map(str::to_owned),
+            edition: None,
             origin: Origin::Catalog,
             created_at: 0,
             updated_at: 0,

@@ -509,6 +509,7 @@ pub(crate) fn album_id3(
         .set("songCount", tracks.len() as i64);
     let object = set_plays(object, annotation);
     object
+        .set("version", album.edition.clone().unwrap_or_default())
         .set(
             "musicBrainzId",
             album.mb_release_id.clone().unwrap_or_default(),
@@ -1095,6 +1096,7 @@ pub(crate) fn catalog_album_ref(result: &CatalogAlbumRefResult, title_suffix: &s
         )
         .set("songCount", 0)
         .set("played", "")
+        .set("version", "")
         .set("musicBrainzId", "")
         .set(
             "genres",
@@ -1226,6 +1228,7 @@ pub(crate) fn catalog_album(result: &CatalogAlbumResult, title_suffix: &str) -> 
         )
         .set("songCount", album.tracks.len() as i64)
         .set("played", "")
+        .set("version", "")
         .set("musicBrainzId", music_brainz_id(&album.ids))
         .set(
             "genres",

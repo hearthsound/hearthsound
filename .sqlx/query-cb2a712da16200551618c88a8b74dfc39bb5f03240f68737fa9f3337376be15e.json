@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, title, sort_title, display_artist, year, release_date, album_type, mb_release_id, mb_release_group_id, upc, origin, created_at, updated_at FROM albums WHERE id = ?",
+  "query": "SELECT id, title, sort_title, display_artist, year, release_date, album_type, mb_release_id, mb_release_group_id, upc, edition, origin, created_at, updated_at FROM albums WHERE id = ?",
   "describe": {
     "columns": [
       {
@@ -114,8 +114,19 @@
         }
       },
       {
-        "name": "origin",
+        "name": "edition",
         "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "edition"
+          }
+        }
+      },
+      {
+        "name": "origin",
+        "ordinal": 11,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -126,7 +137,7 @@
       },
       {
         "name": "created_at",
-        "ordinal": 11,
+        "ordinal": 12,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -137,7 +148,7 @@
       },
       {
         "name": "updated_at",
-        "ordinal": 12,
+        "ordinal": 13,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -161,10 +172,11 @@
       true,
       true,
       true,
+      true,
       false,
       false,
       false
     ]
   },
-  "hash": "72ee26836f23ac57ec4437bcadcf962de859274d962bfefc7add5d12176cb6f3"
+  "hash": "cb2a712da16200551618c88a8b74dfc39bb5f03240f68737fa9f3337376be15e"
 }

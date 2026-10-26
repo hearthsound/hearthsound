@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "WITH scope_tracks(track_id) AS (SELECT id FROM tracks WHERE availability IN (?, ?)) SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, al.created_at, al.updated_at FROM albums al WHERE (EXISTS (SELECT 1 FROM album_artists aa WHERE aa.album_id = al.id AND aa.artist_id = ?) OR EXISTS (SELECT 1 FROM tracks t JOIN track_artists ta ON ta.track_id = t.id WHERE t.album_id = al.id AND ta.artist_id = ?)) AND al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id) ORDER BY al.year IS NULL, al.year, al.sort_title, al.id",
+  "query": "SELECT id, title, sort_title, display_artist, year, release_date, album_type, mb_release_id, mb_release_group_id, upc, edition, origin, created_at, updated_at FROM albums WHERE mb_release_id = ? LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -114,8 +114,19 @@
         }
       },
       {
-        "name": "origin",
+        "name": "edition",
         "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "edition"
+          }
+        }
+      },
+      {
+        "name": "origin",
+        "ordinal": 11,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -126,7 +137,7 @@
       },
       {
         "name": "created_at",
-        "ordinal": 11,
+        "ordinal": 12,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -137,7 +148,7 @@
       },
       {
         "name": "updated_at",
-        "ordinal": 12,
+        "ordinal": 13,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -148,7 +159,7 @@
       }
     ],
     "parameters": {
-      "Right": 4
+      "Right": 1
     },
     "nullable": [
       false,
@@ -161,10 +172,11 @@
       true,
       true,
       true,
+      true,
       false,
       false,
       false
     ]
   },
-  "hash": "b89dd440750057c7e6e1f9268c66b6a4671ecf18747f553ea2c12a844fd392aa"
+  "hash": "94a49f44d7f4d2c6550b8d9db0e93def66bd712424989b4071199050e3f2ba2a"
 }

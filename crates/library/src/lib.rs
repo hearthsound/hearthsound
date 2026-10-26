@@ -55,9 +55,10 @@ mod repository;
 
 pub use error::LibraryError;
 pub use model::{
-    Album, AlbumInput, Artist, ArtistCredit, ArtistInput, Credit, FolderRemovalImpact, Genre,
-    LibraryFolder, ManagedMediaFile, MediaFile, MediaFileInput, MediaRoot, Origin, ReplayGain,
-    ScannedMediaFile, StorageRoots, Track, TrackInput, UnknownOrigin, sort_key,
+    Album, AlbumInput, Artist, ArtistCredit, ArtistInput, Credit, EditionInput,
+    FolderRemovalImpact, Genre, LibraryFolder, ManagedMediaFile, MediaFile, MediaFileInput,
+    MediaRoot, Origin, ReplayGain, ScannedMediaFile, StorageRoots, Track, TrackInput,
+    UnknownOrigin, sort_key,
 };
 pub use repository::LibraryRepository;
 
@@ -65,6 +66,7 @@ pub mod albums;
 pub mod artists;
 pub mod artists_split;
 pub mod artwork;
+pub mod editions;
 pub mod folders;
 pub mod identity;
 pub mod locks;

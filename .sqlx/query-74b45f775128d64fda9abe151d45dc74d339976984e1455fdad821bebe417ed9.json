@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.id AS album_id, a.title AS title, a.edition AS edition, f.path AS folder_path, mf.rel_path AS rel_path FROM albums a JOIN tracks t ON t.album_id = a.id JOIN media_files mf ON mf.track_id = t.id AND mf.storage = 'folder' JOIN library_folders f ON f.id = mf.folder_id WHERE a.origin = 'local' ORDER BY a.id, mf.is_preferred DESC, mf.added_at, mf.rel_path",
+  "describe": {
+    "columns": [
+      {
+        "name": "album_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "name": "edition",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "edition"
+          }
+        }
+      },
+      {
+        "name": "folder_path",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "library_folders",
+            "name": "path"
+          }
+        }
+      },
+      {
+        "name": "rel_path",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "rel_path"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "74b45f775128d64fda9abe151d45dc74d339976984e1455fdad821bebe417ed9"
+}

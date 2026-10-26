@@ -233,6 +233,9 @@ pub struct Album {
     pub mb_release_group_id: Option<String>,
     /// The release UPC, when known.
     pub upc: Option<String>,
+    /// The edition label that tells this release apart from another release of
+    /// the same title, when it states one.
+    pub edition: Option<String>,
     /// Where the row came from.
     pub origin: Origin,
     /// When the row was created, in unix milliseconds.
@@ -626,6 +629,60 @@ impl ArtistCredit {
     }
 }
 
+/// What a writer states about an album's edition label.
+///
+/// Two writers can name the same album row: a scan, which derives the label from
+/// the file it read, and a provider resolution, which knows only what the
+/// catalog stated. A scan states the label it derived, clearing a stale one when
+/// the folder or the tag no longer states an edition; a provider that carries no
+/// version leaves what is stored alone, so enriching an album does not strip the
+/// label the owner's files gave it.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_library::EditionInput;
+///
+/// let label = EditionInput::Labelled("Deluxe Edition".to_owned());
+/// assert_eq!(label.label(), Some("Deluxe Edition"));
+/// assert_eq!(EditionInput::Absent.label(), None);
+/// assert_eq!(EditionInput::Unstated.label(), None);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum EditionInput {
+    /// The writer derived no label and leaves the stored one alone.
+    #[default]
+    Unstated,
+    /// The writer states that the album carries no edition label.
+    Absent,
+    /// The writer states the album's edition label.
+    Labelled(String),
+}
+
+impl EditionInput {
+    /// Returns the label the input states, when it states one.
+    ///
+    /// # Returns
+    ///
+    /// The label for [`EditionInput::Labelled`], `None` otherwise - which is
+    /// also what an absent label writes.
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            EditionInput::Labelled(label) => Some(label.as_str()),
+            EditionInput::Unstated | EditionInput::Absent => None,
+        }
+    }
+
+    /// Reports whether the input states anything at all.
+    ///
+    /// # Returns
+    ///
+    /// `true` for every variant but [`EditionInput::Unstated`].
+    pub fn is_stated(&self) -> bool {
+        !matches!(self, EditionInput::Unstated)
+    }
+}
+
 /// The fields a writer supplies for an album.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlbumInput {
@@ -647,6 +704,8 @@ pub struct AlbumInput {
     pub mb_release_group_id: Option<String>,
     /// The release UPC, when known.
     pub upc: Option<String>,
+    /// What the writer states about the album's edition label.
+    pub edition: EditionInput,
     /// Where the row comes from.
     pub origin: Origin,
 }
@@ -669,6 +728,7 @@ impl AlbumInput {
             mb_release_id: None,
             mb_release_group_id: None,
             upc: None,
+            edition: EditionInput::default(),
             origin,
         }
     }

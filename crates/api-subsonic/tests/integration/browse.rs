@@ -143,6 +143,63 @@ async fn get_album_answers_the_album_with_its_songs() {
 }
 
 #[tokio::test]
+async fn an_album_carries_its_edition_label_as_the_open_subsonic_version() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+    sqlx::query("UPDATE albums SET edition = 'Deluxe Edition' WHERE id = ?")
+        .bind(seeded.alpha.uuid().as_bytes().as_slice())
+        .execute(fixture.database.writer())
+        .await
+        .unwrap();
+
+    let json = get(
+        &app,
+        &format!(
+            "/rest/getAlbum?id={}&musicFolderId=1&apiKey={}&f=json",
+            seeded.alpha, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&json);
+    assert!(
+        json.body.contains("\"version\":\"Deluxe Edition\""),
+        "{}",
+        json.body
+    );
+
+    let xml = get(
+        &app,
+        &format!(
+            "/rest/getAlbum.view?id={}&musicFolderId=1&apiKey={}",
+            seeded.alpha, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&xml);
+    assert!(
+        xml.body.contains("version=\"Deluxe Edition\""),
+        "{}",
+        xml.body
+    );
+}
+
+#[tokio::test]
+async fn an_album_without_an_edition_states_an_empty_version() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+    let json = get(
+        &app,
+        &format!(
+            "/rest/getAlbum?id={}&musicFolderId=1&apiKey={}&f=json",
+            seeded.alpha, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&json);
+    assert!(json.body.contains("\"version\":\"\""), "{}", json.body);
+}
+
+#[tokio::test]
 async fn cover_art_always_names_the_album_and_its_songs_name_it() {
     let (fixture, seeded) = fixture().await;
     let app = fixture.app();

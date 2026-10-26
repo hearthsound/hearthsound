@@ -5,6 +5,7 @@
 //! once per test run, which is what keeps the test build and CI short.
 
 mod batch;
+mod editions;
 mod identity;
 mod large_library;
 mod maintenance;

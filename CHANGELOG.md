@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- An album carries an edition label, derived from the release's MusicBrainz disambiguation tag or, when that is absent, from the album's folder (`Solar Power (Deluxe Edition)` under the title `Solar Power` is `Deluxe Edition`); the scanner keeps it current, the new `library.editions` pass fills it in for a library that already existed, and the OpenSubsonic `album` carries it as `version`, empty when the release states none.
+
 ### Changed
 
 - A scanned folder that an account owns and uses as its save location is mounted read-write, so the documentation, the development compose file and the `/music` example volume now say "read-only, or read-write when owned and used for saves" instead of "read-only".

@@ -7,7 +7,7 @@ use hearthsound_media::{
     probe, verify_decodes,
 };
 use hearthsound_test_support::audio::{
-    AudioFixture, AudioFormat, BitDepth, TrackTags as FixtureTags,
+    AudioFixture, AudioFormat, BitDepth, TrackTags as FixtureTags, write_release_comment,
 };
 
 /// The container, codec, and losslessness expected for a fixture format.
@@ -73,6 +73,51 @@ async fn probes_every_fixture_format() {
         assert!(!result.has_embedded_art, "{}", format.extension());
         assert!(!result.lossless || result.bit_depth == Some(16));
     }
+}
+
+#[tokio::test]
+async fn reads_the_release_comment_from_every_container_family() {
+    let dir = tempfile::tempdir().unwrap();
+    // One fixture per tag family the comment is written in: a Vorbis comment, an
+    // ID3v2 `TXXX` frame, an APE item, and an MP4 freeform atom.
+    let families = [
+        AudioFormat::Flac,
+        AudioFormat::OggVorbis,
+        AudioFormat::Mp3Cbr,
+        AudioFormat::M4aAac,
+        AudioFormat::WavPack,
+    ];
+    for format in families {
+        let path = AudioFixture::new(format)
+            .seconds(0.3)
+            .file_name(format!("comment.{}", format.extension()))
+            .tags(FixtureTags::new("Track", "Artist").album("Solar Power"))
+            .write_into(dir.path())
+            .await
+            .unwrap();
+        assert_eq!(probe(&path).await.unwrap().release_comment, None);
+
+        write_release_comment(&path, "Deluxe Edition")
+            .await
+            .unwrap();
+        assert_eq!(
+            probe(&path).await.unwrap().release_comment.as_deref(),
+            Some("Deluxe Edition"),
+            "{}",
+            format.extension()
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_file_without_a_release_comment_reports_none() {
+    let (_dir, path) = AudioFixture::new(AudioFormat::Flac)
+        .seconds(0.3)
+        .tags(FixtureTags::new("Track", "Artist").album("Album"))
+        .write_in_temp()
+        .await
+        .unwrap();
+    assert_eq!(probe(&path).await.unwrap().release_comment, None);
 }
 
 #[tokio::test]

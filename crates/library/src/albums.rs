@@ -17,6 +17,11 @@
 //! wholesale on every upsert, so an album's credits always match the input that
 //! last wrote it.
 //!
+//! The edition label follows whoever states it, and only them: a scan derives the
+//! label from the file it read and states it on every write, so a file that moves
+//! out of a deluxe folder clears the label it used to have, while a provider that
+//! carries no version leaves the stored label alone.
+//!
 //! Every function takes a [`sqlx::SqliteConnection`] so a caller can run it
 //! inside its own transaction; the pool-level convenience is on
 //! [`crate::LibraryRepository`].
@@ -45,6 +50,7 @@ pub(crate) struct AlbumRow {
     pub(crate) mb_release_id: Option<String>,
     pub(crate) mb_release_group_id: Option<String>,
     pub(crate) upc: Option<String>,
+    pub(crate) edition: Option<String>,
     pub(crate) origin: String,
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
@@ -70,6 +76,7 @@ impl AlbumRow {
             mb_release_id: self.mb_release_id,
             mb_release_group_id: self.mb_release_group_id,
             upc: self.upc,
+            edition: self.edition,
             origin: self.origin.parse()?,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -103,7 +110,10 @@ pub(crate) struct AlbumIdentityRow {
 /// An adopted row has its fields refreshed and its id-less twins merged into it.
 /// The optional columns are merged, not overwritten: a column the input leaves
 /// empty keeps the value the row already holds, and the year and the release date
-/// are only written when the row has none. An album is enriched by whoever knows
+/// are only written when the row has none. The edition label is the exception:
+/// [`EditionInput`] states whether the writer derived a label at all, so a scan
+/// that finds no edition clears a stale one and a provider that knows none leaves
+/// it as it is. An album is enriched by whoever knows
 /// more (a scan that read tags, a provider that resolved a release) and is never
 /// degraded by a caller that knows less. The title and its sort key are always
 /// written, because every caller supplies them.
@@ -238,7 +248,9 @@ pub async fn upsert_album(
                         album_type = COALESCE(?, album_type), \
                         mb_release_id = COALESCE(?, mb_release_id), \
                         mb_release_group_id = COALESCE(?, mb_release_group_id), \
-                        upc = COALESCE(?, upc), updated_at = ? WHERE id = ?",
+                        upc = COALESCE(?, upc), \
+                        edition = CASE WHEN ? THEN ? ELSE edition END, \
+                        updated_at = ? WHERE id = ?",
                 album.title,
                 sort_title,
                 album.display_artist,
@@ -248,6 +260,8 @@ pub async fn upsert_album(
                 album.mb_release_id,
                 album.mb_release_group_id,
                 album.upc,
+                album.edition.is_stated(),
+                album.edition.label(),
                 now,
                 id.as_bytes().as_slice(),
             )
@@ -263,9 +277,9 @@ pub async fn upsert_album(
             let origin = album.origin.as_str();
             sqlx::query!(
                 "INSERT INTO albums (id, title, sort_title, display_artist, year, release_date, \
-                                     album_type, mb_release_id, mb_release_group_id, upc, origin, \
-                                     created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                     album_type, mb_release_id, mb_release_group_id, upc, edition, \
+                                     origin, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 id.as_bytes().as_slice(),
                 album.title,
                 sort_title,
@@ -276,6 +290,7 @@ pub async fn upsert_album(
                 album.mb_release_id,
                 album.mb_release_group_id,
                 album.upc,
+                album.edition.label(),
                 origin,
                 now,
                 now,
@@ -409,9 +424,11 @@ pub(crate) async fn merge_album(
              mb_release_group_id = COALESCE(mb_release_group_id, \
                  (SELECT mb_release_group_id FROM albums WHERE id = ?)), \
              upc = COALESCE(upc, (SELECT upc FROM albums WHERE id = ?)), \
+             edition = COALESCE(edition, (SELECT edition FROM albums WHERE id = ?)), \
              updated_at = ? \
          WHERE id = ?",
     )
+    .bind(from_key.as_slice())
     .bind(from_key.as_slice())
     .bind(from_key.as_slice())
     .bind(from_key.as_slice())
@@ -700,7 +717,7 @@ pub async fn get_album(
     let row = sqlx::query_as!(
         AlbumRow,
         "SELECT id, title, sort_title, display_artist, year, release_date, album_type, \
-                mb_release_id, mb_release_group_id, upc, origin, created_at, updated_at \
+                mb_release_id, mb_release_group_id, upc, edition, origin, created_at, updated_at \
          FROM albums WHERE id = ?",
         entity_key(id),
     )
@@ -730,7 +747,7 @@ pub async fn find_album_by_mb_release_id(
     let row = sqlx::query_as!(
         AlbumRow,
         "SELECT id, title, sort_title, display_artist, year, release_date, album_type, \
-                mb_release_id, mb_release_group_id, upc, origin, created_at, updated_at \
+                mb_release_id, mb_release_group_id, upc, edition, origin, created_at, updated_at \
          FROM albums WHERE mb_release_id = ? LIMIT 1",
         mbid,
     )
@@ -761,8 +778,8 @@ pub async fn list_albums_for_artist(
     let rows = sqlx::query_as!(
         AlbumRow,
         "SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
-                al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, \
-                al.created_at, al.updated_at \
+                al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.edition, \
+                al.origin, al.created_at, al.updated_at \
          FROM albums al \
          WHERE (EXISTS (SELECT 1 FROM album_artists aa \
                         WHERE aa.album_id = al.id AND aa.artist_id = ?) \

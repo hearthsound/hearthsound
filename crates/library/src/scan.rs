@@ -30,7 +30,7 @@
 //! transaction that writes them, which is what makes an owned folder's content
 //! permanent in its owner's personal library.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -55,11 +55,12 @@ use crate::artists_split::split_artists;
 use crate::error::LibraryError;
 use crate::locks::FolderLocks;
 use crate::model::{
-    AlbumInput, ArtistCredit, ArtistInput, LibraryFolder, Origin, ReplayGain, ScannedMediaFile,
-    TrackInput,
+    AlbumInput, ArtistCredit, ArtistInput, EditionInput, LibraryFolder, Origin, ReplayGain,
+    ScannedMediaFile, TrackInput,
 };
 use crate::{
-    DELETE_BATCH, READ_THEN_WRITE, albums, folders, media_files, now_millis, retention, tracks,
+    DELETE_BATCH, READ_THEN_WRITE, albums, editions, folders, media_files, now_millis, retention,
+    tracks,
 };
 
 /// The job kind a library scan is enqueued under.
@@ -878,8 +879,24 @@ impl LibraryScanner {
         // [`READ_THEN_WRITE`].
         let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
         let mut added: Vec<EntityId> = Vec::new();
-        for file in pending.drain(..) {
-            let tags = IndexedTags::from_probe(&file.probe, &file.found.rel_path, separators);
+        // The edition label of an album is derived from every file of the batch
+        // that belongs to it, because the folder rule needs the whole album's
+        // set of parent directories, not one file's.
+        let mut indexed: Vec<(PendingFile, IndexedTags)> = pending
+            .drain(..)
+            .map(|file| {
+                let tags = IndexedTags::from_probe(&file.probe, &file.found.rel_path, separators);
+                (file, tags)
+            })
+            .collect();
+        let editions = album_editions(&indexed);
+        for (file, mut tags) in indexed.drain(..) {
+            if let Some(album) = tags.album.as_mut() {
+                let key = album_key(album);
+                if let Some(edition) = editions.get(&key) {
+                    album.edition = edition.clone();
+                }
+            }
             let album_id = match &tags.album {
                 Some(album) => {
                     Some(albums::upsert_album(&mut tx, album, &tags.album_credits).await?)
@@ -1293,6 +1310,10 @@ impl IndexedTags {
                 album.mb_release_id = tags.mb_release_id.clone();
                 album.mb_release_group_id = tags.mb_release_group_id.clone();
                 album.album_type = compilation.then(|| COMPILATION_ALBUM_TYPE.to_owned());
+                // A stored file lands in the server's own naming template, so
+                // only its own comment can state an edition; a scan derives the
+                // label from every file of the album and overwrites this.
+                album.edition = editions::comment_input(probe.release_comment.as_deref());
                 album
             });
         let album_credits = match album {
@@ -1316,6 +1337,90 @@ impl IndexedTags {
             genres,
         }
     }
+}
+
+/// The identity a scan batch groups an album's files by.
+///
+/// Two releases of one title are two albums, so the key is the identity the store
+/// uses: the folded title, the display credit, the year, and the release id. The
+/// year and the id are what keep a standard release and its deluxe edition apart -
+/// they share their title and their credit - which is the very case the edition
+/// label exists for.
+type AlbumKey = (String, Option<String>, Option<i64>, Option<String>);
+
+/// Builds the group key of one file's album.
+///
+/// # Parameters
+///
+/// - `album`: the album input one file implies.
+///
+/// # Returns
+///
+/// The key that names the album the file belongs to.
+fn album_key(album: &AlbumInput) -> AlbumKey {
+    (
+        crate::model::sort_key(&album.title),
+        album.display_artist.clone(),
+        album.year,
+        album.mb_release_id.clone(),
+    )
+}
+
+/// Derives the edition label of every album a scan batch holds.
+///
+/// Each album's files are read together, because the folder rule asks for the one
+/// directory the whole album lives in and a multi-disc release lives in several.
+/// The release comment is read from the files: the first one that carries a
+/// comment states the album's label.
+///
+/// # Parameters
+///
+/// - `indexed`: the batch, with the inputs each file implies.
+///
+/// # Returns
+///
+/// What the scan states about each album's label, by the group [`album_key`] names.
+fn album_editions(indexed: &[(PendingFile, IndexedTags)]) -> HashMap<AlbumKey, EditionInput> {
+    /// What one album's files of the batch state about its edition.
+    #[derive(Default)]
+    struct Collected {
+        /// The album's title, as the tags spell it.
+        title: String,
+        /// The names of the directories its files sit in; empty for the root.
+        parents: BTreeSet<String>,
+        /// The first release comment a file of the album carries.
+        comment: Option<String>,
+    }
+
+    let mut collected: HashMap<AlbumKey, Collected> = HashMap::new();
+    for (file, tags) in indexed {
+        let Some(album) = tags.album.as_ref() else {
+            continue;
+        };
+        let entry = collected
+            .entry(album_key(album))
+            .or_insert_with(|| Collected {
+                title: album.title.clone(),
+                ..Collected::default()
+            });
+        entry.parents.insert(
+            editions::parent_folder(&file.found.rel_path)
+                .unwrap_or_default()
+                .to_owned(),
+        );
+        if entry.comment.is_none() {
+            entry.comment = file.probe.release_comment.clone();
+        }
+    }
+    collected
+        .into_iter()
+        .map(|(key, album)| {
+            (
+                key,
+                editions::album_input(&album.title, &album.parents, album.comment.as_deref()),
+            )
+        })
+        .collect()
 }
 
 /// Splits one artist list into credits.

@@ -646,6 +646,16 @@ async fn watch_folders(services: Arc<Services>, shutdown: Shutdown) {
             false
         }
     };
+    match hearthsound_library::editions::enqueue_if_pending(services.database(), services.queue())
+        .await
+    {
+        Ok(enqueued) => {
+            tracing::debug!(enqueued, "checked the album edition backfill");
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not queue the album edition backfill");
+        }
+    }
     if !identity_pass {
         let requested = with_retries(
             &STARTUP_SCAN_DELAYS,

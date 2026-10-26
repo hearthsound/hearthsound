@@ -117,6 +117,15 @@ impl AudioFixtureError {
     }
 }
 
+/// The Vorbis comment key the release disambiguation is written under.
+const VORBIS_RELEASE_COMMENT_KEY: &str = "MUSICBRAINZ_ALBUMCOMMENT";
+
+/// The description the release disambiguation is written under elsewhere.
+const RELEASE_COMMENT_NAME: &str = "MusicBrainz Album Comment";
+
+/// The mean of the MP4 freeform atoms Picard writes into.
+const ITUNES_MEAN: &str = "com.apple.iTunes";
+
 /// The sample bit depth of a generated file.
 ///
 /// The depth only means something for the lossless formats that store samples
@@ -1325,6 +1334,219 @@ impl AudioFixture {
         let path = self.write_into(dir.path()).await?;
         Ok((dir, path))
     }
+}
+
+/// Writes the MusicBrainz release disambiguation comment into a file's tag.
+///
+/// The field has no `lofty` [`ItemKey`], so it is written into the container's
+/// own tag type, exactly as MusicBrainz Picard writes it: the
+/// `MUSICBRAINZ_ALBUMCOMMENT` Vorbis comment, the `MusicBrainz Album Comment`
+/// APE item, the `TXXX:MusicBrainz Album Comment` ID3v2 frame, or the
+/// `----:com.apple.iTunes:MusicBrainz Album Comment` freeform atom of an MP4
+/// file. A fixture that needs the tag rule of the edition label is tagged with
+/// this after [`AudioFixture::write_into`].
+///
+/// The write is a blocking `lofty` operation and runs on a blocking thread.
+///
+/// # Parameters
+///
+/// - `path`: the file to tag; it must already exist in a supported format.
+/// - `comment`: the comment to write.
+///
+/// # Errors
+///
+/// Returns [`AudioFixtureError::Tag`] when the file cannot be parsed or written,
+/// [`AudioFixtureError::Io`] when it cannot be opened, and
+/// [`AudioFixtureError::Ffmpeg`] when the container is one this helper does not
+/// write.
+pub async fn write_release_comment(path: &Path, comment: &str) -> Result<(), AudioFixtureError> {
+    let path = path.to_path_buf();
+    let comment = comment.to_owned();
+    tokio::task::spawn_blocking(move || write_release_comment_blocking(&path, &comment))
+        .await
+        .map_err(|source| AudioFixtureError::Io {
+            path: PathBuf::from("<blocking task>"),
+            source: std::io::Error::other(source.to_string()),
+        })?
+}
+
+/// Writes the release comment on the calling thread.
+///
+/// # Parameters
+///
+/// - `path`: the file to tag.
+/// - `comment`: the comment to write.
+///
+/// # Errors
+///
+/// Returns the same errors as [`write_release_comment`].
+fn write_release_comment_blocking(path: &Path, comment: &str) -> Result<(), AudioFixtureError> {
+    let file_type = lofty::probe::Probe::open(path)
+        .map_err(|source| AudioFixtureError::tag(path, source))?
+        .guess_file_type()
+        .map_err(|source| AudioFixtureError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .file_type()
+        .ok_or_else(|| AudioFixtureError::Ffmpeg {
+            args: String::new(),
+            message: format!("no taggable format for {}", path.display()),
+        })?;
+    let options = lofty::config::ParseOptions::new();
+    match file_type {
+        lofty::file::FileType::Flac => rewrite::<lofty::flac::FlacFile>(path, options, |file| {
+            match file.vorbis_comments_mut() {
+                Some(tag) => vorbis_insert(tag, comment),
+                None => {
+                    let mut tag = lofty::ogg::tag::VorbisComments::default();
+                    vorbis_insert(&mut tag, comment);
+                    file.set_vorbis_comments(tag);
+                }
+            }
+        }),
+        lofty::file::FileType::Vorbis => rewrite::<lofty::ogg::VorbisFile>(path, options, |file| {
+            vorbis_insert(file.vorbis_comments_mut(), comment);
+        }),
+        lofty::file::FileType::Opus => rewrite::<lofty::ogg::OpusFile>(path, options, |file| {
+            vorbis_insert(file.vorbis_comments_mut(), comment);
+        }),
+        lofty::file::FileType::Mpeg => {
+            rewrite::<lofty::mpeg::MpegFile>(path, options, |file| match file.id3v2_mut() {
+                Some(tag) => user_text(tag, comment),
+                None => {
+                    let mut tag = lofty::id3::v2::Id3v2Tag::default();
+                    user_text(&mut tag, comment);
+                    file.set_id3v2(tag);
+                }
+            })
+        }
+        lofty::file::FileType::Wav => {
+            rewrite::<lofty::iff::wav::WavFile>(path, options, |file| match file.id3v2_mut() {
+                Some(tag) => user_text(tag, comment),
+                None => {
+                    let mut tag = lofty::id3::v2::Id3v2Tag::default();
+                    user_text(&mut tag, comment);
+                    file.set_id3v2(tag);
+                }
+            })
+        }
+        lofty::file::FileType::WavPack => {
+            rewrite::<lofty::wavpack::WavPackFile>(path, options, |file| match file.ape_mut() {
+                Some(tag) => ape_insert(tag, comment),
+                None => {
+                    let mut tag = lofty::ape::ApeTag::default();
+                    ape_insert(&mut tag, comment);
+                    file.set_ape(tag);
+                }
+            })
+        }
+        lofty::file::FileType::Mp4 => rewrite::<lofty::mp4::Mp4File>(path, options, |file| {
+            let atom = lofty::mp4::Atom::new(
+                lofty::mp4::AtomIdent::Freeform {
+                    mean: std::borrow::Cow::Borrowed(ITUNES_MEAN),
+                    name: std::borrow::Cow::Borrowed(RELEASE_COMMENT_NAME),
+                },
+                lofty::mp4::AtomData::UTF8(comment.to_owned()),
+            );
+            match file.ilst_mut() {
+                Some(ilst) => ilst.insert(atom),
+                None => {
+                    let mut ilst = lofty::mp4::Ilst::default();
+                    ilst.insert(atom);
+                    file.set_ilst(ilst);
+                }
+            }
+        }),
+        other => Err(AudioFixtureError::Ffmpeg {
+            args: String::new(),
+            message: format!(
+                "no release comment writer for {other:?} in {}",
+                path.display()
+            ),
+        }),
+    }
+}
+
+/// Reads a file into its concrete container type, changes it, and saves it back.
+///
+/// # Parameters
+///
+/// - `path`: the file to rewrite.
+/// - `options`: the parse options.
+/// - `change`: the change to apply to the parsed file.
+///
+/// # Errors
+///
+/// Returns [`AudioFixtureError::Io`] when the file cannot be opened and
+/// [`AudioFixtureError::Tag`] when it cannot be parsed or written.
+fn rewrite<T: lofty::file::AudioFile>(
+    path: &Path,
+    options: lofty::config::ParseOptions,
+    change: impl FnOnce(&mut T),
+) -> Result<(), AudioFixtureError> {
+    let mut file = read_blocking::<T>(path, options)?;
+    change(&mut file);
+    file.save_to_path(path, WriteOptions::default())
+        .map_err(|source| AudioFixtureError::tag(path, source))
+}
+
+/// Writes the release comment into a Vorbis comment block.
+///
+/// # Parameters
+///
+/// - `tag`: the block to write into.
+/// - `comment`: the comment to write.
+fn vorbis_insert(tag: &mut lofty::ogg::tag::VorbisComments, comment: &str) {
+    tag.insert(VORBIS_RELEASE_COMMENT_KEY.to_owned(), comment.to_owned());
+}
+
+/// Writes the release comment into an ID3v2 tag as a `TXXX` frame.
+///
+/// # Parameters
+///
+/// - `tag`: the tag to write into.
+/// - `comment`: the comment to write.
+fn user_text(tag: &mut lofty::id3::v2::Id3v2Tag, comment: &str) {
+    tag.insert_user_text(RELEASE_COMMENT_NAME.to_owned(), comment.to_owned());
+}
+
+/// Writes the release comment into an APE tag.
+///
+/// # Parameters
+///
+/// - `tag`: the tag to write into.
+/// - `comment`: the comment to write.
+fn ape_insert(tag: &mut lofty::ape::ApeTag, comment: &str) {
+    if let Ok(item) = lofty::ape::ApeItem::new(
+        RELEASE_COMMENT_NAME.to_owned(),
+        lofty::tag::ItemValue::Text(comment.to_owned()),
+    ) {
+        tag.insert(item);
+    }
+}
+
+/// Reads a file's concrete container type on the calling thread.
+///
+/// # Parameters
+///
+/// - `path`: the file to read.
+/// - `options`: the parse options.
+///
+/// # Errors
+///
+/// Returns [`AudioFixtureError::Io`] when the file cannot be opened and
+/// [`AudioFixtureError::Tag`] when it cannot be parsed.
+fn read_blocking<T: lofty::file::AudioFile>(
+    path: &Path,
+    options: lofty::config::ParseOptions,
+) -> Result<T, AudioFixtureError> {
+    let file = std::fs::File::open(path).map_err(|source| AudioFixtureError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    T::read_from(&mut std::io::BufReader::new(file), options)
+        .map_err(|source| AudioFixtureError::tag(path, source))
 }
 
 /// Runs one ffmpeg command to completion.

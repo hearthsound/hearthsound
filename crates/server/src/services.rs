@@ -73,6 +73,7 @@ use hearthsound_jobs::{
     SchedulerOptions, Shutdown,
 };
 use hearthsound_library::StorageRoots;
+use hearthsound_library::editions::{EDITIONS_JOB_KIND, EditionsJobHandler};
 use hearthsound_library::identity::{REIDENTITY_JOB_KIND, ReidentityJobHandler};
 use hearthsound_library::locks::FolderLocks;
 use hearthsound_library::maintenance::{
@@ -464,6 +465,10 @@ impl Services {
                 Arc::clone(&scanner),
                 Arc::clone(&database),
             )),
+        );
+        runner.register(
+            EDITIONS_JOB_KIND,
+            Arc::new(EditionsJobHandler::new(Arc::clone(&database))),
         );
         runner.register(
             PLUGIN_KV_SWEEP_JOB_KIND,

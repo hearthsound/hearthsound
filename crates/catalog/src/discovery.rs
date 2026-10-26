@@ -1692,6 +1692,7 @@ mod tests {
             mb_release_id: None,
             mb_release_group_id: None,
             upc: None,
+            edition: None,
             origin: hearthsound_library::Origin::Catalog,
             created_at: 0,
             updated_at: 0,
