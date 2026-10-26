@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A scrobble row a service rejected permanently is shown for a week and then swept away, so a queue nobody reads stops growing.
+- A play that nothing scrobbled yet - one whose enqueue failed, or one recorded before the listener linked a service - is offered to the linked services by the next delivery pass, as long as it is less than an hour old.
+- A queue whose service limits cannot be read waits five minutes instead of spending one attempt per row on a call that never happened.
+- A playback session whose client went quiet for longer than its own track records the play it earned instead of dropping it, exactly as the startup recovery does.
+- Liking or saving a track that has no row is refused (Subsonic error 70 for `star`) instead of storing a personal row that refers to nothing.
 - A generated playlist the listener made permanent keeps its lifetime across the daily sync: the sync rewrites its contents, never its expiry, so the expiry sweep no longer deletes a playlist the listener kept.
 - A scrobble a service rejects permanently - an unknown listen, a rejected token or configuration, or a plugin that failed internally - is parked at once instead of being retried for a week; the account's provider link shows it. An unavailable service or a rate limit is still retried on the backoff schedule. One unreadable queued row no longer blocks the rows behind it, and a service that refuses a whole batch has it re-submitted row by row, so only the rows it rejects are parked.
 - Queuing a like, dislike or clear for the linked services runs off the request path, and each service's limits are reused for ten minutes, so a slow plugin no longer delays a like.
