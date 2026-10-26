@@ -687,6 +687,12 @@ fn parse_cron(expression: &str) -> Result<Cron, JobsError> {
 /// after `after_ms`, so a schedule that is due now fires once and then waits for
 /// its next occurrence rather than repeating the one it missed.
 ///
+/// The local zone is the process's own, which `TZ` selects on a container: a
+/// housekeeping schedule such as `0 3 * * *` means 03:00 by the operator's wall
+/// clock. A clock change therefore moves the run: when the clocks jump forward
+/// the wall-clock time inside the skipped hour does not exist that day, so the
+/// run is missed, and when they jump back it occurs twice, so it runs once.
+///
 /// # Parameters
 ///
 /// - `expression`: the cron expression, used in error messages only.

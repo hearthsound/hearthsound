@@ -325,6 +325,35 @@ async fn the_next_fire_time_is_in_server_local_time() {
     assert!(schedule.next_run_at.unwrap() > now_millis());
 }
 
+/// A daily schedule is strictly after the reference it is computed from and
+/// within one local day of it, at every hour of the day.
+///
+/// The strictly-later rule is what keeps a due schedule from firing twice for the
+/// same occurrence. The one-day bound is the wall-clock rule a daily expression
+/// follows: the gap is a day, plus the hour a fall-back night repeats.
+#[tokio::test]
+async fn a_daily_schedule_is_strictly_later_and_within_a_day() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let (_queue, scheduler) = build(&database, SchedulerOptions::default());
+
+    for cron in ["0 0 * * *", "30 2 * * *", "0 3 * * *", "59 23 * * *"] {
+        let before = now_millis();
+        let schedule = system_schedule(&scheduler, cron).await;
+        let next = schedule
+            .next_run_at
+            .unwrap_or_else(|| panic!("{cron} has no next run"));
+        assert!(
+            next > before,
+            "{cron} fired at {next}, which is not after the reference {before}"
+        );
+        assert!(
+            next <= before + 25 * 60 * 60 * 1_000,
+            "{cron} fired at {next}, more than a day after the reference {before}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn run_ticks_until_it_is_shut_down() {
     let dir = tempfile::tempdir().unwrap();
