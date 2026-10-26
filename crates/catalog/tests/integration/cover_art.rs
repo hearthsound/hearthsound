@@ -14,6 +14,7 @@ use crate::common::{
 };
 use hearthsound_catalog::{CatalogError, CoverArtRequest};
 use hearthsound_core::{ClientId, EntityKind, Layer};
+use hearthsound_plugin_host::manifest::ImageCachePolicy;
 use hearthsound_test_support::{ARTWORK_FIXTURE, HELLO_CATALOG, HTTP_CATALOG, METADATA_FIXTURE};
 use serde_json::json;
 use wiremock::matchers::{method, path};
@@ -94,6 +95,11 @@ async fn the_smallest_image_that_covers_the_request_is_served_and_cached() {
 
     assert_eq!(cover.mime_type, "image/png");
     assert_eq!(cover.bytes, IMAGE);
+    assert_eq!(
+        cover.cache_policy,
+        ImageCachePolicy::Cache,
+        "a caching instance's image may be stored by whoever serves it"
+    );
     assert_eq!(
         requested_paths(&server).await,
         vec!["/cover-500.png"],
@@ -212,6 +218,11 @@ async fn a_no_store_instance_returns_the_image_without_caching_it() {
 
     assert_eq!(cover.mime_type, "image/png");
     assert_eq!(cover.bytes, IMAGE);
+    assert_eq!(
+        cover.cache_policy,
+        ImageCachePolicy::NoStore,
+        "the issuing instance's policy reaches the caller that serves the bytes"
+    );
     assert_eq!(count_rows(&env.database, "artwork_cache").await, 0);
     assert!(
         env.artwork_files().is_empty(),

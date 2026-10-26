@@ -38,8 +38,8 @@ use hearthsound_plugin_host::{
     UserConfigService,
 };
 use hearthsound_test_support::{
-    ALBUM_CATALOG, ARTWORK_FIXTURE, DISCOGRAPHY_CATALOG, HELLO_CATALOG, METADATA_FIXTURE,
-    SCROBBLE_FIXTURE, fixture_plugin,
+    ALBUM_CATALOG, ARTWORK_FIXTURE, ARTWORK_NOSTORE_FIXTURE, DISCOGRAPHY_CATALOG, HELLO_CATALOG,
+    METADATA_FIXTURE, SCROBBLE_FIXTURE, fixture_plugin,
 };
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -785,11 +785,53 @@ impl Fixture {
         path: &str,
         artists: &[&str],
     ) -> Vec<u8> {
-        let installed = self
-            .host
-            .install(&fixture_plugin(ARTWORK_FIXTURE))
+        self.install_artwork_layer_from(ARTWORK_FIXTURE, server, path, artists)
             .await
-            .unwrap();
+    }
+
+    /// Installs the artwork fixture whose manifest allows no caching as the
+    /// artwork layer.
+    ///
+    /// The mock server that answers the image lives as long as the fixture's
+    /// runtime, exactly as [`Fixture::install_artwork_layer`]'s does.
+    ///
+    /// # Parameters
+    ///
+    /// - `path`: the image path the fixture configures.
+    /// - `artists`: the artist names the fixture answers a portrait for.
+    ///
+    /// # Returns
+    ///
+    /// The bytes [`ARTWORK_IMAGE`] holds, which is what a 200 answer serves.
+    pub async fn install_no_store_artwork_layer(&self, path: &str, artists: &[&str]) -> Vec<u8> {
+        let server = artwork_server(path, 200).await;
+        let served = self
+            .install_artwork_layer_from(ARTWORK_NOSTORE_FIXTURE, &server, path, artists)
+            .await;
+        std::mem::forget(server);
+        served
+    }
+
+    /// Installs one artwork fixture archive as the artwork layer.
+    ///
+    /// # Parameters
+    ///
+    /// - `archive`: the fixture archive to install.
+    /// - `server`: the mock server that answers the image path.
+    /// - `path`: the image path the fixture configures.
+    /// - `artists`: the artist names the fixture answers a portrait for.
+    ///
+    /// # Returns
+    ///
+    /// The bytes [`ARTWORK_IMAGE`] holds, which is what a 200 answer serves.
+    async fn install_artwork_layer_from(
+        &self,
+        archive: &str,
+        server: &wiremock::MockServer,
+        path: &str,
+        artists: &[&str],
+    ) -> Vec<u8> {
+        let installed = self.host.install(&fixture_plugin(archive)).await.unwrap();
         let plugin_id = self
             .repository
             .register(&installed, PluginSource::Sideload)

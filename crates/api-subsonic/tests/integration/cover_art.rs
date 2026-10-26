@@ -380,6 +380,50 @@ async fn an_artwork_instance_is_asked_before_a_stored_artists_own_art() {
     );
 }
 
+/// An artwork instance that forbids caching tells the client so, and its
+/// portrait is never written to disk.
+#[tokio::test]
+async fn a_no_store_artwork_instance_serves_an_uncacheable_portrait() {
+    let fixture = Fixture::new().await;
+    let seeded = seed_album(
+        &fixture,
+        "Gamma",
+        &[Art::Embedded {
+            size: 32,
+            rgb: 0x00ff_0000,
+        }],
+    )
+    .await;
+    let portrait = fixture
+        .install_no_store_artwork_layer("/portrait.png", &["Gamma Artist"])
+        .await;
+    let app = fixture.app();
+
+    let artist = request(&app, &url(&fixture, &seeded.artist.to_string()), &[]).await;
+    assert_eq!(artist.status, StatusCode::OK);
+    assert_eq!(
+        artist.bytes, portrait,
+        "the artwork layer's portrait is what a stored artist is served"
+    );
+    assert_eq!(
+        artist.header(CACHE_CONTROL),
+        Some("no-store"),
+        "a layer that forbids caching tells the client not to store the image"
+    );
+    assert!(
+        files_in(&fixture.artwork_dir()).is_empty(),
+        "a no-store portrait is never written to the artwork directory"
+    );
+
+    let again = request(&app, &url(&fixture, &seeded.artist.to_string()), &[]).await;
+    assert_eq!(again.status, StatusCode::OK);
+    assert_eq!(
+        again.header(CACHE_CONTROL),
+        Some("no-store"),
+        "the second answer says the same thing"
+    );
+}
+
 #[tokio::test]
 async fn an_entity_without_art_is_not_found() {
     let fixture = Fixture::new().await;

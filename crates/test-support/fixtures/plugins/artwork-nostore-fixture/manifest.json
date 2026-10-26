@@ -1,0 +1,142 @@
+{
+  "manifestVersion": 1,
+  "id": "com.example.artwork-nostore-fixture",
+  "name": "Artwork no-store fixture",
+  "version": "0.1.0",
+  "description": "An artwork plugin whose manifest allows no caching of its images; its catalog half answers nothing.",
+  "authors": [
+    "Hearthsound contributors"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "homepage": "https://github.com/hearthsound/hearthsound",
+  "api": "hearthsound:plugin@0.4.0",
+  "provides": [
+    "catalog",
+    "artwork"
+  ],
+  "permissions": {
+    "http": {
+      "hosts": [
+        "$config:imageUrl"
+      ],
+      "maxBodyBytes": 1048576
+    }
+  },
+  "config": {
+    "server": {
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": [
+          "imageUrl"
+        ],
+        "properties": {
+          "imageUrl": {
+            "type": "string",
+            "format": "uri",
+            "title": "Image base URL",
+            "description": "Images are served from this URL plus the path an entry configures."
+          },
+          "albums": {
+            "type": "array",
+            "title": "Albums",
+            "items": {
+              "type": "object",
+              "required": [
+                "title"
+              ],
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "title": "Title"
+                },
+                "images": {
+                  "type": "array",
+                  "title": "Images",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "path"
+                    ],
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "title": "Path"
+                      },
+                      "width": {
+                        "type": "integer",
+                        "title": "Width"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "artists": {
+            "type": "array",
+            "title": "Artists",
+            "items": {
+              "type": "object",
+              "required": [
+                "title"
+              ],
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "title": "Name"
+                },
+                "images": {
+                  "type": "array",
+                  "title": "Images",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "path"
+                    ],
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "title": "Path"
+                      },
+                      "width": {
+                        "type": "integer",
+                        "title": "Width"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "uiSchema": {
+        "type": "VerticalLayout",
+        "elements": [
+          {
+            "type": "Control",
+            "scope": "#/properties/imageUrl"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/albums"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/artists"
+          }
+        ]
+      }
+    },
+    "user": null
+  },
+  "resources": {
+    "memoryMb": 64,
+    "callTimeoutMs": 5000,
+    "maxInstances": 2
+  },
+  "catalog": {
+    "imageCachePolicy": "no-store"
+  }
+}
