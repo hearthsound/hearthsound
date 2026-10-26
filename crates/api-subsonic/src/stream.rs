@@ -94,7 +94,7 @@ use hearthsound_core::{ClientId, EntityId, FailureReason, IdPrefix, Priority};
 use hearthsound_db::Database;
 use hearthsound_library::query::{self, PreferredFile};
 use hearthsound_library::{LibraryError, MediaFile, StorageRoots, tracks};
-use hearthsound_media::{FfmpegRunner, TranscodeFormat, TranscodeRequest};
+use hearthsound_media::{FfmpegRunner, MediaError, TranscodeFormat, TranscodeRequest};
 use tower_http::services::ServeFile;
 use uuid::Uuid;
 
@@ -950,11 +950,8 @@ impl StreamService {
         // the first chunk is awaited first: an encoder that fails to start then
         // answers 500 instead of a 200 whose body is an error. A slower encoder
         // simply streams into the committed response.
-        let first = match tokio::time::timeout(FIRST_CHUNK_TIMEOUT, encoded.next()).await {
-            Ok(Some(Err(error))) => return Err(internal(error)),
-            Ok(Some(Ok(chunk))) => Some(chunk),
-            Ok(None) | Err(_) => None,
-        };
+        let first = first_chunk(tokio::time::timeout(FIRST_CHUNK_TIMEOUT, encoded.next()).await)
+            .map_err(internal)?;
 
         let (delivered, flag) = AudioDelivered::flag();
         self.sessions.register(
@@ -1097,6 +1094,35 @@ const RETRY_AFTER_SECS: u64 = 10;
 /// How long the first encoded chunk may take before the response commits to
 /// `200`; a slower encoder streams into the committed response.
 const FIRST_CHUNK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Decides what a transcode's first awaited chunk says about the status.
+///
+/// The status cannot change once the body is handed over, so the first chunk is
+/// awaited before the response is committed: an encoder that failed before it
+/// produced anything is answered as the failure it is, while one that is merely
+/// slow - no chunk within [`FIRST_CHUNK_TIMEOUT`], or none at all - streams into
+/// the committed `200`.
+///
+/// # Parameters
+///
+/// - `awaited`: the first chunk under the bound, or the elapsed timeout.
+///
+/// # Returns
+///
+/// The chunk to yield before the rest of the stream, when there is one.
+///
+/// # Errors
+///
+/// Returns the encoder's own error, which is answered `500`.
+fn first_chunk(
+    awaited: Result<Option<Result<Bytes, MediaError>>, tokio::time::error::Elapsed>,
+) -> Result<Option<Bytes>, MediaError> {
+    match awaited {
+        Ok(Some(Err(error))) => Err(error),
+        Ok(Some(Ok(chunk))) => Ok(Some(chunk)),
+        Ok(None) | Err(_) => Ok(None),
+    }
+}
 
 /// The pending-stream mode `stream.pending.mode` selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1543,6 +1569,38 @@ mod tests {
     /// Builds a header value for a test.
     fn value(text: &str) -> HeaderValue {
         HeaderValue::from_str(text).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_transcode_commits_to_200_only_when_its_first_chunk_is_not_a_failure() {
+        let chunk = Bytes::from_static(b"encoded");
+        let first = first_chunk(Ok(Some(Ok(chunk.clone())))).unwrap();
+        assert_eq!(
+            first,
+            Some(chunk),
+            "the first chunk is yielded before the rest of the stream"
+        );
+        assert!(
+            first_chunk(Ok(Some(Err(MediaError::Stream {
+                message: "decode failed".to_owned(),
+            }))))
+            .is_err(),
+            "an encoder that fails before its first chunk is answered 500"
+        );
+        assert!(
+            first_chunk(Ok(None)).unwrap().is_none(),
+            "an encoder that ended without a chunk streams into the committed 200"
+        );
+
+        // The elapsed bound is the same answer: the response commits and the
+        // encoder keeps streaming into it.
+        let elapsed = tokio::time::timeout(Duration::ZERO, std::future::pending::<u8>())
+            .await
+            .unwrap_err();
+        assert!(
+            first_chunk(Err(elapsed)).unwrap().is_none(),
+            "a slow encoder commits to 200 and streams into it"
+        );
     }
 
     #[test]

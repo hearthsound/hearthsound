@@ -625,6 +625,31 @@ async fn stream_transcodes_a_time_offset() {
     );
 }
 
+/// An encoder that cannot decode the file is answered 500, not an empty 200.
+#[tokio::test]
+async fn a_failing_encoder_is_answered_internal_error() {
+    let streamed = streamed_as(AudioFormat::Flac, 2.0, "flac", "flac", 1012).await;
+    // The file the row points at is real audio; bytes no decoder reads make
+    // ffmpeg fail before it produces a single frame.
+    std::fs::write(&streamed.path, b"not audio at all").unwrap();
+    let app = streamed.fixture.app();
+
+    let probe = request(
+        &app,
+        Method::GET,
+        &format!("{}&format=mp3", streamed.uri()),
+        &[],
+    )
+    .await;
+
+    assert_eq!(
+        probe.status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a failed encode is a failed request: {}",
+        String::from_utf8_lossy(&probe.bytes)
+    );
+}
+
 #[tokio::test]
 async fn a_transcode_never_declares_a_length() {
     let streamed = streamed_as(AudioFormat::Flac, 2.0, "flac", "flac", 1012).await;
