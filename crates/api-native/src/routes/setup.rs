@@ -10,6 +10,8 @@
 //! `POST /api/v1/setup` consumes the token once and creates the administrator,
 //! answering exactly what a sign-in answers, so the newly created account is
 //! signed in immediately.
+//! `POST /api/v1/setup/check` validates a link without spending it, so the
+//! wizard can tell a stale link from a live one before it draws its form.
 
 use axum::Json;
 use axum::extract::State;
@@ -50,6 +52,14 @@ pub struct SetupRequest {
     pub password: String,
 }
 
+/// The link a caller wants checked before the wizard shows its form.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupCheck {
+    /// The token the setup link carried.
+    pub token: String,
+}
+
 /// Reports whether the server still needs its first administrator.
 ///
 /// # Errors
@@ -67,6 +77,52 @@ pub async fn setup_status(State(state): State<NativeState>) -> Result<Json<Setup
     Ok(Json(SetupStatus {
         required: users_are_missing(&state).await?,
     }))
+}
+
+/// Reports whether a setup link is still the live one.
+///
+/// The check never spends the token, so the wizard can ask before it shows the
+/// form. It is charged to the calling address exactly like a setup attempt, so
+/// a token cannot be walked through it.
+///
+/// # Errors
+///
+/// Answers `conflict` when an account already exists, `rate-limited` once the
+/// client address spent its budget, `invalid-setup-token` when the token is not
+/// the one the server logged, and `internal` when the users table cannot be
+/// read.
+#[utoipa::path(
+    post,
+    path = "/api/v1/setup/check",
+    tag = "auth",
+    request_body = SetupCheck,
+    responses(
+        (status = 204, description = "The link is live"),
+        (status = 403, description = "The link is not valid", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The server already has an account", body = Problem, content_type = "application/problem+json"),
+        (status = 429, description = "Too many failed attempts from this address", body = Problem, content_type = "application/problem+json"),
+    )
+)]
+pub async fn check_setup_token(
+    State(state): State<NativeState>,
+    ClientAddress(ip): ClientAddress,
+    JsonBody(request): JsonBody<SetupCheck>,
+) -> Result<StatusCode, Problem> {
+    if !users_are_missing(&state).await? {
+        return Err(Problem::conflict("Setup is already complete."));
+    }
+    // Only the address is charged, as `POST /api/v1/setup` charges it: a
+    // per-token key would let a stranger's guesses spend the budget the
+    // operator needs to get into a fresh server.
+    let limiter = state.authenticator().limiter();
+    if let Err(limited) = limiter.check_address(ip) {
+        return Err(Problem::rate_limited(limited.retry_after));
+    }
+    if !state.setup().matches(&request.token).await {
+        limiter.record_address_failure(ip);
+        return Err(Problem::invalid_setup_token());
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Creates the first administrator from the setup link.
@@ -249,5 +305,12 @@ mod tests {
             .expect("the setup route is registered");
         assert_eq!(post.tags, Some(vec!["auth".to_owned()]));
         assert!(post.security.is_none(), "the setup route is public");
+
+        let check = document.paths.paths["/api/v1/setup/check"]
+            .post
+            .as_ref()
+            .expect("the setup check route is registered");
+        assert_eq!(check.tags, Some(vec!["auth".to_owned()]));
+        assert!(check.security.is_none(), "the setup check route is public");
     }
 }

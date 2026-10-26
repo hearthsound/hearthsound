@@ -68,6 +68,25 @@ impl SetupGate {
         self.token.lock().await.clone()
     }
 
+    /// Reports whether the offered token is the one the server logged.
+    ///
+    /// The token stays, so a check never spends the setup link.
+    ///
+    /// # Parameters
+    ///
+    /// - `offered`: the token the caller presented.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the gate holds a token and it matches.
+    pub async fn matches(&self, offered: &str) -> bool {
+        let token = self.token.lock().await;
+        let Some(expected) = token.as_deref() else {
+            return false;
+        };
+        bool::from(expected.as_bytes().ct_eq(offered.as_bytes()))
+    }
+
     /// Consumes the setup when the offered token matches.
     ///
     /// # Parameters
@@ -178,6 +197,30 @@ mod tests {
         let gate = SetupGate::new(false);
         assert!(!gate.restore("anything").await);
         assert!(gate.token().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_check_matches_without_spending_the_token() {
+        let gate = SetupGate::new(true);
+        let token = gate.token().await.unwrap();
+        assert!(gate.matches(&token).await);
+        assert!(!gate.matches("wrong").await);
+        assert!(gate.matches(&token).await, "a check spends nothing");
+        assert!(
+            gate.consume(&token).await,
+            "the checked token is still redeemable"
+        );
+        assert!(
+            !gate.matches(&token).await,
+            "a spent token no longer matches"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closed_gate_matches_nothing() {
+        let gate = SetupGate::new(false);
+        assert!(!gate.matches("").await);
+        assert!(!gate.matches("anything").await);
     }
 
     #[tokio::test]

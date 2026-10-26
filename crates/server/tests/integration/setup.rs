@@ -255,3 +255,131 @@ async fn a_wrong_token_only_spends_the_callers_address_budget() {
     );
     fixture.stop().await;
 }
+
+/// Asks the server whether a setup link is still live.
+///
+/// # Parameters
+///
+/// - `fixture`: the running fixture.
+/// - `token`: the token to check.
+///
+/// # Returns
+///
+/// The answer, which the check never spends the link with.
+async fn check_setup_token(fixture: &Fixture, token: &str) -> reqwest::Response {
+    fixture
+        .client
+        .post(format!("{}/api/v1/setup/check", fixture.base_url()))
+        .header(CONTENT_TYPE, "application/json")
+        .body(json!({ "token": token }).to_string())
+        .send()
+        .await
+        .unwrap()
+}
+
+/// A live link is confirmed without being spent, so the wizard that checked it
+/// can still create the administrator.
+#[tokio::test]
+async fn a_setup_check_answers_204_and_leaves_the_link_live() {
+    let fixture = Fixture::without_account().await;
+    assert_eq!(
+        body(fixture.get("/api/v1/setup").await).await,
+        json!({ "required": true })
+    );
+    let token = fixture.services.setup().token().await.unwrap();
+
+    let checked = check_setup_token(&fixture, &token).await;
+    assert_eq!(checked.status(), StatusCode::NO_CONTENT);
+    assert!(
+        checked.bytes().await.unwrap().is_empty(),
+        "a confirmed link carries no body"
+    );
+
+    let created = complete_setup(&fixture, &token, "admin").await;
+    assert_eq!(
+        created.status(),
+        StatusCode::CREATED,
+        "the checked link is still redeemable"
+    );
+    fixture.stop().await;
+}
+
+/// A wrong token is refused and charged to the address; the real link still
+/// checks out afterwards.
+#[tokio::test]
+async fn a_setup_check_refuses_a_wrong_token() {
+    let fixture = Fixture::without_account().await;
+    let token = fixture.services.setup().token().await.unwrap();
+
+    let refused = check_setup_token(&fixture, "nope").await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    let problem = body(refused).await;
+    assert_eq!(problem["code"], "invalid-setup-token");
+    assert_eq!(problem["detail"], "The setup link is not valid.");
+
+    let checked = check_setup_token(&fixture, &token).await;
+    assert_eq!(
+        checked.status(),
+        StatusCode::NO_CONTENT,
+        "the failure was charged to the address, not to the token"
+    );
+    fixture.stop().await;
+}
+
+/// Once the administrator exists there is no link to check, and the answer says
+/// so instead of calling the token wrong.
+#[tokio::test]
+async fn a_setup_check_answers_conflict_after_the_administrator_exists() {
+    let fixture = Fixture::without_account().await;
+    let token = fixture.services.setup().token().await.unwrap();
+    let created = complete_setup(&fixture, &token, "admin").await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    let refused = check_setup_token(&fixture, &token).await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    assert_eq!(body(refused).await["code"], "conflict");
+    fixture.stop().await;
+}
+
+/// A check is charged to the calling address exactly like a setup attempt, so it
+/// cannot be used to walk tokens.
+#[tokio::test]
+async fn a_setup_check_is_rate_limited_per_address() {
+    let fixture = Fixture::without_account_with_config(|config| {
+        config.settings.insert(
+            "auth.login_rate_limit_per_minute".to_owned(),
+            toml::Value::Integer(2),
+        );
+    })
+    .await;
+    let token = fixture.services.setup().token().await.unwrap();
+
+    for _ in 0..2 {
+        let refused = check_setup_token(&fixture, "not-the-token").await;
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body(refused).await["code"], "invalid-setup-token");
+    }
+
+    let limited = check_setup_token(&fixture, "not-the-token").await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        limited
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .is_some(),
+        "a limited client is told when to retry"
+    );
+    assert_eq!(body(limited).await["code"], "rate-limited");
+
+    let live = check_setup_token(&fixture, &token).await;
+    assert_eq!(
+        live.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a spent address is limited even with the right token"
+    );
+    assert!(
+        fixture.services.setup().token().await.is_some(),
+        "a refusal does not spend the link"
+    );
+    fixture.stop().await;
+}

@@ -13,6 +13,7 @@
 //! | `permission-denied` | 403 | the caller lacks the permission the action needs |
 //! | `quota-exceeded` | 403 | the caller's daily acquisition quota is spent |
 //! | `wrong-password` | 403 | the current password the caller typed does not match |
+//! | `invalid-setup-token` | 403 | the presented setup link is not the live one |
 //! | `sideload-disabled` | 403 | plugin sideloading is switched off |
 //! | `repositories-disabled` | 403 | third-party plugin repositories are switched off |
 //! | `not-found` | 404 | the resource does not exist |
@@ -114,6 +115,16 @@ impl Problem {
             "unauthenticated",
             "Authentication required",
             detail,
+        )
+    }
+
+    /// The setup link the caller presented is not the one the server logged.
+    pub fn invalid_setup_token() -> Problem {
+        Problem::new(
+            StatusCode::FORBIDDEN,
+            "invalid-setup-token",
+            "Invalid setup link",
+            "The setup link is not valid.",
         )
     }
 

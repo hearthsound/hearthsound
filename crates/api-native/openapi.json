@@ -3640,6 +3640,61 @@
         }
       }
     },
+    "/api/v1/setup/check": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Reports whether a setup link is still the live one.",
+        "description": "The check never spends the token, so the wizard can ask before it shows the\nform. It is charged to the calling address exactly like a setup attempt, so\na token cannot be walked through it.\n\n# Errors\n\nAnswers `conflict` when an account already exists, `rate-limited` once the\nclient address spent its budget, `invalid-setup-token` when the token is not\nthe one the server logged, and `internal` when the users table cannot be\nread.",
+        "operationId": "check_setup_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetupCheck"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The link is live"
+          },
+          "403": {
+            "description": "The link is not valid",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The server already has an account",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many failed attempts from this address",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/system/info": {
       "get": {
         "tags": [
@@ -5822,6 +5877,19 @@
           "user": {
             "$ref": "#/components/schemas/UserView",
             "description": "The account."
+          }
+        }
+      },
+      "SetupCheck": {
+        "type": "object",
+        "description": "The link a caller wants checked before the wizard shows its form.",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "The token the setup link carried."
           }
         }
       },

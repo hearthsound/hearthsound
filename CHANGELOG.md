@@ -40,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `POST /api/v1/setup/check` reports whether a setup link is still the live one
+  without spending it, so the setup wizard can refuse a stale link before it
+  draws its form. A wrong token answers `403 invalid-setup-token`, a server that
+  already has an account answers `409 conflict`, and the check is charged to the
+  caller's address exactly like a setup attempt.
 - Liking, unliking, saving and unsaving publish `library.changed` to the account whose library changed (and to administrators), carrying the entity's client id and whether it was added or removed. A repeated like or a dislike of something that was never liked publishes nothing.
 - An acquisition that cannot be attempted waits for a source instead of failing:
   when the acquisition layer serves no instance, or the instance it chose does
