@@ -30,6 +30,14 @@ use uuid::Uuid;
 use crate::error::ActivityError;
 use crate::reports::PlaybackState;
 
+/// The fastest playback rate a client may report.
+///
+/// Eight times normal speed. A rate above it is a client bug rather than a
+/// player setting, and without a bound a client can earn a play in milliseconds;
+/// the session clamps what it counts so a wrong report cannot inflate the
+/// listening time even when it reaches the layer.
+pub const MAX_PLAYBACK_RATE: f64 = 8.0;
+
 /// How often a session in progress is written, in milliseconds.
 ///
 /// Five seconds. A restart loses at most this much listening time, and a client
@@ -88,7 +96,7 @@ impl ListenSession {
     pub fn accumulate(&mut self, now: i64, rate: f64) {
         if self.state == PlaybackState::Playing {
             let elapsed = (now - self.last_at).max(0) as f64;
-            self.listened_ms += (elapsed * rate.max(0.0)) as i64;
+            self.listened_ms += (elapsed * rate.clamp(0.0, MAX_PLAYBACK_RATE)) as i64;
         }
         self.last_at = now;
     }

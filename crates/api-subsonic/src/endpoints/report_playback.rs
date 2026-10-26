@@ -8,7 +8,7 @@
 //! finished session earns, which is why this endpoint resolves the id the same
 //! way `scrobble` does.
 
-use hearthsound_activity::{PlaybackReport, PlaybackState};
+use hearthsound_activity::{MAX_PLAYBACK_RATE, PlaybackReport, PlaybackState};
 
 use crate::auth::Call;
 use crate::browse;
@@ -33,10 +33,11 @@ use super::scrobble::resolve;
 /// # Errors
 ///
 /// Answers Subsonic error 10 when `mediaId`, `positionMs`, or `state` is
-/// missing or not a value the extension defines, error 0 when `playbackRate` or
-/// `ignoreScrobble` is not a number or a boolean, error 70 when `mediaType` is
-/// `podcast` or `mediaId` names no stored track, and a generic error when the
-/// report cannot be applied.
+/// missing or not a value the extension defines, error 0 when `playbackRate` is
+/// not a number, is above the fastest rate the server accepts, or
+/// `ignoreScrobble` is not a boolean, error 70 when `mediaType` is `podcast` or
+/// `mediaId` names no stored track, and a generic error when the report cannot
+/// be applied.
 pub async fn report_playback(call: Call) -> Encoded {
     let Some(media_id) = call.get("mediaId").filter(|value| !value.is_empty()) else {
         return call.encode(Response::failed(SubsonicError::missing_parameter(
@@ -77,11 +78,13 @@ pub async fn report_playback(call: Call) -> Encoded {
     };
     let rate = match call.get("playbackRate").filter(|value| !value.is_empty()) {
         Some(value) => match value.parse::<f64>() {
-            Ok(rate) if rate.is_finite() && rate > 0.0 => rate,
+            Ok(rate) if rate.is_finite() && rate > 0.0 && rate <= MAX_PLAYBACK_RATE => rate,
+            // The session clamps as well, so a wrong report cannot inflate the
+            // listening time even if it reaches the layer another way.
             _ => {
                 return call.encode(Response::failed(SubsonicError::new(
                     codes::GENERIC,
-                    "A playback rate is a positive number.",
+                    "A playback rate is greater than 0 and at most 8.",
                 )));
             }
         },

@@ -787,6 +787,24 @@ mod tests {
     }
 
     #[test]
+    fn a_playback_rate_is_bounded() {
+        let mut fast = ListenSession {
+            duration_ms: 240_000,
+            state: PlaybackState::Playing,
+            ..session(0, 0)
+        };
+        fast.accumulate(1_000, 1_000.0);
+        assert_eq!(
+            fast.listened_ms, 8_000,
+            "a thousand times normal speed counts as the fastest allowed rate"
+        );
+
+        let mut normal = session(240_000, 0);
+        normal.accumulate(1_000, 8.0);
+        assert_eq!(normal.listened_ms, 8_000);
+    }
+
+    #[test]
     fn an_ignored_session_reaches_the_threshold_without_earning_a_play() {
         let mut ignored = session(240_000, 240_000);
         assert!(ignored.reached_threshold());

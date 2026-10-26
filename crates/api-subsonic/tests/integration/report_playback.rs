@@ -200,6 +200,27 @@ async fn report_playback_refuses_unusable_values() {
     )
     .await;
     assert_error(&bad_rate, 0);
+    // A rate above the fastest the server accepts is a client bug: counting it
+    // would earn a play in milliseconds.
+    let fast_rate = get(
+        &app,
+        &format!(
+            "/rest/reportPlayback?mediaId={track}&mediaType=song&positionMs=0&state=playing&playbackRate=1000&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&fast_rate, 0);
+    assert!(fast_rate.body.contains("at most 8"), "{}", fast_rate.body);
+    let accepted_rate = get(
+        &app,
+        &format!(
+            "/rest/reportPlayback?mediaId={track}&mediaType=song&positionMs=0&state=playing&playbackRate=2&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&accepted_rate);
     let bad_ignore = get(
         &app,
         &format!(
