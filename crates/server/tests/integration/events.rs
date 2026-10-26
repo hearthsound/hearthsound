@@ -9,6 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use hearthsound_core::events::{Audience, PlaylistChanged, ServerEvent, UploadUpdated};
 use hearthsound_core::{Availability, EntityId};
 use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, Origin, TrackInput};
+use hearthsound_plugin_host::{InstanceSpec, PluginRepository, PluginSource};
+use hearthsound_test_support::{SCROBBLE_FIXTURE, fixture_plugin};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, SET_COOKIE};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -1254,6 +1256,91 @@ async fn a_playlist_change_reaches_its_owner_and_admins_only() {
 
     drop(owner);
     drop(admin);
+    drop(other);
+    fixture.stop().await;
+}
+
+/// Removing a discovery instance tells each owner that their generated playlists
+/// were deleted, and tells nobody else.
+#[tokio::test]
+async fn a_removed_playlists_owner_is_told_and_other_accounts_are_not() {
+    let fixture = Fixture::new().await;
+    let installed = fixture
+        .services
+        .plugins()
+        .install(&fixture_plugin(SCROBBLE_FIXTURE))
+        .await
+        .unwrap();
+    let plugin_id = PluginRepository::new(fixture.services.database())
+        .register(&installed, PluginSource::Sideload)
+        .await
+        .unwrap()
+        .id;
+    fixture
+        .services
+        .instances()
+        .create(&InstanceSpec {
+            slug: "weekly".to_owned(),
+            plugin_id,
+            display_name: "Weekly Jams Service".to_owned(),
+            server_config: json!({ "endpoint": "http://127.0.0.1:9" }),
+            host_config: Value::Null,
+        })
+        .await
+        .unwrap();
+    let instance = fixture.services.instances().get("weekly").await.unwrap();
+
+    let (owner_id, owner_key) = create_user(&fixture, "playlistowner", false).await;
+    let (_other_id, other_key) = create_user(&fixture, "bystander", false).await;
+    let playlist = fixture
+        .services
+        .activity()
+        .playlists()
+        .upsert_generated(
+            &hearthsound_activity::SyncedPlaylist {
+                owner_user_id: owner_id,
+                source_instance_id: instance.id,
+                source_ref: "weekly-jams",
+                name: "Weekly Jams",
+                comment: None,
+                expires_at: i64::MAX,
+                tracks: &[],
+            },
+            1,
+        )
+        .await
+        .unwrap()
+        .expect("a new slot is written");
+
+    let mut owner = open_stream(&fixture, &owner_key).await;
+    let mut other = open_stream(&fixture, &other_key).await;
+
+    let removed = bearer(
+        &fixture,
+        Method::DELETE,
+        "/api/v1/admin/providers/weekly",
+        None,
+    )
+    .await;
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+
+    let frame = next_frames(&mut owner, 1).await.remove(0);
+    assert_eq!(frame.event, "playlist.changed");
+    assert_eq!(
+        frame.data["data"]["playlistId"],
+        playlist.id.to_string().as_str()
+    );
+    assert_eq!(frame.data["data"]["change"], "deleted");
+
+    // The bystander's next frame is the marker, not the deletion.
+    publish_playlist(&fixture, "pl_marker");
+    let frames = next_frames(&mut other, 1).await;
+    assert_eq!(
+        frames[0].data["data"]["playlistId"], "pl_marker",
+        "another account was told about a playlist that was not theirs"
+    );
+
+    drop(owner);
     drop(other);
     fixture.stop().await;
 }
