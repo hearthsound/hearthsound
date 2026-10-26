@@ -19,7 +19,8 @@
 //!
 //! Two rules shape the write API:
 //!
-//! - Hearthsound never writes into a scanned folder, so a folder row is
+//! - Hearthsound writes into a scanned folder only the file a user saved there,
+//!   when the folder is that user's save location; every other folder is
 //!   read-only input and only `media_files` rows are created for it;
 //! - retention is derived, so a pin change and the `track_retention` row it
 //!   implies are written in the same transaction by [`retention`].

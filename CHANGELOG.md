@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A scanned folder that an account owns and uses as its save location is mounted read-write, so the documentation, the development compose file and the `/music` example volume now say "read-only, or read-write when owned and used for saves" instead of "read-only".
+
 - The personal library holds the tracks of an album the account saved or liked, so saving or liking an album puts its songs in Songs and its artist in Artists; one scope helper now feeds the listings, the counts, the search and every queue.
 - `log.level` covers Hearthsound's own records only; a new `log.dependencies` level (default `error`) covers every other crate, so a scan no longer drowns the log in a tag reader's warnings and `log.level = "debug"` no longer turns on third-party debug output.
 - `admin update-user` validates the password and every limit before its first write, so a refused value no longer leaves the account disabled or renamed by a command that then failed.
@@ -57,6 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A playlist another account cannot see is reported as missing by every edit as well as by the read: `updatePlaylist`, `deletePlaylist`, `createPlaylist?playlistId=`, `hsSetPlaylistLifetime` and the native edit routes answer the same 70/404 a missing id does, and only a public playlist they can see is reported as another account's.
 
 ### Added
+
+- Music an account saves can be written into a scanned folder that account owns: `library.save_folder` is the per-account save location (empty keeps the managed library), `GET /api/v1/me/folders` lists the folders it may name, and a directory with no owner never receives a file. A like, a save, or an addition to a permanent playlist moves a file the library already holds into the folder, and a download a save triggers is imported straight there under `library.naming_template` as a `folder` media file with no managed copy kept. A track whose only file is in another account's folder is copied into the saver's folder; unsaving leaves the folder file in place, and folder files are outside eviction, demotion and delete. An unavailable folder keeps the setting, falls back to the managed library for that save, and raises a `save-folder-unavailable` notice. There is no backfill: music saved before this stays in managed storage. `AGENTS.md` invariant 2 and the matching rules in the design documents are replaced: the server now writes exactly one kind of file into a scanned folder, the one a user saves there.
 
 - `search3` (and `search2`) order an empty-query song listing by a vendor `sort` - `title`, `added`, `played`, `artist`, `album` or `year` - and narrow it by `genre`; `getArtists` orders its index by `sort` - `name`, `added` or `played`; `GET /api/v1/library/queue` takes `sort` for its `songs` source. Each is read only with `hearthsound=1`, so a standard client's response is byte-identical to before.
 - `POST /api/v1/setup/check` reports whether a setup link is still the live one

@@ -14,8 +14,8 @@
 //! filesystem and the `media_files` rows agree with them.
 //!
 //! A pass never touches a file inside a scanned folder. Those files are the
-//! user's own, Hearthsound never writes into a folder, and a track whose only
-//! file is a folder copy has nothing to move.
+//! user's own, only a save writes into a folder, and a track whose only file is
+//! a folder copy has nothing to move.
 //!
 //! # How a move is recorded
 //!

@@ -9,7 +9,8 @@
 //!
 //! 1. `library` - a permanent managed file, which eviction never touches and
 //!    whose tags the import pipeline normalized;
-//! 2. `folder` - a permanent file in a scanned folder, the user's own copy;
+//! 2. `folder` - a permanent file in a scanned folder, the user's own copy
+//!    (written by a save or by the scanner);
 //! 3. `cache` - an evictable managed file that eviction may remove.
 //!
 //! A permanent file is therefore never passed over for an evictable one, and a

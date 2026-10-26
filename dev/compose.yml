@@ -29,9 +29,9 @@ services:
       - ./storage:/storage
       - ./hearthsound.toml:/etc/hearthsound/hearthsound.toml:ro
       # A scanned, pre-existing library folder. `HEARTHSOUND_MUSIC_DIR` overrides
-      # the default `dev/music`. The mount stays read-only: the server never
-      # writes into scanned folders.
-      - ${HEARTHSOUND_MUSIC_DIR:-./music}:/music:ro
+      # the default `dev/music`. Mounted read-write because an admin can make it
+      # an account's save location (M6.1); it is otherwise never written.
+      - ${HEARTHSOUND_MUSIC_DIR:-./music}:/music
       # Where acquisition backends leave their downloads for the server to
       # import.
       - ${HEARTHSOUND_IMPORTS_DIR:-./imports}:/imports

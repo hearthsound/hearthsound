@@ -207,7 +207,8 @@ impl FromStr for ImportMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StorageClass {
-    /// A file inside a scanned folder. Hearthsound never mutates these files.
+    /// A file inside a scanned folder. Only a save into an owned folder writes
+    /// one, and nothing else mutates it.
     Folder,
     /// A permanent managed file under `<storage>/library`.
     Library,
