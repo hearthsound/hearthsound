@@ -2000,9 +2000,9 @@ pub struct QueueItem {
 /// inside the caller's library. The server scope is not offered here, so a
 /// queue can never include a track the caller's library does not hold.
 ///
-/// Only the songs collection has a free order, because it is the one list a
-/// client shows with a sort menu; every other collection has an order of its
-/// own.
+/// Only the songs collection has a free order and a genre filter, because it is
+/// the one list a client shows with a sort menu; every other collection has an
+/// order of its own.
 ///
 /// # Examples
 ///
@@ -2013,15 +2013,27 @@ pub struct QueueItem {
 /// let artist = EntityId::new(IdPrefix::Artist);
 /// assert_ne!(QueueCollection::Artist(artist), QueueCollection::ArtistTop(artist));
 /// assert_eq!(
-///     QueueCollection::Songs(TrackSort::Title),
-///     QueueCollection::Songs(TrackSort::Title)
+///     QueueCollection::Songs {
+///         sort: TrackSort::Title,
+///         genre: None,
+///     },
+///     QueueCollection::Songs {
+///         sort: TrackSort::Title,
+///         genre: None,
+///     }
 /// );
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueueCollection {
     /// The caller's whole personal library, in the order the Songs view shows
-    /// it in.
-    Songs(TrackSort),
+    /// it in, narrowed to one genre when one is named.
+    Songs {
+        /// The order to read the songs in.
+        sort: TrackSort,
+        /// The genre to narrow the songs to, compared to the stored, folded
+        /// name; every song of the library when `None`.
+        genre: Option<String>,
+    },
     /// The tracks the caller liked, most recently liked first.
     Liked,
     /// The tracks the caller uploaded, newest first.
@@ -2042,8 +2054,9 @@ pub enum QueueCollection {
 /// availability and the caller's annotations, so a queue never costs a query
 /// per track. The scope is the caller's personal library, exactly as
 /// [`list_tracks`] defines it, so another user's playlist and unowned folder
-/// content never appear. The songs collection is read in the order it carries,
-/// so a player handed that queue plays the list in the order the client shows.
+/// content never appear. The songs collection is read in the order it carries
+/// and narrowed to the genre it names, so a player handed that queue plays the
+/// list in the order the client shows.
 ///
 /// # Parameters
 ///
@@ -2067,11 +2080,11 @@ pub async fn queue(
     collection: QueueCollection,
 ) -> Result<Option<Vec<QueueItem>>, LibraryError> {
     let user = user_id.as_bytes().to_vec();
-    let visible = match collection {
-        QueueCollection::Songs(_) | QueueCollection::Liked | QueueCollection::Uploads => true,
-        QueueCollection::Playlist(id) => playlist_visible(conn, user_id, id).await?,
+    let visible = match &collection {
+        QueueCollection::Songs { .. } | QueueCollection::Liked | QueueCollection::Uploads => true,
+        QueueCollection::Playlist(id) => playlist_visible(conn, user_id, *id).await?,
         QueueCollection::Artist(id) | QueueCollection::ArtistTop(id) => {
-            artist_in_scope(conn, Scope::Personal { user_id }, id).await?
+            artist_in_scope(conn, Scope::Personal { user_id }, *id).await?
         }
     };
     if !visible {
@@ -2084,14 +2097,22 @@ pub async fn queue(
     // same way for the same reason.
     let mut builder = QueryBuilder::<Sqlite>::new("");
     match collection {
-        QueueCollection::Songs(sort) => {
+        QueueCollection::Songs { sort, genre } => {
             push_personal_scope(&mut builder, &user);
             push_queue_projection(&mut builder, &user);
             builder.push(
                 " FROM tracks t JOIN scope_tracks st ON st.track_id = t.id \
-                 LEFT JOIN albums al ON al.id = t.album_id \
-                 ORDER BY ",
+                 LEFT JOIN albums al ON al.id = t.album_id ",
             );
+            if let Some(genre) = genre {
+                builder
+                    .push(
+                        "JOIN track_genres tg ON tg.track_id = t.id \
+                         JOIN genres g ON g.id = tg.genre_id AND g.name = ",
+                    )
+                    .push_bind(fold_genre(&genre));
+            }
+            builder.push(" ORDER BY ");
             push_track_order(&mut builder, sort);
         }
         QueueCollection::Liked => {

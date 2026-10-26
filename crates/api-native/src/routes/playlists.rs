@@ -262,9 +262,15 @@ async fn source_tracks(
     if let Some(value) = source.strip_prefix("album:") {
         return album_tracks(state, user, is_admin, value).await;
     }
-    let collection = library::collection_of(source, TrackSort::Title)?;
+    let collection = library::collection_of(
+        source,
+        library::SongsQueue {
+            sort: TrackSort::Title,
+            genre: None,
+        },
+    )?;
     match collection {
-        QueueCollection::Songs(_)
+        QueueCollection::Songs { .. }
         | QueueCollection::Liked
         | QueueCollection::Uploads
         | QueueCollection::ArtistTop(_) => Err(library::unknown_source(source)),
@@ -277,7 +283,7 @@ async fn source_tracks(
                 .map_err(|error| {
                     problem::internal("acquiring a reader for a playlist source", &error)
                 })?;
-            let items = query::queue(&mut conn, user, collection)
+            let items = query::queue(&mut conn, user, collection.clone())
                 .await
                 .map_err(|error| problem::internal("reading a playlist source", &error))?
                 .ok_or_else(|| library::missing(collection))?;

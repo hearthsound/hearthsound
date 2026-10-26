@@ -375,6 +375,61 @@ async fn the_songs_queue_answers_the_library_in_order_and_starts_at_from() {
     assert_problem(status, &body, StatusCode::NOT_FOUND, "not-in-source");
 }
 
+/// Attaches one genre to a track, stored as the scan stores it.
+async fn set_genre(db: &Database, track: EntityId, genre: &str) {
+    let id = Uuid::now_v7();
+    let name = genre.trim().to_lowercase();
+    sqlx::query("INSERT INTO genres (id, name) VALUES (?, ?) ON CONFLICT (name) DO NOTHING")
+        .bind(id.as_bytes().as_slice())
+        .bind(&name)
+        .execute(db.writer())
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT OR IGNORE INTO track_genres (track_id, genre_id) \
+         SELECT ?, id FROM genres WHERE name = ?",
+    )
+    .bind(track.uuid().as_bytes().as_slice())
+    .bind(&name)
+    .execute(db.writer())
+    .await
+    .unwrap();
+}
+
+/// The `genre` parameter narrows a songs queue exactly as the song listing
+/// narrows it, and every other source ignores it.
+#[tokio::test]
+async fn the_songs_queue_narrows_to_one_genre() {
+    let fixture = Fixture::new().await;
+    let dir = tempfile::tempdir().unwrap();
+    let seeded = seed(&fixture, dir.path()).await;
+    let db = fixture.services.database();
+    set_genre(db, seeded.alpha_one, "Rock").await;
+    set_genre(db, seeded.bravo_one, "Rock").await;
+    set_genre(db, seeded.alpha_two, "Jazz").await;
+
+    let (status, body) = get_queue(&fixture, "source=songs&genre=rock").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_queue(&body, "songs", Some(2));
+    assert_eq!(
+        item_ids(&body),
+        vec![seeded.alpha_one.to_string(), seeded.bravo_one.to_string()],
+        "the folded name matches, and the title order still applies"
+    );
+
+    let (status, body) = get_queue(&fixture, "source=songs&genre=polka").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_queue(&body, "songs", Some(0));
+
+    let (status, body) = get_queue(&fixture, "source=liked&genre=polka").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        item_ids(&body),
+        vec![seeded.alpha_one.to_string()],
+        "a source with its own order ignores the genre"
+    );
+}
+
 /// The liked and uploads sources name their own tracks in their own order.
 #[tokio::test]
 async fn the_liked_and_uploads_queues_list_their_own_tracks() {

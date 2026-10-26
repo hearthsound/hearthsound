@@ -60,6 +60,19 @@ pub struct QueueQuery {
     /// order of every other source is that source's own.
     #[serde(default)]
     pub sort: Option<String>,
+    /// The genre a `songs` queue is narrowed to, as `getGenres` reports it.
+    /// Absent queues every song, and every other source ignores it.
+    #[serde(default)]
+    pub genre: Option<String>,
+}
+
+/// How a `songs` source is read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SongsQueue {
+    /// The order the songs are read in.
+    pub sort: TrackSort,
+    /// The genre the songs are narrowed to, when the request named one.
+    pub genre: Option<String>,
 }
 
 /// One track of a queue.
@@ -145,6 +158,7 @@ pub struct QueueView {
 /// # Parameters
 ///
 /// - `source`: the source the request named.
+/// - `songs`: the order and the genre a `songs` source is read with.
 ///
 /// # Returns
 ///
@@ -154,12 +168,12 @@ pub struct QueueView {
 ///
 /// Answers `unknown-source` when the name is not one of the listed sources, and
 /// `not-found` when a prefixed source does not carry a valid id of its kind.
-pub(crate) fn collection_of(
-    source: &str,
-    songs_sort: TrackSort,
-) -> Result<QueueCollection, Problem> {
+pub(crate) fn collection_of(source: &str, songs: SongsQueue) -> Result<QueueCollection, Problem> {
     match source {
-        SOURCE_SONGS => Ok(QueueCollection::Songs(songs_sort)),
+        SOURCE_SONGS => Ok(QueueCollection::Songs {
+            sort: songs.sort,
+            genre: songs.genre,
+        }),
         SOURCE_LIKED => Ok(QueueCollection::Liked),
         SOURCE_UPLOADS => Ok(QueueCollection::Uploads),
         _ => {
@@ -207,6 +221,26 @@ fn songs_sort(sort: Option<&str>, user: Uuid) -> TrackSort {
         }
         None => TrackSort::Title,
     }
+}
+
+/// Reads the genre a `songs` queue is narrowed to.
+///
+/// The name is compared to the stored, folded genre, exactly as the Subsonic
+/// song listing and `getSongsByGenre` compare it, so a client passes the same
+/// value it got from `getGenres`.
+///
+/// # Parameters
+///
+/// - `genre`: the `genre` the request carried.
+///
+/// # Returns
+///
+/// The genre to filter on, or `None` when the request names none.
+fn songs_genre(genre: Option<&str>) -> Option<String> {
+    genre
+        .map(str::trim)
+        .filter(|genre| !genre.is_empty())
+        .map(str::to_owned)
 }
 
 /// Reads one client id as an entity id of its kind.
@@ -260,7 +294,7 @@ pub(crate) fn missing(collection: QueueCollection) -> Problem {
         QueueCollection::Artist(_) | QueueCollection::ArtistTop(_) => {
             Problem::not_found("No artist with that id is in this account's library.")
         }
-        QueueCollection::Songs(_) | QueueCollection::Liked | QueueCollection::Uploads => {
+        QueueCollection::Songs { .. } | QueueCollection::Liked | QueueCollection::Uploads => {
             Problem::not_found("No collection lives at that source.")
         }
     }
@@ -301,6 +335,7 @@ pub(crate) fn missing(collection: QueueCollection) -> Problem {
         ("source" = String, Query, description = "The collection: `songs`, `liked`, `uploads`, `playlist:<id>`, `artist:<id>` or `artist-top:<id>`"),
         ("from" = Option<String>, Query, description = "The track id the player starts at; absent starts at the first item"),
         ("sort" = Option<String>, Query, description = "The order a `songs` queue is read in: `title`, `added`, `played`, `artist`, `album` or `year`"),
+        ("genre" = Option<String>, Query, description = "The genre a `songs` queue is narrowed to, as `getGenres` reports it"),
     ),
     responses(
         (status = 200, description = "The whole collection, in its own order", body = QueueView),
@@ -317,7 +352,10 @@ pub async fn collection_queue(
 ) -> Result<Json<QueueView>, Problem> {
     let collection = collection_of(
         &query.source,
-        songs_sort(query.sort.as_deref(), authed.user_id()),
+        SongsQueue {
+            sort: songs_sort(query.sort.as_deref(), authed.user_id()),
+            genre: songs_genre(query.genre.as_deref()),
+        },
     )?;
     let read = {
         let mut conn = state
@@ -326,7 +364,7 @@ pub async fn collection_queue(
             .acquire()
             .await
             .map_err(|error| problem::internal("acquiring a reader for a queue", &error))?;
-        query::queue(&mut conn, authed.user_id(), collection)
+        query::queue(&mut conn, authed.user_id(), collection.clone())
             .await
             .map_err(|error| problem::internal("reading a collection queue", &error))?
     };

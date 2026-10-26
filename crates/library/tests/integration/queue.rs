@@ -393,7 +393,10 @@ async fn the_songs_queue_lists_the_personal_library_in_sort_order() {
     let items = queue(
         &mut conn,
         seeded.user,
-        QueueCollection::Songs(TrackSort::Title),
+        QueueCollection::Songs {
+            sort: TrackSort::Title,
+            genre: None,
+        },
     )
     .await
     .unwrap()
@@ -442,7 +445,10 @@ async fn the_songs_queue_lists_the_personal_library_in_sort_order() {
     let others = queue(
         &mut conn,
         seeded.other,
-        QueueCollection::Songs(TrackSort::Title),
+        QueueCollection::Songs {
+            sort: TrackSort::Title,
+            genre: None,
+        },
     )
     .await
     .unwrap()
@@ -622,10 +628,17 @@ async fn a_six_thousand_track_library_queues_in_order() {
 
     let mut conn = db.readers().acquire().await.unwrap();
     let started = Instant::now();
-    let items = queue(&mut conn, user, QueueCollection::Songs(TrackSort::Title))
-        .await
-        .unwrap()
-        .unwrap();
+    let items = queue(
+        &mut conn,
+        user,
+        QueueCollection::Songs {
+            sort: TrackSort::Title,
+            genre: None,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let elapsed = started.elapsed();
     println!("queued {} tracks in {elapsed:?}", items.len());
 
@@ -641,6 +654,74 @@ async fn a_six_thousand_track_library_queues_in_order() {
     );
 }
 
+/// Attaches one genre to a track, stored as the scan stores it.
+///
+/// # Parameters
+///
+/// - `db`: the migrated database.
+/// - `track`: the track the genre is attached to.
+/// - `genre`: the genre name, as a client would ask for it.
+async fn set_genre(db: &Database, track: EntityId, genre: &str) {
+    let id = Uuid::now_v7();
+    let name = genre.trim().to_lowercase();
+    sqlx::query("INSERT INTO genres (id, name) VALUES (?, ?) ON CONFLICT (name) DO NOTHING")
+        .bind(id.as_bytes().as_slice())
+        .bind(&name)
+        .execute(db.writer())
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT OR IGNORE INTO track_genres (track_id, genre_id) \
+         SELECT ?, id FROM genres WHERE name = ?",
+    )
+    .bind(track.uuid().as_bytes().as_slice())
+    .bind(&name)
+    .execute(db.writer())
+    .await
+    .unwrap();
+}
+
+/// A songs queue narrows to one genre, compared to the stored folded name.
+#[tokio::test]
+async fn the_songs_queue_narrows_to_one_genre() {
+    let dir = tempfile::tempdir().unwrap();
+    let seeded = seed(dir.path()).await;
+    set_genre(&seeded.db, seeded.alpha_one, "Rock").await;
+    set_genre(&seeded.db, seeded.bravo_one, "Rock").await;
+    set_genre(&seeded.db, seeded.alpha_two, "Jazz").await;
+    let mut conn = seeded.db.readers().acquire().await.unwrap();
+
+    let rock = queue(
+        &mut conn,
+        seeded.user,
+        QueueCollection::Songs {
+            sort: TrackSort::Title,
+            genre: Some("ROCK".to_owned()),
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        ids(&rock),
+        vec![seeded.alpha_one, seeded.bravo_one],
+        "the genre matches case-insensitively and the order still applies"
+    );
+
+    let polka = queue(
+        &mut conn,
+        seeded.user,
+        QueueCollection::Songs {
+            sort: TrackSort::Title,
+            genre: Some("polka".to_owned()),
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(polka.is_empty(), "a genre no song carries queues nothing");
+}
+
 /// The songs queue is read in the order it carries, so a player handed the
 /// queue plays the list in the order the client shows.
 #[tokio::test]
@@ -654,7 +735,10 @@ async fn the_songs_queue_follows_the_requested_order() {
     let played = queue(
         &mut conn,
         seeded.user,
-        QueueCollection::Songs(TrackSort::Played { user: seeded.user }),
+        QueueCollection::Songs {
+            sort: TrackSort::Played { user: seeded.user },
+            genre: None,
+        },
     )
     .await
     .unwrap()
@@ -676,7 +760,10 @@ async fn the_songs_queue_follows_the_requested_order() {
     let by_album = queue(
         &mut conn,
         seeded.user,
-        QueueCollection::Songs(TrackSort::Album),
+        QueueCollection::Songs {
+            sort: TrackSort::Album,
+            genre: None,
+        },
     )
     .await
     .unwrap()

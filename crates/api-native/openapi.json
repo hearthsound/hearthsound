@@ -2603,6 +2603,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "genre",
+            "in": "query",
+            "description": "The genre a `songs` queue is narrowed to, as `getGenres` reports it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
