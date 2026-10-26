@@ -71,7 +71,9 @@ mod wire;
 
 pub use artwork::{CoverArt, CoverArtRequest};
 pub use cache::{ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
-pub use dedupe::{DURATION_TOLERANCE_MS, DedupedCatalog, LocalTrackHit, MaterializedEntity};
+pub use dedupe::{
+    DURATION_TOLERANCE_MS, DedupedCatalog, LocalMatches, LocalTrackHit, MaterializedEntity,
+};
 pub use discovery::{
     DiscoveryService, InstancePlaylist, LinkedUserContexts, NoUserContexts, ResolvedAlbum,
     ResolvedArtist, SimilarArtistAlbums, UserContextSource,

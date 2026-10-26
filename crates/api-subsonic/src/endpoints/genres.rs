@@ -12,7 +12,7 @@
 
 use std::collections::HashSet;
 
-use hearthsound_catalog::{CatalogSearch, CatalogTrackResult, LocalTrackHit};
+use hearthsound_catalog::{CatalogSearch, CatalogTrackResult, LocalMatches, LocalTrackHit};
 use hearthsound_core::providers::{
     ArtistSeed, ExternalId, ISRC, MB_ARTIST, MB_RECORDING, MB_RELEASE, TrackSeed,
 };
@@ -903,7 +903,11 @@ async fn resolved_song_objects(
             tracks: vec![result.clone()],
             ..CatalogSearch::default()
         };
-        let deduped = match catalog_layer.deduplicate(&hits, &search).await {
+        let local = LocalMatches {
+            tracks: hits,
+            ..LocalMatches::default()
+        };
+        let deduped = match catalog_layer.deduplicate(&local, &search).await {
             Ok(deduped) => deduped,
             Err(error) => {
                 tracing::warn!(%error, "could not deduplicate a suggested song");

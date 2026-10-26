@@ -1,10 +1,20 @@
 //! Deduplication of catalog results against what the server already stores.
 //!
 //! A search returns local results first and catalog results after them, and the
-//! two lists can describe the same recording: a track the server acquired and a
+//! two lists can describe the same entity: a track the server acquired and a
 //! catalog plugin that also knows it. The user must not see it twice, so a
-//! catalog track whose recording is already stored is dropped and reported
-//! instead, which is what lets the API layer answer with the stored track's id.
+//! catalog entity whose row the caller's own results already show is dropped and
+//! reported instead, which is what lets the API layer answer with the stored
+//! row's id.
+//!
+//! Storing a row is not the same as showing it. Playing a catalog song
+//! materializes its track, album and artist before the acquisition starts, and a
+//! failure leaves those rows behind too, while the personal library only holds
+//! what the listener saved or played from a listed scope. A materialized row the
+//! caller cannot see therefore does not hide the catalog entity it came from:
+//! the search keeps answering with the catalog hit the listener started from.
+//! That is why [`CatalogService::deduplicate`] takes the caller's local matches
+//! with the search and why the rule reads "already stored *and* already shown".
 //!
 //! The rules a dropped catalog track matches are the ones the design fixes
 //! (02-architecture.md, flow F1):
@@ -13,17 +23,19 @@
 //! 2. an existing `p:<slug>` alias in `external_ids`, which means the entity was
 //!    already materialized and keeps resolving to its row;
 //! 3. the same normalized title and artist with a duration within
-//!    [`DURATION_TOLERANCE_MS`] of the local track's.
+//!    [`DURATION_TOLERANCE_MS`] of the local track's, and an album both sides
+//!    agree on when either side states no duration.
 //!
 //! The third rule exists because the same recording is routinely listed with
 //! slightly different titles and durations by different providers; three seconds
 //! is wider than any rounding a provider applies to a track length and narrower
 //! than the gap to a different version of the same song.
 //!
-//! Albums and artists are reported when they are already materialized but never
-//! dropped: a stored album and a catalog album of the same name may legitimately
-//! be different releases, whereas two rows for one recording are always a
-//! duplicate.
+//! An album is dropped when the caller's own albums already hold the stored row
+//! its alias names, and an artist likewise. A stored album and a catalog album of
+//! the same name may legitimately be different releases, so the name fold that
+//! pairs them ([`CatalogService::name_twins`]) is a separate, display-only rule;
+//! this module only reports what is actually stored.
 //!
 //! # Examples
 //!
@@ -186,23 +198,70 @@ pub struct MaterializedEntity {
     pub entity_id: EntityId,
 }
 
+/// What the caller's own results already show, for deduplication to compare
+/// against.
+///
+/// The three lists are the local half of the response the caller is building: a
+/// catalog entity whose row appears here is already visible to the listener and
+/// is therefore left out of the catalog list. A row that is stored but absent
+/// here stays in the catalog list, which is what keeps a played-but-unsaved
+/// entity reachable after the play materialized it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalMatches {
+    /// One hit per local track the same response shows.
+    pub tracks: Vec<LocalTrackHit>,
+    /// The stored albums the same response shows.
+    pub albums: Vec<EntityId>,
+    /// The stored artists the same response shows.
+    pub artists: Vec<EntityId>,
+}
+
+impl LocalMatches {
+    /// Reports whether the caller's results already show a stored track.
+    ///
+    /// # Parameters
+    ///
+    /// - `track`: the stored track.
+    ///
+    /// # Returns
+    ///
+    /// `true` when one of [`LocalMatches::tracks`] is that row.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_catalog::LocalMatches;
+    /// use hearthsound_core::{EntityId, IdPrefix};
+    ///
+    /// let track = EntityId::new(IdPrefix::Track);
+    /// let matches = LocalMatches::default();
+    /// assert!(!matches.shows_track(track));
+    /// ```
+    pub fn shows_track(&self, track: EntityId) -> bool {
+        self.tracks.iter().any(|hit| hit.track_id == track)
+    }
+}
+
 /// What deduplication did to one catalog search result.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DedupedCatalog {
-    /// The catalog tracks that are not stored yet, in the provider's order.
+    /// The catalog tracks the response must show, in the provider's order.
+    ///
+    /// A track whose stored row the caller's results already show is left out;
+    /// one whose row is stored but invisible to the caller stays.
     pub tracks: Vec<CatalogTrackResult>,
-    /// The catalog albums, in the provider's order.
+    /// The catalog albums the response must show, in the provider's order.
     ///
-    /// An album is never dropped; a caller that wants to hide one whose id is in
-    /// [`DedupedCatalog::materialized`] can, and a caller that wants the more
-    /// complete catalog view keeps it.
+    /// An album whose stored row the caller's results already show is left out,
+    /// for the same reason as a track.
     pub albums: Vec<CatalogAlbumRefResult>,
-    /// The catalog artists, in the provider's order.
+    /// The catalog artists the response must show, in the provider's order.
     ///
-    /// Never dropped, for the same reason as albums.
+    /// An artist whose stored row the caller's results already show is left out,
+    /// for the same reason as a track.
     pub artists: Vec<CatalogArtistResult>,
-    /// The catalog entities that already resolve to a stored row, tracks
-    /// included: every dropped track is listed here.
+    /// Every catalog id that resolves to a stored row, tracks included, so a
+    /// caller keeps the id mapping whether or not the entity is shown.
     pub materialized: Vec<MaterializedEntity>,
 }
 
@@ -250,21 +309,27 @@ impl DedupedCatalog {
 }
 
 impl CatalogService {
-    /// Drops the catalog tracks the server already stores.
+    /// Drops the catalog entities whose stored row the caller's results show.
     ///
     /// The alias table is asked once per provider instance and entity kind, and
     /// once for the ISRCs of the catalog tracks, so a search costs a handful of
     /// statements rather than one per result.
     ///
+    /// A catalog entity is left out only when it resolves to a stored row *and*
+    /// that row is one the caller's own results already show. A materialized row
+    /// behind no visible result (a played song nobody saved) keeps its catalog
+    /// entity in the list: hiding it would make the artist, the album and the
+    /// songs the listener just clicked disappear from the search that found them.
+    ///
     /// # Parameters
     ///
-    /// - `local`: one hit per local track the same search returned.
+    /// - `local`: what the caller's own results already show.
     /// - `search`: the catalog half of the response.
     ///
     /// # Returns
     ///
-    /// The catalog tracks that are not stored yet, the albums and artists to
-    /// append, and every catalog entity that already resolves to a stored row.
+    /// The catalog entities to append, and every catalog entity that resolves to
+    /// a stored row.
     ///
     /// # Errors
     ///
@@ -272,24 +337,20 @@ impl CatalogService {
     /// [`CatalogError::CorruptAlias`] when a stored id does not decode.
     pub async fn deduplicate(
         &self,
-        local: &[LocalTrackHit],
+        local: &LocalMatches,
         search: &CatalogSearch,
     ) -> Result<DedupedCatalog, CatalogError> {
         let provider_aliases = self.provider_alias_index(search).await?;
         let isrc_aliases = aliases::isrc_aliases(self.database(), &catalog_isrcs(search)).await?;
 
         let mut local_isrcs: HashMap<String, EntityId> = HashMap::new();
-        for hit in local {
+        for hit in &local.tracks {
             if let Some(isrc) = normalize_isrc(hit.isrc.as_deref()) {
                 local_isrcs.entry(isrc).or_insert(hit.track_id);
             }
         }
 
-        let mut deduped = DedupedCatalog {
-            albums: search.albums.clone(),
-            artists: search.artists.clone(),
-            ..DedupedCatalog::default()
-        };
+        let mut deduped = DedupedCatalog::default();
 
         for track in &search.tracks {
             let slug = track.id.slug();
@@ -304,33 +365,53 @@ impl CatalogService {
                     normalize_isrc(track.track.isrc.as_deref())
                         .and_then(|isrc| isrc_aliases.get(&isrc).copied())
                 })
-                .or_else(|| matching_local_track(track, local));
+                .or_else(|| matching_local_track(track, &local.tracks));
             match stored {
-                Some(entity_id) => deduped.materialized.push(MaterializedEntity {
-                    catalog_id: track.id.clone(),
-                    entity_id,
-                }),
+                Some(entity_id) => {
+                    deduped.materialized.push(MaterializedEntity {
+                        catalog_id: track.id.clone(),
+                        entity_id,
+                    });
+                    if !local.shows_track(entity_id) {
+                        deduped.tracks.push(track.clone());
+                    }
+                }
                 None => deduped.tracks.push(track.clone()),
             }
         }
 
-        for catalog_id in &albums_and_artists(search) {
+        for album in &search.albums {
             let key = (
-                catalog_id.slug().as_str().to_owned(),
-                catalog_id.provider_id().to_owned(),
+                album.id.slug().as_str().to_owned(),
+                album.id.provider_id().to_owned(),
             );
             if let Some(entity_id) = provider_aliases.get(&key) {
-                let already = deduped
-                    .materialized
-                    .iter()
-                    .any(|entity| &entity.catalog_id == catalog_id);
-                if !already {
-                    deduped.materialized.push(MaterializedEntity {
-                        catalog_id: catalog_id.clone(),
-                        entity_id: *entity_id,
-                    });
+                deduped.materialized.push(MaterializedEntity {
+                    catalog_id: album.id.clone(),
+                    entity_id: *entity_id,
+                });
+                if local.albums.contains(entity_id) {
+                    continue;
                 }
             }
+            deduped.albums.push(album.clone());
+        }
+
+        for artist in &search.artists {
+            let key = (
+                artist.id.slug().as_str().to_owned(),
+                artist.id.provider_id().to_owned(),
+            );
+            if let Some(entity_id) = provider_aliases.get(&key) {
+                deduped.materialized.push(MaterializedEntity {
+                    catalog_id: artist.id.clone(),
+                    entity_id: *entity_id,
+                });
+                if local.artists.contains(entity_id) {
+                    continue;
+                }
+            }
+            deduped.artists.push(artist.clone());
         }
 
         Ok(deduped)
@@ -741,17 +822,6 @@ fn catalog_isrcs(search: &CatalogSearch) -> Vec<String> {
     isrcs.sort();
     isrcs.dedup();
     isrcs
-}
-
-/// Returns the album and artist ids of a search result.
-///
-/// # Parameters
-///
-/// - `search`: the catalog search result.
-fn albums_and_artists(search: &CatalogSearch) -> Vec<CatalogId> {
-    let mut entities: Vec<CatalogId> = search.albums.iter().map(|album| album.id.clone()).collect();
-    entities.extend(search.artists.iter().map(|artist| artist.id.clone()));
-    entities
 }
 
 /// Returns the album and artist ids of a search result with their kinds.

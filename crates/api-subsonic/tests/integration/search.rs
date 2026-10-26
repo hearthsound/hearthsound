@@ -416,3 +416,176 @@ async fn search_results_carry_relevance_scores_when_the_vendor_extension_is_on()
         plain.body
     );
 }
+
+/// Playing a catalog song materializes its rows; the search that found it must
+/// keep answering with them for a listener who saved nothing.
+#[tokio::test]
+async fn a_played_catalog_entity_stays_in_the_search_that_found_it() {
+    use hearthsound_core::{ClientId, EntityKind};
+
+    let fixture = Fixture::new().await;
+    fixture.install_hello_catalog().await;
+    let app = fixture.app();
+    let uri = format!(
+        "/rest/search3?query=world&apiKey={}&f=json",
+        fixture.api_key
+    );
+
+    let before = get(&app, &uri).await;
+    assert_ok(&before);
+    let (artist, album, song) = catalog_ids(&before.body);
+
+    // The play path materializes the track before it can fail or succeed; its
+    // album and artist come with it.
+    let Ok(ClientId::Catalog(track)) = ClientId::parse(&song) else {
+        panic!("the song id is a catalog id: {song}");
+    };
+    assert_eq!(track.kind(), EntityKind::Track);
+    let stored = fixture.catalog.materialize_track(&track).await.unwrap();
+
+    let after = get(&app, &uri).await;
+    assert_ok(&after);
+    assert!(
+        after.body.contains(&song),
+        "the song the listener just played must stay listed: {}",
+        after.body
+    );
+    assert!(
+        after.body.contains(&album),
+        "the album must stay listed: {}",
+        after.body
+    );
+    assert!(
+        after.body.contains(&artist),
+        "the artist must stay listed: {}",
+        after.body
+    );
+
+    // Saving it makes the stored rows the only ones that show these entities.
+    let saved = get(
+        &app,
+        &format!(
+            "/rest/hsSave?hearthsound=1&apiKey={}&f=json&id={stored}",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&saved);
+    let listed = get(&app, &uri).await;
+    assert_ok(&listed);
+    assert!(
+        listed.body.contains(&stored.to_string()),
+        "the saved song is the local result: {}",
+        listed.body
+    );
+    assert!(
+        !listed.body.contains(&song),
+        "a saved song is listed once: {}",
+        listed.body
+    );
+}
+
+/// Reads the first catalog artist, album and song ids of a `search3` body.
+///
+/// # Parameters
+///
+/// - `body`: the JSON response body.
+///
+/// # Returns
+///
+/// The artist, album and song ids, in that order.
+fn catalog_ids(body: &str) -> (String, String, String) {
+    let value: serde_json::Value = serde_json::from_str(body).unwrap();
+    let result = &value["subsonic-response"]["searchResult3"];
+    let id = |kind: &str| {
+        result[kind][0]["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the search answered a catalog {kind}: {body}"))
+            .to_owned()
+    };
+    (id("artist"), id("album"), id("song"))
+}
+
+/// A play that cannot deliver a file still leaves the catalog arrays of the
+/// search that found it exactly as they were.
+#[tokio::test]
+async fn a_failed_play_leaves_the_catalog_arrays_alone() {
+    let mut fixture = Fixture::new().await;
+    fixture.install_hello_catalog().await;
+    // No acquisition instance exists, so the play is admitted and parks; the
+    // fail mode answers the request instead of holding it.
+    fixture.add_acquisition_layer().await;
+    fixture
+        .settings
+        .set(
+            keys::STREAM_PENDING_MODE.name(),
+            SettingValue::String("fail".to_owned()),
+            None,
+        )
+        .await
+        .unwrap();
+    let app = fixture.app();
+    let uri = format!(
+        "/rest/search3?query=world&apiKey={}&f=json",
+        fixture.api_key
+    );
+
+    let before = get(&app, &uri).await;
+    assert_ok(&before);
+    let artists = catalog_list(&before.body, "artist");
+    let albums = catalog_list(&before.body, "album");
+    let songs = catalog_list(&before.body, "song");
+    assert!(!artists.is_empty() && !albums.is_empty() && !songs.is_empty());
+
+    let play = get(
+        &app,
+        &format!(
+            "/rest/stream?id={}&apiKey={}",
+            songs[0], fixture.api_key
+        ),
+    )
+    .await;
+    assert!(
+        !play.status.is_success(),
+        "the play cannot deliver a file: {}",
+        play.status
+    );
+
+    let after = get(&app, &uri).await;
+    assert_ok(&after);
+    assert_eq!(
+        catalog_list(&after.body, "artist"),
+        artists,
+        "the artist array keeps its entries and their provider order: {}",
+        after.body
+    );
+    assert_eq!(
+        catalog_list(&after.body, "album"),
+        albums,
+        "the album array keeps its entries and their provider order: {}",
+        after.body
+    );
+    assert_eq!(catalog_list(&after.body, "song"), songs);
+}
+
+/// Reads the ids of one catalog kind of a `search3` body, in its order.
+///
+/// # Parameters
+///
+/// - `body`: the JSON response body.
+/// - `kind`: the member to read: `artist`, `album` or `song`.
+///
+/// # Returns
+///
+/// The ids of the catalog entries of that kind.
+fn catalog_list(body: &str, kind: &str) -> Vec<String> {
+    let value: serde_json::Value = serde_json::from_str(body).unwrap();
+    value["subsonic-response"]["searchResult3"][kind]
+        .as_array()
+        .unwrap_or_else(|| panic!("the search answered a {kind} array: {body}"))
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .filter(|id| id.starts_with("x_"))
+        .map(str::to_owned)
+        .collect()
+}

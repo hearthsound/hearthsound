@@ -23,7 +23,8 @@ use std::collections::{HashMap, HashSet};
 
 use hearthsound_activity::Annotation;
 use hearthsound_catalog::{
-    CatalogAlbumRefResult, CatalogArtistResult, CatalogSearch, CatalogTrackResult, LocalTrackHit,
+    CatalogAlbumRefResult, CatalogArtistResult, CatalogSearch, CatalogTrackResult, LocalMatches,
+    LocalTrackHit,
 };
 use hearthsound_config::SettingsStore;
 use hearthsound_config::keys;
@@ -1024,6 +1025,12 @@ fn hit(view: &TrackView) -> LocalTrackHit {
 /// A per-kind failure is logged and skipped, because the local matches already
 /// answered and a catalog instance that is down must not fail the search.
 ///
+/// What the response already shows is what deduplication compares against: a
+/// catalog entity whose stored row the local results and the twin fold already
+/// list is left out, while one whose row is stored but not shown (a played song
+/// nobody saved) is appended, so the play does not remove the hit it started
+/// from.
+///
 /// # Parameters
 ///
 /// - `call`: the authenticated call, whose state holds the catalog layer.
@@ -1070,7 +1077,12 @@ async fn append_catalog(
     if found.is_empty() {
         return;
     }
-    let deduped = match catalog.deduplicate(hits, &found).await {
+    let local_matches = LocalMatches {
+        tracks: hits.to_vec(),
+        albums: matches.local_album_ids(),
+        artists: matches.local_artist_ids(),
+    };
+    let deduped = match catalog.deduplicate(&local_matches, &found).await {
         Ok(deduped) => deduped,
         Err(error) => {
             tracing::warn!(error = %error, "could not deduplicate catalog results");
@@ -1101,11 +1113,13 @@ async fn append_catalog(
         }
     };
 
+    // Deduplication already left out every catalog entity the local results
+    // show, so the lists are appended as they are; the twin fold is display
+    // only and never removes a hit the caller can open.
     matches.catalog_artists.extend(
         deduped
             .artists
             .iter()
-            .filter(|artist| deduped.stored_entity(&artist.id).is_none())
             .filter(|artist| !twins.contains(&artist.id))
             .take(window_limit(artist_window))
             .cloned(),
@@ -1114,7 +1128,6 @@ async fn append_catalog(
         deduped
             .albums
             .iter()
-            .filter(|album| deduped.stored_entity(&album.id).is_none())
             .filter(|album| !twins.contains(&album.id))
             .take(window_limit(album_window))
             .cloned(),
