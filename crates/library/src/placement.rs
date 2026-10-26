@@ -175,6 +175,129 @@ fn move_file_blocking(source: &Path, destination: &Path) -> Result<(), LibraryEr
     std::fs::remove_file(source).map_err(|error| io_error(source, error))
 }
 
+/// Moves a file so the destination is a file of its own.
+///
+/// A plain rename keeps the inode, so a source that is hardlinked to another
+/// name would leave the destination sharing its bytes with that other name: a
+/// link-mode import hardlinks a backend's file, and moving that inode into a
+/// scanned folder would let the backend's next rewrite change a file inside the
+/// folder behind the server's back. A source with more than one link is
+/// therefore copied durably and then unlinked, which leaves the other name
+/// untouched and gives the destination a fresh inode; a source with one link is
+/// a plain move.
+///
+/// # Parameters
+///
+/// - `source`: the file that moves.
+/// - `destination`: the path it moves to, which the caller has picked free.
+///
+/// # Returns
+///
+/// `()` once the file is at the destination and the source name is gone.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Io`] when the source cannot be stat-ed, a directory
+/// cannot be created, the file cannot be copied, flushed or renamed, or the
+/// source cannot be removed, and [`LibraryError::Join`] when the blocking task
+/// cannot be joined.
+pub async fn move_file_unshared(source: &Path, destination: &Path) -> Result<(), LibraryError> {
+    let source = source.to_path_buf();
+    let destination = destination.to_path_buf();
+    tokio::task::spawn_blocking(move || move_file_unshared_blocking(&source, &destination)).await?
+}
+
+/// Moves one file, on a blocking thread, keeping the destination's inode its
+/// own.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Io`] for the step that failed.
+fn move_file_unshared_blocking(source: &Path, destination: &Path) -> Result<(), LibraryError> {
+    if has_multiple_links(source)? {
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
+        }
+        copy_durable_blocking(source, destination)?;
+        return std::fs::remove_file(source).map_err(|error| io_error(source, error));
+    }
+    move_file_blocking(source, destination)
+}
+
+/// Returns whether a file has more than one name on disk.
+///
+/// # Parameters
+///
+/// - `path`: the file to look at.
+///
+/// # Returns
+///
+/// `true` when another name shares the file's inode.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Io`] when the file cannot be stat-ed.
+#[cfg(unix)]
+fn has_multiple_links(path: &Path) -> Result<bool, LibraryError> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path).map_err(|error| io_error(path, error))?;
+    Ok(metadata.nlink() > 1)
+}
+
+/// Returns whether a file has more than one name on disk.
+///
+/// A platform without a link count cannot tell, so the file is moved plainly.
+///
+/// # Parameters
+///
+/// - `path`: the file to look at.
+///
+/// # Returns
+///
+/// `false`.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Io`] when the file cannot be stat-ed.
+#[cfg(not(unix))]
+fn has_multiple_links(path: &Path) -> Result<bool, LibraryError> {
+    std::fs::metadata(path).map_err(|error| io_error(path, error))?;
+    Ok(false)
+}
+
+/// Copies a file durably to a destination the caller has picked free.
+///
+/// The bytes go to a temporary file beside the destination and are renamed into
+/// place, so a crash never exposes a partial file at the destination. Nothing is
+/// removed: the source keeps its name, its inode and its bytes. The destination's
+/// parent directories are created first.
+///
+/// # Parameters
+///
+/// - `source`: the file to copy.
+/// - `destination`: the path it is copied to, which the caller has picked free.
+///
+/// # Returns
+///
+/// `()` once the copy is at the destination.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Io`] when a directory cannot be created, the file
+/// cannot be copied, the copy cannot be flushed, or the rename fails, and
+/// [`LibraryError::Join`] when the blocking task cannot be joined.
+pub async fn copy_file_durable(source: &Path, destination: &Path) -> Result<(), LibraryError> {
+    let source = source.to_path_buf();
+    let destination = destination.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
+        }
+        copy_durable_blocking(&source, &destination)
+    })
+    .await?
+}
+
 /// Copies a file durably to a destination on another filesystem.
 ///
 /// The bytes go to a temporary file beside the destination, are flushed to

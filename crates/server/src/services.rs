@@ -74,6 +74,7 @@ use hearthsound_jobs::{
 };
 use hearthsound_library::StorageRoots;
 use hearthsound_library::identity::{REIDENTITY_JOB_KIND, ReidentityJobHandler};
+use hearthsound_library::locks::FolderLocks;
 use hearthsound_library::maintenance::{
     MAINTENANCE_JOB_KIND, MAINTENANCE_SCHEDULE, MaintenanceJobHandler, MaintenanceSignal,
     StorageMaintainer,
@@ -387,6 +388,7 @@ impl Services {
             config.paths.artwork.join("thumbs"),
             Arc::clone(&ffmpeg),
         ));
+        let folder_locks = Arc::new(FolderLocks::new());
         let orchestrator = Arc::new(AcquisitionOrchestrator::new(
             Arc::clone(&database),
             settings.clone(),
@@ -397,6 +399,7 @@ impl Services {
             AcquisitionStorage::new(
                 config.paths.staging.clone(),
                 StorageRoots::new(config.paths.library.clone(), config.paths.cache.clone()),
+                Arc::clone(&folder_locks),
             ),
         ));
         orchestrator.start();
@@ -405,6 +408,7 @@ impl Services {
             &database,
             Arc::clone(&events),
             settings.clone(),
+            folder_locks,
         ));
 
         let user_configs = UserConfigService::new(&database, secrets.clone());

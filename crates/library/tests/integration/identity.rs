@@ -15,6 +15,7 @@ use hearthsound_library::identity::{
     REIDENTITY_JOB_KIND, REIDENTITY_PASS, ReidentityJobHandler, consolidate_albums,
     consolidate_artists, enqueue_if_pending, maintenance_pending, mark_maintenance_complete,
 };
+use hearthsound_library::locks::FolderLocks;
 use hearthsound_library::scan::{LibraryScanner, ScanRequest};
 use hearthsound_library::{LibraryRepository, sort_key};
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
@@ -35,7 +36,12 @@ async fn scanner_for(db: &Database) -> Arc<LibraryScanner> {
     )
     .await
     .unwrap();
-    Arc::new(LibraryScanner::new(db, Arc::new(EventBus::new()), settings))
+    Arc::new(LibraryScanner::new(
+        db,
+        Arc::new(EventBus::new()),
+        settings,
+        Arc::new(FolderLocks::new()),
+    ))
 }
 
 /// Inserts an account and returns its id.

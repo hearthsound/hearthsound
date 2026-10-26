@@ -13,6 +13,7 @@ use hearthsound_core::{Availability, StorageClass};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_jobs::{JobQueue, JobRunner, JobRunnerOptions, JobState, QueueOptions, Shutdown};
 use hearthsound_library::artwork::{CoverArt, cover_for_file, track_cover};
+use hearthsound_library::locks::FolderLocks;
 use hearthsound_library::scan::{
     LibraryScanner, SCAN_JOB_KIND, ScanJobHandler, ScanRequest, ScanStatus,
 };
@@ -34,7 +35,7 @@ async fn scanner_for(db: &Database, events: Arc<EventBus>) -> LibraryScanner {
     )
     .await
     .unwrap();
-    LibraryScanner::new(db, events, settings)
+    LibraryScanner::new(db, events, settings, Arc::new(FolderLocks::new()))
 }
 
 /// Writes a short FLAC named after `title` into `dir`.
@@ -696,7 +697,12 @@ async fn a_single_valued_artist_tag_respects_a_changed_separator_list() {
         .await
         .unwrap();
 
-    let scanner = LibraryScanner::new(&db, Arc::new(EventBus::new()), settings);
+    let scanner = LibraryScanner::new(
+        &db,
+        Arc::new(EventBus::new()),
+        settings,
+        Arc::new(FolderLocks::new()),
+    );
     let folder = library.add_library_folder(&music, None).await.unwrap();
     scanner.scan_folder(folder.id).await.unwrap();
 

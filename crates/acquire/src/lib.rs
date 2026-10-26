@@ -52,6 +52,7 @@ pub mod playlist_add;
 pub mod prefetch;
 pub mod profile;
 pub mod repo;
+pub mod save_folder;
 pub mod score;
 pub mod search;
 pub mod select;

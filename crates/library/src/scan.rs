@@ -2,8 +2,9 @@
 //!
 //! A scan walks a folder, recognises the audio files in it, probes each one for
 //! its format and tags, and writes the artists, albums, tracks, and media files
-//! it finds. It never writes into the folder: a scanned folder is read-only
-//! input, and only the database rows describing it change.
+//! it finds. The scan never writes into the folder - the only writer into a
+//! scanned folder is a save into the folder its owner chose as their save
+//! location - so a scan changes only the database rows describing the folder.
 //!
 //! The scan is incremental. A file whose size and modification time match the
 //! stored media file is skipped without probing, a file whose size or
@@ -21,10 +22,10 @@
 //! transaction that writes them, which is what makes an owned folder's content
 //! permanent in its owner's personal library.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
@@ -44,6 +45,7 @@ use uuid::Uuid;
 
 use crate::artists_split::split_artists;
 use crate::error::LibraryError;
+use crate::locks::FolderLocks;
 use crate::model::{
     AlbumInput, ArtistCredit, ArtistInput, LibraryFolder, Origin, ReplayGain, ScannedMediaFile,
     TrackInput,
@@ -319,6 +321,7 @@ pub(crate) struct IndexedTags {
 ///
 /// use hearthsound_core::events::EventBus;
 /// use hearthsound_db::Database;
+/// use hearthsound_library::locks::FolderLocks;
 /// use hearthsound_library::scan::LibraryScanner;
 ///
 /// # async fn example(db: &Database, folder_id: uuid::Uuid) -> Result<(), Box<dyn std::error::Error>> {
@@ -328,7 +331,12 @@ pub(crate) struct IndexedTags {
 ///     hearthsound_config::SettingSources::default(),
 /// )
 /// .await?;
-/// let scanner = LibraryScanner::new(db, Arc::new(EventBus::new()), settings);
+/// let scanner = LibraryScanner::new(
+///     db,
+///     Arc::new(EventBus::new()),
+///     settings,
+///     Arc::new(FolderLocks::new()),
+/// );
 /// let report = scanner.scan_folder(folder_id).await?;
 /// println!("indexed {} files", report.files_indexed);
 /// # Ok(())
@@ -344,8 +352,9 @@ pub struct LibraryScanner {
     events: Arc<EventBus>,
     /// The settings service the scan reads its tunables from.
     settings: Settings,
-    /// One lock per folder, so two scans of a folder never overlap.
-    folder_locks: Arc<Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
+    /// One lock per folder, shared with every other writer into the folder, so
+    /// a scan and a save never overlap.
+    folder_locks: Arc<FolderLocks>,
     /// The counters [`LibraryScanner::status`] reports.
     counters: Arc<ScanCounters>,
 }
@@ -367,17 +376,24 @@ impl LibraryScanner {
     ///   on.
     /// - `settings`: the settings service; a scan reads its tunables from the
     ///   snapshot in effect when it starts.
+    /// - `folder_locks`: the per-folder locks every writer into a scanned folder
+    ///   shares, so a scan never runs while a save writes into the same folder.
     ///
     /// # Returns
     ///
     /// The scanner.
-    pub fn new(db: &Database, events: Arc<EventBus>, settings: Settings) -> LibraryScanner {
+    pub fn new(
+        db: &Database,
+        events: Arc<EventBus>,
+        settings: Settings,
+        folder_locks: Arc<FolderLocks>,
+    ) -> LibraryScanner {
         LibraryScanner {
             writer: db.writer().clone(),
             readers: db.readers().clone(),
             events,
             settings,
-            folder_locks: Arc::new(Mutex::new(HashMap::new())),
+            folder_locks,
             counters: Arc::new(ScanCounters::default()),
         }
     }
@@ -539,8 +555,7 @@ impl LibraryScanner {
         folder_id: Uuid,
         request: &ScanRequest,
     ) -> Result<ScanReport, LibraryError> {
-        let lock = self.folder_lock(folder_id);
-        let _guard = lock.lock().await;
+        let _guard = self.folder_locks.lock(folder_id).await;
         self.scan_locked(folder_id, request).await
     }
 
@@ -584,24 +599,6 @@ impl LibraryScanner {
         self.counters
             .files_processed
             .fetch_add(files, Ordering::SeqCst);
-    }
-
-    /// Returns the lock of one folder and builds it when it is missing.
-    ///
-    /// # Parameters
-    ///
-    /// - `folder_id`: the folder's id.
-    ///
-    /// # Returns
-    ///
-    /// The folder's lock. The lock outlives the call, so two callers that ask
-    /// for the same folder share one guard.
-    fn folder_lock(&self, folder_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self
-            .folder_locks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Arc::clone(locks.entry(folder_id).or_default())
     }
 
     /// Scans one folder under its lock and records how it ended.

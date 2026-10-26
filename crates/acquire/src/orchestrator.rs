@@ -45,6 +45,7 @@ use hearthsound_core::{
     Priority, QualityTier, new_uuid_v7,
 };
 use hearthsound_db::Database;
+use hearthsound_library::locks::FolderLocks;
 use hearthsound_library::{LibraryRepository, StorageRoots, media_files, tracks};
 use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::{ProviderRegistry, RegistryInstance};
@@ -59,6 +60,7 @@ use crate::repo::{
     self, AcquisitionRepository, AcquisitionRow, AcquisitionSummary, LedgerQuery, ListFilter,
     NewAcquisition,
 };
+use crate::save_folder::SaveFolders;
 use crate::search::SearchOutcome;
 
 /// How often the scheduler looks for work it was not woken for.
@@ -449,19 +451,23 @@ impl AcquisitionProgress {
     }
 }
 
-/// The storage paths the acquisition pipeline writes under.
+/// The storage paths the acquisition pipeline writes under, and the folder
+/// locks it shares with the other writers of a scanned folder.
 ///
 /// The composition root builds this from the bootstrap path configuration:
 /// `staging_root` is `paths.staging`, and `roots` holds `paths.library` and
-/// `paths.cache`.
+/// `paths.cache`. `folder_locks` is the same instance the library scanner holds,
+/// so a save into a scanned folder and a scan of that folder never interleave.
 ///
 /// # Examples
 ///
 /// ```
 /// use std::path::PathBuf;
+/// use std::sync::Arc;
 ///
 /// use hearthsound_acquire::orchestrator::AcquisitionStorage;
 /// use hearthsound_library::StorageRoots;
+/// use hearthsound_library::locks::FolderLocks;
 ///
 /// let storage = AcquisitionStorage::new(
 ///     PathBuf::from("/srv/storage/staging"),
@@ -469,6 +475,7 @@ impl AcquisitionProgress {
 ///         PathBuf::from("/srv/storage/library"),
 ///         PathBuf::from("/srv/storage/cache"),
 ///     ),
+///     Arc::new(FolderLocks::new()),
 /// );
 /// assert_eq!(storage.staging_root, PathBuf::from("/srv/storage/staging"));
 /// ```
@@ -478,6 +485,8 @@ pub struct AcquisitionStorage {
     pub staging_root: PathBuf,
     /// The managed storage roots imported files land under.
     pub roots: StorageRoots,
+    /// The per-folder locks, shared with the library scanner.
+    pub folder_locks: Arc<FolderLocks>,
 }
 
 impl AcquisitionStorage {
@@ -487,10 +496,17 @@ impl AcquisitionStorage {
     ///
     /// - `staging_root`: the staging root, `paths.staging`.
     /// - `roots`: the managed storage roots, `paths.library` and `paths.cache`.
-    pub fn new(staging_root: PathBuf, roots: StorageRoots) -> AcquisitionStorage {
+    /// - `folder_locks`: the per-folder locks every writer into a scanned folder
+    ///   shares.
+    pub fn new(
+        staging_root: PathBuf,
+        roots: StorageRoots,
+        folder_locks: Arc<FolderLocks>,
+    ) -> AcquisitionStorage {
         AcquisitionStorage {
             staging_root,
             roots,
+            folder_locks,
         }
     }
 }
@@ -513,6 +529,7 @@ impl AcquisitionStorage {
 /// use hearthsound_core::events::EventBus;
 /// use hearthsound_db::Database;
 /// use hearthsound_library::StorageRoots;
+/// use hearthsound_library::locks::FolderLocks;
 /// use hearthsound_media::FfmpegRunner;
 /// use hearthsound_plugin_host::ProviderRegistry;
 ///
@@ -540,6 +557,7 @@ impl AcquisitionStorage {
 ///             PathBuf::from("/srv/hearthsound/storage/library"),
 ///             PathBuf::from("/srv/hearthsound/storage/cache"),
 ///         ),
+///         Arc::new(FolderLocks::new()),
 ///     ),
 ///));
 /// orchestrator.start();
@@ -581,12 +599,17 @@ struct Inner {
     events: Arc<EventBus>,
     /// The library tables the wanted track is read from.
     library: LibraryRepository,
+    /// The save locations, which write a user's saved music into their folder.
+    save_folders: SaveFolders,
     /// The ledger.
     repository: AcquisitionRepository,
     /// The root of `<storage>/staging/`.
     staging_root: PathBuf,
     /// The managed storage roots imported files land under.
     storage_roots: StorageRoots,
+    /// The per-folder locks, shared with the library scanner and the save-folder
+    /// service.
+    folder_locks: Arc<FolderLocks>,
     /// The function the import stage links a source file into managed storage
     /// with.
     ///
@@ -713,6 +736,15 @@ impl AcquisitionOrchestrator {
     ) -> AcquisitionOrchestrator {
         let library = LibraryRepository::new(&database);
         let repository = AcquisitionRepository::new(&database);
+        let save_folders = SaveFolders::new(
+            Arc::clone(&database),
+            settings.clone(),
+            storage.roots.clone(),
+            Arc::clone(&storage.folder_locks),
+            Arc::clone(&events),
+            library.clone(),
+            Arc::clone(&catalog),
+        );
         AcquisitionOrchestrator {
             inner: Arc::new(Inner {
                 database,
@@ -723,8 +755,10 @@ impl AcquisitionOrchestrator {
                 events,
                 library,
                 repository,
+                save_folders,
                 staging_root: storage.staging_root,
                 storage_roots: storage.roots,
+                folder_locks: storage.folder_locks,
                 hardlink: RwLock::new(Arc::new(|source: &Path, destination: &Path| {
                     std::fs::hard_link(source, destination)
                 })),
@@ -822,6 +856,28 @@ impl AcquisitionOrchestrator {
     /// Returns the library repository the wanted track is read from.
     pub fn library(&self) -> &LibraryRepository {
         &self.inner.library
+    }
+
+    /// Returns the service that resolves and writes a user's save location.
+    ///
+    /// The import stage asks it where an acquisition's file goes, and a like or
+    /// a save asks it to move a file the library already holds into the saver's
+    /// folder.
+    ///
+    /// # Returns
+    ///
+    /// The save-location service.
+    pub fn save_folders(&self) -> &SaveFolders {
+        &self.inner.save_folders
+    }
+
+    /// Returns the per-folder locks every writer into a scanned folder shares.
+    ///
+    /// # Returns
+    ///
+    /// The lock set, which is the one the library scanner holds.
+    pub fn folder_locks(&self) -> &Arc<FolderLocks> {
+        &self.inner.folder_locks
     }
 
     /// Returns the acquisition ledger.
@@ -3452,6 +3508,7 @@ mod tests {
             AcquisitionStorage::new(
                 dir.join("storage/staging"),
                 StorageRoots::new(dir.join("storage/library"), dir.join("storage/cache")),
+                Arc::new(FolderLocks::new()),
             ),
         ))
     }

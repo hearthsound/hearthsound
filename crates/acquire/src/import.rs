@@ -47,14 +47,15 @@ use std::time::SystemTime;
 use hearthsound_catalog::CoverArtRequest;
 use hearthsound_config::keys;
 use hearthsound_core::events::{LibraryChange, LibraryChanged, ServerEvent};
-use hearthsound_core::providers::{Candidate, CandidateFile, CatalogAlbum};
+use hearthsound_core::providers::{Candidate, CandidateFile};
 use hearthsound_core::{
-    AcquisitionState, Availability, CatalogId, ClientId, EntityId, EntityKind, FailureReason,
-    ImportMode, PinReason, Priority, QualityTier, StorageClass,
+    AcquisitionState, Availability, ClientId, EntityId, EntityKind, FailureReason, ImportMode,
+    PinReason, Priority, QualityTier, StorageClass,
 };
-use hearthsound_library::naming::{NamingContext, NamingTemplate};
+use hearthsound_library::naming::NamingTemplate;
 use hearthsound_library::{
-    LibraryError, ManagedMediaFile, Track, media_files, placement, retention, tracks,
+    LibraryError, ManagedMediaFile, ScannedMediaFile, Track, media_files, placement, retention,
+    tracks,
 };
 use hearthsound_media::{
     Artwork, Codec, ProbeResult, probe, verify_decodes, write_sidecar_cover, write_tags,
@@ -68,6 +69,9 @@ use crate::error::AcquireError;
 use crate::orchestrator::{AcquisitionOrchestrator, DestinationReservation};
 use crate::profile;
 use crate::repo::{self, AcquisitionRow};
+use crate::save_folder::{
+    FolderDestination, IssuedAlbum, NamingInputs, SaveTarget, issued_album, naming_facts,
+};
 use crate::select::AlbumFileMapping;
 use crate::verify::SourceFile;
 
@@ -136,167 +140,42 @@ pub(crate) struct AlbumImportSummary {
     pub(crate) detail: Option<String>,
 }
 
+/// Everything placing one tagged file needs.
+///
+/// The file is tagged in the acquisition's staging directory first, so the
+/// placement itself is only the choice of a free name, the install and the row;
+/// this carries what those three steps read.
+struct Placement<'a> {
+    /// The acquisition the file belongs to.
+    acquisition_id: Uuid,
+    /// The instance that served the download, for its import roots.
+    instance: &'a RegistryInstance,
+    /// The track the file is for.
+    track_id: EntityId,
+    /// The verified file, whose probe the row is built from.
+    verified: &'a VerifiedFile,
+    /// The path the naming template rendered, relative to the root.
+    relative: &'a Path,
+    /// Whether the track is pinned, which decides library against cache.
+    pinned: bool,
+    /// The acquisition's staging directory.
+    staged_dir: &'a Path,
+    /// The tags the staged copy is written with.
+    tags: &'a hearthsound_media::TrackTags,
+    /// The cover the staged copy is written with, when there is one.
+    cover: Option<&'a Artwork>,
+    /// Whether the cover is embedded into the file's tags.
+    embed_cover: bool,
+    /// The sidecar cover's file name.
+    cover_filename: &'a str,
+}
+
 /// Why a candidate was rejected.
 struct Rejection {
     /// The failure reason the acquisition uses when nothing is left.
     reason: FailureReason,
     /// What the check saw.
     detail: String,
-}
-
-/// What an album row's issuing catalog instance contributes to an import.
-///
-/// A materialized catalog track can be the only stored row of its album, so the
-/// album row says nothing about how many tracks or discs the release has; the
-/// album its issuing instance lists is then the source. An album nothing issued
-/// is local, and its stored rows are all of it.
-enum IssuedAlbum {
-    /// The album the issuing catalog instance lists: the artist it credits the
-    /// album with, when it credits one, and the totals its tracklist implies for
-    /// the imported track.
-    Catalog {
-        /// The first artist the album credits.
-        album_artist: Option<String>,
-        /// The disc and track totals the tracklist implies.
-        totals: AlbumTotals,
-    },
-    /// No catalog instance issued the album, so its stored rows are all of it.
-    Local,
-    /// A catalog instance issued the album but its album could not be read.
-    Unavailable,
-}
-
-impl IssuedAlbum {
-    /// Returns the artist the issuing catalog instance credits the album with.
-    ///
-    /// # Returns
-    ///
-    /// The credit's display name, or `None` for anything but a catalog album
-    /// that credits an artist. A provider whose track-embedded album carries no
-    /// artist - Deezer's, for example - leaves the caller to fall back to the
-    /// track's own artist, which is the only album artist such an import has.
-    fn album_artist(&self) -> Option<&str> {
-        match self {
-            IssuedAlbum::Catalog { album_artist, .. } => album_artist.as_deref(),
-            IssuedAlbum::Local | IssuedAlbum::Unavailable => None,
-        }
-    }
-}
-
-/// The sources an import picks the album artist from, in order of reliability.
-///
-/// The stored album row comes first because it is what the rest of the library
-/// shows. The issuing catalog instance's own album comes next, because the
-/// album reference a lone materialized track carries may omit the artist -
-/// Deezer's does - while its full album lists one. The track's own artist is the
-/// last resort: an album nobody credited still has to produce a file whose path
-/// and `albumartist` tag name an artist.
-struct AlbumArtistSources<'a> {
-    /// The album row's display artist.
-    stored: Option<&'a str>,
-    /// The first artist the album stored a credit for.
-    stored_credit: Option<&'a str>,
-    /// The first artist the issuing catalog instance credits the album with.
-    catalog_credit: Option<&'a str>,
-    /// The track's display artist.
-    track: Option<&'a str>,
-    /// The first artist the track is credited to.
-    track_credit: Option<&'a str>,
-}
-
-impl AlbumArtistSources<'_> {
-    /// Returns the album artist the imported file is named and tagged with.
-    ///
-    /// # Returns
-    ///
-    /// The first source that names an artist, or `None` when none of them does.
-    fn pick(&self) -> Option<String> {
-        self.stored
-            .or(self.stored_credit)
-            .or(self.catalog_credit)
-            .or(self.track)
-            .or(self.track_credit)
-            .map(str::to_owned)
-    }
-}
-
-/// The disc and track totals an imported file is tagged and rendered with.
-///
-/// A total the import cannot derive is `None`, which writes no tag for it and
-/// renders no disc prefix rather than claiming a number nothing supports.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct AlbumTotals {
-    /// How many discs the release has, when it is known to have more than one.
-    disc_total: Option<u32>,
-    /// How many tracks the imported track's disc holds, when it is known.
-    track_total: Option<u32>,
-}
-
-/// Counts the totals a catalog album's tracklist implies.
-///
-/// A multi-disc release counts only the tracks it holds on the imported track's
-/// own disc, which is what a `TRACKTOTAL` tag on such a release means, and a
-/// multi-disc release whose imported track names no disc gets no track total,
-/// because the disc the count would describe is unknown.
-///
-/// # Parameters
-///
-/// - `album`: the album the issuing instance lists.
-/// - `disc_number`: the imported track's disc number.
-///
-/// # Returns
-///
-/// The release's disc count and the imported disc's track count.
-fn totals_of_catalog_album(album: &CatalogAlbum, disc_number: Option<i64>) -> AlbumTotals {
-    let disc_total = album
-        .tracks
-        .iter()
-        .filter_map(|track| track.disc_number)
-        .max()
-        .filter(|disc| *disc > 1)
-        .map(u32::from);
-    let track_total = match disc_total {
-        Some(_) => disc_number
-            .and_then(|disc| u16::try_from(disc).ok())
-            .and_then(|disc| {
-                let count = album
-                    .tracks
-                    .iter()
-                    .filter(|track| track.disc_number == Some(disc))
-                    .count();
-                u32::try_from(count).ok()
-            }),
-        None => u32::try_from(album.tracks.len()).ok(),
-    }
-    .filter(|count| *count > 0);
-    AlbumTotals {
-        disc_total,
-        track_total,
-    }
-}
-
-/// Counts the totals a local album's stored rows imply.
-///
-/// # Parameters
-///
-/// - `rows`: the album's stored track rows.
-///
-/// # Returns
-///
-/// The highest disc number the rows carry, when they carry more than one, and
-/// how many rows the album has.
-fn totals_of_stored_rows(rows: &[Track]) -> AlbumTotals {
-    let disc_total = rows
-        .iter()
-        .filter_map(|track| track.disc_number)
-        .max()
-        .and_then(|disc| u32::try_from(disc).ok())
-        .filter(|disc| *disc > 1);
-    let track_total = u32::try_from(rows.len()).ok().filter(|count| *count > 0);
-    AlbumTotals {
-        disc_total,
-        track_total,
-    }
 }
 
 impl AcquisitionOrchestrator {
@@ -591,6 +470,7 @@ impl AcquisitionOrchestrator {
             imported: 0,
             detail: None,
         };
+        let target = self.save_target(&current).await?;
         for (mapping, verified) in mappings.iter().zip(verified) {
             let Some(verified) = verified else {
                 continue;
@@ -599,7 +479,7 @@ impl AcquisitionOrchestrator {
                 continue;
             };
             match self
-                .import_file_for_track(acquisition_id, instance, track.id, verified)
+                .import_file_for_track(acquisition_id, instance, track.id, verified, &target)
                 .await
             {
                 Ok(imported) => {
@@ -1233,8 +1113,9 @@ impl AcquisitionOrchestrator {
                 .await?;
         }
 
+        let target = self.save_target(row).await?;
         let imported = self
-            .import_file_for_track(acquisition_id, instance, track_id, verified)
+            .import_file_for_track(acquisition_id, instance, track_id, verified, &target)
             .await?;
 
         let mut tx = self.database().writer().begin().await?;
@@ -1277,15 +1158,22 @@ impl AcquisitionOrchestrator {
         Ok(imported)
     }
 
-    /// Imports one verified file for one track into managed storage.
+    /// Imports one verified file for one track into the file's save target.
     ///
     /// The file is copied into the acquisition's staging directory and tagged
     /// there, or hardlinked from a `link`-mode import root, before it is
-    /// installed under the root retention chooses. The transaction writes the
+    /// installed under the root retention chooses; a save whose account has a
+    /// scanned folder as its save location is installed into that folder instead,
+    /// as a `folder` media file with no managed copy. The transaction writes the
     /// `media_files` row, ensures the track's retention row and sets the track's
     /// availability; the availability and library-change events are published
     /// after it commits. No acquisition state is written, so an album
     /// acquisition can import several files before it completes.
+    ///
+    /// A folder that cannot be written - it was removed, unmounted or mounted
+    /// read-only - falls back to the managed library once, publishes the
+    /// save-folder notice and releases the folder's lock, because the tagged copy
+    /// is still in staging and the retry is a rename rather than a re-download.
     ///
     /// # Parameters
     ///
@@ -1294,6 +1182,8 @@ impl AcquisitionOrchestrator {
     ///   import roots.
     /// - `track_id`: the track the file is for.
     /// - `verified`: the verified file, whose probe the rows are built from.
+    /// - `target`: where the file goes: the saver's scanned folder or the
+    ///   managed library.
     ///
     /// # Returns
     ///
@@ -1310,6 +1200,7 @@ impl AcquisitionOrchestrator {
         instance: &RegistryInstance,
         track_id: EntityId,
         verified: &VerifiedFile,
+        target: &SaveTarget,
     ) -> Result<ImportedFile, AcquireError> {
         let track = self
             .library()
@@ -1325,7 +1216,7 @@ impl AcquisitionOrchestrator {
             None => Vec::new(),
         };
         let issued = match track.album_id {
-            Some(album_id) => self.issued_album(album_id, track.disc_number).await,
+            Some(album_id) => issued_album(self.catalog(), album_id, track.disc_number).await,
             None => IssuedAlbum::Local,
         };
         let artists = self.library().list_track_artists(track_id).await?;
@@ -1342,45 +1233,22 @@ impl AcquisitionOrchestrator {
         let cover_filename = snapshot.get(keys::LIBRARY_COVER_FILENAME)?;
 
         let extension = extension_of(&verified.file, &verified.probe);
-        let album_artist = AlbumArtistSources {
-            stored: album
-                .as_ref()
-                .and_then(|album| album.display_artist.as_deref()),
-            stored_credit: album_artists.first().map(|artist| artist.name.as_str()),
-            catalog_credit: issued.album_artist(),
-            track: track.display_artist.as_deref(),
-            track_credit: artists.first().map(|artist| artist.name.as_str()),
-        }
-        .pick();
-        let album_title = album.as_ref().map(|album| album.title.clone());
-        let year = album.as_ref().and_then(|album| album.year);
-        let AlbumTotals {
-            disc_total,
-            track_total,
-        } = match issued {
-            IssuedAlbum::Catalog { totals, .. } => totals,
-            IssuedAlbum::Local => totals_of_stored_rows(&album_tracks),
-            IssuedAlbum::Unavailable => AlbumTotals::default(),
-        };
-        let context = NamingContext {
-            album_artist: album_artist.as_deref(),
-            album: album_title.as_deref(),
-            year,
-            disc_number: track.disc_number.and_then(|disc| u32::try_from(disc).ok()),
-            disc_total,
-            track_number: track
-                .track_number
-                .and_then(|number| u32::try_from(number).ok()),
-            title: Some(track.title.as_str()),
-            extension: Some(extension.as_str()),
-        };
-        let relative = template.render(&context)?;
-        let storage = if pinned {
-            StorageClass::Library
-        } else {
-            StorageClass::Cache
-        };
-        let base = retention::import_destination(pinned, self.storage_roots(), &relative);
+        let facts = naming_facts(
+            &track,
+            NamingInputs {
+                album: album.as_ref(),
+                album_tracks: &album_tracks,
+                issued: &issued,
+                artists: &artists,
+                album_artists: &album_artists,
+            },
+        );
+        let album_artist = facts.album_artist.clone();
+        let album_title = facts.album.clone();
+        let year = facts.year;
+        let disc_total = facts.disc_total;
+        let track_total = facts.track_total;
+        let relative = facts.render(&template, &extension)?;
 
         // Work on a copy inside the acquisition's staging directory, so the
         // backend's own file is never written to and a crash cannot leave a
@@ -1423,17 +1291,139 @@ impl AcquisitionOrchestrator {
             ..Default::default()
         };
 
+        // A save whose account chose a scanned folder writes there instead, and
+        // the folder's lock is held across the file write and the row insert so a
+        // scan of the folder cannot index the file as a second track.
+        let reserved = self.save_folders().reserve(target).await?;
+        let placement = Placement {
+            acquisition_id,
+            instance,
+            track_id,
+            verified,
+            relative: &relative,
+            pinned,
+            staged_dir: &staged_dir,
+            tags: &tags,
+            cover: cover.as_ref(),
+            embed_cover,
+            cover_filename: &cover_filename,
+        };
+        let Some(folder) = reserved else {
+            return self.place_file(&placement, None).await;
+        };
+        match self.place_file(&placement, Some(&folder)).await {
+            Ok(imported) => Ok(imported),
+            Err(error) if is_folder_unavailable(&error) => {
+                let name = folder.folder.name.as_str();
+                tracing::warn!(
+                    acquisition = %acquisition_id,
+                    folder = %folder.folder.path.display(),
+                    %error,
+                    "the save folder could not be written; keeping the file in the managed library"
+                );
+                if let Some(user) = folder.folder.owner_user_id {
+                    self.save_folders().notice(user, Some(name));
+                }
+                // The tagged copy is still in staging, so the retry is a rename
+                // and not a second download.
+                drop(folder);
+                self.place_file(&placement, None).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Places one tagged file at its destination and records the row.
+    ///
+    /// # Parameters
+    ///
+    /// - `placement`: what the import writes.
+    /// - `folder`: the save folder to write into, or `None` for the managed
+    ///   library.
+    ///
+    /// # Returns
+    ///
+    /// The file the import wrote.
+    ///
+    /// # Errors
+    ///
+    /// Returns the library, settings or filesystem error that stopped the
+    /// import, and [`AcquireError::ImportPath`] when every name under the
+    /// destination's directory is taken.
+    async fn place_file(
+        &self,
+        placement: &Placement<'_>,
+        folder: Option<&FolderDestination>,
+    ) -> Result<ImportedFile, AcquireError> {
+        let Placement {
+            acquisition_id,
+            instance,
+            track_id,
+            verified,
+            relative,
+            pinned,
+            staged_dir,
+            tags,
+            cover,
+            embed_cover,
+            cover_filename,
+        } = *placement;
+        let (base, storage, availability, link_mode) = match folder {
+            Some(destination) => (
+                destination.folder.path.join(relative),
+                StorageClass::Folder,
+                Availability::Local,
+                // A folder file must be its own inode: a hardlink would share it
+                // with the backend's file, which the backend may rewrite.
+                false,
+            ),
+            None => {
+                let storage = if pinned {
+                    StorageClass::Library
+                } else {
+                    StorageClass::Cache
+                };
+                (
+                    retention::import_destination(pinned, self.storage_roots(), relative),
+                    storage,
+                    if pinned {
+                        Availability::Local
+                    } else {
+                        Availability::Cached
+                    },
+                    import_root(instance, &verified.file)
+                        .is_some_and(|root| root.mode == ImportMode::Link),
+                )
+            }
+        };
+
         // The names this import has already lost: one another import in this
         // process reserved, one a file already holds, and one a stored row
         // holds while its file is gone. Every lost name moves the import to the
         // next collision suffix, which is what keeps the retry from picking the
         // same name again.
         let mut taken: HashSet<PathBuf> = HashSet::new();
-        let link_mode =
-            import_root(instance, &verified.file).is_some_and(|root| root.mode == ImportMode::Link);
+        let folder_root = folder.map(|destination| destination.folder.path.as_path());
         for _ in 0..placement::MAX_COLLISIONS {
-            let (destination, reservation) = self.reserve_destination(&base, &mut taken).await?;
-            let rel_path = placement::relative_path(self.storage_roots(), storage, &destination);
+            let (destination, reservation) = match folder_root {
+                // A folder's names are held by the folder lock the caller holds,
+                // so a scan and another save cannot pick the same one.
+                Some(_) => (
+                    placement::free_destination(&base, &taken)
+                        .await
+                        .map_err(AcquireError::Library)?,
+                    None,
+                ),
+                None => {
+                    let (destination, reservation) =
+                        self.reserve_destination(&base, &mut taken).await?;
+                    (destination, Some(reservation))
+                }
+            };
+            let rel_path = match folder_root {
+                Some(root) => folder_relative(root, &destination),
+                None => placement::relative_path(self.storage_roots(), storage, &destination),
+            };
             let mut linked = false;
             if link_mode {
                 match self
@@ -1449,18 +1439,10 @@ impl AcquisitionOrchestrator {
                 }
             }
             if !linked {
-                let staged = staged_dir.join(
-                    destination
-                        .file_name()
-                        .unwrap_or_else(|| relative.as_os_str()),
-                );
+                let staged =
+                    staged_dir.join(destination.file_name().unwrap_or(relative.as_os_str()));
                 copy_file(&verified.file.absolute_path, &staged).await?;
-                write_tags(
-                    &staged,
-                    &tags,
-                    if embed_cover { cover.as_ref() } else { None },
-                )
-                .await?;
+                write_tags(&staged, tags, if embed_cover { cover } else { None }).await?;
                 match install(&staged, &destination).await? {
                     Installed::Placed => {}
                     Installed::Taken => {
@@ -1470,10 +1452,10 @@ impl AcquisitionOrchestrator {
                 }
             }
 
-            if let Some(artwork) = &cover
+            if let Some(artwork) = cover
                 && let Some(parent) = destination.parent()
             {
-                write_sidecar_cover(parent, &cover_filename, artwork).await?;
+                write_sidecar_cover(parent, cover_filename, artwork).await?;
             }
 
             let metadata =
@@ -1486,37 +1468,59 @@ impl AcquisitionOrchestrator {
             let size = metadata.len();
             let mtime_ms = mtime_millis(&metadata);
             let tier = quality_tier_of(&destination, &verified.probe);
-            let availability = if pinned {
-                Availability::Local
-            } else {
-                Availability::Cached
-            };
 
             let mut tx = self.database().writer().begin().await?;
-            let inserted = media_files::insert_managed_media_file(
-                &mut tx,
-                &ManagedMediaFile {
-                    track_id,
-                    storage,
-                    rel_path: rel_path.clone(),
-                    size: i64::try_from(size).unwrap_or(i64::MAX),
-                    mtime_ms,
-                    format: Some(verified.probe.container.as_str().to_owned()),
-                    codec: Some(verified.probe.codec.as_str().to_owned()),
-                    bitrate_kbps: verified.probe.bitrate_kbps.map(i64::from),
-                    sample_rate: verified.probe.sample_rate.map(i64::from),
-                    bit_depth: verified.probe.bit_depth.map(i64::from),
-                    channels: verified.probe.channels.map(i64::from),
-                    duration_ms: i64::try_from(verified.probe.duration_ms).ok(),
-                    lossless: Some(verified.probe.lossless),
-                    quality_tier: tier,
-                    replaygain: None,
-                    has_embedded_art: Some(verified.probe.has_embedded_art),
-                    uploaded_by: None,
-                    acquisition_id: Some(acquisition_id),
-                },
-            )
-            .await;
+            let inserted = match folder {
+                Some(destination_folder) => {
+                    media_files::upsert_folder_media_file(
+                        &mut tx,
+                        track_id,
+                        &ScannedMediaFile {
+                            folder_id: destination_folder.folder.id,
+                            rel_path: rel_path.clone(),
+                            size: i64::try_from(size).unwrap_or(i64::MAX),
+                            mtime_ms,
+                            format: Some(verified.probe.container.as_str().to_owned()),
+                            codec: Some(verified.probe.codec.as_str().to_owned()),
+                            bitrate_kbps: verified.probe.bitrate_kbps.map(i64::from),
+                            sample_rate: verified.probe.sample_rate.map(i64::from),
+                            bit_depth: verified.probe.bit_depth.map(i64::from),
+                            channels: verified.probe.channels.map(i64::from),
+                            duration_ms: i64::try_from(verified.probe.duration_ms).ok(),
+                            lossless: Some(verified.probe.lossless),
+                            replaygain: None,
+                            has_embedded_art: Some(verified.probe.has_embedded_art),
+                        },
+                    )
+                    .await
+                }
+                None => {
+                    media_files::insert_managed_media_file(
+                        &mut tx,
+                        &ManagedMediaFile {
+                            track_id,
+                            storage,
+                            rel_path: rel_path.clone(),
+                            size: i64::try_from(size).unwrap_or(i64::MAX),
+                            mtime_ms,
+                            format: Some(verified.probe.container.as_str().to_owned()),
+                            codec: Some(verified.probe.codec.as_str().to_owned()),
+                            bitrate_kbps: verified.probe.bitrate_kbps.map(i64::from),
+                            sample_rate: verified.probe.sample_rate.map(i64::from),
+                            bit_depth: verified.probe.bit_depth.map(i64::from),
+                            channels: verified.probe.channels.map(i64::from),
+                            duration_ms: i64::try_from(verified.probe.duration_ms).ok(),
+                            lossless: Some(verified.probe.lossless),
+                            quality_tier: tier,
+                            replaygain: None,
+                            has_embedded_art: Some(verified.probe.has_embedded_art),
+                            uploaded_by: None,
+                            acquisition_id: Some(acquisition_id),
+                        },
+                    )
+                    .await
+                }
+            };
             let media_file_id = match inserted {
                 Ok(media_file_id) => media_file_id,
                 Err(error) if is_stored_path_conflict(&error) => {
@@ -1530,12 +1534,20 @@ impl AcquisitionOrchestrator {
                 }
                 Err(error) => return Err(error.into()),
             };
-            // A track with no retention row would be invisible to the eviction
-            // query, which joins `track_retention`; the row is created by the first
-            // pin write, so an unpinned track gets an empty one here.
-            if !pinned {
-                retention::add_pin_reason(&mut tx, track_id, PinReason::Admin).await?;
-                retention::remove_pin_reason(&mut tx, track_id, PinReason::Admin).await?;
+            match folder {
+                // A folder file is permanent whatever the pins say, and the pin
+                // is what a later scan of an owned folder writes for it too.
+                Some(_) => {
+                    retention::add_pin_reason(&mut tx, track_id, PinReason::Folder).await?;
+                }
+                // A track with no retention row would be invisible to the eviction
+                // query, which joins `track_retention`; the row is created by the
+                // first pin write, so an unpinned track gets an empty one here.
+                None if !pinned => {
+                    retention::add_pin_reason(&mut tx, track_id, PinReason::Admin).await?;
+                    retention::remove_pin_reason(&mut tx, track_id, PinReason::Admin).await?;
+                }
+                None => {}
             }
             tracks::set_track_availability(&mut tx, track_id, availability, None).await?;
             tx.commit().await?;
@@ -1552,6 +1564,31 @@ impl AcquisitionOrchestrator {
         }
 
         Err(AcquireError::ImportPath { path: base })
+    }
+
+    /// Resolves where one acquisition's file goes.
+    ///
+    /// Only a save and a permanent playlist addition are the user saying they
+    /// mean to keep the track, and only those write into the requester's save
+    /// folder; everything else - a play, a prefetch, an administrative retry -
+    /// stays in managed storage.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the acquisition's ledger row, for its reason and its requester.
+    ///
+    /// # Returns
+    ///
+    /// The save location, resolved once for the whole acquisition.
+    ///
+    /// # Errors
+    ///
+    /// Returns the settings or folder read error that stopped the resolution.
+    async fn save_target(&self, row: &AcquisitionRow) -> Result<SaveTarget, AcquireError> {
+        if row.reason != crate::adopt::SAVE_REASON && row.reason != crate::adopt::PLAYLIST_REASON {
+            return Ok(SaveTarget::Managed);
+        }
+        self.save_folders().target(row.requested_by).await
     }
 
     /// Reserves the next free destination for a rendered relative path.
@@ -1594,77 +1631,6 @@ impl AcquisitionOrchestrator {
                 None => {
                     taken.insert(candidate);
                 }
-            }
-        }
-    }
-
-    /// What the issuing catalog instance adds to a stored album row's import.
-    ///
-    /// A materialized catalog track can be the only stored row of its album, so
-    /// the album row says nothing about how many tracks or discs the release
-    /// has; the instance's own album is the reliable source. The album is
-    /// found through the `p:<slug>` alias the materialization wrote, and read
-    /// through the catalog cache, so a listing an album page just fetched costs
-    /// no second provider call.
-    ///
-    /// # Parameters
-    ///
-    /// - `album_id`: the stored album row to resolve.
-    /// - `disc_number`: the imported track's disc number, which selects the disc
-    ///   a multi-disc album's track total counts.
-    ///
-    /// # Returns
-    ///
-    /// [`IssuedAlbum::Catalog`] with the instance's album artist and the totals
-    /// its tracklist implies for an album a catalog instance issued,
-    /// [`IssuedAlbum::Local`] for one nothing issued, and
-    /// [`IssuedAlbum::Unavailable`] when the alias exists but its album could
-    /// not be read. A failure is logged at debug and never propagates: an import
-    /// that cannot reach its catalog instance still imports the file it
-    /// verified.
-    async fn issued_album(&self, album_id: EntityId, disc_number: Option<i64>) -> IssuedAlbum {
-        let alias = match self.catalog().provider_aliases(album_id).await {
-            Ok(aliases) => match aliases.into_iter().next() {
-                Some(alias) => alias,
-                None => return IssuedAlbum::Local,
-            },
-            Err(error) => {
-                tracing::debug!(
-                    album = %album_id,
-                    %error,
-                    "the provider alias of an imported track's album could not be read"
-                );
-                return IssuedAlbum::Unavailable;
-            }
-        };
-        let id = match CatalogId::new(alias.slug, EntityKind::Album, alias.provider_id) {
-            Ok(id) => id,
-            Err(error) => {
-                tracing::debug!(
-                    album = %album_id,
-                    %error,
-                    "the provider alias of an imported track's album does not name an album"
-                );
-                return IssuedAlbum::Unavailable;
-            }
-        };
-        match self.catalog().album(&id).await {
-            Ok(result) => IssuedAlbum::Catalog {
-                album_artist: result
-                    .album
-                    .artists
-                    .first()
-                    .map(|credit| credit.name.clone()),
-                totals: totals_of_catalog_album(&result.album, disc_number),
-            },
-            Err(error) => {
-                tracing::debug!(
-                    album = %album_id,
-                    instance = id.slug().as_str(),
-                    %error,
-                    "the catalog album of an imported track could not be read"
-                );
-                IssuedAlbum::Unavailable
             }
         }
     }
@@ -1875,6 +1841,51 @@ fn quality_tier_of(destination: &Path, probe: &ProbeResult) -> Option<QualityTie
         track_index: None,
     };
     profile::quality_tier(&candidate)
+}
+
+/// Returns a path's part relative to a scanned folder's root.
+///
+/// # Parameters
+///
+/// - `root`: the folder's absolute path.
+/// - `path`: the absolute path inside the folder.
+///
+/// # Returns
+///
+/// The path relative to the root, as the `media_files` row stores it, or the
+/// whole path when it is not under the root.
+fn folder_relative(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Returns whether an import failed because the save folder cannot be written.
+///
+/// A folder that was removed, unmounted or mounted read-only, and one whose file
+/// handle went stale, all answer one of these kinds; the import then keeps the
+/// file in the managed library instead of failing the acquisition. Any other
+/// error is a real failure.
+///
+/// # Parameters
+///
+/// - `error`: the error the placement returned.
+///
+/// # Returns
+///
+/// `true` when the file could be placed in the managed library instead.
+fn is_folder_unavailable(error: &AcquireError) -> bool {
+    let AcquireError::Io { source, .. } = error else {
+        return false;
+    };
+    matches!(
+        source.kind(),
+        std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::ReadOnlyFilesystem
+            | std::io::ErrorKind::StaleNetworkFileHandle
+    )
 }
 
 /// Returns whether a media file insert lost its path to a stored row.
@@ -2136,188 +2147,4 @@ fn mtime_millis(metadata: &std::fs::Metadata) -> i64 {
         .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
         .and_then(|duration| i64::try_from(duration.as_millis()).ok())
         .unwrap_or(0)
-}
-
-#[cfg(test)]
-mod tests {
-    use hearthsound_core::IdPrefix;
-    use hearthsound_core::providers::CatalogTrack;
-    use hearthsound_library::Origin;
-    use uuid::Uuid;
-
-    use super::*;
-
-    /// Builds a catalog album holding `discs[i]` tracks on disc `i + 1`.
-    ///
-    /// # Parameters
-    ///
-    /// - `discs`: the track count of each disc, disc 1 first.
-    fn album(discs: &[u16]) -> CatalogAlbum {
-        let mut tracks = Vec::new();
-        for (index, count) in discs.iter().enumerate() {
-            let disc = u16::try_from(index + 1).unwrap();
-            for number in 1..=*count {
-                tracks.push(CatalogTrack {
-                    id: format!("track-{disc}-{number}"),
-                    title: format!("Song {disc}-{number}"),
-                    artists: Vec::new(),
-                    album: None,
-                    duration_ms: None,
-                    disc_number: Some(disc),
-                    track_number: Some(number),
-                    isrc: None,
-                    explicit: None,
-                    ids: Vec::new(),
-                });
-            }
-        }
-        CatalogAlbum {
-            id: "album-1".to_owned(),
-            title: "Album".to_owned(),
-            artists: Vec::new(),
-            release_date: None,
-            album_type: None,
-            upc: None,
-            genres: Vec::new(),
-            images: Vec::new(),
-            tracks,
-            ids: Vec::new(),
-        }
-    }
-
-    /// Builds a stored track row on the given disc.
-    ///
-    /// # Parameters
-    ///
-    /// - `disc_number`: the row's disc number.
-    fn row(disc_number: Option<i64>) -> Track {
-        Track {
-            id: EntityId::from_uuid(IdPrefix::Track, Uuid::nil()),
-            album_id: None,
-            title: "Song".to_owned(),
-            sort_title: "Song".to_owned(),
-            display_artist: None,
-            disc_number,
-            track_number: None,
-            duration_ms: None,
-            isrc: None,
-            mb_recording_id: None,
-            explicit: None,
-            origin: Origin::Catalog,
-            availability: Availability::Remote,
-            unavailable_until: None,
-            created_at: 0,
-            updated_at: 0,
-        }
-    }
-
-    #[test]
-    fn the_album_artist_comes_from_the_first_source_that_names_one() {
-        let all = AlbumArtistSources {
-            stored: Some("Stored"),
-            stored_credit: Some("Stored Credit"),
-            catalog_credit: Some("Catalog Credit"),
-            track: Some("Track Artist"),
-            track_credit: Some("Track Credit"),
-        };
-        assert_eq!(all.pick().as_deref(), Some("Stored"));
-
-        let without_stored = AlbumArtistSources {
-            stored: None,
-            ..all
-        };
-        assert_eq!(without_stored.pick().as_deref(), Some("Stored Credit"));
-
-        let catalog_only = AlbumArtistSources {
-            stored_credit: None,
-            ..without_stored
-        };
-        assert_eq!(catalog_only.pick().as_deref(), Some("Catalog Credit"));
-
-        let track_only = AlbumArtistSources {
-            catalog_credit: None,
-            ..catalog_only
-        };
-        assert_eq!(track_only.pick().as_deref(), Some("Track Artist"));
-
-        let credit_only = AlbumArtistSources {
-            track: None,
-            ..track_only
-        };
-        assert_eq!(credit_only.pick().as_deref(), Some("Track Credit"));
-
-        let nothing = AlbumArtistSources {
-            track_credit: None,
-            ..credit_only
-        };
-        assert_eq!(nothing.pick(), None);
-    }
-
-    #[test]
-    fn a_single_disc_album_counts_all_of_its_tracks() {
-        assert_eq!(
-            totals_of_catalog_album(&album(&[5]), Some(1)),
-            AlbumTotals {
-                disc_total: None,
-                track_total: Some(5),
-            }
-        );
-    }
-
-    #[test]
-    fn a_multi_disc_album_counts_the_tracks_of_the_imported_disc() {
-        let album = album(&[4, 3]);
-        assert_eq!(
-            totals_of_catalog_album(&album, Some(2)),
-            AlbumTotals {
-                disc_total: Some(2),
-                track_total: Some(3),
-            }
-        );
-        assert_eq!(
-            totals_of_catalog_album(&album, Some(1)),
-            AlbumTotals {
-                disc_total: Some(2),
-                track_total: Some(4),
-            }
-        );
-    }
-
-    #[test]
-    fn a_multi_disc_album_without_a_disc_number_writes_no_track_total() {
-        assert_eq!(
-            totals_of_catalog_album(&album(&[4, 3]), None),
-            AlbumTotals {
-                disc_total: Some(2),
-                track_total: None,
-            }
-        );
-    }
-
-    #[test]
-    fn an_album_without_tracks_writes_no_total() {
-        assert_eq!(
-            totals_of_catalog_album(&album(&[]), Some(1)),
-            AlbumTotals::default()
-        );
-        assert_eq!(totals_of_stored_rows(&[]), AlbumTotals::default());
-    }
-
-    #[test]
-    fn stored_rows_count_toward_a_local_album() {
-        assert_eq!(
-            totals_of_stored_rows(&[row(Some(1)), row(Some(1)), row(Some(2))]),
-            AlbumTotals {
-                disc_total: Some(2),
-                track_total: Some(3),
-            }
-        );
-        assert_eq!(
-            totals_of_stored_rows(&[row(Some(1)), row(None)]),
-            AlbumTotals {
-                disc_total: None,
-                track_total: Some(2),
-            }
-        );
-    }
 }

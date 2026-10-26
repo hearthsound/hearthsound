@@ -27,6 +27,7 @@ use hearthsound_core::events::EventBus;
 use hearthsound_core::{Availability, EntityId, IdPrefix, Layer};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_jobs::{JobQueue, QueueOptions};
+use hearthsound_library::locks::FolderLocks;
 use hearthsound_library::scan::LibraryScanner;
 use hearthsound_library::thumbnails::ThumbnailCache;
 use hearthsound_library::{
@@ -236,6 +237,7 @@ impl Fixture {
             &database,
             Arc::clone(&events),
             settings.clone(),
+            Arc::new(FolderLocks::new()),
         ));
         let jobs = Arc::new(JobQueue::new(&database, QueueOptions::default()));
         let state = state.with_scanner(Arc::clone(&scanner), Arc::clone(&jobs));
@@ -1088,7 +1090,11 @@ impl Fixture {
             Arc::clone(&self.catalog),
             Arc::clone(&self.ffmpeg),
             Arc::clone(&self.events),
-            AcquisitionStorage::new(staging, self.roots.clone()),
+            AcquisitionStorage::new(
+                staging,
+                self.roots.clone(),
+                Arc::new(hearthsound_library::locks::FolderLocks::new()),
+            ),
         ));
         let prefetch = Arc::new(PrefetchScheduler::new(Arc::clone(&orchestrator)));
         self.state = self

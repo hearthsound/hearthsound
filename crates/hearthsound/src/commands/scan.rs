@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_core::events::EventBus;
+use hearthsound_library::locks::FolderLocks;
 use hearthsound_library::scan::{LibraryScanner, ScanReport, ScanRequest};
 use hearthsound_library::{LibraryFolder, LibraryRepository};
 
@@ -38,7 +39,12 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let (database, _outcome) = context::open_database(&config).await?;
     let settings = context::load_settings(&config, env, &database).await?;
-    let scanner = LibraryScanner::new(&database, Arc::new(EventBus::new()), settings);
+    let scanner = LibraryScanner::new(
+        &database,
+        Arc::new(EventBus::new()),
+        settings,
+        Arc::new(FolderLocks::new()),
+    );
     let mut folders = LibraryRepository::new(&database)
         .list_library_folders()
         .await

@@ -9,6 +9,7 @@ mod identity;
 mod large_library;
 mod maintenance;
 mod naming;
+mod placement;
 mod query;
 mod queue;
 mod repository;

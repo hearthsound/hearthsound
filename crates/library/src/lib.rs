@@ -66,6 +66,7 @@ pub mod artists_split;
 pub mod artwork;
 pub mod folders;
 pub mod identity;
+pub mod locks;
 pub mod maintenance;
 pub mod media_files;
 pub mod naming;

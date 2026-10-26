@@ -19,6 +19,7 @@ use hearthsound_config::{SettingSources, SettingsRegistry, settings::Settings};
 use hearthsound_core::events::EventBus;
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_library::LibraryRepository;
+use hearthsound_library::locks::FolderLocks;
 use hearthsound_library::scan::LibraryScanner;
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags, write_tags};
 
@@ -53,7 +54,12 @@ async fn scanner(db: &Database) -> LibraryScanner {
     )
     .await
     .unwrap();
-    LibraryScanner::new(db, Arc::new(EventBus::new()), settings)
+    LibraryScanner::new(
+        db,
+        Arc::new(EventBus::new()),
+        settings,
+        Arc::new(FolderLocks::new()),
+    )
 }
 
 /// Counts the tracks the scan wrote.

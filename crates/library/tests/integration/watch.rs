@@ -12,6 +12,7 @@ use hearthsound_core::events::EventBus;
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_jobs::{JobQueue, JobRunner, JobRunnerOptions, QueueOptions, Shutdown};
 use hearthsound_library::LibraryRepository;
+use hearthsound_library::locks::FolderLocks;
 use hearthsound_library::scan::{LibraryScanner, SCAN_JOB_KIND, ScanJobHandler, ScanRequest};
 use hearthsound_library::watch::LibraryWatcher;
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
@@ -106,6 +107,7 @@ async fn a_new_album_is_indexed_when_it_appears() {
         &db,
         Arc::new(EventBus::new()),
         settings.clone(),
+        Arc::new(FolderLocks::new()),
     ));
     let watcher = LibraryWatcher::new(&db, Arc::clone(&scanner), Arc::clone(&queue), settings);
 
@@ -181,6 +183,7 @@ async fn a_scan_does_not_request_another_scan() {
         &db,
         Arc::new(EventBus::new()),
         settings.clone(),
+        Arc::new(FolderLocks::new()),
     ));
     let watcher = LibraryWatcher::new(
         &db,
@@ -244,6 +247,7 @@ async fn an_unreadable_subdirectory_does_not_stop_the_watch() {
         &db,
         Arc::new(EventBus::new()),
         settings.clone(),
+        Arc::new(FolderLocks::new()),
     ));
     let watcher = LibraryWatcher::new(&db, Arc::clone(&scanner), Arc::clone(&queue), settings);
     watcher.reconcile().await.unwrap();
@@ -306,6 +310,7 @@ async fn a_directory_created_later_is_watched() {
         &db,
         Arc::new(EventBus::new()),
         settings.clone(),
+        Arc::new(FolderLocks::new()),
     ));
     let watcher = LibraryWatcher::new(&db, Arc::clone(&scanner), Arc::clone(&queue), settings);
     watcher.reconcile().await.unwrap();
@@ -376,6 +381,7 @@ async fn a_symlinked_directory_is_watched() {
         &db,
         Arc::new(EventBus::new()),
         settings.clone(),
+        Arc::new(FolderLocks::new()),
     ));
     let watcher = LibraryWatcher::new(&db, Arc::clone(&scanner), Arc::clone(&queue), settings);
     watcher.reconcile().await.unwrap();

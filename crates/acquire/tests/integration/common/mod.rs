@@ -22,6 +22,7 @@ use hearthsound_config::{SettingSources, SettingsRegistry};
 use hearthsound_core::events::{EventBus, EventEnvelope, ServerEvent};
 use hearthsound_core::{AcquisitionState, Availability, EntityId, Granularity, Layer, Priority};
 use hearthsound_db::{Database, MIGRATOR};
+use hearthsound_library::locks::FolderLocks;
 use hearthsound_library::{
     AlbumInput, ArtistCredit, LibraryRepository, Origin, StorageRoots, Track, TrackInput, tracks,
 };
@@ -359,6 +360,7 @@ impl Env {
             AcquisitionStorage::new(
                 staging.clone(),
                 StorageRoots::new(library_root.clone(), cache_root.clone()),
+                Arc::new(FolderLocks::new()),
             ),
         );
         if let Some(hardlink) = hardlink {
