@@ -201,16 +201,30 @@ impl Session {
         self.last_at = now;
     }
 
+    /// Reports whether the session has listened to enough to be a play.
+    ///
+    /// The threshold is half the track, or four minutes of it, whichever comes
+    /// first, on a track of at least [`MIN_TRACK_MS`]. It answers about the
+    /// listening alone: whether the client asked to be ignored is
+    /// [`Session::earned`]'s business, so a session can cross the threshold and
+    /// still record nothing.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the listened time reached the threshold.
+    fn reached_threshold(&self) -> bool {
+        self.duration_ms >= MIN_TRACK_MS
+            && self.listened_ms >= (self.duration_ms / 2).min(LISTENED_HALF_MS)
+    }
+
     /// Reports whether the session earned a play.
     ///
     /// # Returns
     ///
-    /// `true` when the client did not ask to be ignored, the track is long
-    /// enough, and at least half of it or four minutes were listened to.
+    /// `true` when the client did not ask to be ignored and the session reached
+    /// the play threshold.
     fn earned(&self) -> bool {
-        !self.ignore_scrobble
-            && self.duration_ms >= MIN_TRACK_MS
-            && self.listened_ms >= (self.duration_ms / 2).min(LISTENED_HALF_MS)
+        !self.ignore_scrobble && self.reached_threshold()
     }
 }
 
@@ -440,21 +454,27 @@ impl InMemoryReports {
 
         match report.state {
             PlaybackState::Starting => {
-                // A new start closes the previous session: its listening time is
-                // accumulated, and the play it earned is recorded when the start
-                // was for another track. A start for the same track keeps the
-                // session, so a client that seeks and restarts does not lose
-                // what it listened to.
+                // A start is the only report that opens a play. It continues
+                // the open session when it names the same track and that
+                // session has not yet reached the play threshold - a seek, a
+                // resume, or a restart mid-track - so the listening time is
+                // kept and no second play is recorded. Anything else closes the
+                // session: a different track, or the same track started again
+                // after the threshold, which is repeat-one and counts as another
+                // play. A client that loops without sending a start keeps one
+                // play per continuous session.
                 let (started_at, listened_ms, ignore_scrobble, duration_ms) = match previous {
                     Some(mut session) => {
                         session.accumulate(report.now, report.rate);
                         session.ignore_scrobble |= report.ignore_scrobble;
+                        // A repeat often arrives without the duration, so the
+                        // session's own is carried into the new one.
                         let duration_ms = if report.duration_ms > 0 {
                             report.duration_ms
                         } else {
                             session.duration_ms
                         };
-                        if session.track_id == report.track_id {
+                        if session.track_id == report.track_id && !session.reached_threshold() {
                             (
                                 session.started_at,
                                 session.listened_ms,
@@ -462,6 +482,10 @@ impl InMemoryReports {
                                 duration_ms,
                             )
                         } else {
+                            // `reached_threshold` decides the split and
+                            // `earned` decides the record, so a session the
+                            // client asked to ignore restarts cleanly and
+                            // records nothing.
                             if session.earned() {
                                 plan.record = Some((
                                     session.track_id,
@@ -543,5 +567,56 @@ impl InMemoryReports {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Returns a session that listened to `listened_ms` of a `duration_ms`
+    /// track.
+    ///
+    /// # Parameters
+    ///
+    /// - `duration_ms`: how long the track lasts.
+    /// - `listened_ms`: how much was listened to.
+    fn session(duration_ms: i64, listened_ms: i64) -> Session {
+        Session {
+            track_id: EntityId::new(hearthsound_core::IdPrefix::Track),
+            duration_ms,
+            state: PlaybackState::Playing,
+            started_at: 0,
+            last_at: 0,
+            listened_ms,
+            ignore_scrobble: false,
+        }
+    }
+
+    #[test]
+    fn the_threshold_is_half_the_track_or_four_minutes() {
+        assert!(!session(240_000, 119_999).reached_threshold());
+        assert!(session(240_000, 120_000).reached_threshold());
+        assert!(
+            session(3_600_000, 240_000).reached_threshold(),
+            "four minutes of an hour is enough"
+        );
+        assert!(
+            !session(20_000, 20_000).reached_threshold(),
+            "a track too short to count never reaches it"
+        );
+    }
+
+    #[test]
+    fn an_ignored_session_reaches_the_threshold_without_earning_a_play() {
+        let mut ignored = session(240_000, 240_000);
+        assert!(ignored.reached_threshold());
+        assert!(ignored.earned());
+        ignored.ignore_scrobble = true;
+        assert!(
+            ignored.reached_threshold(),
+            "the split still happens when the play is not recorded"
+        );
+        assert!(!ignored.earned(), "an ignored session records nothing");
     }
 }

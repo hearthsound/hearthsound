@@ -742,3 +742,280 @@ async fn a_reported_play_suppresses_one_scrobble_only() {
     );
     assert_eq!(activity.plays().play_count(user, one.uuid()).await.unwrap(), 2);
 }
+
+/// Repeat-one: each listen of a track that already counted is a play of its own.
+#[tokio::test]
+async fn repeat_one_records_each_full_listen() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let reports = activity.reports();
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let one = track_id(tracks[0]);
+
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Starting,
+            START,
+        ))
+        .await
+        .unwrap();
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Playing,
+            START + 130_000,
+        ))
+        .await
+        .unwrap();
+    // The track starts again after the first listen already counted.
+    assert!(matches!(
+        reports
+            .report(&report(
+                user,
+                "dsub",
+                one,
+                240_000,
+                PlaybackState::Starting,
+                START + 140_000,
+            ))
+            .await
+            .unwrap(),
+        PlaybackOutcome::Recorded(_)
+    ));
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Playing,
+            START + 260_000,
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        reports
+            .report(&report(
+                user,
+                "dsub",
+                one,
+                240_000,
+                PlaybackState::Stopped,
+                START + 270_000,
+            ))
+            .await
+            .unwrap(),
+        PlaybackOutcome::Recorded(_)
+    ));
+
+    let plays = activity.plays().play_count(user, one.uuid()).await.unwrap();
+    assert_eq!(plays, 2, "each listen counted");
+    let rows = sqlx::query!("SELECT started_at, listened_ms FROM plays ORDER BY started_at")
+        .fetch_all(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(rows[0].started_at, START);
+    assert_eq!(
+        rows[0].listened_ms, 140_000,
+        "the first play counts up to the moment the repeat started"
+    );
+    assert_eq!(rows[1].started_at, START + 140_000);
+    assert_eq!(
+        rows[1].listened_ms, 130_000,
+        "the second play counts only the second listen"
+    );
+}
+
+/// A start before the threshold continues the same session, which is what a
+/// restart mid-track looks like.
+#[tokio::test]
+async fn a_restart_before_the_threshold_continues_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let reports = activity.reports();
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let one = track_id(tracks[0]);
+
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Starting,
+            START,
+        ))
+        .await
+        .unwrap();
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Playing,
+            START + 30_000,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        reports
+            .report(&report(
+                user,
+                "dsub",
+                one,
+                240_000,
+                PlaybackState::Starting,
+                START + 31_000,
+            ))
+            .await
+            .unwrap(),
+        PlaybackOutcome::Updated,
+        "a start before the threshold records nothing"
+    );
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Playing,
+            START + 130_000,
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        reports
+            .report(&report(
+                user,
+                "dsub",
+                one,
+                240_000,
+                PlaybackState::Stopped,
+                START + 140_000,
+            ))
+            .await
+            .unwrap(),
+        PlaybackOutcome::Recorded(_)
+    ));
+
+    assert_eq!(
+        activity.plays().play_count(user, one.uuid()).await.unwrap(),
+        1
+    );
+    let stored = sqlx::query!("SELECT started_at, listened_ms FROM plays")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(stored.started_at, START, "the session kept its start");
+    assert_eq!(stored.listened_ms, 140_000);
+}
+
+/// A track too short to count records nothing however often it repeats.
+#[tokio::test]
+async fn a_repeat_of_a_track_too_short_to_count_records_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let reports = activity.reports();
+    let user = insert_user(&database).await;
+    let (album, _) = insert_album(&library).await;
+    let short = track_id(insert_track(&library, album, "Interlude", 3).await);
+
+    let mut at = START;
+    for listen in 0..3 {
+        reports
+            .report(&report(
+                user,
+                "dsub",
+                short,
+                20_000,
+                PlaybackState::Starting,
+                at,
+            ))
+            .await
+            .unwrap();
+        at += 20_000;
+        assert_eq!(
+            reports
+                .report(&report(
+                    user,
+                    "dsub",
+                    short,
+                    20_000,
+                    PlaybackState::Stopped,
+                    at,
+                ))
+                .await
+                .unwrap(),
+            PlaybackOutcome::Updated,
+            "listen {} of a twenty-second track", listen + 1
+        );
+    }
+    assert_eq!(
+        activity
+            .plays()
+            .play_count(user, short.uuid())
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+/// After the threshold every start is a new play, including a seek back: the
+/// rule cannot tell a seek from a repeat, and the threshold is the definition
+/// of one listen.
+#[tokio::test]
+async fn a_seek_back_after_the_threshold_starts_a_new_play() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let reports = activity.reports();
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let one = track_id(tracks[0]);
+
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Starting,
+            START,
+        ))
+        .await
+        .unwrap();
+    let mut seek = report(
+        user,
+        "dsub",
+        one,
+        240_000,
+        PlaybackState::Starting,
+        START + 130_000,
+    );
+    seek.position_ms = 0;
+    assert!(matches!(
+        reports.report(&seek).await.unwrap(),
+        PlaybackOutcome::Recorded(_)
+    ));
+    assert_eq!(
+        activity.plays().play_count(user, one.uuid()).await.unwrap(),
+        1
+    );
+}
