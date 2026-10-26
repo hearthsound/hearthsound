@@ -93,8 +93,8 @@ use tower_http::cors::CorsLayer;
 
 use crate::error::ServerError;
 use crate::jobs::{
-    KvSweepJobHandler, PLUGIN_HEALTH_JOB_KIND, PLUGIN_HEALTH_SCHEDULE, PLUGIN_KV_SWEEP_CRON,
-    PLUGIN_KV_SWEEP_JOB_KIND, PluginHealthJobHandler, EnrichJobHandler,
+    EnrichJobHandler, KvSweepJobHandler, PLUGIN_HEALTH_JOB_KIND, PLUGIN_HEALTH_SCHEDULE,
+    PLUGIN_KV_SWEEP_CRON, PLUGIN_KV_SWEEP_JOB_KIND, PluginHealthJobHandler,
 };
 use crate::web::WebAssets;
 

@@ -140,13 +140,16 @@ impl CatalogService {
                     name: found.artist.name.clone(),
                     ids: found.artist.ids.clone(),
                 };
-                self.artist_info(&request).await.map(|_| ()).unwrap_or_else(|error| {
-                    tracing::warn!(
-                        %error,
-                        artist = %found.id,
-                        "the catalog could not read an artist's information"
-                    )
-                });
+                self.artist_info(&request)
+                    .await
+                    .map(|_| ())
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(
+                            %error,
+                            artist = %found.id,
+                            "the catalog could not read an artist's information"
+                        )
+                    });
                 self.artist_portraits(id)
                     .await
                     .map(|_| ())

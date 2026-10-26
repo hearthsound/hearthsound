@@ -8,7 +8,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use crate::common::{Env, count_cache_rows};
-use hearthsound_catalog::{PageDepth, PageAlbum};
+use hearthsound_catalog::{PageAlbum, PageDepth};
 use hearthsound_core::{ClientId, Layer};
 use hearthsound_library::query::Scope;
 use hearthsound_test_support::DISCOGRAPHY_CATALOG;
@@ -89,16 +89,26 @@ async fn enriching_a_stored_artist_fills_the_page_for_the_next_visit() {
         .iter()
         .filter(|album| matches!(album, PageAlbum::Catalog(_)))
         .count();
-    assert!(catalogs >= 2, "the albums the library lacks are catalog ones");
+    assert!(
+        catalogs >= 2,
+        "the albums the library lacks are catalog ones"
+    );
 }
 
 #[tokio::test]
 async fn enriching_a_catalog_album_fills_its_tracklist_and_artist_listing() {
     let env = discography_env().await;
     let service = env.service();
-    let album = crate::common::catalog_id("disco", hearthsound_core::EntityKind::Album, "disco-album-1");
+    let album = crate::common::catalog_id(
+        "disco",
+        hearthsound_core::EntityKind::Album,
+        "disco-album-1",
+    );
 
-    let report = service.enrich(&ClientId::Catalog(album.clone())).await.unwrap();
+    let report = service
+        .enrich(&ClientId::Catalog(album.clone()))
+        .await
+        .unwrap();
     assert!(report.enriched);
     assert!(service.cached_album(&album).await.unwrap().is_some());
 }

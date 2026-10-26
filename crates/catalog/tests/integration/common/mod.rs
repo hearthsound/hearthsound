@@ -301,11 +301,8 @@ impl Env {
             .unwrap();
         let credited = library.list_album_artists(album).await.unwrap();
         let artist_id = credited.first().unwrap().id;
-        let mut track = TrackInput::new(
-            format!("{title} Track"),
-            Origin::Local,
-            Availability::Local,
-        );
+        let mut track =
+            TrackInput::new(format!("{title} Track"), Origin::Local, Availability::Local);
         track.album_id = Some(album);
         track.duration_ms = Some(180_000);
         let track = library.insert_track(&track, &[], &[]).await.unwrap();

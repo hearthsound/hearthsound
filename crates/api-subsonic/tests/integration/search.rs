@@ -539,10 +539,7 @@ async fn a_failed_play_leaves_the_catalog_arrays_alone() {
 
     let play = get(
         &app,
-        &format!(
-            "/rest/stream?id={}&apiKey={}",
-            songs[0], fixture.api_key
-        ),
+        &format!("/rest/stream?id={}&apiKey={}", songs[0], fixture.api_key),
     )
     .await;
     assert!(

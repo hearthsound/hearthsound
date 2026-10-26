@@ -720,9 +720,7 @@ impl CatalogService {
         }) else {
             return Ok(None);
         };
-        let Some(catalog_artist) = self
-            .catalog_artist_of_stored(artist, layer, depth)
-            .await?
+        let Some(catalog_artist) = self.catalog_artist_of_stored(artist, layer, depth).await?
         else {
             return Ok(None);
         };

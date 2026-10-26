@@ -29,8 +29,8 @@ use hearthsound_core::{CatalogId, EntityKind, Layer, ProviderError, Slug};
 use hearthsound_db::Database;
 use hearthsound_plugin_host::{ProviderRegistry, RegistryInstance};
 use moka::future::Cache as MemoryCache;
-use uuid::Uuid;
 use tokio::time::error::Elapsed;
+use uuid::Uuid;
 
 use crate::artwork::REFUSED_IMAGE_TTL;
 use crate::cache::{Cache, ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
@@ -183,7 +183,8 @@ struct Inner {
     /// A page's burst of reads asks for the same enrichment three times; the map
     /// keeps the second and third from queueing a job, and a completed run
     /// releases the key so a later visit may ask again.
-    enriching: std::sync::Mutex<std::collections::HashMap<(String, String, Uuid), std::time::Instant>>,
+    enriching:
+        std::sync::Mutex<std::collections::HashMap<(String, String, Uuid), std::time::Instant>>,
     /// The catalog artist a normalized name resolved to.
     ///
     /// Resolving a name is a catalog search, and a browse page asks for the same
@@ -305,7 +306,8 @@ impl CatalogService {
     /// suppress a later one.
     pub(crate) fn enriching(
         &self,
-    ) -> &std::sync::Mutex<std::collections::HashMap<(String, String, Uuid), std::time::Instant>> {
+    ) -> &std::sync::Mutex<std::collections::HashMap<(String, String, Uuid), std::time::Instant>>
+    {
         &self.inner.enriching
     }
 
@@ -587,7 +589,7 @@ impl CatalogService {
                 },
             )
             .await?;
-        Vec::<CatalogAlbumRef>::from(albums)
+        albums
             .into_iter()
             .map(|album| album_ref_result(id.slug(), album))
             .collect()

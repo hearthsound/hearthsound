@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Browse pages answer from the library and the cached catalog data only; a `catalog.enrich` job fetches the missing extras, publishes `catalog.enriched` to the listener whose page asked, and the open page refreshes without a reload.
+- Search results promote their artists and album references into the cache, so opening a result costs no catalog call.
+
 ### Added
 
 - An acquisition that cannot be attempted waits for a source instead of failing:

@@ -79,9 +79,7 @@ pub use discovery::{
     DiscoveryService, InstancePlaylist, LinkedUserContexts, NoUserContexts, ResolvedAlbum,
     ResolvedArtist, SimilarArtistAlbums, UserContextSource,
 };
-pub use enrichment::{
-    ENRICH_JOB_KIND, EnrichJobPayload, Enrichment, TOP_TRACKS_CACHE_LIMIT,
-};
+pub use enrichment::{ENRICH_JOB_KIND, EnrichJobPayload, Enrichment, TOP_TRACKS_CACHE_LIMIT};
 pub use error::CatalogError;
 pub use identity::{IDENTITY_MATCH_THRESHOLD, IdentityRequest, ResolvedRecording};
 pub use materialize::{MaterializedAlbum, ProviderAlias, materialize_entity};

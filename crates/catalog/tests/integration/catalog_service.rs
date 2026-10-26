@@ -376,7 +376,9 @@ async fn a_failing_name_search_is_an_error_the_page_degrades() {
         .service()
         .artist_page(
             &hearthsound_core::ClientId::Entity(artist),
-            &[hearthsound_library::query::Scope::server_for_principal(true)],
+            &[hearthsound_library::query::Scope::server_for_principal(
+                true,
+            )],
             hearthsound_catalog::PageDepth::Full,
         )
         .await

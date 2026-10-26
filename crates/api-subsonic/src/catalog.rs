@@ -110,6 +110,67 @@ pub(crate) fn music_brainz_id(ids: &[hearthsound_core::providers::ExternalId]) -
         .unwrap_or_default()
 }
 
+/// Asks for the catalog extras of one entity when the caller opted into the
+/// vendor extension and nothing has asked yet for this listener.
+///
+/// The read that calls this has already answered from the library and the cache,
+/// so this is an addition: a process without a job queue, a payload that cannot
+/// be encoded and an enqueue that fails are logged and dropped, and a later read
+/// asks again. The claim is released on a failure so the retry is not suppressed
+/// for the whole deduplication window.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, whose listener is the audience of the
+///   completion event and whose job queue runs the work.
+/// - `id`: the entity whose page asked.
+pub(crate) async fn request_enrichment(call: &Call, id: &ClientId) {
+    use hearthsound_catalog::{ENRICH_JOB_KIND, EnrichJobPayload};
+    use hearthsound_jobs::NewJob;
+
+    if !call.params().vendor_enabled() {
+        return;
+    }
+    let Some(jobs) = call.state().jobs() else {
+        return;
+    };
+    let catalog = call.state().catalog();
+    let user = call.principal().user_id.uuid();
+    if !catalog.begin_enrichment(id, user).await {
+        return;
+    }
+    let (entity_id, kind) = match id {
+        ClientId::Entity(entity) => (
+            entity.to_string(),
+            match entity.kind() {
+                hearthsound_core::IdPrefix::Artist => EntityKind::Artist,
+                _ => EntityKind::Album,
+            },
+        ),
+        ClientId::Catalog(catalog_id) => (catalog_id.to_string(), catalog_id.kind()),
+    };
+    let payload = EnrichJobPayload {
+        entity_id,
+        kind,
+        user_id: user,
+    };
+    let job = match NewJob::new(ENRICH_JOB_KIND)
+        .priority(hearthsound_core::Priority::Queue)
+        .payload(&payload)
+    {
+        Ok(job) => job,
+        Err(error) => {
+            tracing::warn!(%error, entity = %id, "a catalog enrichment could not be encoded");
+            catalog.finish_enrichment(id, user).await;
+            return;
+        }
+    };
+    if let Err(error) = jobs.enqueue(job).await {
+        tracing::warn!(%error, entity = %id, "a catalog enrichment could not be enqueued");
+        catalog.finish_enrichment(id, user).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,68 +216,5 @@ mod tests {
 
         assert_eq!(artist_id(&slug(), &canonical), None);
         assert_eq!(artist_id(&slug(), &credit(&[])), None);
-    }
-}
-
-/// Asks for the catalog extras of one entity when the caller opted into the
-/// vendor extension and nothing has asked yet for this listener.
-///
-/// The read that calls this has already answered from the library and the cache,
-/// so this is an addition: a process without a job queue, a payload that cannot
-/// be encoded and an enqueue that fails are logged and dropped, and a later read
-/// asks again. The claim is released on a failure so the retry is not suppressed
-/// for the whole deduplication window.
-///
-/// # Parameters
-///
-/// - `call`: the authenticated call, whose listener is the audience of the
-///   completion event and whose job queue runs the work.
-/// - `id`: the entity whose page asked.
-pub(crate) async fn request_enrichment(call: &Call, id: &ClientId) {
-    use hearthsound_catalog::{ENRICH_JOB_KIND, EnrichJobPayload};
-    use hearthsound_jobs::NewJob;
-
-    if !call.params().vendor_enabled() {
-        return;
-    }
-    let Some(jobs) = call.state().jobs() else {
-        return;
-    };
-    let catalog = call.state().catalog();
-    let user = call.principal().user_id.uuid();
-    if !catalog.begin_enrichment(id, user).await {
-        return;
-    }
-    let (entity_id, kind) = match id {
-        ClientId::Entity(entity) => (
-            entity.to_string(),
-            match entity.kind() {
-                hearthsound_core::IdPrefix::Artist => EntityKind::Artist,
-                _ => EntityKind::Album,
-            },
-        ),
-        ClientId::Catalog(catalog_id) => {
-            (catalog_id.to_string(), catalog_id.kind())
-        }
-    };
-    let payload = EnrichJobPayload {
-        entity_id,
-        kind,
-        user_id: user,
-    };
-    let job = match NewJob::new(ENRICH_JOB_KIND)
-        .priority(hearthsound_core::Priority::Queue)
-        .payload(&payload)
-    {
-        Ok(job) => job,
-        Err(error) => {
-            tracing::warn!(%error, entity = %id, "a catalog enrichment could not be encoded");
-            catalog.finish_enrichment(id, user).await;
-            return;
-        }
-    };
-    if let Err(error) = jobs.enqueue(job).await {
-        tracing::warn!(%error, entity = %id, "a catalog enrichment could not be enqueued");
-        catalog.finish_enrichment(id, user).await;
     }
 }

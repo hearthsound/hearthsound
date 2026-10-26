@@ -111,11 +111,7 @@ impl JobHandler for EnrichJobHandler {
             .await
             .map_err(|error| JobError::new(error.to_string()))?;
         if let Some(seed) = &report.artist
-            && !self
-                .catalog
-                .registry()
-                .layers(Layer::Discovery)
-                .is_empty()
+            && !self.catalog.registry().layers(Layer::Discovery).is_empty()
         {
             self.discovery
                 .artist_top_tracks(payload.user_id, seed, TOP_TRACKS_CACHE_LIMIT)
@@ -129,9 +125,7 @@ impl JobHandler for EnrichJobHandler {
                     )
                 });
         }
-        self.catalog
-            .finish_enrichment(&id, payload.user_id)
-            .await;
+        self.catalog.finish_enrichment(&id, payload.user_id).await;
         self.events.publish_for(
             Audience::User(payload.user_id),
             ServerEvent::CatalogEnriched(CatalogEnriched {
