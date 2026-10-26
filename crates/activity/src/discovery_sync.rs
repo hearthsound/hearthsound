@@ -16,7 +16,10 @@
 //!   so the playlist id a client holds keeps working and a reader never sees a
 //!   half-written playlist;
 //! - a track the catalog cannot name is dropped rather than stored as a
-//!   placeholder, and the rest of the playlist is still written.
+//!   placeholder, and the rest of the playlist is still written;
+//! - a refresh that cannot resolve or store every suggestion it has is skipped
+//!   instead of written short, so a transient provider failure never deletes
+//!   tracks from a playlist.
 //!
 //! A playlist the service already retired is not written again: the service
 //! may keep listing it for a while, and writing it would recreate a playlist
@@ -193,8 +196,10 @@ impl DiscoverySyncJobHandler {
     /// and tracks replaced. A playlist whose service expiry has already passed
     /// is skipped, so a service that keeps listing a retired playlist does not
     /// recreate it after the expiry job removed it. A suggested track no
-    /// catalog can name is dropped with a debug log line, and the rest of the
-    /// playlist is written.
+    /// catalog can name is dropped, and the rest of the playlist is written; a
+    /// catalog search that fails, or a resolved entity this server cannot store,
+    /// skips the whole playlist instead, because writing the shorter list would
+    /// delete the entries the failure merely hid.
     ///
     /// # Parameters
     ///
@@ -231,19 +236,46 @@ impl DiscoverySyncJobHandler {
             }
             let suggestions = instance_playlist.playlist.tracks;
             let limit = u32::try_from(suggestions.len()).unwrap_or(u32::MAX);
-            let resolved = self.discovery.resolve_tracks(&suggestions, limit).await?;
+            // A catalog that cannot answer is not a playlist whose tracks were
+            // renamed: writing what it did answer would delete the entries the
+            // failure hid, so the whole playlist is skipped until the next pass.
+            let resolved = match self.discovery.resolve_tracks(&suggestions, limit).await {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        playlist = summary.reference.as_str(),
+                        user = %user,
+                        "kept a generated playlist because the catalog could not resolve it"
+                    );
+                    continue;
+                }
+            };
             let mut tracks = Vec::with_capacity(resolved.len());
+            let mut stored_every = true;
             for result in resolved {
+                // A suggestion no catalog names is dropped, which is the
+                // documented behaviour; one the catalog named but this server
+                // could not store fails the write for the same reason a search
+                // failure does.
+                let Some(result) = result else {
+                    continue;
+                };
                 match materialize_entity(&self.catalog, &result.id).await {
                     Ok(track) => tracks.push(track),
                     Err(error) => {
-                        tracing::debug!(
+                        tracing::warn!(
                             %error,
                             playlist = summary.reference.as_str(),
-                            "a suggested track of a generated playlist could not be stored"
+                            "kept a generated playlist because a suggested track could not be stored"
                         );
+                        stored_every = false;
+                        break;
                     }
                 }
+            }
+            if !stored_every {
+                continue;
             }
             let expires_at = summary
                 .expires_at

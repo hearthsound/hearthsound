@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use crate::common::{
     Env, HELLO_CATALOG_ID, HTTP_CATALOG_ID, SPIN_CATALOG_ID, catalog_endpoint, catalog_id, query,
 };
-use hearthsound_catalog::CatalogError;
+use hearthsound_catalog::{CatalogError, DiscoveryService, NoUserContexts};
 use hearthsound_config::SettingValue;
 use hearthsound_config::keys;
 use hearthsound_core::{EntityKind, Layer, Slug};
@@ -538,4 +538,69 @@ async fn album_by_title_costs_one_search_and_is_remembered() {
 /// - `server`: the wiremock endpoint.
 async fn requests(server: &MockServer) -> usize {
     server.received_requests().await.unwrap().len()
+}
+
+/// Resolving suggested tracks tells a suggestion no provider names apart from a
+/// catalog that could not answer.
+///
+/// The difference decides what a generated-playlist sync may write: a `None`
+/// entry is a track the service suggested and no catalog knows, while an error
+/// means the catalog cannot answer at all, so a shorter list would delete the
+/// entries the failure hid.
+#[tokio::test]
+async fn resolving_tracks_separates_a_miss_from_a_failure() {
+    let hello = Env::new().await;
+    hello
+        .instance(
+            "hello",
+            HELLO_CATALOG,
+            HELLO_CATALOG_ID,
+            json!({"greeting": "Hi"}),
+        )
+        .await;
+    hello.assign(Layer::Catalog, &["hello"]).await;
+    let discovery = DiscoveryService::new(
+        std::sync::Arc::clone(&hello.registry),
+        std::sync::Arc::new(hello.service()),
+        std::sync::Arc::new(NoUserContexts),
+    );
+    let suggestions = vec![hearthsound_core::providers::SuggestedTrack {
+        title: "A Song No Provider Names".to_owned(),
+        artists: vec!["Nobody".to_owned()],
+        album: None,
+        duration_ms: None,
+        ids: Vec::new(),
+        score: None,
+    }];
+
+    let resolved = discovery.resolve_tracks(&suggestions, 10).await.unwrap();
+    assert_eq!(
+        resolved,
+        vec![None],
+        "a miss is an entry, not an error and not a gap"
+    );
+
+    let broken = Env::new().await;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    broken
+        .instance(
+            "broken",
+            HTTP_CATALOG,
+            HTTP_CATALOG_ID,
+            json!({"url": format!("{}/search", server.uri())}),
+        )
+        .await;
+    broken.assign(Layer::Catalog, &["broken"]).await;
+    let discovery = DiscoveryService::new(
+        std::sync::Arc::clone(&broken.registry),
+        std::sync::Arc::new(broken.service()),
+        std::sync::Arc::new(NoUserContexts),
+    );
+
+    let refused = discovery.resolve_tracks(&suggestions, 10).await;
+    assert!(refused.is_err(), "a search failure is reported, not hidden");
 }

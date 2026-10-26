@@ -261,7 +261,8 @@ pub async fn get_top_songs(call: Call) -> Encoded {
             if let Some(suggestions) = discovery.cached_artist_top_tracks(user, &seed, limit).await
             {
                 match discovery.resolve_tracks(&suggestions, limit).await {
-                    Ok(resolved) if !resolved.is_empty() => {
+                    Ok(resolved) if resolved.iter().any(Option::is_some) => {
+                        let resolved = resolved.into_iter().flatten().collect();
                         let songs = match resolved_song_objects(&call, resolved).await {
                             Ok(songs) => songs,
                             Err(error) => return call.encode(Response::failed(error)),
@@ -285,7 +286,8 @@ pub async fn get_top_songs(call: Call) -> Encoded {
             match discovery.artist_top_tracks(user, &seed, limit).await {
                 Ok(suggestions) if !suggestions.is_empty() => {
                     match discovery.resolve_tracks(&suggestions, limit).await {
-                        Ok(resolved) if !resolved.is_empty() => {
+                        Ok(resolved) if resolved.iter().any(Option::is_some) => {
+                            let resolved = resolved.into_iter().flatten().collect();
                             let songs = match resolved_song_objects(&call, resolved).await {
                                 Ok(songs) => songs,
                                 Err(error) => return call.encode(Response::failed(error)),
@@ -450,7 +452,7 @@ async fn similar_songs(call: &Call, member: &'static str) -> Encoded {
                 Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
             };
             match discovery.resolve_tracks(&suggestions, limit).await {
-                Ok(resolved) => resolved,
+                Ok(resolved) => resolved.into_iter().flatten().collect(),
                 Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
             }
         }
@@ -475,7 +477,7 @@ async fn similar_songs(call: &Call, member: &'static str) -> Encoded {
                     }
                 };
                 match discovery.resolve_tracks(&tracks, limit).await {
-                    Ok(resolved) => lists.push(resolved),
+                    Ok(resolved) => lists.push(resolved.into_iter().flatten().collect()),
                     Err(error) => {
                         return call.encode(Response::failed(catalog::failure(&error)));
                     }

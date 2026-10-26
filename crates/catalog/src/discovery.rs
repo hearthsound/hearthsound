@@ -925,7 +925,7 @@ impl DiscoveryService {
             let resolved = self
                 .resolve_tracks(chunk, u32::try_from(chunk.len()).unwrap_or(u32::MAX))
                 .await?;
-            for result in resolved {
+            for result in resolved.into_iter().flatten() {
                 let Some(album) = result.track.album.clone() else {
                     continue;
                 };
@@ -1174,28 +1174,31 @@ impl DiscoveryService {
     ///
     /// # Returns
     ///
-    /// The resolved entities, in the suggestions' order, without the ones that
-    /// could not be resolved.
+    /// One entry per suggestion, in the suggestions' order: `Some` for one the
+    /// catalog names and `None` for one no provider names.
     ///
     /// # Errors
     ///
-    /// Returns [`CatalogError`] when a catalog search fails in a way the layer
-    /// reports; a failure is logged and the suggestion is dropped, so this is
-    /// a defensive signature rather than a normal outcome.
+    /// Returns [`CatalogError`] when a catalog search fails. A caller that
+    /// writes what it resolved - the generated-playlist sync - must skip the
+    /// whole write then, because a shorter list would delete the entries the
+    /// failure merely hid.
     pub async fn resolve_tracks(
         &self,
         suggestions: &[SuggestedTrack],
         limit: u32,
-    ) -> Result<Vec<CatalogTrackResult>, CatalogError> {
+    ) -> Result<Vec<Option<CatalogTrackResult>>, CatalogError> {
         let wanted = usize::try_from(limit)
             .unwrap_or(usize::MAX)
             .min(suggestions.len());
-        let mut resolved = Vec::new();
+        let mut resolved = Vec::with_capacity(wanted);
         for chunk in suggestions[..wanted].chunks(RESOLVE_PARALLELISM) {
             let answers =
                 futures_util::future::join_all(chunk.iter().map(|seed| self.resolve_track(seed)))
                     .await;
-            resolved.extend(answers.into_iter().flatten());
+            for answer in answers {
+                resolved.push(answer?);
+            }
         }
         Ok(resolved)
     }
@@ -1255,10 +1258,19 @@ impl DiscoveryService {
     ///
     /// The catalog entity the suggestion names, or `None` when the search did
     /// not name it.
-    async fn resolve_track(&self, suggestion: &SuggestedTrack) -> Option<CatalogTrackResult> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when the search fails: a suggestion the catalog
+    /// could not answer for is not the same as one it does not name, and the
+    /// caller decides what a failure means.
+    async fn resolve_track(
+        &self,
+        suggestion: &SuggestedTrack,
+    ) -> Result<Option<CatalogTrackResult>, CatalogError> {
         let key = track_resolution_key(suggestion);
         if let Some(cached) = self.inner.track_resolutions.get(&key).await {
-            return Some(cached);
+            return Ok(Some(cached));
         }
         let primary = suggestion
             .artists
@@ -1276,17 +1288,7 @@ impl DiscoveryService {
             limit: TRACK_RESOLUTION_LIMIT,
             offset: 0,
         };
-        let found = match self.inner.catalog.search(&query).await {
-            Ok(found) => found,
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    title = suggestion.title.as_str(),
-                    "a suggested track could not be resolved"
-                );
-                return None;
-            }
-        };
+        let found = self.inner.catalog.search(&query).await?;
         let title = normalize(&suggestion.title);
         let resolved = found.tracks.into_iter().find(|result| {
             if normalize(&result.track.title) != title {
@@ -1306,7 +1308,7 @@ impl DiscoveryService {
                 .insert(key, resolved.clone())
                 .await;
         }
-        resolved
+        Ok(resolved)
     }
 
     /// Resolves one suggested artist to a visible stored artist or a catalog
