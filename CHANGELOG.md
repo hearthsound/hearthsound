@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Browse pages answer from the library and the cached catalog data only; a `catalog.enrich` job fetches the missing extras, publishes `catalog.enriched` to the listener whose page asked, and the open page refreshes without a reload.
 - Search results promote their artists and album references into the cache, so opening a result costs no catalog call.
 - `playlist.changed` is delivered to the playlist's owner and to administrators only, instead of every connected account.
+- `savePlayQueue` and `savePlayQueueByIndex` store only the ids that resolve - an id naming a deleted track, an entity that is not a track, or a catalog track no instance answers is dropped - and the current entry follows them, so a saved queue always reads back whole. A negative `position` is refused with an error instead of being clamped to zero.
 - A `scrobble` time more than thirty days in the past is refused, and one a few minutes in the future is clamped to now; a now-playing row can no longer start in the future and stay visible for decades.
 - A playback rate above eight times normal speed is refused by `reportPlayback` and clamped by the session, so a wrong rate can no longer earn a play in milliseconds.
 - A `playing` or `paused` report for a track other than the open session's closes that session and starts one for the reported track, so now playing and the play both name the right track.

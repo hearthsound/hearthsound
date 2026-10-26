@@ -289,3 +289,146 @@ async fn play_queue_requests_are_refused_without_usable_values() {
     .await;
     assert_error(&bad_current, 0);
 }
+
+/// Saving a queue keeps only the ids that resolve, moves the current index with
+/// them, and refuses a negative position.
+#[tokio::test]
+async fn an_unresolvable_id_is_dropped_and_the_index_follows() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+    let stored = seeded.alpha_tracks[0];
+    // A track uuid nothing names, an album id, and a catalog track no instance
+    // answers: none of them can be served back.
+    let gone = hearthsound_core::EntityId::from_uuid(
+        hearthsound_core::IdPrefix::Track,
+        uuid::Uuid::now_v7(),
+    )
+    .to_string();
+    let album = seeded.alpha.to_string();
+    // A catalog id no instance answers: the slug names no configured catalog.
+    let catalog = hearthsound_core::CatalogId::new(
+        hearthsound_core::Slug::new("nowhere").unwrap(),
+        hearthsound_core::EntityKind::Track,
+        "ghost",
+    )
+    .unwrap()
+    .to_string();
+
+    let saved = get(
+        &app,
+        &format!(
+            "/rest/savePlayQueue?id={gone}&id={stored}&id={album}&id={catalog}&current={stored}&position=2000&c=Rufin&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&saved);
+
+    for call in ["getPlayQueue", "getPlayQueueByIndex"] {
+        let queue = get(
+            &app,
+            &format!("/rest/{call}?c=Rufin&apiKey={}&f=json", fixture.api_key),
+        )
+        .await;
+        assert_ok(&queue);
+        assert!(
+            queue.body.contains(&format!("\"id\":\"{stored}\"")),
+            "{call} dropped the resolvable entry: {}",
+            queue.body
+        );
+        assert!(
+            !queue.body.contains(&gone) && !queue.body.contains(catalog.as_str()),
+            "{call} served an entry that does not resolve: {}",
+            queue.body
+        );
+        // Each shape reports the current entry its own way.
+        if call == "getPlayQueueByIndex" {
+            assert!(
+                queue.body.contains("\"currentIndex\":0"),
+                "{call} did not remap the index: {}",
+                queue.body
+            );
+        } else {
+            assert!(
+                queue.body.contains(&format!("\"current\":\"{stored}\"")),
+                "{call} did not remap the current entry: {}",
+                queue.body
+            );
+        }
+        assert!(
+            queue.body.contains("\"position\":2000"),
+            "{call} lost the position: {}",
+            queue.body
+        );
+    }
+
+    // A negative position is a broken request, and it leaves the saved queue as
+    // it was.
+    let refused = get(
+        &app,
+        &format!(
+            "/rest/savePlayQueue?id={stored}&position=-1&c=Rufin&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&refused, 0);
+    let queue = get(
+        &app,
+        &format!(
+            "/rest/getPlayQueue?c=Rufin&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&queue);
+    assert!(
+        queue.body.contains(&format!("\"current\":\"{stored}\"")),
+        "the refused save changed the queue: {}",
+        queue.body
+    );
+}
+
+/// An unknown current id in the middle of the list lands on the next kept
+/// entry.
+#[tokio::test]
+async fn an_unknown_current_after_filtering_lands_on_the_next_entry() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+    let (first, second) = (seeded.alpha_tracks[0], seeded.alpha_tracks[1]);
+    let gone = hearthsound_core::EntityId::from_uuid(
+        hearthsound_core::IdPrefix::Track,
+        uuid::Uuid::now_v7(),
+    )
+    .to_string();
+
+    let saved = get(
+        &app,
+        &format!(
+            "/rest/savePlayQueue?id={first}&id={gone}&id={second}&current={gone}&c=Rufin&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&saved);
+
+    let queue = get(
+        &app,
+        &format!(
+            "/rest/getPlayQueue?c=Rufin&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&queue);
+    assert!(
+        queue.body.contains(&format!("\"current\":\"{second}\"")),
+        "the index did not move to the next kept entry: {}",
+        queue.body
+    );
+    assert!(
+        queue.body.contains(&format!("\"id\":\"{second}\"")),
+        "{}",
+        queue.body
+    );
+}
