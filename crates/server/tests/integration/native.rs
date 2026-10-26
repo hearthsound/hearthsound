@@ -4709,3 +4709,96 @@ async fn an_environment_pinned_setting_cannot_be_patched() {
     assert_eq!(entry["value"], 7, "{entry}");
     fixture.stop().await;
 }
+
+/// Disabling the acquisition plugin abandons the transfer it was serving.
+///
+/// The worker keeps polling a live plugin host, so only the orchestrator being
+/// told that the registry changed stops it: the attempt's transfer is cancelled,
+/// and the acquisition goes back to searching or waits for a source instead of
+/// failing or cooling the track down.
+#[tokio::test]
+async fn disabling_the_acquisition_plugin_abandons_its_download() {
+    let fixture = Fixture::new().await;
+    let downloads = fixture.database_path().parent().unwrap().join("downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    common::install_acquisition_with(&fixture.services, &downloads, 10_000).await;
+    fixture.services.registry().rebuild().await.unwrap();
+
+    let library = hearthsound_library::LibraryRepository::new(fixture.services.database());
+    let track = common::insert_remote_track(&library).await;
+    let started = fixture
+        .services
+        .orchestrator()
+        .request(hearthsound_acquire::orchestrator::AcquireRequest::new(
+            track,
+            hearthsound_core::Priority::Play,
+            "test",
+        ))
+        .await
+        .unwrap();
+    let acquisition = started.acquisition_id().unwrap();
+    let repository = fixture.services.orchestrator().repository();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let row = repository.get(acquisition).await.unwrap().unwrap();
+        if row.plugin_token.is_some() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the acquisition never started its download; it is {}",
+            row.state
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let disabled = bearer(
+        &fixture,
+        reqwest::Method::POST,
+        &format!("/api/v1/admin/plugins/{}/disable", common::ACQ_ID),
+        None,
+    )
+    .await;
+    assert_eq!(disabled.status(), StatusCode::OK);
+
+    // Within a poll of the registry change the attempt is abandoned: the row is
+    // back in the pipeline waiting for a source, never failed.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let row = repository.get(acquisition).await.unwrap().unwrap();
+        if row.state == hearthsound_core::AcquisitionState::Queued && row.park_reason.is_some() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the abandoned acquisition is {} instead of waiting for a source",
+            row.state
+        );
+        assert_ne!(
+            row.state,
+            hearthsound_core::AcquisitionState::Failed,
+            "disabling the plugin must not fail the acquisition"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let row = repository.get(acquisition).await.unwrap().unwrap();
+    assert_eq!(
+        row.park_reason,
+        Some(hearthsound_core::ParkReason::NoSource)
+    );
+    assert_eq!(row.failure_reason, None);
+    assert_eq!(row.instance_id, None, "the attempt released its instance");
+
+    // The fixture saw its transfer cancelled, which is what proves the worker
+    // stopped instead of finishing the download.
+    let cancellations: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT value FROM plugin_kv WHERE key = 'counter:cancel'")
+            .fetch_optional(fixture.services.database().readers())
+            .await
+            .unwrap();
+    let cancellations: u64 = cancellations
+        .map(|value| serde_json::from_slice(&value).unwrap())
+        .unwrap_or(0);
+    assert!(cancellations >= 1, "the abandoned transfer was cancelled");
+    fixture.stop().await;
+}

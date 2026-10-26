@@ -375,6 +375,26 @@ pub const SEARCH_POLLS: u32 = 60;
 /// - `services`: the running server's services.
 /// - `downloads`: the directory granted as the instance's import root.
 pub async fn install_acquisition(services: &Arc<Services>, downloads: &std::path::Path) {
+    install_acquisition_with(services, downloads, 1).await;
+}
+
+/// Installs the acquisition fixture with a chosen download length.
+///
+/// The fixture answers `running` for `download_running_polls` polls, so a test
+/// that has to act while a transfer is in flight asks for a long one and a test
+/// that only reads the ledger asks for the shortest.
+///
+/// # Parameters
+///
+/// - `services`: the running server's services.
+/// - `downloads`: the directory granted as the instance's import root.
+/// - `download_running_polls`: how many polls answer `running` before a
+///   simulated download completes.
+pub async fn install_acquisition_with(
+    services: &Arc<Services>,
+    downloads: &std::path::Path,
+    download_running_polls: u32,
+) {
     let installed = services
         .plugins()
         .install(&fixture_plugin(ACQUISITION_FIXTURE))
@@ -411,7 +431,7 @@ pub async fn install_acquisition(services: &Arc<Services>, downloads: &std::path
                 "scenario": "normal",
                 "searchPolls": SEARCH_POLLS,
                 "downloadQueuedPolls": 0,
-                "downloadRunningPolls": 1,
+                "downloadRunningPolls": download_running_polls,
                 "downloadBytesPerPoll": 4000,
                 "outputRoot": "downloads",
                 "matchSuffix": ".flac",
