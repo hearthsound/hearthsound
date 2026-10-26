@@ -422,6 +422,86 @@ async fn a_file_that_is_not_on_disk_is_skipped() {
     assert_eq!(row.storage, StorageClass::Cache, "the row is untouched");
 }
 
+/// A saved file in a folder survives eviction and an unpin that deletes.
+///
+/// A folder file is the user's own copy: it is not in the cache root, so the
+/// eviction query cannot see it, and a track whose last pin is removed has
+/// nothing in managed storage to demote or delete.
+#[tokio::test]
+async fn a_saved_folder_file_survives_eviction_and_an_unpin_delete() {
+    let fixture = Fixture::new().await;
+    let folder_root = fixture._dir.path().join("music").join("saved");
+    std::fs::create_dir_all(&folder_root).unwrap();
+    let file = folder_root.join("01 - Cafe del Mar.flac");
+    std::fs::write(&file, b"flac").unwrap();
+    let folder = fixture
+        .library
+        .add_library_folder(&folder_root, None)
+        .await
+        .unwrap();
+    let track = fixture.track(Availability::Local).await;
+    let id = fixture
+        .library
+        .insert_media_file(&hearthsound_library::MediaFileInput {
+            track_id: track,
+            storage: StorageClass::Folder,
+            folder_id: Some(folder.id),
+            rel_path: "01 - Cafe del Mar.flac".to_owned(),
+            size: 4,
+            mtime_ms: 1,
+            format: None,
+            codec: None,
+            bitrate_kbps: None,
+            sample_rate: None,
+            bit_depth: None,
+            channels: None,
+            duration_ms: None,
+            lossless: None,
+            quality_tier: None,
+            replaygain: None,
+            has_embedded_art: None,
+            uploaded_by: None,
+            acquisition_id: None,
+        })
+        .await
+        .unwrap();
+    fixture
+        .library
+        .add_pin_reason(track, PinReason::UserLibrary)
+        .await
+        .unwrap();
+    set(
+        &fixture,
+        "storage.cache.max_bytes",
+        SettingValue::Integer(0),
+    )
+    .await;
+    set(
+        &fixture,
+        "storage.unpin_action",
+        SettingValue::String("delete".to_owned()),
+    )
+    .await;
+    fixture
+        .library
+        .remove_pin_reason(track, PinReason::UserLibrary)
+        .await
+        .unwrap();
+
+    let evicted = fixture.maintainer().evict().await.unwrap();
+    assert_eq!(evicted.files, 0, "a folder file is no candidate");
+    let report = fixture.maintainer().relocate().await.unwrap();
+    assert_eq!(
+        report,
+        Default::default(),
+        "a track with no managed file has nothing to move or delete"
+    );
+    assert!(file.is_file(), "the saved file is still there");
+    let row = fixture.row(id).await.unwrap();
+    assert_eq!(row.storage, StorageClass::Folder);
+    assert_eq!(row.folder_id, Some(folder.id));
+}
+
 /// Sets a setting the maintainer reads.
 async fn set(fixture: &Fixture, key: &str, value: SettingValue) {
     fixture.settings.set(key, value, None).await.unwrap();
