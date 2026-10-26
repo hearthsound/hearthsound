@@ -3917,11 +3917,26 @@
           "id",
           "state",
           "priority",
+          "targetKind",
           "awaitingSource",
           "createdAt",
           "updatedAt"
         ],
         "properties": {
+          "albumArtist": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The album's artist, for an album target that knows one."
+          },
+          "albumTitle": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The album's title, for an album target."
+          },
           "awaitingSource": {
             "type": "boolean",
             "description": "Whether the acquisition is queued and waiting for an acquisition source.\n\nA parked acquisition looks idle because its state is `queued`; this flag\nsays it is not about to run."
@@ -3972,6 +3987,10 @@
           "state": {
             "type": "string",
             "description": "The lifecycle state, such as `queued`, `downloading`, `completed` or\n`failed`."
+          },
+          "targetKind": {
+            "type": "string",
+            "description": "Whether the acquisition targets a track or a whole album: `track` or\n`album`."
           },
           "trackArtist": {
             "type": [

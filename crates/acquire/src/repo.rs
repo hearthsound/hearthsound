@@ -1299,9 +1299,10 @@ pub struct ListFilter {
 /// One acquisition as an administrative listing shows it.
 ///
 /// The row carries what a person needs to recognize the job - its client id, its
-/// state, its priority and the track it targets - plus the display fields the
-/// ledger does not hold itself: the track's title and artist, and the slug of the
-/// instance serving it. The percentage is the one the last progress snapshot
+/// state, its priority, and whether it targets a track or a whole album - plus
+/// the display fields the ledger does not hold itself: the track's title and
+/// artist, the album's title and artist, and the slug of the instance serving
+/// it. The percentage is the one the last progress snapshot
 /// allows, which is the same number the event stream carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcquisitionSummary {
@@ -1313,12 +1314,18 @@ pub struct AcquisitionSummary {
     pub state: AcquisitionState,
     /// The acquisition's priority.
     pub priority: Priority,
+    /// Whether the acquisition targets a track or a whole album.
+    pub target_kind: Granularity,
     /// The track the acquisition is for, when it is track-granular.
     pub track_id: Option<EntityId>,
     /// The track's title, when the track still exists.
     pub track_title: Option<String>,
     /// The track's display artist, when the track knows one.
     pub track_artist: Option<String>,
+    /// The album's title, for an album-granular acquisition.
+    pub album_title: Option<String>,
+    /// The album's display artist, when the album knows one.
+    pub album_artist: Option<String>,
     /// The slug of the instance serving the acquisition, when one is named and
     /// the registry still knows it.
     pub instance: Option<String>,
@@ -1340,6 +1347,7 @@ pub struct AcquisitionSummary {
 struct ListDbRow {
     id: Vec<u8>,
     track_id: Option<Vec<u8>>,
+    granularity: String,
     priority: String,
     state: String,
     progress: Option<String>,
@@ -1349,6 +1357,8 @@ struct ListDbRow {
     updated_at: i64,
     track_title: Option<String>,
     track_artist: Option<String>,
+    album_title: Option<String>,
+    album_artist: Option<String>,
     instance_slug: Option<String>,
 }
 
@@ -1372,8 +1382,11 @@ impl ListDbRow {
                 .as_deref()
                 .map(|bytes| entity(IdPrefix::Track, bytes))
                 .transpose()?,
+            target_kind: decode_literal("granularity", &self.granularity)?,
             track_title: self.track_title,
             track_artist: self.track_artist,
+            album_title: self.album_title,
+            album_artist: self.album_artist,
             instance: self.instance_slug,
             percent: crate::download::stored_progress(self.progress.as_deref())
                 .and_then(|stored| stored.percent()),
@@ -1393,12 +1406,13 @@ impl ListDbRow {
     }
 }
 
-/// Lists acquisitions, newest first, with the display fields of their track.
+/// Lists acquisitions, newest first, with the display fields of their target.
 ///
-/// The track's title and artist are joined in, as is the slug of the instance
-/// serving the acquisition, so a caller that only prints the listing does not
-/// have to look either up. A row whose track or instance has been deleted keeps
-/// its place with the missing field left `None`.
+/// A track-granular row carries its track's title and artist, an album-granular
+/// row its album's, and every row the slug of the instance serving it, so a
+/// caller that only prints the listing does not have to look any of them up. A
+/// row whose target or instance has been deleted keeps its place with the
+/// missing field left `None`.
 ///
 /// # Parameters
 ///
@@ -1425,12 +1439,14 @@ pub async fn list(
     let limit = i64::from(filter.limit.unwrap_or(u32::MAX));
     let rows = sqlx::query_as!(
         ListDbRow,
-        "SELECT a.id, a.track_id, a.priority, a.state, a.progress, a.failure_reason, \
-                a.park_reason, a.created_at, a.updated_at, \
+        "SELECT a.id, a.track_id, a.granularity, a.priority, a.state, a.progress, \
+                a.failure_reason, a.park_reason, a.created_at, a.updated_at, \
                 t.title AS track_title, t.display_artist AS track_artist, \
+                al.title AS album_title, al.display_artist AS album_artist, \
                 i.slug AS instance_slug \
          FROM acquisitions a \
          LEFT JOIN tracks t ON t.id = a.track_id \
+         LEFT JOIN albums al ON al.id = a.album_id \
          LEFT JOIN provider_instances i ON i.id = a.instance_id \
          WHERE (? IS NULL OR a.state = ?) \
            AND (? = 0 OR a.state IN ('queued', 'resolving', 'searching', 'downloading', \

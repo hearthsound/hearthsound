@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT a.id, a.track_id, a.priority, a.state, a.progress, a.failure_reason, a.park_reason, a.created_at, a.updated_at, t.title AS track_title, t.display_artist AS track_artist, i.slug AS instance_slug FROM acquisitions a LEFT JOIN tracks t ON t.id = a.track_id LEFT JOIN provider_instances i ON i.id = a.instance_id WHERE (? IS NULL OR a.state = ?) AND (? = 0 OR a.state IN ('queued', 'resolving', 'searching', 'downloading', 'verifying', 'importing')) ORDER BY a.created_at DESC, a.rowid DESC LIMIT ?",
+  "query": "SELECT a.id, a.track_id, a.granularity, a.priority, a.state, a.progress, a.failure_reason, a.park_reason, a.created_at, a.updated_at, t.title AS track_title, t.display_artist AS track_artist, al.title AS album_title, al.display_artist AS album_artist, i.slug AS instance_slug FROM acquisitions a LEFT JOIN tracks t ON t.id = a.track_id LEFT JOIN albums al ON al.id = a.album_id LEFT JOIN provider_instances i ON i.id = a.instance_id WHERE (? IS NULL OR a.state = ?) AND (? = 0 OR a.state IN ('queued', 'resolving', 'searching', 'downloading', 'verifying', 'importing')) ORDER BY a.created_at DESC, a.rowid DESC LIMIT ?",
   "describe": {
     "columns": [
       {
@@ -26,8 +26,19 @@
         }
       },
       {
-        "name": "priority",
+        "name": "granularity",
         "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "acquisitions",
+            "name": "granularity"
+          }
+        }
+      },
+      {
+        "name": "priority",
+        "ordinal": 3,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -38,7 +49,7 @@
       },
       {
         "name": "state",
-        "ordinal": 3,
+        "ordinal": 4,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -49,7 +60,7 @@
       },
       {
         "name": "progress",
-        "ordinal": 4,
+        "ordinal": 5,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -60,7 +71,7 @@
       },
       {
         "name": "failure_reason",
-        "ordinal": 5,
+        "ordinal": 6,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -71,7 +82,7 @@
       },
       {
         "name": "park_reason",
-        "ordinal": 6,
+        "ordinal": 7,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -82,7 +93,7 @@
       },
       {
         "name": "created_at",
-        "ordinal": 7,
+        "ordinal": 8,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -93,7 +104,7 @@
       },
       {
         "name": "updated_at",
-        "ordinal": 8,
+        "ordinal": 9,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -104,7 +115,7 @@
       },
       {
         "name": "track_title",
-        "ordinal": 9,
+        "ordinal": 10,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -115,7 +126,7 @@
       },
       {
         "name": "track_artist",
-        "ordinal": 10,
+        "ordinal": 11,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -125,8 +136,30 @@
         }
       },
       {
+        "name": "album_title",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "name": "album_artist",
+        "ordinal": 13,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "display_artist"
+          }
+        }
+      },
+      {
         "name": "instance_slug",
-        "ordinal": 11,
+        "ordinal": 14,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -144,15 +177,18 @@
       true,
       false,
       false,
+      false,
       true,
       true,
       true,
       false,
       false,
+      true,
+      true,
       true,
       true,
       true
     ]
   },
-  "hash": "2a0e6c1b13f959dc77cdac9da3a43a38628ea5ef4d7891b3b6c22e25f16dd2af"
+  "hash": "6063d60ee986af953cd0b056ac4a44a82545eee74672ca566890f5b448aa1044"
 }

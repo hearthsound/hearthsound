@@ -43,12 +43,19 @@ pub struct AcquisitionView {
     pub state: String,
     /// The priority the request was made at.
     pub priority: String,
+    /// Whether the acquisition targets a track or a whole album: `track` or
+    /// `album`.
+    pub target_kind: String,
     /// The track's client id (`tr_...`), when the acquisition names one.
     pub track_id: Option<String>,
     /// The track's title, when known.
     pub track_title: Option<String>,
     /// The track's artist, when known.
     pub track_artist: Option<String>,
+    /// The album's title, for an album target.
+    pub album_title: Option<String>,
+    /// The album's artist, for an album target that knows one.
+    pub album_artist: Option<String>,
     /// The plugin instance doing the work, when one has been assigned.
     pub instance: Option<String>,
     /// Progress from 0 to 100, when the backend reports it.
@@ -75,9 +82,12 @@ impl From<&AcquisitionSummary> for AcquisitionView {
             id: summary.client_id.clone(),
             state: summary.state.as_str().to_string(),
             priority: summary.priority.as_str().to_string(),
+            target_kind: summary.target_kind.as_str().to_string(),
             track_id: summary.track_id.as_ref().map(ToString::to_string),
             track_title: summary.track_title.clone(),
             track_artist: summary.track_artist.clone(),
+            album_title: summary.album_title.clone(),
+            album_artist: summary.album_artist.clone(),
             instance: summary.instance.clone(),
             percent: summary.percent,
             failure_reason: summary

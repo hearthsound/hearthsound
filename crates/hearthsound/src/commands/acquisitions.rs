@@ -152,7 +152,7 @@ fn acquisition_id(text: &str) -> anyhow::Result<Uuid> {
     }
 }
 
-/// Renders the track an acquisition targets.
+/// Renders the entity an acquisition targets.
 ///
 /// # Parameters
 ///
@@ -160,9 +160,12 @@ fn acquisition_id(text: &str) -> anyhow::Result<Uuid> {
 ///
 /// # Returns
 ///
-/// `<artist> - <title>`, the one field that is known, or `-`.
+/// `<artist> - <title>` for the target the row names - its track or its album -
+/// the one field that is known, or `-`.
 fn track_of(row: &AcquisitionSummary) -> String {
-    match (row.track_artist.as_deref(), row.track_title.as_deref()) {
+    let artist = row.track_artist.as_deref().or(row.album_artist.as_deref());
+    let title = row.track_title.as_deref().or(row.album_title.as_deref());
+    match (artist, title) {
         (Some(artist), Some(title)) => format!("{artist} - {title}"),
         (None, Some(title)) => title.to_owned(),
         (Some(artist), None) => artist.to_owned(),

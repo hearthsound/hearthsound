@@ -1293,6 +1293,71 @@ async fn an_administrator_lists_cancels_and_retries_acquisitions() {
     fixture.stop().await;
 }
 
+/// An album acquisition is named by its album, and a track acquisition by its
+/// track: the row a client draws as `Unknown track` is the one thing the listing
+/// could not say.
+#[tokio::test]
+async fn the_acquisition_listing_names_an_album_target() {
+    let fixture = Fixture::new().await;
+    let downloads = fixture.database_path().parent().unwrap().join("downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    common::install_acquisition(&fixture.services, &downloads).await;
+    fixture.services.registry().rebuild().await.unwrap();
+
+    let database = fixture.services.database();
+    let library = hearthsound_library::LibraryRepository::new(database);
+    let track = common::insert_remote_track(&library).await;
+    fixture
+        .services
+        .orchestrator()
+        .request(hearthsound_acquire::orchestrator::AcquireRequest::new(
+            track,
+            hearthsound_core::Priority::Play,
+            "test",
+        ))
+        .await
+        .unwrap();
+    let mut album_input =
+        hearthsound_library::AlbumInput::new("Reload Album", hearthsound_library::Origin::Catalog);
+    album_input.display_artist = Some("Reload Artist".to_owned());
+    let album = library.upsert_album(&album_input, &[]).await.unwrap();
+    {
+        let mut tx = database.writer().begin().await.unwrap();
+        hearthsound_acquire::repo::insert(
+            &mut tx,
+            &hearthsound_acquire::repo::NewAcquisition {
+                id: hearthsound_core::new_uuid_v7(),
+                track_id: None,
+                album_id: Some(album),
+                granularity: hearthsound_core::Granularity::Album,
+                priority: hearthsound_core::Priority::Queue,
+                reason: "test".to_owned(),
+                requested_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let listing = json(bearer_get(&fixture, "/api/v1/admin/acquisitions").await).await;
+    let rows = listing["acquisitions"].as_array().unwrap();
+    let track_row = rows
+        .iter()
+        .find(|row| row["targetKind"] == "track")
+        .unwrap_or_else(|| panic!("the track target is missing from {listing}"));
+    assert_eq!(track_row["trackTitle"], "Reload Song");
+    assert!(track_row["albumTitle"].is_null(), "{track_row}");
+    let album_row = rows
+        .iter()
+        .find(|row| row["targetKind"] == "album")
+        .unwrap_or_else(|| panic!("the album target is missing from {listing}"));
+    assert!(album_row["trackId"].is_null(), "{album_row}");
+    assert_eq!(album_row["albumTitle"], "Reload Album");
+    assert_eq!(album_row["albumArtist"], "Reload Artist");
+    fixture.stop().await;
+}
+
 /// Builds a `multipart/form-data` body with one `file` part per entry, and
 /// the `Content-Type` that names its boundary.
 fn multipart_body(files: &[(&str, Vec<u8>)]) -> (String, Vec<u8>) {
