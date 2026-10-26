@@ -25,8 +25,9 @@
 //!   syncing a library needs.
 //! - [`PageDepth::Cached`] is what a first-party page read uses: it pairs through
 //!   recorded aliases and through the answers the catalog layers already cached,
-//!   never calls a provider and never writes. A cold entity answers from the
-//!   library alone and a `catalog.enrich` job fills the rest.
+//!   and never writes. A cold entity opens with one bounded read of its own
+//!   record, and a `catalog.enrich` job fills the extras (the discography, the
+//!   top songs, the biography and the portraits) that a page never waits for.
 //!
 //! ## Privacy
 //!
@@ -65,12 +66,16 @@ pub enum PageDepth {
     /// stored entity inside a scope answers from stored rows, without a catalog
     /// call.
     Library,
-    /// Pair by alias and by cached provider answers only; never call a provider
-    /// and never write.
+    /// Pair by alias and by cached provider answers; never write, and spend at
+    /// most one bounded read to open an entity whose page has no cached hero.
     ///
     /// This is the depth of a first-party page read: the page answers from the
     /// library plus whatever the catalog layers already cached, and the extras a
-    /// cold entity lacks are fetched by a `catalog.enrich` job.
+    /// cold entity lacks are fetched by a `catalog.enrich` job. The entity's own
+    /// record - the artist's name and identifiers, the album's title, credits and
+    /// tracklist - is the page's identity rather than one of its extras, so a
+    /// cold page read may spend one provider call for it, and never walks an
+    /// artist's discography to find it.
     Cached,
     /// Pair by alias, then by name or title, and record what the page found.
     ///
@@ -444,6 +449,93 @@ impl CatalogService {
             Ok(found) => Ok(Some(found)),
             Err(CatalogError::NotFound) => Ok(None),
             Err(error) => Err(error),
+        }
+    }
+
+    /// Reads one catalog artist to open its page.
+    ///
+    /// The artist record carries the name and the identifiers, which are the
+    /// page's identity: a page that cannot open its artist is not a degraded page
+    /// but a missing one. A cached depth therefore spends one bounded `artist`
+    /// read when nothing cached it, and never asks for the discography. A
+    /// provider failure is logged and reads as a miss, so the page still answers
+    /// from the library and the cache.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the catalog id of the artist.
+    /// - `depth`: how much the page may spend.
+    ///
+    /// # Returns
+    ///
+    /// The artist, or `None` when no provider and no cached answer names one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when a live read at [`PageDepth::Full`] fails.
+    async fn page_artist_hero(
+        &self,
+        id: &CatalogId,
+        depth: PageDepth,
+    ) -> Result<Option<CatalogArtistResult>, CatalogError> {
+        let cached = self.page_artist(id, depth).await?;
+        if cached.is_some() || depth != PageDepth::Cached {
+            return Ok(cached);
+        }
+        match self.artist(id).await {
+            Ok(found) => Ok(Some(found)),
+            Err(CatalogError::NotFound) => Ok(None),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    artist = %id,
+                    "a catalog artist could not be read to open its page"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Reads one catalog album to open its page.
+    ///
+    /// The album and its tracklist are the page itself rather than one of its
+    /// extras, so a cached depth spends one bounded `album` read when nothing
+    /// cached it instead of answering a page whose listing is empty. A provider
+    /// failure is logged and reads as a miss, and the caller falls back to the
+    /// cached reference a search promoted.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the catalog id of the album.
+    /// - `depth`: how much the page may spend.
+    ///
+    /// # Returns
+    ///
+    /// The album, or `None` when no provider and no cached answer names one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when a live read at [`PageDepth::Full`] fails.
+    async fn page_album_hero(
+        &self,
+        id: &CatalogId,
+        depth: PageDepth,
+    ) -> Result<Option<CatalogAlbumResult>, CatalogError> {
+        let cached = self.page_album(id, depth).await?;
+        if cached.is_some() || depth != PageDepth::Cached {
+            return Ok(cached);
+        }
+        match self.album(id).await {
+            Ok(found) => Ok(Some(found)),
+            Err(CatalogError::NotFound) => Ok(None),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    album = %id,
+                    "a catalog album could not be read to open its page"
+                );
+                Ok(None)
+            }
         }
     }
 
@@ -838,7 +930,7 @@ impl CatalogService {
                 (Some(*entity), catalog, visible)
             }
             ClientId::Catalog(catalog_id) if catalog_id.kind() == EntityKind::Artist => {
-                let Some(fetched) = self.page_artist(catalog_id, depth).await? else {
+                let Some(fetched) = self.page_artist_hero(catalog_id, depth).await? else {
                     return Ok(None);
                 };
                 let namespace = provider_namespace(catalog_id.slug());
@@ -1025,11 +1117,11 @@ impl CatalogService {
                 (Some(*entity), fetched, visible)
             }
             ClientId::Catalog(catalog_id) if catalog_id.kind() == EntityKind::Album => {
-                let fetched = match self.page_album(catalog_id, depth).await? {
+                let fetched = match self.page_album_hero(catalog_id, depth).await? {
                     Some(found) => found,
-                    // The hero of a cold album page is the cached reference: the
-                    // title and the credits are known, the tracklist arrives with
-                    // the enrichment.
+                    // A provider that could not answer still leaves the hero: the
+                    // title and the credits a search promoted are known, and the
+                    // tracklist arrives with the enrichment.
                     None => match self.cached_album_ref(catalog_id).await? {
                         Some(reference) => CatalogAlbumResult {
                             id: reference.id.clone(),

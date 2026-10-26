@@ -53,15 +53,20 @@ const EMPTY_SEGMENT: &str = "untitled";
 
 /// Whether a path resolution may call a catalog provider.
 ///
-/// A first-party path lookup must not spend provider quota: it resolves through
-/// the library and the answers the catalog layers already cached, and the page
-/// it opens asks for the rest through a `catalog.enrich` job. A native or internal
-/// lookup resolves live.
+/// Resolving an identity is navigation, not an extra: the link a page published
+/// must open even for a visitor who arrives before anything cached the
+/// provider's answer. A cached resolution therefore reads the library, the
+/// recorded aliases and the cached provider answers first, and spends at most
+/// one bounded catalog search when all of them hold nothing. It never fetches an
+/// artist's discography or an album's tracklist; the page it opens asks for its
+/// extras through a `catalog.enrich` job. A native or internal lookup resolves
+/// live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathMode {
     /// Pair by name and title, and call providers as needed.
     Live,
-    /// Pair through recorded aliases and cached provider answers only.
+    /// Pair through the library, recorded aliases and cached provider answers,
+    /// and fall back to one bounded catalog search when the cache is cold.
     Cached,
 }
 
@@ -360,14 +365,17 @@ impl CatalogService {
     ///
     /// The album segment is matched against the artist page's listing, in the
     /// order the page shows it, so the ordinal of an album agrees with the one
-    /// its card links to. An album the listing does not hold is searched for in
-    /// the catalog when the artist is a catalog artist.
+    /// its card links to. An album the listing does not hold is searched for by
+    /// its title and kept when the artist's name answers to the path's artist
+    /// segment; a [`PathMode::Cached`] lookup spends that one search only when
+    /// nothing cached the answer.
     ///
     /// # Parameters
     ///
     /// - `artist_segment`: the artist path segment.
     /// - `album_segment`: the album path segment.
     /// - `scopes`: the scopes the caller reads, in listing order.
+    /// - `mode`: whether the resolution may call a provider.
     ///
     /// # Returns
     ///
@@ -403,7 +411,7 @@ impl CatalogService {
             }));
         }
         let query = CatalogQuery {
-            text: format!("{} {}", words(&artist_base), words(&base)),
+            text: words(&base),
             kinds: vec![EntityKind::Album],
             limit: 10,
             offset: 0,
@@ -797,7 +805,7 @@ impl CatalogService {
         Ok(candidates)
     }
 
-    /// Searches the catalog for a path, using the cache at the cached mode.
+    /// Searches the catalog for a path.
     ///
     /// # Parameters
     ///
@@ -812,18 +820,29 @@ impl CatalogService {
     ///
     /// Returns [`CatalogError`] when the live search fails or a setting cannot be
     /// read.
+    ///
+    /// A [`PathMode::Cached`] lookup reads the cached answer first and spends one
+    /// search when nothing is cached: an entity whose page handed its path out
+    /// must resolve on a cold cache, and one search of ten rows is the bound.
     async fn search_for_path(
         &self,
         query: &CatalogQuery,
         mode: PathMode,
     ) -> Result<Option<crate::service::CatalogSearch>, CatalogError> {
-        match mode {
-            PathMode::Cached => self.cached_search(query).await,
-            PathMode::Live => self.search(query).await.map(Some),
+        if mode == PathMode::Live {
+            return self.search(query).await.map(Some);
         }
+        if let Some(found) = self.cached_search(query).await? {
+            return Ok(Some(found));
+        }
+        self.search(query).await.map(Some)
     }
 
     /// Reads one catalog artist at the mode the caller asked for.
+    ///
+    /// A [`PathMode::Cached`] read answers from the cache and spends one bounded
+    /// `artist` read when nothing cached the record: the identity a path needs is
+    /// navigation, not an extra.
     ///
     /// # Parameters
     ///
@@ -832,20 +851,28 @@ impl CatalogService {
     ///
     /// # Errors
     ///
-    /// Returns [`CatalogError::NotFound`] when the cached mode has no answer for
-    /// it, and whatever a live read returns.
+    /// Returns [`CatalogError::NotFound`] when neither the cache nor the provider
+    /// names the artist, and whatever a live read returns.
     async fn artist_at(
         &self,
         id: &CatalogId,
         mode: PathMode,
     ) -> Result<CatalogArtistResult, CatalogError> {
-        match mode {
-            PathMode::Cached => self.cached_artist(id).await?.ok_or(CatalogError::NotFound),
-            PathMode::Live => self.artist(id).await,
+        if mode == PathMode::Live {
+            return self.artist(id).await;
+        }
+        match self.cached_artist(id).await? {
+            Some(found) => Ok(found),
+            None => self.artist(id).await,
         }
     }
 
     /// Reads one catalog album at the mode the caller asked for.
+    ///
+    /// A [`PathMode::Cached`] read answers from the cache, then from the
+    /// reference a search or an artist listing promoted, and only then spends one
+    /// bounded `album` read. The title and the credits are what a path needs; the
+    /// tracklist is not part of a path.
     ///
     /// # Parameters
     ///
@@ -854,8 +881,8 @@ impl CatalogService {
     ///
     /// # Errors
     ///
-    /// Returns [`CatalogError::NotFound`] when the cached mode has no answer for
-    /// it, and whatever a live read returns.
+    /// Returns [`CatalogError::NotFound`] when neither the cache nor the provider
+    /// names the album, and whatever a live read returns.
     async fn album_at(
         &self,
         id: &CatalogId,
@@ -867,13 +894,9 @@ impl CatalogService {
         if let Some(album) = self.cached_album(id).await? {
             return Ok(album);
         }
-        // A path needs the title and the credits, which the reference a search or
-        // an artist listing promoted already carries; the tracklist is not part
-        // of a path.
-        let reference = self
-            .cached_album_ref(id)
-            .await?
-            .ok_or(CatalogError::NotFound)?;
+        let Some(reference) = self.cached_album_ref(id).await? else {
+            return self.album(id).await;
+        };
         Ok(crate::service::CatalogAlbumResult {
             id: reference.id,
             album: hearthsound_core::providers::CatalogAlbum {

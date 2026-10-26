@@ -483,6 +483,82 @@ async fn an_album_path_names_the_album_the_artist_page_lists() {
     );
 }
 
+/// A path a page published resolves on a cold cache, without a discography walk.
+///
+/// The link a card shows is built from names alone, so the first visitor of a
+/// catalog artist or album may arrive before anything cached its provider
+/// answer. Resolving the identity is navigation: one bounded catalog search is
+/// allowed, and the page's extras still arrive with the enrichment job.
+#[tokio::test]
+async fn a_catalog_path_resolves_on_a_cold_cache() {
+    let fixture = Fixture::new().await;
+    fixture.install_discography_catalog().await;
+
+    let artist = resolve_path(&fixture, "artist=discography-artist").await;
+    assert_eq!(
+        artist["id"].as_str(),
+        Some(catalog_id(EntityKind::Artist, ARTIST).as_str()),
+        "an artist nothing cached yet still resolves by name"
+    );
+    assert_eq!(artist["path"].as_str(), Some("discography-artist"));
+
+    let album = resolve_path(&fixture, "artist=discography-artist&album=first-light").await;
+    assert_eq!(
+        album["id"].as_str(),
+        Some(catalog_id(EntityKind::Album, "disco-album-1").as_str())
+    );
+    assert_eq!(
+        album["path"].as_str(),
+        Some("discography-artist/first-light")
+    );
+    assert_eq!(enrich_jobs(&fixture).await, 0, "a path enqueues nothing");
+
+    // The second visit answers from what the first lookup cached.
+    let again = resolve_path(&fixture, "artist=discography-artist&album=first-light").await;
+    assert_eq!(again["id"], album["id"]);
+}
+
+/// A catalog album's own page lists its tracklist on the first visit.
+///
+/// The tracklist is the page, not an extra: the artist's discography, top songs
+/// and biography are what wait for the enrichment job.
+#[tokio::test]
+async fn a_cold_catalog_album_page_lists_its_tracklist() {
+    let fixture = Fixture::new().await;
+    fixture.install_discography_catalog().await;
+    let body = album_page(&fixture, &catalog_id(EntityKind::Album, "disco-album-1")).await;
+
+    assert_eq!(
+        song_ids(&body),
+        vec![
+            catalog_id(EntityKind::Track, "disco-track-1-1"),
+            catalog_id(EntityKind::Track, "disco-track-1-2"),
+            catalog_id(EntityKind::Track, "disco-track-1-3"),
+        ],
+        "a cold album page carries its tracklist"
+    );
+    let album = &body["subsonic-response"]["album"];
+    assert_eq!(album["name"].as_str(), Some("First Light"));
+    assert_eq!(album["songCount"].as_i64(), Some(3));
+}
+
+/// A cold catalog artist page opens the artist and still asks for the extras.
+#[tokio::test]
+async fn a_cold_catalog_artist_page_opens_and_asks_for_the_extras() {
+    let fixture = Fixture::new().await;
+    fixture.install_discography_catalog().await;
+    let body = artist_page(&fixture, &catalog_id(EntityKind::Artist, ARTIST), true).await;
+
+    let artist = &body["subsonic-response"]["artist"];
+    assert_eq!(artist["name"].as_str(), Some("Discography Artist"));
+    assert_eq!(album_ids(&body), Vec::<String>::new(), "no discography yet");
+    assert_eq!(
+        enrich_jobs(&fixture).await,
+        1,
+        "the page's extras arrive with the enrichment job"
+    );
+}
+
 #[tokio::test]
 async fn an_id_resolves_to_its_canonical_path() {
     let seed = seeded().await;

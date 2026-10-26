@@ -992,10 +992,11 @@ fn page_track_id(track: &PageTrack) -> ClientId {
 /// # Returns
 ///
 /// [`PageDepth::Cached`] when the client opted into the vendor extension, and
-/// [`PageDepth::Library`] otherwise. A first-party page never waits for a
-/// provider: it answers from the library plus the cached catalog answers, and
-/// the read then asks for the extras through a `catalog.enrich` job. A
-/// third-party client keeps the library-only answer for a stored id.
+/// [`PageDepth::Library`] otherwise. A first-party page answers from the library
+/// plus the cached catalog answers; a cold entity opens with one bounded read of
+/// its own record, and never waits for its extras, which the read asks for
+/// through a `catalog.enrich` job. A third-party client keeps the library-only
+/// answer for a stored id.
 fn page_depth(call: &Call) -> PageDepth {
     if call.params().vendor_enabled() {
         PageDepth::Cached
