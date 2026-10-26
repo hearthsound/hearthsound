@@ -71,7 +71,7 @@ mod service;
 mod wire;
 
 pub use artwork::{CoverArt, CoverArtRequest};
-pub use cache::{ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
+pub use cache::{EMPTY_TOP_TRACKS_TTL, ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
 pub use dedupe::{
     DURATION_TOLERANCE_MS, DedupedCatalog, LocalMatches, LocalTrackHit, MaterializedEntity,
 };

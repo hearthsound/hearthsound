@@ -11,7 +11,7 @@ use crate::common::{
     Env, HELLO_CATALOG_ID, HTTP_CATALOG_ID, cache_row_lifetime, catalog_endpoint, catalog_id,
     count_cache_rows, http_config, now_millis, query, write_cache_row,
 };
-use hearthsound_catalog::{ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
+use hearthsound_catalog::{EMPTY_TOP_TRACKS_TTL, ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
 use hearthsound_config::SettingValue;
 use hearthsound_config::keys as setting_keys;
 use hearthsound_core::{EntityKind, Layer};
@@ -367,4 +367,63 @@ async fn rows_of(database: &hearthsound_db::Database, instance: uuid::Uuid) -> i
         .fetch_one(database.readers())
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn an_empty_top_tracks_answer_lives_for_an_hour() {
+    let env = Env::new().await;
+    env.instance(
+        "hello",
+        HELLO_CATALOG,
+        HELLO_CATALOG_ID,
+        serde_json::json!({}),
+    )
+    .await;
+    env.assign(Layer::Catalog, &["hello"]).await;
+    let service = env.service();
+    let artist = catalog_id("hello", EntityKind::Artist, "hello-artist-1");
+    let instance = env.instance_id("hello");
+
+    // A provider that answers no popular tracks is a legitimate answer, so it is
+    // cached - for an hour, not for an entity's six.
+    let empty = service.artist_top_tracks(&artist, 0).await.unwrap();
+    assert!(empty.is_empty());
+    let empty_lifetime = cache_row_lifetime(
+        &env.database,
+        instance,
+        RequestKey::artist_top_tracks("hello-artist-1", 0).as_str(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        empty_lifetime,
+        i64::try_from(EMPTY_TOP_TRACKS_TTL.as_millis()).unwrap()
+    );
+
+    let full = service.artist_top_tracks(&artist, 5).await.unwrap();
+    assert_eq!(full.len(), 1);
+    let full_lifetime = cache_row_lifetime(
+        &env.database,
+        instance,
+        RequestKey::artist_top_tracks("hello-artist-1", 5).as_str(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        full_lifetime,
+        i64::try_from(ENTITY_CACHE_TTL.as_millis()).unwrap()
+    );
+
+    // Within the hour both answers are served from the cache: the provider is not
+    // asked again and no row is added.
+    let rows = count_cache_rows(&env.database).await;
+    assert!(
+        service
+            .artist_top_tracks(&artist, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(service.artist_top_tracks(&artist, 5).await.unwrap(), full);
+    assert_eq!(count_cache_rows(&env.database).await, rows);
 }

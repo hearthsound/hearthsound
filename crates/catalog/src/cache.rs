@@ -42,6 +42,14 @@ use crate::error::CatalogError;
 /// the short of the two lifetimes.
 pub const SEARCH_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
+/// How long a cached answer that found nothing stays fresh.
+///
+/// One hour. A provider that has no popular tracks for an artist today may have
+/// them tomorrow, and an empty answer that lived as long as an entity answer
+/// would hide the chart for six hours. The established pattern for an empty
+/// answer is a short lifetime (`EMPTY_ARTIST_INFO_TTL`, `EMPTY_ARTWORK_TTL`).
+pub const EMPTY_TOP_TRACKS_TTL: Duration = Duration::from_secs(60 * 60);
+
 /// How long a cached entity lookup stays fresh.
 ///
 /// Six hours. A track, album or artist changes far less often than a search
@@ -431,6 +439,60 @@ impl Cache {
             return Ok(cached.into());
         }
         let value = call.await?;
+        self.put(instance, key, &W::from(&value), ttl).await;
+        Ok(value)
+    }
+
+    /// Runs a provider call through the cache, with a lifetime the answer chooses.
+    ///
+    /// An answer that found nothing is worth less than one that found something,
+    /// so the lifetime is a function of the value: [`through`](Cache::through)
+    /// serves the answers whose lifetime is fixed.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance`: the instance id part of the key.
+    /// - `key`: the canonical request key.
+    /// - `ttl_of`: how long this particular answer stays usable.
+    /// - `call`: the provider call to run on a miss.
+    ///
+    /// # Returns
+    ///
+    /// The cached response, or the response the call produced.
+    ///
+    /// # Errors
+    ///
+    /// Returns what `call` returns. A cache read failure is a miss and a failed
+    /// call is not cached.
+    pub(crate) async fn through_for<T, W, F, L>(
+        &self,
+        instance: Uuid,
+        key: &RequestKey,
+        ttl_of: L,
+        call: F,
+    ) -> Result<T, CatalogError>
+    where
+        W: Serialize + DeserializeOwned + for<'a> From<&'a T> + Into<T>,
+        F: Future<Output = Result<T, CatalogError>>,
+        L: Fn(&T) -> Duration,
+    {
+        let cached = match self.get::<W>(instance, key).await {
+            Ok(cached) => cached,
+            Err(error) => {
+                tracing::warn!(
+                    instance = %instance,
+                    request = key.as_str(),
+                    error = %error,
+                    "a cached catalog response could not be read; asking the provider"
+                );
+                None
+            }
+        };
+        if let Some(cached) = cached {
+            return Ok(cached.into());
+        }
+        let value = call.await?;
+        let ttl = ttl_of(&value);
         self.put(instance, key, &W::from(&value), ttl).await;
         Ok(value)
     }

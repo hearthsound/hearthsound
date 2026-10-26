@@ -33,7 +33,7 @@ use tokio::time::error::Elapsed;
 use uuid::Uuid;
 
 use crate::artwork::REFUSED_IMAGE_TTL;
-use crate::cache::{Cache, ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
+use crate::cache::{Cache, EMPTY_TOP_TRACKS_TTL, ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
 use crate::dedupe::normalize;
 use crate::error::CatalogError;
 use crate::wire::{
@@ -616,13 +616,22 @@ impl CatalogService {
         let instance = self.instance_for(id.slug())?;
         let provider = Self::catalog_provider(&instance)?;
         let timeout = catalog_timeout(&self.settings_snapshot())?;
+        // An artist the provider has no chart for answers an empty list, and an
+        // empty list is remembered for an hour rather than for an entity's six,
+        // so the panel recovers the same day the provider learns the artist.
         let tracks = self
             .inner
             .cache
-            .through::<Vec<CatalogTrack>, WireTracks, _>(
+            .through_for::<Vec<CatalogTrack>, WireTracks, _, _>(
                 instance.id(),
                 &RequestKey::artist_top_tracks(id.provider_id(), limit),
-                ENTITY_CACHE_TTL,
+                |tracks: &Vec<CatalogTrack>| {
+                    if tracks.is_empty() {
+                        EMPTY_TOP_TRACKS_TTL
+                    } else {
+                        ENTITY_CACHE_TTL
+                    }
+                },
                 async {
                     let outcome = tokio::time::timeout(
                         timeout,
