@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Browse pages answer from the library and the cached catalog data only; a `catalog.enrich` job fetches the missing extras, publishes `catalog.enriched` to the listener whose page asked, and the open page refreshes without a reload.
 - Search results promote their artists and album references into the cache, so opening a result costs no catalog call.
 - `playlist.changed` is delivered to the playlist's owner and to administrators only, instead of every connected account.
+- A playlist another account cannot see is reported as missing by every edit as well as by the read: `updatePlaylist`, `deletePlaylist`, `createPlaylist?playlistId=`, `hsSetPlaylistLifetime` and the native edit routes answer the same 70/404 a missing id does, and only a public playlist they can see is reported as another account's.
 
 ### Added
 

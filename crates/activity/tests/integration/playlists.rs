@@ -196,6 +196,8 @@ async fn only_the_owner_may_edit_and_others_see_public_playlists() {
         .await
         .unwrap();
 
+    // A playlist the editor may not see is reported as missing, so an id cannot
+    // be probed; a public one they may see is reported as another account's.
     let refused = playlist
         .update(
             private.id,
@@ -208,11 +210,15 @@ async fn only_the_owner_may_edit_and_others_see_public_playlists() {
         .await
         .unwrap_err();
     assert!(
-        matches!(refused, ActivityError::NotOwner { .. }),
+        matches!(refused, ActivityError::UnknownPlaylist { .. }),
         "{refused:?}"
     );
     assert!(matches!(
         playlist.delete(private.id, other).await.unwrap_err(),
+        ActivityError::UnknownPlaylist { .. }
+    ));
+    assert!(matches!(
+        playlist.delete(public.id, other).await.unwrap_err(),
         ActivityError::NotOwner { .. }
     ));
 
@@ -330,8 +336,8 @@ async fn only_the_owner_may_convert_a_playlist() {
         .await
         .unwrap_err();
     assert!(
-        matches!(refused, ActivityError::NotOwner { .. }),
-        "{refused:?}"
+        matches!(refused, ActivityError::UnknownPlaylist { .. }),
+        "a private playlist of another account looks missing: {refused:?}"
     );
     assert!(
         is_pinned(&library, tracks[0]).await,
@@ -509,7 +515,7 @@ async fn reordering_rewrites_the_positions_and_refuses_a_bad_order() {
             .reorder(created.id, other, &[0, 1, 2])
             .await
             .unwrap_err(),
-        ActivityError::NotOwner { .. }
+        ActivityError::UnknownPlaylist { .. }
     ));
     assert_eq!(
         order(

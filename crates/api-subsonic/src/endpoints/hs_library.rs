@@ -341,11 +341,12 @@ pub async fn hs_get_library_counts(call: Call) -> Encoded {
 ///
 /// # Errors
 ///
-/// Answers Subsonic error 70 when the request does not carry `hearthsound=1`
-/// and when `playlistId` is malformed or names no playlist, error 10 when
-/// `playlistId` or `temporary` is missing, error 0 when `temporary` is not a
-/// boolean or `expiresAt` is not a non-negative number, error 50 when the
-/// playlist belongs to another account, and a generic error when a write fails.
+/// Answers Subsonic error 70 when the request does not carry `hearthsound=1`,
+/// when `playlistId` is malformed, names no playlist, or names a private
+/// playlist of another account, error 10 when `playlistId` or `temporary` is
+/// missing, error 0 when `temporary` is not a boolean or `expiresAt` is not a
+/// non-negative number, error 50 when the playlist is public but belongs to
+/// another account, and a generic error when a write fails.
 pub async fn hs_set_playlist_lifetime(call: Call) -> Encoded {
     if !call.vendor_enabled() {
         return call.encode(Response::failed(SubsonicError::not_found()));

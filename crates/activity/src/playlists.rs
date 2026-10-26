@@ -476,9 +476,10 @@ impl Playlists {
     ///
     /// # Errors
     ///
-    /// Returns [`ActivityError::UnknownPlaylist`] when no playlist has that id,
-    /// [`ActivityError::NotOwner`] when `editor` does not own it, and the errors
-    /// of [`Playlists::update`].
+    /// Returns [`ActivityError::UnknownPlaylist`] when no playlist has that id
+    /// or the editor may not see it, [`ActivityError::NotOwner`] when it is
+    /// public but belongs to another account, and the errors of
+    /// [`Playlists::update`].
     pub async fn replace_tracks(
         &self,
         id: EntityId,
@@ -530,10 +531,11 @@ impl Playlists {
     ///
     /// # Errors
     ///
-    /// Returns [`ActivityError::UnknownPlaylist`] when no playlist has that id,
-    /// [`ActivityError::NotOwner`] when `editor` does not own it,
-    /// [`ActivityError::InvalidOrder`] when `order` is not a permutation of
-    /// `0..len`, and [`ActivityError::Database`] when a write fails.
+    /// Returns [`ActivityError::UnknownPlaylist`] when no playlist has that id
+    /// or the editor may not see it, [`ActivityError::NotOwner`] when it is
+    /// public but belongs to another account, [`ActivityError::InvalidOrder`]
+    /// when `order` is not a permutation of `0..len`, and
+    /// [`ActivityError::Database`] when a write fails.
     pub async fn reorder(
         &self,
         id: EntityId,
@@ -606,11 +608,11 @@ impl Playlists {
     ///
     /// # Errors
     ///
-    /// Returns [`ActivityError::UnknownPlaylist`] when no playlist has that id,
-    /// [`ActivityError::NotOwner`] when `editor` does not own it,
-    /// [`ActivityError::InvalidName`] when a new name is empty, and
-    /// [`ActivityError::Database`] or [`ActivityError::Library`] when a write
-    /// fails.
+    /// Returns [`ActivityError::UnknownPlaylist`] when no playlist has that id
+    /// or the editor may not see it, [`ActivityError::NotOwner`] when it is
+    /// public but belongs to another account, [`ActivityError::InvalidName`]
+    /// when a new name is empty, and [`ActivityError::Database`] or
+    /// [`ActivityError::Library`] when a write fails.
     pub async fn update(
         &self,
         id: EntityId,
@@ -687,10 +689,10 @@ impl Playlists {
     ///
     /// # Errors
     ///
-    /// Returns [`ActivityError::UnknownPlaylist`] when no playlist has that id,
-    /// [`ActivityError::NotOwner`] when `editor` does not own it, and
-    /// [`ActivityError::Database`] or [`ActivityError::Library`] when a write
-    /// fails.
+    /// Returns [`ActivityError::UnknownPlaylist`] when no playlist has that id
+    /// or the editor may not see it, [`ActivityError::NotOwner`] when it is
+    /// public but belongs to another account, and [`ActivityError::Database`]
+    /// or [`ActivityError::Library`] when a write fails.
     pub async fn delete(&self, id: EntityId, editor: Uuid) -> Result<bool, ActivityError> {
         let mut tx = self.writer.begin_with(crate::READ_THEN_WRITE).await?;
         let playlist = load_or_unknown(&mut tx, id).await?;
@@ -733,10 +735,10 @@ impl Playlists {
     ///
     /// # Errors
     ///
-    /// Returns [`ActivityError::UnknownPlaylist`] when no playlist has that id,
-    /// [`ActivityError::NotOwner`] when `editor` does not own it, and
-    /// [`ActivityError::Database`] or [`ActivityError::Library`] when a write
-    /// fails.
+    /// Returns [`ActivityError::UnknownPlaylist`] when no playlist has that id
+    /// or the editor may not see it, [`ActivityError::NotOwner`] when it is
+    /// public but belongs to another account, and [`ActivityError::Database`]
+    /// or [`ActivityError::Library`] when a write fails.
     pub async fn set_lifetime(
         &self,
         id: EntityId,
@@ -1058,6 +1060,11 @@ fn checked_name(name: &str) -> Result<&str, ActivityError> {
 
 /// Reports an edit by a caller that does not own the playlist.
 ///
+/// A playlist the caller may not see is reported as missing, so no id can be
+/// probed: `deletePlaylist` answers what `getPlaylist` answers. A public
+/// playlist the caller can see but does not own is reported as another
+/// account's, which is a fact the listing already told them.
+///
 /// # Parameters
 ///
 /// - `playlist`: the playlist being changed.
@@ -1065,14 +1072,20 @@ fn checked_name(name: &str) -> Result<&str, ActivityError> {
 ///
 /// # Errors
 ///
-/// Returns [`ActivityError::NotOwner`] when the two differ.
+/// Returns [`ActivityError::NotOwner`] when the playlist is public and
+/// [`ActivityError::UnknownPlaylist`] when the caller may not see it.
 fn check_owner(playlist: &Playlist, editor: Uuid) -> Result<(), ActivityError> {
-    if playlist.owner_user_id != editor {
+    if playlist.owner_user_id == editor {
+        return Ok(());
+    }
+    if playlist.is_public {
         return Err(ActivityError::NotOwner {
             id: playlist.id.to_string(),
         });
     }
-    Ok(())
+    Err(ActivityError::UnknownPlaylist {
+        id: playlist.id.to_string(),
+    })
 }
 
 /// Reports whether a reorder lists every position of a playlist exactly once.

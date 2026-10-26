@@ -455,7 +455,8 @@ async fn playlists_belong_to_their_owner() {
     assert_ok(&created);
     let id = playlist_id(&created.body).expect("the response carries the playlist id");
 
-    // Another account may not see a private playlist, and may not change it.
+    // Another account may not see a private playlist, and every call that names
+    // it answers what a missing id answers, so an id cannot be probed.
     let hidden = get(
         &app,
         &format!("/rest/getPlaylist?id={id}&apiKey={other_key}&f=json"),
@@ -467,13 +468,13 @@ async fn playlists_belong_to_their_owner() {
         &format!("/rest/updatePlaylist?playlistId={id}&name=Mine&apiKey={other_key}&f=json"),
     )
     .await;
-    assert_error(&refused, 50);
+    assert_error(&refused, 70);
     let refused = get(
         &app,
         &format!("/rest/deletePlaylist?id={id}&apiKey={other_key}&f=json"),
     )
     .await;
-    assert_error(&refused, 50);
+    assert_error(&refused, 70);
     let refused = get(
         &app,
         &format!(
@@ -482,7 +483,13 @@ async fn playlists_belong_to_their_owner() {
         ),
     )
     .await;
-    assert_error(&refused, 50);
+    assert_error(&refused, 70);
+    let refused = get(
+        &app,
+        &format!("/rest/hsSetPlaylistLifetime?playlistId={id}&temporary=false&apiKey={other_key}&hearthsound=1&f=json"),
+    )
+    .await;
+    assert_error(&refused, 70);
 
     // A non-administrator may not ask for another account's playlists.
     let refused = get(

@@ -133,10 +133,10 @@ pub async fn get_playlist(call: Call) -> Encoded {
 /// # Errors
 ///
 /// Answers Subsonic error 10 when neither `playlistId` nor `name` is given,
-/// error 50 when the playlist belongs to another account, error 70 when
-/// `playlistId` is malformed or names no playlist and when a song id cannot be
-/// resolved, and a generic error when a catalog song cannot be materialized or
-/// a write fails.
+/// error 70 when `playlistId` is malformed, names no playlist or names a private
+/// playlist of another account, and when a song id cannot be resolved, error 50
+/// when the playlist is public but belongs to another account, and a generic
+/// error when a catalog song cannot be materialized or a write fails.
 pub async fn create_playlist(call: Call) -> Encoded {
     let songs = match songs(&call, "songId").await {
         Ok(songs) => songs,
@@ -212,10 +212,11 @@ pub async fn create_playlist(call: Call) -> Encoded {
 /// # Errors
 ///
 /// Answers Subsonic error 10 when `playlistId` is missing, error 0 when
-/// `public` is not a boolean or a `songIndexToRemove` is not a number, error 50
-/// when the playlist belongs to another account, error 70 when the playlist id
-/// is malformed, names no playlist, or a song id cannot be resolved, and a
-/// generic error when a catalog song cannot be materialized or a write fails.
+/// `public` is not a boolean or a `songIndexToRemove` is not a number, error 70
+/// when the playlist id is malformed, names no playlist, names a private
+/// playlist of another account, or a song id cannot be resolved, error 50 when
+/// the playlist is public but belongs to another account, and a generic error
+/// when a catalog song cannot be materialized or a write fails.
 pub async fn update_playlist(call: Call) -> Encoded {
     let id = match playlist_id(&call, "playlistId") {
         Ok(id) => id,
@@ -297,9 +298,10 @@ pub async fn update_playlist(call: Call) -> Encoded {
 ///
 /// # Errors
 ///
-/// Answers Subsonic error 10 when `id` is missing, error 50 when the playlist
-/// belongs to another account, error 70 when the id is malformed or names no
-/// playlist, and a generic error when a write fails.
+/// Answers Subsonic error 10 when `id` is missing, error 70 when the id is
+/// malformed, names no playlist, or names a private playlist of another account
+/// (so an id cannot be probed), error 50 when the playlist is public but
+/// belongs to another account, and a generic error when a write fails.
 pub async fn delete_playlist(call: Call) -> Encoded {
     let id = match playlist_id(&call, "id") {
         Ok(id) => id,
@@ -609,7 +611,8 @@ async fn annotations_for(
 ///
 /// A playlist that does not exist and one the caller may not see are both
 /// reported as missing, so one account cannot learn that another's private
-/// playlist exists.
+/// playlist exists; only a public playlist the caller can see is reported as
+/// another account's, which the listing already told them.
 ///
 /// # Parameters
 ///
