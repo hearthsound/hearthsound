@@ -627,8 +627,11 @@ impl CatalogService {
             }
         }
 
+        // The title alone is the query: a provider that matches an album title
+        // against the text does not answer an album whose title is contained in a
+        // longer string, and the artist is what the credit comparison decides.
         let query = CatalogQuery {
-            text: format!("{artist} {title}"),
+            text: title.to_owned(),
             kinds: vec![EntityKind::Album],
             limit: ALBUM_RESOLUTION_LIMIT,
             offset: 0,

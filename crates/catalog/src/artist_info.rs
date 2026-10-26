@@ -9,10 +9,13 @@
 
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use hearthsound_config::SettingsStore;
 use hearthsound_config::keys;
 use hearthsound_core::Layer;
 use hearthsound_core::providers::{ArtistInfo, ArtistInfoRequest};
+use hearthsound_plugin_host::registry::RegistryInstance;
 
 use crate::cache::RequestKey;
 use crate::error::CatalogError;
@@ -59,48 +62,76 @@ impl CatalogService {
             return Ok(None);
         }
         let timeout = artist_info_timeout(&self.settings_snapshot())?;
+        let deadline = tokio::time::Instant::now() + timeout;
         let key = RequestKey::artist_info(request);
 
-        for instance in instances {
-            let Some(provider) = instance.metadata() else {
-                continue;
-            };
-            if let Some(cached) = self.cached_artist_info_of(instance.id(), &key).await {
-                match cached {
-                    Some(info) => return Ok(Some(info)),
-                    None => continue,
-                }
-            }
-            let asked = tokio::time::timeout(timeout, provider.artist_info(request)).await;
-            let info = match asked {
-                Ok(Ok(Some(info))) => info,
-                Ok(Ok(None)) => {
-                    // The instance does not know the artist; the next one may.
-                    self.store_artist_info(instance.id(), &key, None, EMPTY_ARTIST_INFO_TTL)
-                        .await;
-                    continue;
-                }
-                Ok(Err(error)) => {
-                    tracing::debug!(
-                        instance = instance.slug().as_str(),
-                        %error,
-                        "a metadata instance could not answer an artist lookup"
-                    );
-                    continue;
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        instance = instance.slug().as_str(),
-                        "a metadata instance did not answer in time"
-                    );
-                    continue;
-                }
-            };
-            self.store_artist_info(instance.id(), &key, Some(&info), ARTIST_INFO_TTL)
-                .await;
-            return Ok(Some(info));
+        // Every instance is asked at once and the earliest one in the
+        // administrator's order that answers wins, so the call costs one
+        // instance's deadline rather than the sum of them.
+        let answers = futures_util::future::join_all(
+            instances
+                .iter()
+                .map(|instance| self.artist_info_of(instance, &key, request, deadline)),
+        )
+        .await;
+        Ok(answers.into_iter().flatten().next())
+    }
+
+    /// Asks one metadata instance for an artist, or reads its cached answer.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance`: the instance to ask.
+    /// - `key`: the artist's cache key.
+    /// - `request`: the artist's name and identifiers.
+    /// - `deadline`: the instant the whole fan-out stops waiting.
+    ///
+    /// # Returns
+    ///
+    /// The information, or `None` when this instance knows nothing, failed, or did
+    /// not answer before the deadline.
+    async fn artist_info_of(
+        &self,
+        instance: &Arc<RegistryInstance>,
+        key: &RequestKey,
+        request: &ArtistInfoRequest,
+        deadline: tokio::time::Instant,
+    ) -> Option<ArtistInfo> {
+        let Some(provider) = instance.metadata() else {
+            return None;
+        };
+        if let Some(cached) = self.cached_artist_info_of(instance.id(), key).await {
+            return cached;
         }
-        Ok(None)
+        let asked = tokio::time::timeout_at(deadline, provider.artist_info(request)).await;
+        match asked {
+            Ok(Ok(Some(info))) => {
+                self.store_artist_info(instance.id(), key, Some(&info), ARTIST_INFO_TTL)
+                    .await;
+                Some(info)
+            }
+            Ok(Ok(None)) => {
+                // The instance does not know the artist; another one may.
+                self.store_artist_info(instance.id(), key, None, EMPTY_ARTIST_INFO_TTL)
+                    .await;
+                None
+            }
+            Ok(Err(error)) => {
+                tracing::debug!(
+                    instance = instance.slug().as_str(),
+                    %error,
+                    "a metadata instance could not answer an artist lookup"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::warn!(
+                    instance = instance.slug().as_str(),
+                    "a metadata instance did not answer in time"
+                );
+                None
+            }
+        }
     }
 
     /// Reads a cached artist-info answer.
