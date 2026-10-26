@@ -4588,3 +4588,55 @@ async fn a_wrong_rest_api_key_is_rate_limited() {
         .unwrap();
     assert!(body.contains("Too many login attempts"), "{body}");
 }
+
+/// A setting an environment variable overrides is announced in the listing and
+/// refused by a patch, so an edit that cannot work is not silently ignored.
+#[tokio::test]
+async fn an_environment_pinned_setting_cannot_be_patched() {
+    let mut env = std::collections::BTreeMap::new();
+    env.insert(
+        "HEARTHSOUND__SEARCH__CATALOG__MAX_RESULTS".to_owned(),
+        "7".to_owned(),
+    );
+    let fixture = Fixture::with_env(|_| {}, env).await;
+
+    let listing = json(bearer_get(&fixture, "/api/v1/admin/settings").await).await;
+    let entry = listing["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["key"] == "search.catalog.max_results")
+        .unwrap_or_else(|| panic!("the key is missing from the listing: {listing}"))
+        .clone();
+    assert_eq!(entry["value"], 7);
+    assert_eq!(entry["environmentPinned"], true, "{entry}");
+    assert_eq!(entry["source"], "environment", "{entry}");
+
+    let patched = bearer(
+        &fixture,
+        reqwest::Method::PATCH,
+        "/api/v1/admin/settings",
+        Some(serde_json::json!({
+            "settings": { "search.catalog.max_results": 9 },
+        })),
+    )
+    .await;
+    let problem = assert_problem(patched, StatusCode::CONFLICT, "conflict").await;
+    let detail = problem["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("environment"),
+        "the refusal names the environment: {detail}"
+    );
+
+    // The refused patch changed nothing.
+    let listing = json(bearer_get(&fixture, "/api/v1/admin/settings").await).await;
+    let entry = listing["settings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["key"] == "search.catalog.max_results")
+        .unwrap()
+        .clone();
+    assert_eq!(entry["value"], 7, "{entry}");
+    fixture.stop().await;
+}

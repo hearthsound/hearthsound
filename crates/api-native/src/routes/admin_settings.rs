@@ -154,8 +154,14 @@ pub async fn patch_settings(
         .apply(&changes, Some(authed.user_id()))
         .await
         .map_err(|error| match error {
-            SettingsError::Pinned { key } | SettingsError::EnvironmentOverride { key } => {
-                Problem::conflict(format!("`{key}` is pinned by the configuration."))
+            // The up-front check above names every pinned key at once; this arm
+            // is the race where the value became pinned between the check and the
+            // write, so it names the cause of that one key.
+            SettingsError::Pinned { key } => {
+                Problem::conflict(format!("`{key}` is pinned by the configuration file."))
+            }
+            SettingsError::EnvironmentOverride { key } => {
+                Problem::conflict(format!("`{key}` is set by an environment variable."))
             }
             SettingsError::UnknownKey { key } => {
                 Problem::invalid_request(format!("`{key}` is not a setting."))

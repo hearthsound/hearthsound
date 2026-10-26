@@ -105,6 +105,23 @@ impl Fixture {
         Fixture::build_with(adjust, true, true).await
     }
 
+    /// Builds a server whose environment layer holds `env`.
+    ///
+    /// This is how a test drives an environment-overridden runtime setting, which
+    /// no API or CLI write can change.
+    ///
+    /// # Parameters
+    ///
+    /// - `adjust`: changes the configuration the default config file loads to.
+    /// - `env`: the environment the composition root reads, keyed by variable
+    ///   name.
+    pub async fn with_env(
+        adjust: impl FnOnce(&mut BootstrapConfig),
+        env: BTreeMap<String, String>,
+    ) -> Fixture {
+        Fixture::build_with_env(adjust, true, false, env).await
+    }
+
     /// Builds a server, creating the test account unless `account` is false.
     async fn build(adjust: impl FnOnce(&mut BootstrapConfig), account: bool) -> Fixture {
         Fixture::build_with(adjust, account, false).await
@@ -117,12 +134,23 @@ impl Fixture {
         account: bool,
         configured_address: bool,
     ) -> Fixture {
+        Fixture::build_with_env(adjust, account, configured_address, BTreeMap::new()).await
+    }
+
+    /// Builds a server over an environment map and either an ephemeral loopback
+    /// port or the configured address.
+    async fn build_with_env(
+        adjust: impl FnOnce(&mut BootstrapConfig),
+        account: bool,
+        configured_address: bool,
+        env: BTreeMap<String, String>,
+    ) -> Fixture {
         install_crypto_provider();
         let dir = tempfile::tempdir().unwrap();
         let mut config = write_config(dir.path());
         adjust(&mut config);
-        let secret_key = SecretKey::load(&config.secrets.key_file, &BTreeMap::new()).unwrap();
-        let services = Services::build(config, &BTreeMap::new()).await.unwrap();
+        let secret_key = SecretKey::load(&config.secrets.key_file, &env).unwrap();
+        let services = Services::build(config, &env).await.unwrap();
         let (user_id, api_key, app_password) = if account {
             let user = Users::new(services.database())
                 .create(
