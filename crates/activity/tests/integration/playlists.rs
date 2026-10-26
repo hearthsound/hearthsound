@@ -520,3 +520,52 @@ async fn reordering_rewrites_the_positions_and_refuses_a_bad_order() {
         "a refused reorder leaves the playlist as it was"
     );
 }
+
+/// Expiring a playlist releases the playlist pin of its tracks, and a track
+/// another permanent playlist still holds keeps it.
+#[tokio::test]
+async fn expiring_a_playlist_releases_its_playlist_pins() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let playlist = Playlists::new(&database);
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let (reverted, kept) = (track_id(tracks[0]), track_id(tracks[1]));
+
+    // One playlist holds both tracks and is forced back to temporary with an
+    // expiry that has passed, which is the row the old sync left behind: its
+    // pins are stale, because a temporary playlist pins nothing.
+    let expired = playlist
+        .create(user, "Reverted", None, false, &[reverted, kept])
+        .await
+        .unwrap();
+    sqlx::query("UPDATE playlists SET is_temporary = 1, expires_at = 1 WHERE id = ?")
+        .bind(expired.id.uuid().as_bytes().as_slice())
+        .execute(database.writer())
+        .await
+        .unwrap();
+    // A second, permanent playlist still holds one of them.
+    playlist
+        .create(user, "Kept", None, false, &[kept])
+        .await
+        .unwrap();
+
+    assert_eq!(playlist.delete_expired(5_000).await.unwrap(), 1);
+
+    let mut conn = database.readers().acquire().await.unwrap();
+    let released = hearthsound_library::retention::pin_reasons(&mut conn, reverted)
+        .await
+        .unwrap();
+    assert!(
+        !released.contains(&hearthsound_core::PinReason::Playlist),
+        "the deleted playlist still pins its track: {released:?}"
+    );
+    let retained = hearthsound_library::retention::pin_reasons(&mut conn, kept)
+        .await
+        .unwrap();
+    assert!(
+        retained.contains(&hearthsound_core::PinReason::Playlist),
+        "a track another permanent playlist holds lost its pin: {retained:?}"
+    );
+}

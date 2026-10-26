@@ -771,9 +771,11 @@ impl Playlists {
 
     /// Deletes the temporary playlists whose expiry has passed.
     ///
-    /// The entries go with the playlist, and no pin has to be released: a
-    /// temporary playlist pins nothing while it exists, so removing it changes
-    /// no track.
+    /// The entries go with the playlist, and the playlist pin of every track
+    /// they held is refreshed in the same transaction. A temporary playlist
+    /// normally pins nothing, but a row an earlier bug left pinned by one would
+    /// otherwise stay pinned by a playlist that no longer exists; refreshing
+    /// re-derives each track from the playlists that remain.
     ///
     /// # Parameters
     ///
@@ -786,16 +788,34 @@ impl Playlists {
     ///
     /// # Errors
     ///
-    /// Returns [`ActivityError::Database`] when the rows cannot be deleted.
+    /// Returns [`ActivityError::Database`] when the rows cannot be read or
+    /// deleted and [`ActivityError::Library`] when a pin cannot be updated.
     pub async fn delete_expired(&self, now: i64) -> Result<u64, ActivityError> {
+        let mut tx = self.writer.begin_with(crate::READ_THEN_WRITE).await?;
+        let tracks = sqlx::query_scalar!(
+            "SELECT DISTINCT pt.track_id FROM playlist_tracks pt \
+             JOIN playlists p ON p.id = pt.playlist_id \
+             WHERE p.is_temporary = 1 AND p.expires_at IS NOT NULL AND p.expires_at <= ?",
+            now,
+        )
+        .fetch_all(&mut *tx)
+        .await?;
         let deleted = sqlx::query!(
             "DELETE FROM playlists \
              WHERE is_temporary = 1 AND expires_at IS NOT NULL AND expires_at <= ?",
             now,
         )
-        .execute(&self.writer)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
+        for track in tracks {
+            let track = EntityId::from_uuid(IdPrefix::Track, Uuid::from_slice(&track)?);
+            refresh_playlist_pin(&mut tx, track).await?;
+        }
+        tx.commit().await?;
+        if deleted > 0 {
+            self.signal.notify();
+        }
         Ok(deleted)
     }
 
