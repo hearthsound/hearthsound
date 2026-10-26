@@ -92,6 +92,8 @@ pub struct CoverArt {
     pub mime_type: String,
     /// The encoded image bytes.
     pub bytes: Vec<u8>,
+    /// How the instance that delivered these bytes allows them to be stored.
+    pub cache_policy: ImageCachePolicy,
 }
 
 /// What the artwork layer answered for one request.
@@ -557,6 +559,7 @@ impl CatalogService {
         Ok(CoverArt {
             mime_type,
             bytes: fetched.bytes,
+            cache_policy: fetched.cache_policy,
         })
     }
 
@@ -1066,6 +1069,7 @@ impl CatalogService {
         Ok(CoverArt {
             mime_type,
             bytes: fetched.bytes,
+            cache_policy: fetched.cache_policy,
         })
     }
 
@@ -1096,6 +1100,9 @@ impl CatalogService {
             Ok(bytes) => Some(CoverArt {
                 mime_type: row.content_type,
                 bytes,
+                // Only an image whose instance allowed caching is written, so
+                // a stored one is always servable under the cached policy.
+                cache_policy: ImageCachePolicy::Cache,
             }),
             Err(error) => {
                 tracing::warn!(

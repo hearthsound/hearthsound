@@ -253,7 +253,7 @@ async fn artwork_layer(call: &BinaryCall, entity: EntityId, size: Option<u32>) -
             Served {
                 mime_type: cover.mime_type,
                 bytes: cover.bytes,
-                cache_control: STORED_CACHE_CONTROL,
+                cache_control: cache_control(cover.cache_policy),
             },
         )),
         Err(CatalogError::NotFound) => LayerAnswer::Missing,
@@ -403,8 +403,8 @@ async fn first_track_cover(
 /// - `call`: the authenticated call.
 /// - `id`: the entity to fetch cover art of, in the form the catalog layer
 ///   resolves: a catalog id by itself, or a stored entity id through its alias.
-/// - `slug`: the instance that issued the entity, which supplies the image cache
-///   policy of the response.
+/// - `slug`: the instance that issued the entity, which names the instance a
+///   refusal is logged and worded for; the bytes carry their own cache policy.
 /// - `size`: the requested size in pixels.
 ///
 /// # Returns
@@ -412,11 +412,6 @@ async fn first_track_cover(
 /// The image response, or one of the refusal codes of the module header.
 async fn proxy(call: &BinaryCall, id: &ClientId, slug: &Slug, size: Option<u32>) -> HttpResponse {
     let catalog = call.state().catalog();
-    let policy = catalog
-        .registry()
-        .instance(slug.as_str())
-        .map(|instance| instance.image_cache_policy())
-        .unwrap_or_default();
     let request = CoverArtRequest {
         id: id.clone(),
         size,
@@ -427,7 +422,7 @@ async fn proxy(call: &BinaryCall, id: &ClientId, slug: &Slug, size: Option<u32>)
             Served {
                 mime_type: cover.mime_type,
                 bytes: cover.bytes,
-                cache_control: cache_control(policy),
+                cache_control: cache_control(cover.cache_policy),
             },
         ),
         Err(error) => catalog_failure(slug, &error),
