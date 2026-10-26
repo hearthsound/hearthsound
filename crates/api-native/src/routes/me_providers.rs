@@ -9,9 +9,10 @@
 //!
 //! A link is one row of `provider_user_configs`, sealed with the server's
 //! secret key: the account name the service reported and the configuration the
-//! plugin needs for every later call. The listing never returns that
-//! configuration; it returns the schema the form is rendered from and the
-//! account name, so a token the listener entered is never handed back. It also
+//! plugin needs for every later call. The listing returns the schema the form is
+//! rendered from, the account name, and the configuration with every write-only
+//! field replaced by `[sealed]`; a token the listener entered is never handed
+//! back, and a write that echoes the placeholder keeps the stored value. It also
 //! reports how many scrobbles are waiting for the service, how many the outbox
 //! gave up on, and the most recent delivery error, which is what the account
 //! menu shows.
@@ -31,7 +32,8 @@ use hearthsound_core::providers::{AccountLinkProvider, LinkMethod, UserContext};
 use hearthsound_jobs::NewJob;
 use hearthsound_plugin_host::manifest::ConfigSection;
 use hearthsound_plugin_host::{
-    RegistryInstance, UserConfig, UserConfigError, validate_user_config,
+    RegistryInstance, UserConfig, UserConfigError, merge_user_config, redact_user_config,
+    validate_user_config,
 };
 use moka::future::Cache;
 use rand::RngExt;
@@ -149,6 +151,11 @@ pub struct ProviderLink {
     /// When the account was linked, in unix milliseconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub linked_at: Option<i64>,
+    /// The stored configuration, in which every write-only field carries the
+    /// `[sealed]` placeholder; absent while the service is not linked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub config: Option<Value>,
     /// Scrobbles waiting to be delivered.
     pub pending_scrobbles: u32,
     /// Scrobbles the outbox gave up on.
@@ -238,8 +245,10 @@ pub async fn list_provider_links(
 ///
 /// Answers `not-found` for an unknown or non-linkable slug, `wrong-link-method`
 /// for a browser service, `invalid-config` when the configuration does not match
-/// the schema, `link-failed` when the plugin rejects the configuration or cannot
-/// answer, and `internal` when the link cannot be stored.
+/// the schema or when a write-only field carries the `[sealed]` placeholder
+/// while nothing is stored for it, `link-failed` when the plugin rejects the
+/// configuration or cannot answer, and `internal` when the link cannot be
+/// stored.
 #[utoipa::path(
     put,
     path = "/api/v1/me/providers/{slug}/config",
@@ -276,11 +285,24 @@ pub async fn put_provider_config(
             "This service declares no user configuration.",
         ));
     };
-    let config =
-        validate_user_config(&section.schema, &body.config).map_err(|error| match error {
-            UserConfigError::Schema(problems) => Problem::invalid_config(problems.join("; ")),
-            other => problem::internal("validating a service configuration", &other),
-        })?;
+    let previous = state
+        .user_configs()
+        .get(instance.id(), authed.user_id())
+        .await
+        .map_err(link_storage_problem)?;
+    let merged = merge_user_config(
+        &section.schema,
+        &body.config,
+        previous.as_ref().map(|link| &link.config),
+    )
+    .map_err(|error| match error {
+        UserConfigError::Config(message) => Problem::invalid_config(message),
+        other => problem::internal("merging a service configuration", &other),
+    })?;
+    let config = validate_user_config(&section.schema, &merged).map_err(|error| match error {
+        UserConfigError::Schema(problems) => Problem::invalid_config(problems.join("; ")),
+        other => problem::internal("validating a service configuration", &other),
+    })?;
     let account = provider
         .verify_account(&user_context(authed.user_id(), &config))
         .await
@@ -629,6 +651,10 @@ fn provider_link(
         LinkMethod::Config => instance.manifest().config.user.as_ref().map(config_schema),
         LinkMethod::Browser => None,
     };
+    let config = match (&link, instance.manifest().config.user.as_ref()) {
+        (Some(link), Some(section)) => Some(redact_user_config(&section.schema, &link.config)),
+        _ => None,
+    };
     let (linked, account_name, linked_at) = match link {
         Some(link) => (true, link.account_name, Some(link.linked_at)),
         None => (false, None, None),
@@ -646,6 +672,7 @@ fn provider_link(
         linked,
         account_name,
         linked_at,
+        config,
         pending_scrobbles: counters.pending,
         failed_scrobbles: counters.failed,
         last_error: counters.last_error,

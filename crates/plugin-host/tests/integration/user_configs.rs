@@ -11,7 +11,9 @@ use std::path::Path;
 
 use hearthsound_config::secret::SecretKey;
 use hearthsound_db::{Database, MIGRATOR};
-use hearthsound_plugin_host::{UserConfigError, UserConfigService, validate_user_config};
+use hearthsound_plugin_host::{
+    UserConfigError, UserConfigService, merge_user_config, redact_user_config, validate_user_config,
+};
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
@@ -234,4 +236,62 @@ async fn defaults_are_filled_in_before_the_plugin_is_called() {
 
     let config = validate_user_config(&schema, &json!({"token": "good"})).unwrap();
     assert_eq!(config, json!({"token": "good", "mode": "full"}));
+}
+
+/// A listing masks every write-only field and leaves the rest alone.
+#[test]
+fn a_listing_masks_every_write_only_field() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "token": { "type": "string", "writeOnly": true },
+            "username": { "type": "string" },
+        },
+    });
+    let redacted = redact_user_config(&schema, &json!({ "token": "abc", "username": "echo" }));
+    assert_eq!(redacted, json!({ "token": "[sealed]", "username": "echo" }));
+
+    let absent = redact_user_config(&schema, &json!({ "username": "echo" }));
+    assert_eq!(
+        absent,
+        json!({ "username": "echo" }),
+        "a field the configuration does not carry is not invented"
+    );
+}
+
+/// A write that echoes the placeholder keeps the stored secret and applies the
+/// rest of the form.
+#[test]
+fn an_echoed_placeholder_keeps_the_stored_value() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "token": { "type": "string", "writeOnly": true },
+            "username": { "type": "string" },
+        },
+    });
+    let merged = merge_user_config(
+        &schema,
+        &json!({ "token": "[sealed]", "username": "new" }),
+        Some(&json!({ "token": "abc", "username": "old" })),
+    )
+    .unwrap();
+    assert_eq!(merged, json!({ "token": "abc", "username": "new" }));
+}
+
+/// A placeholder with nothing stored under it is refused, naming the field.
+#[test]
+fn a_placeholder_with_nothing_stored_is_refused() {
+    let schema = json!({
+        "type": "object",
+        "properties": { "token": { "type": "string", "writeOnly": true } },
+    });
+    let error = merge_user_config(&schema, &json!({ "token": "[sealed]" }), None).unwrap_err();
+    match error {
+        UserConfigError::Config(message) => assert!(
+            message.contains("/token"),
+            "the refusal names the field: {message}"
+        ),
+        other => panic!("expected a configuration error, got {other}"),
+    }
 }

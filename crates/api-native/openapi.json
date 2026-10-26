@@ -3067,7 +3067,7 @@
           "me"
         ],
         "summary": "Stores the caller's configuration for a service that links by configuration.",
-        "description": "The configuration is checked against the plugin's user schema, with the\nschema's defaults filled in, and the plugin's `verify-account` names the\naccount before anything is stored. A service that links through its own site\nanswers `wrong-link-method`.\n\n# Errors\n\nAnswers `not-found` for an unknown or non-linkable slug, `wrong-link-method`\nfor a browser service, `invalid-config` when the configuration does not match\nthe schema, `link-failed` when the plugin rejects the configuration or cannot\nanswer, and `internal` when the link cannot be stored.",
+        "description": "The configuration is checked against the plugin's user schema, with the\nschema's defaults filled in, and the plugin's `verify-account` names the\naccount before anything is stored. A service that links through its own site\nanswers `wrong-link-method`.\n\n# Errors\n\nAnswers `not-found` for an unknown or non-linkable slug, `wrong-link-method`\nfor a browser service, `invalid-config` when the configuration does not match\nthe schema or when a write-only field carries the `[sealed]` placeholder\nwhile nothing is stored for it, `link-failed` when the plugin rejects the\nconfiguration or cannot answer, and `internal` when the link cannot be\nstored.",
         "operationId": "put_provider_config",
         "parameters": [
           {
@@ -5205,6 +5205,13 @@
               "null"
             ],
             "description": "The name of the linked account, when there is one."
+          },
+          "config": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The stored configuration, in which every write-only field carries the\n`[sealed]` placeholder; absent while the service is not linked."
           },
           "displayName": {
             "type": "string",

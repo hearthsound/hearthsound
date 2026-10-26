@@ -467,3 +467,144 @@ async fn an_instance_that_cannot_link_accounts_is_not_found() {
         json(send(&fixture, reqwest::Method::GET, "/api/v1/me/providers", None).await).await;
     assert_eq!(listed["providers"], json!([]));
 }
+
+/// Looks up one service's listed link.
+///
+/// # Parameters
+///
+/// - `fixture`: the running fixture.
+/// - `slug`: the instance slug to read.
+///
+/// # Returns
+///
+/// The service's row of the listing.
+async fn listed(fixture: &Fixture, slug: &str) -> Value {
+    let listed =
+        json(send(fixture, reqwest::Method::GET, "/api/v1/me/providers", None).await).await;
+    listed["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["slug"] == slug)
+        .cloned()
+        .unwrap_or_else(|| panic!("{slug} is not listed: {listed}"))
+}
+
+/// The stored configuration of one link, unsealed by the service.
+///
+/// # Parameters
+///
+/// - `fixture`: the running fixture.
+/// - `slug`: the instance slug whose link is read.
+///
+/// # Returns
+///
+/// The configuration the row holds.
+async fn stored_config(fixture: &Fixture, slug: &str) -> Value {
+    let instance = fixture.services.instances().get(slug).await.unwrap();
+    let state = fixture.services.native_state();
+    let link = state
+        .user_configs()
+        .get(instance.id, fixture.user_id)
+        .await
+        .unwrap()
+        .expect("the service is linked");
+    link.config
+}
+
+#[tokio::test]
+async fn a_linked_service_reports_its_masked_configuration() {
+    let endpoint = MockServer::start().await;
+    let fixture = Fixture::new().await;
+    install_scrobble(&fixture).await;
+    create_scrobble(&fixture, "listenbrainz", endpoint.uri().as_str(), "config").await;
+    assign_scrobble(&fixture, &["listenbrainz"]).await;
+
+    let response = send(
+        &fixture,
+        reqwest::Method::PUT,
+        "/api/v1/me/providers/listenbrainz/config",
+        Some(json!({"config": {"token": "good"}})),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let provider = listed(&fixture, "listenbrainz").await;
+    assert_eq!(
+        provider["config"]["token"], "[sealed]",
+        "a stored write-only field is masked: {provider}"
+    );
+    assert_eq!(
+        stored_config(&fixture, "listenbrainz").await["token"],
+        "good",
+        "the stored secret is untouched by the masking"
+    );
+
+    // A service that is not linked reports no configuration at all.
+    create_scrobble(&fixture, "other", endpoint.uri().as_str(), "config").await;
+    assign_scrobble(&fixture, &["listenbrainz", "other"]).await;
+    let unlinked = listed(&fixture, "other").await;
+    assert!(unlinked.get("config").is_none(), "{unlinked}");
+}
+
+#[tokio::test]
+async fn an_unchanged_placeholder_keeps_the_stored_token() {
+    let endpoint = MockServer::start().await;
+    let fixture = Fixture::new().await;
+    install_scrobble(&fixture).await;
+    create_scrobble(&fixture, "listenbrainz", endpoint.uri().as_str(), "config").await;
+    assign_scrobble(&fixture, &["listenbrainz"]).await;
+
+    let first = send(
+        &fixture,
+        reqwest::Method::PUT,
+        "/api/v1/me/providers/listenbrainz/config",
+        Some(json!({"config": {"token": "good"}})),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let response = send(
+        &fixture,
+        reqwest::Method::PUT,
+        "/api/v1/me/providers/listenbrainz/config",
+        Some(json!({"config": {"token": "[sealed]"}})),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "an untouched placeholder is a valid configuration"
+    );
+    let link = json(response).await;
+    assert_eq!(link["config"]["token"], "[sealed]", "{link}");
+    assert_eq!(
+        stored_config(&fixture, "listenbrainz").await["token"],
+        "good",
+        "the placeholder kept the stored secret"
+    );
+}
+
+#[tokio::test]
+async fn a_placeholder_without_a_stored_link_is_refused() {
+    let endpoint = MockServer::start().await;
+    let fixture = Fixture::new().await;
+    install_scrobble(&fixture).await;
+    create_scrobble(&fixture, "listenbrainz", endpoint.uri().as_str(), "config").await;
+    assign_scrobble(&fixture, &["listenbrainz"]).await;
+
+    let response = send(
+        &fixture,
+        reqwest::Method::PUT,
+        "/api/v1/me/providers/listenbrainz/config",
+        Some(json!({"config": {"token": "[sealed]"}})),
+    )
+    .await;
+    let problem =
+        assert_problem(response, StatusCode::UNPROCESSABLE_ENTITY, "invalid-config").await;
+    assert!(
+        problem["detail"].as_str().unwrap().contains("token"),
+        "{problem}"
+    );
+    assert_eq!(link_rows(&fixture).await, 0);
+}

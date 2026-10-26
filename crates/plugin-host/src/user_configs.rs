@@ -13,6 +13,10 @@
 //! Nothing outside [`UserConfigService`] ever sees a plaintext token, and
 //! [`UserConfig::context`] is the only place that turns a row into the
 //! [`UserContext`] a plugin receives.
+//!
+//! A listing hands the configuration back with `[sealed]` in place of every
+//! write-only field ([`redact_user_config`]), and a write that echoes the
+//! placeholder keeps the stored secret ([`merge_user_config`]).
 
 use hearthsound_config::secret::{SecretBox, SecretError};
 use hearthsound_core::providers::UserContext;
@@ -20,7 +24,9 @@ use hearthsound_db::Database;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::instances::{InstanceError, apply_defaults, open_value, seal_value};
+use crate::instances::{
+    InstanceError, SECRET_PLACEHOLDER, apply_defaults, open_value, seal_value, visit_write_only,
+};
 use crate::repo::{RepoError, now_millis};
 
 /// The key a sealed envelope is stored under.
@@ -358,6 +364,77 @@ pub fn validate_user_config(schema: &Value, input: &Value) -> Result<Value, User
         return Err(UserConfigError::Schema(problems));
     }
     Ok(config)
+}
+
+/// Replaces every write-only field of a user configuration with
+/// [`SECRET_PLACEHOLDER`], so a listing can be rendered without holding a
+/// secret.
+///
+/// A field the configuration does not carry is not invented, and a field the
+/// schema does not mark `writeOnly` is handed back as it is.
+///
+/// # Parameters
+///
+/// - `schema`: the manifest's `config.user.schema`, a draft-07 JSON Schema.
+/// - `config`: the stored configuration.
+///
+/// # Returns
+///
+/// The configuration, with every write-only field masked.
+pub fn redact_user_config(schema: &Value, config: &Value) -> Value {
+    let mut masked = config.clone();
+    visit_write_only(schema, &mut masked, &mut |_path, value| {
+        *value = Value::String(SECRET_PLACEHOLDER.to_owned());
+    });
+    masked
+}
+
+/// Puts the stored value back under every write-only field the caller echoed as
+/// [`SECRET_PLACEHOLDER`].
+///
+/// A field the caller left out is not touched: the schema's defaults are
+/// applied later, exactly as for a first write.
+///
+/// # Parameters
+///
+/// - `schema`: the manifest's `config.user.schema`, a draft-07 JSON Schema.
+/// - `input`: the configuration the listener sent.
+/// - `previous`: the configuration that is stored, when the service is linked.
+///
+/// # Returns
+///
+/// The configuration to validate and store.
+///
+/// # Errors
+///
+/// Returns [`UserConfigError::Config`] when a field carries the placeholder
+/// while no stored configuration holds a value for it.
+pub fn merge_user_config(
+    schema: &Value,
+    input: &Value,
+    previous: Option<&Value>,
+) -> Result<Value, UserConfigError> {
+    let mut merged = input.clone();
+    let mut failure: Option<UserConfigError> = None;
+    visit_write_only(schema, &mut merged, &mut |path, value| {
+        if value.as_str() != Some(SECRET_PLACEHOLDER) {
+            return;
+        }
+        match previous.and_then(|stored| stored.pointer(path)) {
+            Some(stored) if !stored.is_null() => *value = stored.clone(),
+            _ => {
+                failure.get_or_insert_with(|| {
+                    UserConfigError::Config(format!(
+                        "`{path}` is the sealed placeholder, but no configuration is stored for this service"
+                    ))
+                });
+            }
+        }
+    });
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(merged),
+    }
 }
 
 /// Seals the account name and the configuration into the stored envelope.

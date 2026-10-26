@@ -1245,7 +1245,11 @@ pub(crate) fn apply_defaults(schema: &Value, config: &mut Value) {
 /// property of the object, of a nested object, or of an array element. The
 /// closure is handed the JSON pointer of the field it is given, so a caller can
 /// find the same field in another configuration.
-fn visit_write_only(schema: &Value, value: &mut Value, replace: &mut impl FnMut(&str, &mut Value)) {
+pub(crate) fn visit_write_only(
+    schema: &Value,
+    value: &mut Value,
+    replace: &mut impl FnMut(&str, &mut Value),
+) {
     visit_write_only_at(schema, value, "", replace);
 }
 

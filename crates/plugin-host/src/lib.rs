@@ -90,6 +90,7 @@ pub use updates::{
     UpdateCheckReport, UpdateChecker,
 };
 pub use user_configs::{
-    LinkedUser, UserConfig, UserConfigError, UserConfigService, validate_user_config,
+    LinkedUser, UserConfig, UserConfigError, UserConfigService, merge_user_config,
+    redact_user_config, validate_user_config,
 };
 pub use validate::HOSTED_LAYERS;
