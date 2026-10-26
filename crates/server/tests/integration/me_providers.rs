@@ -14,7 +14,7 @@ use hearthsound_core::Layer;
 use hearthsound_plugin_host::{PluginRepository, PluginSource};
 use hearthsound_test_support::{ALBUM_CATALOG, SCROBBLE_FIXTURE, fixture_plugin};
 use reqwest::StatusCode;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, LOCATION};
+use reqwest::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, LOCATION};
 use serde_json::{Value, json};
 use wiremock::MockServer;
 
@@ -607,4 +607,36 @@ async fn a_placeholder_without_a_stored_link_is_refused() {
         "{problem}"
     );
     assert_eq!(link_rows(&fixture).await, 0);
+}
+
+/// A callback opened without a session answers a page, not a problem document.
+#[tokio::test]
+async fn the_link_callback_without_a_session_answers_a_page() {
+    let fixture = Fixture::new().await;
+
+    let response = fixture
+        .client
+        .get(format!(
+            "{}/api/v1/me/providers/lastfm/link/callback?state=x",
+            fixture.base_url()
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.headers()[CONTENT_TYPE],
+        "text/html; charset=utf-8",
+        "a browser is answered with a page"
+    );
+    assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+    let body = response.text().await.unwrap();
+    assert!(body.contains("/login"), "{body}");
+    assert!(body.contains("/account/services"), "{body}");
+    assert!(
+        !body.contains("\"code\""),
+        "no problem document is shown to a browser: {body}"
+    );
+    fixture.stop().await;
 }

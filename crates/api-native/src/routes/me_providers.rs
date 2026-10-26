@@ -23,11 +23,12 @@ use std::time::Duration;
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
-use axum::http::header::HOST;
+use axum::http::header::{self, HOST};
 use axum::http::request::Parts;
-use axum::response::Redirect;
+use axum::response::{IntoResponse, Redirect, Response};
 use data_encoding::BASE64URL_NOPAD;
 use hearthsound_activity::{DISCOVERY_SYNC_JOB_KIND, DiscoverySyncPayload, OutboxCounters};
+use hearthsound_core::ProviderError;
 use hearthsound_core::providers::{AccountLinkProvider, LinkMethod, UserContext};
 use hearthsound_jobs::NewJob;
 use hearthsound_plugin_host::manifest::ConfigSection;
@@ -204,7 +205,7 @@ pub struct ProviderLinkUrl {
     tag = "me",
     responses(
         (status = 200, description = "The services the caller may link", body = ProviderLinks),
-        (status = 401, description = "No valid credential", body = Problem, content_type = "application/problem+json"),
+        (status = 401, description = "A page that asks the listener to sign in and finish the link in the browser that started it", content_type = "text/html"),
         (status = 502, description = "A service could not be asked how it links accounts", body = Problem, content_type = "application/problem+json"),
     ),
     security(("bearer" = []), ("session" = []))
@@ -271,10 +272,7 @@ pub async fn put_provider_config(
 ) -> Result<Json<ProviderLink>, Problem> {
     let instance = linkable(&state, &slug)?;
     let provider = account_link(&instance)?;
-    let method = provider
-        .get_link_method()
-        .await
-        .map_err(|error| Problem::link_failed(StatusCode::BAD_GATEWAY, error.to_string()))?;
+    let method = provider.get_link_method().await.map_err(link_failure)?;
     if method == LinkMethod::Browser {
         return Err(Problem::wrong_link_method(
             "This service links accounts through its own site.",
@@ -306,9 +304,7 @@ pub async fn put_provider_config(
     let account = provider
         .verify_account(&user_context(authed.user_id(), &config))
         .await
-        .map_err(|error| {
-            Problem::link_failed(StatusCode::UNPROCESSABLE_ENTITY, error.to_string())
-        })?;
+        .map_err(link_failure)?;
     let stored = parse_account_config(&account.config)?;
     let link = state
         .user_configs()
@@ -365,10 +361,7 @@ pub async fn start_provider_link(
 ) -> Result<Json<ProviderLinkUrl>, Problem> {
     let instance = linkable(&state, &slug)?;
     let provider = account_link(&instance)?;
-    let method = provider
-        .get_link_method()
-        .await
-        .map_err(|error| Problem::link_failed(StatusCode::BAD_GATEWAY, error.to_string()))?;
+    let method = provider.get_link_method().await.map_err(link_failure)?;
     if method == LinkMethod::Config {
         return Err(Problem::wrong_link_method(
             "This service links accounts with a configuration.",
@@ -390,19 +383,23 @@ pub async fn start_provider_link(
     let url = provider
         .begin_link(&context, &callback)
         .await
-        .map_err(|error| Problem::link_failed(StatusCode::BAD_GATEWAY, error.to_string()))?;
+        .map_err(link_failure)?;
     Ok(Json(ProviderLinkUrl { url }))
 }
 
 /// Finishes a browser link from the query the service redirected with.
 ///
-/// The route always answers a redirect to the account menu: `<path>?linked=<slug>`
-/// when the link was stored and `<path>?linkError=<slug>` for a missing, expired
-/// or foreign nonce, or any failure of the plugin.
+/// The route answers a page, never a problem document, because a browser opens
+/// it: a redirect to the account menu - `<path>?linked=<slug>` when the link was
+/// stored and `<path>?linkError=<slug>` for a missing, expired or foreign nonce
+/// or any failure of the plugin - or, without a session, a page that asks the
+/// listener to sign in and open the link again. The nonce is not consumed on
+/// that page, so signing in and reopening the URL inside the link's ten minutes
+/// still finishes it.
 ///
 /// # Errors
 ///
-/// Answers `unauthenticated` without credentials; every other outcome is a
+/// Answers `401 text/html` without credentials; every other outcome is a
 /// redirect, because the address is opened in a browser.
 #[utoipa::path(
     get,
@@ -419,13 +416,38 @@ pub async fn start_provider_link(
     security(("session" = []))
 )]
 pub async fn provider_link_callback(
-    authed: Authed,
+    authed: Option<Authed>,
     State(state): State<NativeState>,
     Path(slug): Path<String>,
     RawQuery(raw): RawQuery,
+) -> Response {
+    let Some(authed) = authed else {
+        return sign_in_required(&slug);
+    };
+    finish_link(&authed, &state, &slug, raw)
+        .await
+        .into_response()
+}
+
+/// Finishes a browser link for a signed-in listener.
+///
+/// Every outcome is a redirect to the account menu, which says what happened;
+/// the address is opened in a browser, so it never answers a problem document.
+///
+/// # Parameters
+///
+/// - `authed`: the listener the browser is signed in as.
+/// - `state`: the native API's shared state.
+/// - `slug`: the provider instance the link is for.
+/// - `raw`: the service's redirect query, which carries the nonce.
+async fn finish_link(
+    authed: &Authed,
+    state: &NativeState,
+    slug: &str,
+    raw: Option<String>,
 ) -> Redirect {
-    let Ok(instance) = linkable(&state, &slug) else {
-        return link_failure(&slug);
+    let Ok(instance) = linkable(state, slug) else {
+        return failed_link(slug);
     };
     let query: Vec<(String, String)> = form_urlencoded::parse(raw.unwrap_or_default().as_bytes())
         .into_owned()
@@ -435,20 +457,20 @@ pub async fn provider_link_callback(
         .find(|(name, _)| name == "state")
         .map(|(_, value)| value.clone())
     else {
-        return link_failure(&slug);
+        return failed_link(slug);
     };
     let Some((issued_to, issued_slug)) = state.link_states().take(&nonce).await else {
-        return link_failure(&slug);
+        return failed_link(slug);
     };
     if issued_to != authed.user_id() || issued_slug != slug {
-        return link_failure(&slug);
+        return failed_link(slug);
     }
     let Ok(provider) = account_link(&instance) else {
-        return link_failure(&slug);
+        return failed_link(slug);
     };
     match provider.get_link_method().await {
         Ok(LinkMethod::Browser) => {}
-        Ok(LinkMethod::Config) | Err(_) => return link_failure(&slug),
+        Ok(LinkMethod::Config) | Err(_) => return failed_link(slug),
     }
     let query: Vec<(String, String)> = query
         .into_iter()
@@ -467,12 +489,12 @@ pub async fn provider_link_callback(
                 %error,
                 "the service refused a browser link"
             );
-            return link_failure(&slug);
+            return failed_link(slug);
         }
     };
     let config = match parse_account_config(&account.config) {
         Ok(config) => config,
-        Err(_) => return link_failure(&slug),
+        Err(_) => return failed_link(slug),
     };
     match state
         .user_configs()
@@ -486,13 +508,13 @@ pub async fn provider_link_callback(
                 "linked a service through the browser"
             );
             if instance.discovery().is_some() {
-                enqueue_discovery_sync(&state, issued_to).await;
+                enqueue_discovery_sync(state, issued_to).await;
             }
             Redirect::to(&format!("{ACCOUNT_SERVICES_PATH}?linked={slug}"))
         }
         Err(error) => {
             tracing::warn!(%error, "could not store a browser link");
-            link_failure(&slug)
+            failed_link(slug)
         }
     }
 }
@@ -621,10 +643,7 @@ fn account_link(instance: &RegistryInstance) -> Result<&Arc<dyn AccountLinkProvi
 /// Answers `link-failed` when the plugin cannot answer.
 async fn link_method(instance: &RegistryInstance) -> Result<LinkMethod, Problem> {
     let provider = account_link(instance)?;
-    provider
-        .get_link_method()
-        .await
-        .map_err(|error| Problem::link_failed(StatusCode::BAD_GATEWAY, error.to_string()))
+    provider.get_link_method().await.map_err(link_failure)
 }
 
 /// Renders one instance's link as the account menu reads it.
@@ -774,11 +793,156 @@ fn public_base(state: &NativeState, parts: &Parts) -> String {
     format!("{scheme}://{host}")
 }
 
+/// Words a failed provider call as the sentence a listener reads.
+///
+/// The plugin's own message names the protocol rather than the listener's
+/// problem - a rejected token reads as the bare word `unauthorized` - so each
+/// failure class is answered with what the listener can do about it. The
+/// plugin's text stays in the log, where an operator reads it.
+///
+/// # Parameters
+///
+/// - `error`: what the provider call answered.
+///
+/// # Returns
+///
+/// The problem the route answers with.
+fn link_failure(error: ProviderError) -> Problem {
+    match error {
+        ProviderError::Unauthorized => Problem::link_failed(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "The service did not accept the credentials. Check the token and try again.",
+        ),
+        ProviderError::InvalidConfig => Problem::link_failed(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "The service configuration is incomplete.",
+        ),
+        ProviderError::RateLimited { retry_after_ms } => Problem::link_failed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "The service asked to wait {} s before trying again.",
+                retry_after_ms.div_ceil(1000)
+            ),
+        ),
+        ProviderError::Unavailable => Problem::link_failed(
+            StatusCode::BAD_GATEWAY,
+            "The service could not be reached. Try again in a moment.",
+        ),
+        other => problem::internal("linking a service", &other),
+    }
+}
+
 /// Answers the account menu with a failed link.
 ///
 /// # Parameters
 ///
 /// - `slug`: the instance whose link failed.
-fn link_failure(slug: &str) -> Redirect {
+fn failed_link(slug: &str) -> Redirect {
     Redirect::to(&format!("{ACCOUNT_SERVICES_PATH}?linkError={slug}"))
+}
+
+/// Answers the page a browser sees when the callback is opened without a
+/// session.
+///
+/// The page carries no script and no external asset, and it does not consume the
+/// nonce, so signing in and opening the same URL again inside the link's ten
+/// minutes still finishes the link.
+///
+/// # Parameters
+///
+/// - `slug`: the provider instance the link is for, which the page names.
+///
+/// # Returns
+///
+/// A `401 text/html` page with its two ways onwards.
+fn sign_in_required(slug: &str) -> Response {
+    let name = escape_html(slug);
+    let page = format!(
+        "<!DOCTYPE html>\
+<html lang=\"en\">\
+<head>\
+<meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<title>Finish connecting {name}</title>\
+</head>\
+<body>\
+<h1>Finish connecting {name}</h1>\
+<p>This link must be finished in the browser where you started it, signed in to Hearthsound.</p>\
+<p><a href=\"/login\">Sign in</a> &middot; <a href=\"{ACCOUNT_SERVICES_PATH}\">Connected Services</a></p>\
+</body>\
+</html>"
+    );
+    (
+        StatusCode::UNAUTHORIZED,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        page,
+    )
+        .into_response()
+}
+
+/// Escapes the characters an HTML text node or attribute value must not carry.
+///
+/// # Parameters
+///
+/// - `text`: the text to escape.
+///
+/// # Returns
+///
+/// The escaped text.
+fn escape_html(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A rejected credential is worded as what the listener can do about it.
+    #[test]
+    fn a_failed_link_names_the_listeners_problem() {
+        let rejected = link_failure(ProviderError::Unauthorized);
+        assert_eq!(rejected.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            rejected.detail.as_deref(),
+            Some("The service did not accept the credentials. Check the token and try again.")
+        );
+
+        let unreachable = link_failure(ProviderError::Unavailable);
+        assert_eq!(unreachable.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            unreachable.detail.as_deref(),
+            Some("The service could not be reached. Try again in a moment.")
+        );
+
+        let limited = link_failure(ProviderError::RateLimited {
+            retry_after_ms: 2_400,
+        });
+        assert_eq!(limited.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            limited.detail.as_deref(),
+            Some("The service asked to wait 3 s before trying again.")
+        );
+    }
+
+    /// The sign-in page escapes the name it is handed.
+    #[test]
+    fn the_sign_in_page_escapes_the_service_name() {
+        assert_eq!(escape_html("<script>"), "&lt;script&gt;");
+        assert_eq!(escape_html("a & b"), "a &amp; b");
+        assert_eq!(escape_html("\"x\" 'y'"), "&quot;x&quot; &#39;y&#39;");
+    }
 }

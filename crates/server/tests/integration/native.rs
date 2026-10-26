@@ -120,10 +120,21 @@ async fn an_unsupported_method_is_method_not_allowed() {
         None,
     )
     .await;
-    assert_problem(response, StatusCode::METHOD_NOT_ALLOWED, "method-not-allowed").await;
+    assert_problem(
+        response,
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method-not-allowed",
+    )
+    .await;
 
     // An unknown path still answers `not-found` whatever its method is.
-    let response = bearer(&fixture, reqwest::Method::DELETE, "/api/v1/nothing/here", None).await;
+    let response = bearer(
+        &fixture,
+        reqwest::Method::DELETE,
+        "/api/v1/nothing/here",
+        None,
+    )
+    .await;
     assert_problem(response, StatusCode::NOT_FOUND, "not-found").await;
 
     fixture.stop().await;

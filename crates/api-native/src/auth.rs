@@ -15,7 +15,10 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+use std::convert::Infallible;
+
 use axum::extract::FromRequestParts;
+use axum::extract::OptionalFromRequestParts;
 use axum::extract::connect_info::ConnectInfo;
 use axum::http::header::{AUTHORIZATION, COOKIE};
 use axum::http::request::Parts;
@@ -150,6 +153,26 @@ impl FromRequestParts<NativeState> for Authed {
     }
 }
 
+impl OptionalFromRequestParts<NativeState> for Authed {
+    type Rejection = Infallible;
+
+    /// Resolves the credential like the strict extractor, and answers `None`
+    /// instead of a rejection when there is none.
+    ///
+    /// This is for browser-facing routes that must answer a page instead of a
+    /// problem document; every other route keeps the strict [`Authed`].
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &NativeState,
+    ) -> Result<Option<Authed>, Infallible> {
+        Ok(
+            <Authed as FromRequestParts<NativeState>>::from_request_parts(parts, state)
+                .await
+                .ok(),
+        )
+    }
+}
+
 impl FromRequestParts<NativeState> for AdminAuthed {
     type Rejection = Problem;
 
@@ -158,7 +181,8 @@ impl FromRequestParts<NativeState> for AdminAuthed {
         parts: &mut Parts,
         state: &NativeState,
     ) -> Result<AdminAuthed, Problem> {
-        let authed = Authed::from_request_parts(parts, state).await?;
+        let authed =
+            <Authed as FromRequestParts<NativeState>>::from_request_parts(parts, state).await?;
         if !authed.principal.is_admin {
             return Err(Problem::forbidden(
                 "Only an administrator may use this resource.",

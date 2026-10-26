@@ -3031,13 +3031,9 @@
             }
           },
           "401": {
-            "description": "No valid credential",
+            "description": "A page that asks the listener to sign in and finish the link in the browser that started it",
             "content": {
-              "application/problem+json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
+              "text/html": {}
             }
           },
           "502": {
@@ -3261,7 +3257,7 @@
           "me"
         ],
         "summary": "Finishes a browser link from the query the service redirected with.",
-        "description": "The route always answers a redirect to the account menu: `<path>?linked=<slug>`\nwhen the link was stored and `<path>?linkError=<slug>` for a missing, expired\nor foreign nonce, or any failure of the plugin.\n\n# Errors\n\nAnswers `unauthenticated` without credentials; every other outcome is a\nredirect, because the address is opened in a browser.",
+        "description": "The route answers a page, never a problem document, because a browser opens\nit: a redirect to the account menu - `<path>?linked=<slug>` when the link was\nstored and `<path>?linkError=<slug>` for a missing, expired or foreign nonce\nor any failure of the plugin - or, without a session, a page that asks the\nlistener to sign in and open the link again. The nonce is not consumed on\nthat page, so signing in and reopening the URL inside the link's ten minutes\nstill finishes it.\n\n# Errors\n\nAnswers `401 text/html` without credentials; every other outcome is a\nredirect, because the address is opened in a browser.",
         "operationId": "provider_link_callback",
         "parameters": [
           {
