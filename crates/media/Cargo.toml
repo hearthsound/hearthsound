@@ -19,7 +19,7 @@ lofty.workspace = true
 rusty-chromaprint.workspace = true
 symphonia.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "process", "rt"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]

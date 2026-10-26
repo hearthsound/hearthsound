@@ -262,7 +262,8 @@ impl TranscodeRequest {
 /// An encoded stream produced by ffmpeg.
 ///
 /// The stream yields the encoder's output as it is flushed and ends when ffmpeg
-/// exits. Dropping it kills the process and releases its concurrency slot.
+/// exits. Dropping it kills the process at once, even when it has produced no
+/// output yet, and releases its concurrency slot once the child is gone.
 pub struct TranscodeStream {
     format: TranscodeFormat,
     stream: AudioStream,
@@ -375,7 +376,11 @@ pub(crate) fn transcode_args(request: &TranscodeRequest) -> Vec<OsString> {
 ///
 /// The child is moved into the task so that dropping the returned stream (and
 /// therefore the channel) ends the task, kills the child, and releases its
-/// permit. A read error is forwarded to the client as a stream error.
+/// permit. The read is raced against the receiver being dropped, so a child that
+/// has produced nothing yet - a source that stalls, or a client that walks away
+/// before the first byte - is killed at once instead of holding the budget until
+/// it writes something. A read error is forwarded to the client as a stream
+/// error.
 ///
 /// # Parameters
 ///
@@ -396,7 +401,18 @@ pub(crate) fn chunk_stream(
     tokio::spawn(async move {
         let mut buffer = vec![0u8; CHUNK_BYTES];
         loop {
-            match stdout.read(&mut buffer).await {
+            // A client that disconnected is noticed here rather than on the
+            // next send: a stalled source may never produce the chunk a failed
+            // send needs.
+            let read = tokio::select! {
+                () = sender.closed() => {
+                    tracing::debug!(pid = process.id(), "the client went away; killing ffmpeg");
+                    let _ = process.kill();
+                    break;
+                }
+                read = stdout.read(&mut buffer) => read,
+            };
+            match read {
                 Ok(0) => break,
                 Ok(read) => {
                     let chunk = Bytes::copy_from_slice(&buffer[..read]);

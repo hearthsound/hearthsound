@@ -303,3 +303,42 @@ async fn honours_the_channel_cap() {
     let request = TranscodeRequest::new(&source, TranscodeFormat::Mp3).max_channels(Some(0));
     assert_eq!(request.max_channels, None);
 }
+
+/// A stream dropped while ffmpeg has produced nothing still kills the child at
+/// once: a client that walks away must not hold a transcode slot until the
+/// source wakes up.
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_a_stalled_stream_kills_ffmpeg() {
+    let dir = tempfile::tempdir().unwrap();
+    // A FIFO nobody writes to: ffmpeg blocks opening it, so it never emits a
+    // byte - the worst case a disconnect meets.
+    let source = dir.path().join("stalled.flac");
+    let created = std::process::Command::new("mkfifo")
+        .arg(&source)
+        .status()
+        .expect("mkfifo runs");
+    assert!(created.success(), "the fifo was created");
+
+    let runner = FfmpegRunner::new(None, 1);
+    let stream = runner
+        .transcode(&TranscodeRequest::new(&source, TranscodeFormat::Mp3))
+        .await
+        .unwrap();
+    // Let the reader task block on the silent child.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(runner.in_flight(), 1, "the transcode holds its slot");
+
+    drop(stream);
+
+    // The permit comes back only once the child has exited, so a count of zero
+    // says the stalled process is gone.
+    let deadline = std::time::Instant::now() + Duration::from_millis(500);
+    while runner.in_flight() > 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a dropped stalled stream kept its ffmpeg child alive"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
