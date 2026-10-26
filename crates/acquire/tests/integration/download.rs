@@ -8,7 +8,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::common::{Env, INSTANCE, InstanceLimits, candidate, config, one_candidate};
 use hearthsound_acquire::orchestrator::{AcquireRequest, AcquisitionHandle};
@@ -543,4 +543,243 @@ async fn a_lost_token_cancels_the_candidate_before_searching_again() {
         "a lost token's transfer is cancelled before the search restarts"
     );
     assert!(env.downloads_started(INSTANCE).await >= 2);
+}
+
+/// Changes an instance's `maxConcurrent` and rebuilds the registry, which is what
+/// an administrator's edit does.
+///
+/// # Parameters
+///
+/// - `env`: the environment whose instance changes.
+/// - `max_concurrent`: the new download limit.
+async fn set_max_concurrent(env: &Env, max_concurrent: u32) {
+    use hearthsound_plugin_host::instances::{InstanceService, InstanceSpec};
+
+    let service = InstanceService::new(
+        std::sync::Arc::clone(&env.host),
+        env.repository.clone(),
+        env.secrets.clone(),
+    );
+    let view = service.get(INSTANCE).await.unwrap();
+    service
+        .update(
+            INSTANCE,
+            &InstanceSpec {
+                slug: INSTANCE.to_owned(),
+                plugin_id: view.plugin_id.clone(),
+                display_name: view.display_name.clone(),
+                server_config: view.server_config.clone(),
+                host_config: crate::common::host_config(
+                    &env.downloads,
+                    InstanceLimits {
+                        max_concurrent,
+                        ..InstanceLimits::default()
+                    },
+                ),
+            },
+        )
+        .await
+        .unwrap();
+    env.registry.rebuild().await.unwrap();
+}
+
+/// Waits until an acquisition holds a started download attempt.
+///
+/// The ledger's `downloading` state says the pipeline chose a candidate, not that
+/// the attempt holds one of the instance's slots: a row waits for a slot while it
+/// is already in that stage. The recorded token is what proves the attempt
+/// started.
+///
+/// # Parameters
+///
+/// - `env`: the environment whose ledger is read.
+/// - `id`: the acquisition to wait for.
+async fn wait_for_attempt(env: &Env, id: Uuid) {
+    let deadline = Instant::now() + crate::common::WAIT_TIMEOUT;
+    while env.acquisition(id).await.plugin_token.is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "acquisition {id} never started an attempt"
+        );
+        tokio::time::sleep(crate::common::WAIT_POLL_INTERVAL).await;
+    }
+}
+
+/// Returns whether an acquisition holds a started download attempt.
+///
+/// # Parameters
+///
+/// - `env`: the environment whose ledger is read.
+/// - `id`: the acquisition to check.
+async fn has_attempt(env: &Env, id: Uuid) -> bool {
+    env.acquisition(id).await.plugin_token.is_some()
+}
+
+/// Waits until one of two acquisitions holds a started download attempt.
+///
+/// # Parameters
+///
+/// - `env`: the environment whose ledger is read.
+/// - `ids`: the acquisitions to wait for.
+///
+/// # Returns
+///
+/// The acquisition that started.
+async fn wait_for_either_attempt(env: &Env, ids: [Uuid; 2]) -> Uuid {
+    let deadline = Instant::now() + crate::common::WAIT_TIMEOUT;
+    loop {
+        for id in ids {
+            if has_attempt(env, id).await {
+                return id;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "neither acquisition of {ids:?} started an attempt"
+        );
+        tokio::time::sleep(crate::common::WAIT_POLL_INTERVAL).await;
+    }
+}
+
+/// Two play requests issued together preempt two *different* bulk downloads.
+///
+/// A preempted attempt keeps its registration until it notices, so without a
+/// per-attempt mark the second interactive request would pick the same victim
+/// again and the other bulk download would keep its slot for ever.
+#[tokio::test]
+async fn two_play_requests_preempt_two_different_bulk_downloads() {
+    let mut server = config(one_candidate(), "normal", 0, "downloads", ".flac");
+    server["downloadRunningPolls"] = json!(40);
+    let env = Env::with_import_mode(
+        server,
+        InstanceLimits {
+            max_concurrent: 2,
+            ..InstanceLimits::default()
+        },
+        &crate::common::FAST_POLLING,
+        // Every acquisition reads the same simulated download.
+        "copy",
+        false,
+    )
+    .await;
+    place_download(&env, "01 - Hello Song.flac").await;
+
+    // Two bulk runs hold both slots.
+    let first_bulk = env.remote_track("Hello Song", "Hello Artist").await;
+    let second_bulk = env.remote_track("Hello Song", "Hello Artist").await;
+    let first_id = request(&env, first_bulk, Priority::Background).await.id;
+    let second_id = request(&env, second_bulk, Priority::Background).await.id;
+    env.start();
+    wait_for_attempt(&env, first_id).await;
+    wait_for_attempt(&env, second_id).await;
+
+    // Two users press play together, and both need a slot.
+    let first_play = env.remote_track("Hello Song", "Hello Artist").await;
+    let second_play = env.remote_track("Hello Song", "Hello Artist").await;
+    let first_play_id = request(&env, first_play, Priority::Play).await.id;
+    let second_play_id = request(&env, second_play, Priority::Play).await.id;
+
+    // Both bulk attempts are cancelled, each one costing one interruption: the
+    // mark is what stops the second request from picking the first one again.
+    let deadline = Instant::now() + crate::common::WAIT_TIMEOUT;
+    while env.cancels_recorded(INSTANCE).await < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "only {} attempt(s) were cancelled for two preemptions",
+            env.cancels_recorded(INSTANCE).await
+        );
+        tokio::time::sleep(crate::common::WAIT_POLL_INTERVAL).await;
+    }
+    assert!(
+        logged(&env, first_id, "preempted by an interactive request").await,
+        "the first bulk download was preempted"
+    );
+    assert!(
+        logged(&env, second_id, "preempted by an interactive request").await,
+        "the second bulk download was preempted too, instead of the first one again"
+    );
+
+    // Both plays complete, so the preemption handed each of them a slot.
+    env.wait_for_state(first_play_id, AcquisitionState::Completed)
+        .await;
+    env.wait_for_state(second_play_id, AcquisitionState::Completed)
+        .await;
+}
+
+/// A raised download limit takes effect at once; a lowered one never lets the
+/// running attempts exceed it.
+#[tokio::test]
+async fn changing_the_slot_limit_mid_flight_takes_effect_at_once() {
+    let mut server = config(one_candidate(), "normal", 0, "downloads", ".flac");
+    server["downloadRunningPolls"] = json!(100);
+    let env = Env::with_import_mode(
+        server,
+        InstanceLimits {
+            max_concurrent: 1,
+            ..InstanceLimits::default()
+        },
+        &crate::common::FAST_POLLING,
+        "copy",
+        false,
+    )
+    .await;
+    place_download(&env, "01 - Hello Song.flac").await;
+
+    // One download holds the only slot; two more wait for it.
+    let running = env.remote_track("Hello Song", "Hello Artist").await;
+    let running_id = request(&env, running, Priority::Queue).await.id;
+    env.start();
+    wait_for_attempt(&env, running_id).await;
+    let waiting_one = env.remote_track("Hello Song", "Hello Artist").await;
+    let waiting_two = env.remote_track("Hello Song", "Hello Artist").await;
+    let waiting_one_id = request(&env, waiting_one, Priority::Queue).await.id;
+    let waiting_two_id = request(&env, waiting_two, Priority::Queue).await.id;
+    env.wait_for_state(waiting_two_id, AcquisitionState::Downloading)
+        .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !has_attempt(&env, waiting_one_id).await && !has_attempt(&env, waiting_two_id).await,
+        "a single slot serves one download"
+    );
+
+    // Raising the limit wakes a waiter immediately, while the first attempt is
+    // still running, and the new limit still bounds the concurrency.
+    set_max_concurrent(&env, 2).await;
+    let started = wait_for_either_attempt(&env, [waiting_one_id, waiting_two_id]).await;
+    let other = if started == waiting_one_id {
+        waiting_two_id
+    } else {
+        waiting_one_id
+    };
+    assert!(
+        has_attempt(&env, running_id).await,
+        "the first attempt was never cancelled"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !has_attempt(&env, other).await,
+        "the raised limit still bounds how many run at once"
+    );
+
+    // Lowering it stops new permits even though two attempts are running.
+    set_max_concurrent(&env, 1).await;
+    let third = env.remote_track("Hello Song", "Hello Artist").await;
+    let third_id = request(&env, third, Priority::Queue).await.id;
+    env.wait_for_state(third_id, AcquisitionState::Downloading)
+        .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !has_attempt(&env, third_id).await,
+        "the lowered limit refuses a third download while two run"
+    );
+
+    // Both running attempts have to end before the lowered limit admits one.
+    env.orchestrator.cancel(running_id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !has_attempt(&env, third_id).await,
+        "one running attempt is still one more than the lowered limit allows"
+    );
+    env.orchestrator.cancel(started).await.unwrap();
+    wait_for_attempt(&env, third_id).await;
 }
