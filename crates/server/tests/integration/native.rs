@@ -26,7 +26,11 @@ pub(crate) async fn json(response: reqwest::Response) -> Value {
 }
 
 /// Asserts a response is a problem document with the given status and code.
-async fn assert_problem(response: reqwest::Response, status: StatusCode, code: &str) -> Value {
+pub(crate) async fn assert_problem(
+    response: reqwest::Response,
+    status: StatusCode,
+    code: &str,
+) -> Value {
     assert_eq!(response.status(), status);
     assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
     let body = json(response).await;

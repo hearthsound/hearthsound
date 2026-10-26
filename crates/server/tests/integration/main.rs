@@ -20,6 +20,7 @@ mod plugin_admin;
 mod prefetch;
 mod queue;
 mod reload;
+mod save_folder;
 mod scrobbles;
 mod setup;
 mod storage;

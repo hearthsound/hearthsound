@@ -16,6 +16,7 @@ use hearthsound_core::{
 };
 use hearthsound_media::{Container, probe};
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
+use uuid::Uuid;
 
 /// Admits one acquisition and returns its handle.
 async fn request(env: &Env, track: EntityId, priority: Priority) -> AcquisitionHandle {
@@ -690,4 +691,158 @@ async fn a_copied_import_never_replaces_a_file_that_appeared() {
     );
     assert!(env.cache_root.join(&rel_path).is_file());
     assert_eq!(env.media_files_for(track).await, 1);
+}
+
+/// Admits an acquisition a user's save requested, so the save location applies.
+///
+/// # Parameters
+///
+/// - `env`: the test environment.
+/// - `track`: the track to acquire.
+/// - `user`: the account whose save location decides where the file goes.
+async fn request_save(env: &Env, track: EntityId, user: Uuid) -> AcquisitionHandle {
+    env.orchestrator
+        .request(
+            AcquireRequest::new(
+                track,
+                Priority::Play,
+                hearthsound_acquire::adopt::SAVE_REASON,
+            )
+            .with_requested_by(Some(user)),
+        )
+        .await
+        .unwrap()
+        .handle()
+        .expect("the request must be admitted")
+        .clone()
+}
+
+/// The media rows a track has.
+async fn media_rows(env: &Env, track: EntityId) -> Vec<(String, Option<Vec<u8>>, String)> {
+    sqlx::query_as("SELECT storage, folder_id, rel_path FROM media_files WHERE track_id = ?")
+        .bind(track.uuid().as_bytes().to_vec())
+        .fetch_all(env.database.readers())
+        .await
+        .unwrap()
+}
+
+/// The pin reasons a track carries.
+async fn pins(env: &Env, track: EntityId) -> Vec<PinReason> {
+    let mut conn = env.database.readers().acquire().await.unwrap();
+    hearthsound_library::retention::pin_reasons(&mut conn, track)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_import_for_a_save_is_written_into_the_owners_folder() {
+    let env = Env::new(
+        config(one_candidate(), "normal", 0, "downloads", ".flac"),
+        InstanceLimits::default(),
+        &[],
+    )
+    .await;
+    place(&env, "01 - Hello Song.flac").await;
+    let user = env.add_user().await;
+    let folder = env.save_folder(user, "music").await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    let id = request_save(&env, track, user).await.id;
+
+    env.start();
+    env.wait_for_state(id, AcquisitionState::Completed).await;
+
+    let destination = folder.path.join(RELATIVE);
+    assert!(
+        destination.is_file(),
+        "the file is written into the owner's folder"
+    );
+    assert!(!env.cache_root.join(RELATIVE).exists());
+    assert!(!env.library_root.join(RELATIVE).exists());
+    let rows = media_rows(&env, track).await;
+    assert_eq!(rows.len(), 1, "one file, and so one row");
+    assert_eq!(rows[0].0, "folder");
+    assert_eq!(
+        rows[0].1.as_deref(),
+        Some(folder.id.as_bytes().as_slice()),
+        "the row names the folder it is in"
+    );
+    assert_eq!(rows[0].2, RELATIVE);
+    assert_eq!(env.track(track).await.availability, Availability::Local);
+    assert!(
+        pins(&env, track).await.contains(&PinReason::Folder),
+        "a folder file is pinned with the folder reason"
+    );
+    let probed = probe(&destination).await.unwrap();
+    assert_eq!(probed.tags.title.as_deref(), Some("Hello Song"));
+    assert_eq!(probed.tags.album.as_deref(), Some("Hello Song album"));
+    assert_eq!(probed.tags.album_artist.as_deref(), Some("Hello Artist"));
+    assert_eq!(probed.tags.track_number, Some(1));
+}
+
+#[tokio::test]
+async fn a_link_mode_import_copies_when_the_target_is_a_folder() {
+    let env = Env::with_import_mode(
+        config(one_candidate(), "normal", 0, "downloads", ".flac"),
+        InstanceLimits::default(),
+        &[],
+        "link",
+        false,
+    )
+    .await;
+    let source = place(&env, "01 - Hello Song.flac").await;
+    let source_bytes = std::fs::read(&source).unwrap();
+    let user = env.add_user().await;
+    let folder = env.save_folder(user, "music").await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    let id = request_save(&env, track, user).await.id;
+
+    env.start();
+    env.wait_for_state(id, AcquisitionState::Completed).await;
+
+    let destination = folder.path.join(RELATIVE);
+    assert!(destination.is_file());
+    assert_eq!(
+        std::fs::read(&source).unwrap(),
+        source_bytes,
+        "the backend's own file keeps its bytes"
+    );
+    assert_ne!(
+        std::fs::metadata(&source).unwrap().ino(),
+        std::fs::metadata(&destination).unwrap().ino(),
+        "the folder file must not share the backend's inode"
+    );
+    assert_eq!(std::fs::metadata(&destination).unwrap().nlink(), 1);
+}
+
+#[tokio::test]
+async fn a_saved_import_falls_back_to_managed_storage_when_the_folder_is_read_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let env = Env::new(
+        config(one_candidate(), "normal", 0, "downloads", ".flac"),
+        InstanceLimits::default(),
+        &[],
+    )
+    .await;
+    place(&env, "01 - Hello Song.flac").await;
+    let user = env.add_user().await;
+    let folder = env.save_folder(user, "music").await;
+    let original = std::fs::metadata(&folder.path).unwrap().permissions();
+    std::fs::set_permissions(&folder.path, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    let id = request_save(&env, track, user).await.id;
+
+    env.start();
+    env.wait_for_state(id, AcquisitionState::Completed).await;
+    std::fs::set_permissions(&folder.path, original).unwrap();
+
+    assert!(
+        env.cache_root.join(RELATIVE).is_file(),
+        "the file is kept in the managed library instead"
+    );
+    let rows = media_rows(&env, track).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "cache");
+    assert_eq!(rows[0].1, None, "the row is a managed one");
+    assert_eq!(env.track(track).await.availability, Availability::Cached);
 }

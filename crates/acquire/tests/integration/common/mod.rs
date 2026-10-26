@@ -1024,6 +1024,45 @@ impl Env {
         id
     }
 
+    /// Points a user's save location at a folder the user owns.
+    ///
+    /// The folder is created beside the storage tree, added to the library as
+    /// the user's, and stored as the user's `library.save_folder` override in the
+    /// same encoded form the API writes: the folder's client id.
+    ///
+    /// # Parameters
+    ///
+    /// - `owner`: the account that owns the folder and saves into it.
+    /// - `name`: the directory's name inside the environment, unique per test.
+    ///
+    /// # Returns
+    ///
+    /// The folder.
+    pub async fn save_folder(&self, owner: Uuid, name: &str) -> hearthsound_library::LibraryFolder {
+        let path = self.root.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        let folder = self
+            .library
+            .add_library_folder(&path, Some(owner))
+            .await
+            .unwrap();
+        let value = hearthsound_core::EntityId::from_uuid(
+            hearthsound_core::IdPrefix::LibraryFolder,
+            folder.id,
+        )
+        .to_string();
+        sqlx::query(
+            "INSERT INTO user_settings (user_id, key, value) VALUES (?, 'library.save_folder', ?) \
+             ON CONFLICT (user_id, key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(owner.as_bytes().as_slice())
+        .bind(serde_json::Value::String(value).to_string())
+        .execute(self.database.writer())
+        .await
+        .unwrap();
+        folder
+    }
+
     /// Reads an acquisition row.
     pub async fn acquisition(&self, id: Uuid) -> hearthsound_acquire::repo::AcquisitionRow {
         self.orchestrator

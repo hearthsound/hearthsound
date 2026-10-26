@@ -9,7 +9,7 @@
 use axum::Json;
 use axum::extract::State;
 use hearthsound_config::settings::{SettingEntry, SettingsError};
-use hearthsound_config::{SettingKind, SettingSource, SettingsRegistry};
+use hearthsound_config::{SettingKind, SettingSource, SettingValue, SettingsRegistry, keys};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -141,6 +141,14 @@ pub async fn patch_settings(
         } else {
             Some(setting_value(def, value)?)
         };
+        if key == keys::LIBRARY_SAVE_FOLDER.name()
+            && let Some(SettingValue::String(folder)) = &value
+            && !folder.is_empty()
+        {
+            return Err(Problem::invalid_request(
+                "save locations are per account; `library.save_folder` must be empty on the server",
+            ));
+        }
         changes.push((key.clone(), value));
     }
     if !pinned.is_empty() {
