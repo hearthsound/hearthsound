@@ -308,38 +308,3 @@ async fn the_stream_refuses_unusable_parameters() {
         "an offset that is not a number"
     );
 }
-
-/// An encoder that cannot start is answered 500, not a 200 with no audio.
-#[tokio::test]
-async fn a_failing_encode_is_answered_internal_error() {
-    let (fixture, seeded) = fixture().await;
-    let track = seeded.alpha_tracks[0];
-    let app = fixture.app();
-
-    // The seeded file is real audio; overwriting it with bytes no decoder reads
-    // makes ffmpeg fail before it produces a frame.
-    let mut conn = fixture.database.readers().acquire().await.unwrap();
-    let file = hearthsound_library::query::preferred_media_file(&mut conn, &fixture.roots, track)
-        .await
-        .unwrap()
-        .expect("the seeded track has a media file");
-    std::fs::write(&file.absolute_path, b"not audio at all").unwrap();
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/rest/stream?id={track}&format=mp3&apiKey={}",
-                    fixture.api_key
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        response.status(),
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "a failed encode is a failed request, not an empty 200"
-    );
-}

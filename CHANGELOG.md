@@ -217,6 +217,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A failed registry rebuild after a committed write answers `503 unavailable`
   and is retried on its own instead of leaving the registry stale.
 
+- A denied `hsAcquire` request carries its stored reason in the Hearthsound-only
+  `hearthsoundReason` error member (`quota-exceeded` or `permission-denied`) for a
+  client that sent `hearthsound=1`; without the opt-in the answer is byte-identical
+  to the standard refusal.
+- A linked service reports its stored configuration with `[sealed]` in place of
+  every write-only field, and a write that echoes the placeholder keeps the stored
+  secret instead of overwriting it.
+- A transcode declares no `Content-Length` and `estimateContentLength` changes
+  nothing, because an encoded body's size is only known once the encoder exits; an
+  encoder that fails to start is answered `500` instead of an empty `200`.
+- A stream request from an account that may not acquire is refused before its
+  catalog id is materialized, so a refusal writes no library row.
+- A multi-id `scrobble` resolves every id before it records any play, so an id it
+  cannot resolve leaves no play behind.
+- A reported playback position past the end of its track is applied as the track's
+  length, so a client that overshoots cannot inflate the play it earns.
+- A cover image served through the catalog or artwork layer follows the issuing
+  instance's image cache policy: a `no-store` instance's picture is not cacheable
+  by the client.
+
 ### Fixed
 
 - A stored provider secret is never printed by a validation error: the message

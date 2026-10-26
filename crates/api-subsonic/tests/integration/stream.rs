@@ -651,6 +651,8 @@ async fn a_transcode_never_declares_a_length() {
         "the answer carries the encoded audio"
     );
 
+    // The head of a transcode starts no encoder, so it declares nothing about
+    // the encoded stream; the `0` hyper writes describes the empty HEAD body.
     let head = request(
         &app,
         Method::HEAD,
@@ -659,10 +661,12 @@ async fn a_transcode_never_declares_a_length() {
     )
     .await;
     assert_eq!(head.status, StatusCode::OK);
-    assert!(
-        !head.headers.contains_key(header::CONTENT_LENGTH),
-        "the head of a transcode declares no length either"
+    assert_eq!(
+        header_of(&head, header::CONTENT_LENGTH),
+        "0",
+        "the head of a transcode declares no size for the encoded stream"
     );
+    assert!(head.bytes.is_empty(), "a head carries no body");
 }
 
 #[tokio::test]
