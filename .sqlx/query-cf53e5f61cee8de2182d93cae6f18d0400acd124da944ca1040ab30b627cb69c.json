@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, track_id, rel_path, size, mtime_ms FROM media_files WHERE storage = 'folder' AND folder_id = ? AND rel_path >= ? AND rel_path < ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "track_id",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "track_id"
+          }
+        }
+      },
+      {
+        "name": "rel_path",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "rel_path"
+          }
+        }
+      },
+      {
+        "name": "size",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "size"
+          }
+        }
+      },
+      {
+        "name": "mtime_ms",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "media_files",
+            "name": "mtime_ms"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "cf53e5f61cee8de2182d93cae6f18d0400acd124da944ca1040ab30b627cb69c"
+}

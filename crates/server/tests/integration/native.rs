@@ -4032,13 +4032,13 @@ async fn a_folder_cannot_be_or_contain_the_servers_own_paths() {
     fixture.stop().await;
 }
 
-/// A folder that holds another library folder reports the duplicate cleanup.
+/// A folder that holds another library folder hands its rows over.
 ///
 /// The outer folder indexed its inner folder's files before the inner folder was
-/// added; once it exists, the outer scan skips it and prunes what it had, so a
-/// file is indexed by the deepest folder alone.
+/// added; once it exists, the inner scan takes those rows over, so each file
+/// keeps its track, and the outer scan has nothing of its own to remove.
 #[tokio::test]
-async fn the_folder_scan_reports_the_duplicate_cleanup() {
+async fn the_folder_scan_reports_the_hand_over() {
     let fixture = Fixture::new().await;
     let music = fixture.library_dir("music-overlap");
     let inner = music.join("Inner");
@@ -4090,17 +4090,32 @@ async fn the_folder_scan_reports_the_duplicate_cleanup() {
         .await
         .unwrap();
     assert_eq!(report.files_seen, 2, "the inner folder owns its files");
+    assert_eq!(
+        report.tracks_removed, 0,
+        "the rows the outer folder indexed are taken over"
+    );
 
     let report = fixture.services.scanner().scan_folder(outer).await.unwrap();
     assert_eq!(report.files_seen, 2, "the outer scan skips the inner root");
-    assert_eq!(report.files_removed, 2, "the outer duplicates went");
-    assert_eq!(report.tracks_removed, 2);
+    assert_eq!(
+        report.files_removed, 0,
+        "the rows under the nested root are the nested folder's"
+    );
+    assert_eq!(report.tracks_removed, 0);
 
     let tracks: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks")
         .fetch_one(fixture.services.database().readers())
         .await
         .unwrap();
     assert_eq!(tracks, 4, "one track per file");
+    let owned: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM media_files WHERE storage = 'folder' AND folder_id = ?",
+    )
+    .bind(nested.as_bytes().as_slice())
+    .fetch_one(fixture.services.database().readers())
+    .await
+    .unwrap();
+    assert_eq!(owned, 2, "the inner folder owns its files' rows");
 
     fixture.stop().await;
 }

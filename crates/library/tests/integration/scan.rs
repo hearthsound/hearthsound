@@ -17,7 +17,9 @@ use hearthsound_library::locks::FolderLocks;
 use hearthsound_library::scan::{
     LibraryScanner, SCAN_JOB_KIND, ScanJobHandler, ScanRequest, ScanStatus,
 };
-use hearthsound_library::{LibraryRepository, Origin, ReplayGain, StorageRoots};
+use hearthsound_library::{
+    LibraryRepository, MediaFileInput, Origin, ReplayGain, StorageRoots, TrackInput,
+};
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
 
 async fn migrated(dir: &Path) -> Database {
@@ -80,6 +82,75 @@ async fn only_track(library: &LibraryRepository, artist: &str) -> hearthsound_co
         .unwrap();
     let albums = library.list_albums_for_artist(artist.id).await.unwrap();
     library.list_tracks_for_album(albums[0].id).await.unwrap()[0].id
+}
+
+/// Likes a track for a user.
+async fn like(db: &Database, user: uuid::Uuid, track: hearthsound_core::EntityId) {
+    sqlx::query(
+        "INSERT INTO user_feedback (user_id, entity_kind, entity_id, value, at) \
+         VALUES (?, 'track', ?, 'like', 0)",
+    )
+    .bind(user.as_bytes().as_slice())
+    .bind(track.uuid().as_bytes().as_slice())
+    .execute(db.writer())
+    .await
+    .unwrap();
+}
+
+/// Puts a track in a new playlist of a user and returns the playlist's id.
+async fn playlist_entry(
+    db: &Database,
+    user: uuid::Uuid,
+    track: hearthsound_core::EntityId,
+) -> uuid::Uuid {
+    let playlist = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO playlists (id, owner_user_id, name, is_public, is_temporary, created_at, \
+                                updated_at) VALUES (?, ?, 'Mix', 0, 0, 0, 0)",
+    )
+    .bind(playlist.as_bytes().as_slice())
+    .bind(user.as_bytes().as_slice())
+    .execute(db.writer())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO playlist_tracks (playlist_id, position, track_id, added_at) \
+         VALUES (?, 0, ?, 0)",
+    )
+    .bind(playlist.as_bytes().as_slice())
+    .bind(track.uuid().as_bytes().as_slice())
+    .execute(db.writer())
+    .await
+    .unwrap();
+    playlist
+}
+
+/// Counts the likes a track carries.
+async fn likes(db: &Database, track: hearthsound_core::EntityId) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM user_feedback \
+         WHERE entity_kind = 'track' AND entity_id = ? AND value = 'like'",
+    )
+    .bind(track.uuid().as_bytes().as_slice())
+    .fetch_one(db.readers())
+    .await
+    .unwrap()
+}
+
+/// Counts the entries a playlist has for a track.
+async fn playlist_entries(
+    db: &Database,
+    playlist: uuid::Uuid,
+    track: hearthsound_core::EntityId,
+) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM playlist_tracks WHERE playlist_id = ? AND track_id = ?",
+    )
+    .bind(playlist.as_bytes().as_slice())
+    .bind(track.uuid().as_bytes().as_slice())
+    .fetch_one(db.readers())
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
@@ -1497,9 +1568,15 @@ async fn a_nested_folder_indexes_each_file_once() {
     assert_eq!(stray, 1, "the outer folder holds only the file it owns");
 }
 
-/// An outer folder's stale duplicates are pruned once the inner folder exists.
+/// A nested folder takes over the track an outer folder indexed for the same
+/// file, so the like and the playlist entry on it survive.
+///
+/// A file belongs to the deepest folder that contains it: the inner folder
+/// re-points the outer folder's row instead of indexing the file again, which
+/// keeps the track - and everything that points at it - and leaves the outer
+/// folder nothing of its own to prune.
 #[tokio::test]
-async fn an_outer_folder_prunes_rows_a_nested_folder_owns() {
+async fn a_nested_folder_keeps_the_track_an_outer_folder_indexed() {
     let dir = tempfile::tempdir().unwrap();
     let db = migrated(dir.path()).await;
     let library = LibraryRepository::new(&db);
@@ -1508,46 +1585,53 @@ async fn an_outer_folder_prunes_rows_a_nested_folder_owns() {
     std::fs::create_dir_all(&inner).unwrap();
     write_song(&inner, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
     write_song(&music, "Sunset", "Someone Else", "Evening").await;
+    let user = insert_user(&db).await;
 
     let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
     let outer = library.add_library_folder(&music, None).await.unwrap();
     scanner.scan_folder(outer.id).await.unwrap();
-    assert_eq!(library.list_artists().await.unwrap().len(), 2);
+    let track = only_track(&library, "Energy 52").await;
+    like(&db, user, track).await;
+    let playlist = playlist_entry(&db, user, track).await;
 
-    // The inner folder is added after the outer one indexed its file too, so the
-    // same file now has one track per folder.
+    // The inner folder is added after the outer one indexed its file.
     let nested = library.add_library_folder(&inner, None).await.unwrap();
-    scanner.scan_folder(nested.id).await.unwrap();
-    let tracks_of = |album: hearthsound_core::EntityId| {
-        let library = &library;
-        async move { library.list_tracks_for_album(album).await.unwrap() }
-    };
-    let energy = library
-        .list_artists()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|artist| artist.name == "Energy 52")
-        .unwrap();
-    let album = library.list_albums_for_artist(energy.id).await.unwrap()[0].id;
+    let report = scanner.scan_folder(nested.id).await.unwrap();
+    assert_eq!(report.files_seen, 1);
     assert_eq!(
-        tracks_of(album).await.len(),
-        2,
-        "the folder was indexed twice"
+        report.files_skipped, 1,
+        "the adopted row was not probed again"
     );
+    assert_eq!(report.tracks_removed, 0, "the outer track is adopted");
+
+    let tracks: i64 = sqlx::query_scalar("SELECT count(*) FROM tracks")
+        .fetch_one(db.readers())
+        .await
+        .unwrap();
+    assert_eq!(tracks, 2, "one track per file");
+    assert_eq!(
+        only_track(&library, "Energy 52").await,
+        track,
+        "the track kept its id"
+    );
+    let files = library.list_media_files_for_track(track).await.unwrap();
+    assert_eq!(files.len(), 1, "the file was not indexed twice");
+    assert_eq!(files[0].folder_id, Some(nested.id));
+    assert_eq!(files[0].rel_path, "Cafe del Mar.flac");
 
     let report = scanner.scan_folder(outer.id).await.unwrap();
-    assert_eq!(report.files_removed, 1, "the outer duplicate went");
-    assert_eq!(report.tracks_removed, 1);
-
-    let tracks = tracks_of(album).await;
-    assert_eq!(tracks.len(), 1, "the inner folder's track survives");
-    let files = library
-        .list_media_files_for_track(tracks[0].id)
-        .await
-        .unwrap();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0].folder_id, Some(nested.id));
+    assert_eq!(
+        report.files_removed, 0,
+        "the outer folder has nothing to prune"
+    );
+    assert_eq!(report.tracks_removed, 0);
+    assert_eq!(only_track(&library, "Energy 52").await, track);
+    assert_eq!(likes(&db, track).await, 1, "the like survived");
+    assert_eq!(
+        playlist_entries(&db, playlist, track).await,
+        1,
+        "the playlist entry survived"
+    );
     let stray: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM media_files WHERE storage = 'folder' AND folder_id = ?",
     )
@@ -1557,6 +1641,226 @@ async fn an_outer_folder_prunes_rows_a_nested_folder_owns() {
     .unwrap();
     assert_eq!(stray, 1, "the outer folder kept only the file it owns");
     assert_eq!(library.list_artists().await.unwrap().len(), 2);
+}
+
+/// A scan of the outer folder before the inner folder's first scan keeps the
+/// track: the rows under a nested root are not the outer folder's to prune.
+#[tokio::test]
+async fn an_outer_folder_scan_leaves_the_rows_a_nested_folder_will_take_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    let inner = music.join("Alex G");
+    std::fs::create_dir_all(&inner).unwrap();
+    write_song(&inner, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+    write_song(&music, "Sunset", "Someone Else", "Evening").await;
+    let user = insert_user(&db).await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let outer = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(outer.id).await.unwrap();
+    let track = only_track(&library, "Energy 52").await;
+    like(&db, user, track).await;
+    let playlist = playlist_entry(&db, user, track).await;
+
+    let nested = library.add_library_folder(&inner, None).await.unwrap();
+    let report = scanner.scan_folder(outer.id).await.unwrap();
+    assert_eq!(
+        report.files_removed, 0,
+        "the nested root's rows are the nested folder's to take over"
+    );
+    assert_eq!(report.tracks_removed, 0);
+    assert_eq!(only_track(&library, "Energy 52").await, track);
+
+    let report = scanner.scan_folder(nested.id).await.unwrap();
+    assert_eq!(report.files_seen, 1);
+    assert_eq!(
+        report.files_skipped, 1,
+        "the adopted row was not probed again"
+    );
+    let files = library.list_media_files_for_track(track).await.unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].folder_id, Some(nested.id));
+    assert_eq!(only_track(&library, "Energy 52").await, track);
+    assert_eq!(likes(&db, track).await, 1);
+    assert_eq!(playlist_entries(&db, playlist, track).await, 1);
+}
+
+/// A second track for a file that already has one is removed by the nested
+/// folder's scan, keeping the older track and its like.
+///
+/// A database written before a file had one owner holds a row in each folder,
+/// and so a track per folder. The nested folder's scan keeps the enclosing
+/// folder's track - the older one, the one a like was made against - and
+/// removes the duplicate.
+#[tokio::test]
+async fn a_nested_folder_scan_removes_a_duplicate_track_for_the_same_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    let inner = music.join("Alex G");
+    std::fs::create_dir_all(&inner).unwrap();
+    write_song(&inner, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+    write_song(&music, "Sunset", "Someone Else", "Evening").await;
+    let user = insert_user(&db).await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let outer = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(outer.id).await.unwrap();
+    let track = only_track(&library, "Energy 52").await;
+    like(&db, user, track).await;
+
+    let nested = library.add_library_folder(&inner, None).await.unwrap();
+    let duplicate = library
+        .insert_track(
+            &TrackInput::new("Cafe del Mar", Origin::Local, Availability::Local),
+            &[],
+            &[],
+        )
+        .await
+        .unwrap();
+    library
+        .insert_media_file(&MediaFileInput {
+            track_id: duplicate,
+            storage: StorageClass::Folder,
+            folder_id: Some(nested.id),
+            rel_path: "Cafe del Mar.flac".to_owned(),
+            size: 0,
+            mtime_ms: 0,
+            format: None,
+            codec: None,
+            bitrate_kbps: None,
+            sample_rate: None,
+            bit_depth: None,
+            channels: None,
+            duration_ms: None,
+            lossless: None,
+            quality_tier: None,
+            replaygain: None,
+            has_embedded_art: None,
+            uploaded_by: None,
+            acquisition_id: None,
+        })
+        .await
+        .unwrap();
+
+    let report = scanner.scan_folder(nested.id).await.unwrap();
+    assert_eq!(report.tracks_removed, 1, "the duplicate track went");
+    assert!(
+        library.get_track(duplicate).await.unwrap().is_none(),
+        "the duplicate is gone"
+    );
+    assert_eq!(only_track(&library, "Energy 52").await, track);
+    let files = library.list_media_files_for_track(track).await.unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].folder_id, Some(nested.id));
+    assert_eq!(likes(&db, track).await, 1, "the like survived");
+}
+
+/// A nested folder whose root is empty keeps the rows an outer folder holds
+/// for it: an empty root is what an unmounted disk looks like.
+#[tokio::test]
+async fn a_nested_folder_with_an_empty_root_keeps_the_rows_an_outer_folder_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    let inner = music.join("Alex G");
+    std::fs::create_dir_all(&inner).unwrap();
+    let song = write_song(&inner, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+    let user = insert_user(&db).await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let outer = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(outer.id).await.unwrap();
+    let track = only_track(&library, "Energy 52").await;
+    like(&db, user, track).await;
+    let nested = library.add_library_folder(&inner, None).await.unwrap();
+
+    std::fs::remove_file(&song).unwrap();
+    let report = scanner.scan_folder(nested.id).await.unwrap();
+    assert!(report.prune_refused, "an empty root is not pruned");
+    assert_eq!(report.files_removed, 0);
+    assert_eq!(only_track(&library, "Energy 52").await, track);
+    assert_eq!(likes(&db, track).await, 1);
+}
+
+/// A scan of one subtree of a nested folder leaves the rows outside it alone.
+///
+/// The watcher scans the directory a file changed in, so a subtree scan must not
+/// treat the files it did not walk as gone: the rows an enclosing folder holds
+/// outside the subtree stay until a scan sees that subtree too.
+#[tokio::test]
+async fn a_nested_folder_subtree_scan_leaves_the_other_rows_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    let inner = music.join("Alex G");
+    let live = inner.join("Live");
+    std::fs::create_dir_all(&live).unwrap();
+    write_song(&inner, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+    write_song(&live, "Sunset", "Energy 52", "Evening").await;
+    let user = insert_user(&db).await;
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let outer = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(outer.id).await.unwrap();
+    let studio = library
+        .list_artists()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|artist| artist.name == "Energy 52")
+        .unwrap();
+    let album_of = |title: &'static str| {
+        let library = &library;
+        async move {
+            library
+                .list_albums_for_artist(studio.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|album| album.title == title)
+                .unwrap()
+                .id
+        }
+    };
+    let studio_album = album_of("Cafe del Mar").await;
+    let studio_track = library.list_tracks_for_album(studio_album).await.unwrap()[0].id;
+    let evening_album = album_of("Evening").await;
+    let evening_track = library.list_tracks_for_album(evening_album).await.unwrap()[0].id;
+    like(&db, user, studio_track).await;
+
+    let nested = library.add_library_folder(&inner, None).await.unwrap();
+    let request = ScanRequest::folder(nested.id).paths(["Live"]);
+    let report = scanner.scan(&request).await.unwrap().remove(0);
+    assert_eq!(report.files_seen, 1, "only the subtree was walked");
+
+    let files = library
+        .list_media_files_for_track(evening_track)
+        .await
+        .unwrap();
+    assert_eq!(files.len(), 1, "the walked file was taken over");
+    assert_eq!(files[0].folder_id, Some(nested.id));
+    assert_eq!(files[0].rel_path, "Live/Sunset.flac");
+    assert!(
+        library.get_track(studio_track).await.unwrap().is_some(),
+        "the row outside the subtree is left alone"
+    );
+    let files = library
+        .list_media_files_for_track(studio_track)
+        .await
+        .unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(
+        files[0].folder_id,
+        Some(outer.id),
+        "the outer folder still owns it until a scan walks it"
+    );
+    assert_eq!(likes(&db, studio_track).await, 1);
 }
 
 /// Writes a short FLAC with an explicit year and artist id.

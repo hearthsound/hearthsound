@@ -276,6 +276,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A file that two overlapping folders hold is indexed once, by the deepest
+  folder that contains it: a folder added inside another one takes over the rows
+  the outer folder indexed, so the track keeps its id, its likes, its ratings,
+  its playlist entries and its plays, and the outer folder no longer removes a
+  row a nested folder owns.
+- A file a database already indexed twice - once per folder - keeps the older
+  track, and the nested folder's next scan removes the duplicate.
 - A stored provider secret is never printed by a validation error: the message
   names the field and the keyword, never the restored value or, for a plugin's
   own complaint, the secret it quoted.

@@ -600,6 +600,102 @@ pub async fn list_folder_media_files(
         .collect()
 }
 
+/// Lists the stored state of the media files of a folder under one of its
+/// directories.
+///
+/// A folder's scan uses this to find the rows an enclosing folder holds for the
+/// files it is about to index: a file belongs to the deepest folder that
+/// contains it, so the deeper folder re-points those rows instead of indexing
+/// the same file a second time.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `folder_id`: the library folder's id.
+/// - `prefix`: the directory, relative to the folder root and without a
+///   trailing `/`.
+///
+/// # Returns
+///
+/// The rows under `prefix`, keyed by their path relative to the folder root.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when the query fails.
+pub async fn list_folder_media_files_under(
+    conn: &mut SqliteConnection,
+    folder_id: Uuid,
+    prefix: &str,
+) -> Result<HashMap<String, StoredFileState>, LibraryError> {
+    // `/` sorts directly before `0`, so the range covers every path below the
+    // directory and nothing beside it, on the index the folder and path share.
+    let lower = format!("{prefix}/");
+    let upper = format!("{prefix}0");
+    let rows = sqlx::query!(
+        "SELECT id, track_id, rel_path, size, mtime_ms FROM media_files \
+         WHERE storage = 'folder' AND folder_id = ? AND rel_path >= ? AND rel_path < ?",
+        folder_id.as_bytes().as_slice(),
+        lower,
+        upper,
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok((
+                row.rel_path,
+                StoredFileState {
+                    id: decode_uuid(&row.id)?,
+                    track_id: decode_entity(IdPrefix::Track, &row.track_id)?,
+                    size: row.size,
+                    mtime_ms: row.mtime_ms,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// Moves a `folder` media file to another folder and relative path.
+///
+/// This is what records that a file a folder indexes is owned by a folder
+/// inside it: the row keeps its id and its track, so the track's likes, saves,
+/// ratings, playlist entries and plays survive the move, and only the folder and
+/// the path change. The track's preferred file does not change, because the
+/// storage class does not.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `id`: the media file that moved.
+/// - `folder_id`: the folder that owns the file now.
+/// - `rel_path`: its path relative to that folder's root.
+///
+/// # Returns
+///
+/// `true` when the row was updated, `false` when no `folder` row has that id.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when the update fails, including a unique
+/// index violation when a row already holds the same folder and path.
+pub async fn repoint_folder_media_file(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    folder_id: Uuid,
+    rel_path: &str,
+) -> Result<bool, LibraryError> {
+    let affected = sqlx::query!(
+        "UPDATE media_files SET folder_id = ?, rel_path = ? WHERE id = ? AND storage = 'folder'",
+        folder_id.as_bytes().as_slice(),
+        rel_path,
+        id.as_bytes().as_slice(),
+    )
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
+}
+
 /// Moves a managed media file to another storage class and relative path.
 ///
 /// This is what records the new home of a file the storage maintainer moved

@@ -314,6 +314,78 @@ pub fn nested_roots(folders: &[LibraryFolder], folder: &LibraryFolder) -> Vec<Pa
     nested
 }
 
+/// Returns the library folders that strictly contain another one.
+///
+/// Overlapping folders are allowed: a file belongs to the deepest folder that
+/// contains it, so the folder inside another one takes over the rows the
+/// enclosing folder holds for the files it indexes, and the enclosing folder's
+/// scan leaves those rows alone. Stored folder paths are canonical, so a plain
+/// component-wise comparison is enough.
+///
+/// # Parameters
+///
+/// - `folders`: every library folder.
+/// - `folder`: the folder whose scan is about to run.
+///
+/// # Returns
+///
+/// The other folders that contain `folder`, the deepest first, so the nearest
+/// enclosing folder is the first candidate for a file's row.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::PathBuf;
+///
+/// use hearthsound_library::LibraryFolder;
+/// use hearthsound_library::folders::enclosing_folders;
+/// use uuid::Uuid;
+///
+/// let folder = |id: u128, path: &str| LibraryFolder {
+///     id: Uuid::from_u128(id),
+///     path: PathBuf::from(path),
+///     name: path.to_owned(),
+///     owner_user_id: None,
+///     watch: true,
+///     created_at: 0,
+///     last_scan_at: None,
+///     last_scan_error: None,
+/// };
+/// let folders = vec![
+///     folder(1, "/music"),
+///     folder(2, "/music/Alex G"),
+///     folder(3, "/music/Alex G/live"),
+///     folder(4, "/other"),
+/// ];
+/// let enclosing = enclosing_folders(&folders, &folders[2]);
+/// assert_eq!(
+///     enclosing
+///         .iter()
+///         .map(|folder| folder.path.display().to_string())
+///         .collect::<Vec<_>>(),
+///     vec!["/music/Alex G".to_owned(), "/music".to_owned()]
+/// );
+/// ```
+pub fn enclosing_folders(folders: &[LibraryFolder], folder: &LibraryFolder) -> Vec<LibraryFolder> {
+    let mut enclosing: Vec<LibraryFolder> = folders
+        .iter()
+        .filter(|other| other.id != folder.id)
+        .filter(|other| other.path != folder.path)
+        .filter(|other| folder.path.starts_with(&other.path))
+        .cloned()
+        .collect();
+    enclosing.sort_by(|left, right| {
+        right
+            .path
+            .components()
+            .count()
+            .cmp(&left.path.components().count())
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    enclosing.dedup_by(|left, right| left.id == right.id);
+    enclosing
+}
+
 /// Adds a folder to the scan set.
 ///
 /// The path is canonicalized, so a symlinked or relative spelling resolves to

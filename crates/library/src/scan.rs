@@ -13,6 +13,14 @@
 //! files at all is deleted when it was created by scanning and demoted to
 //! `remote` when it came from the catalog.
 //!
+//! Overlapping folders are allowed, and each file belongs to the deepest folder
+//! that contains it. A folder's walk skips the roots of the folders inside it,
+//! its scan takes over the rows an enclosing folder holds for the files under
+//! its root - re-pointing them instead of indexing the same file again, so the
+//! track keeps its id and everything that points at it - and its prune leaves
+//! the rows under a nested folder's root alone, because those are that folder's
+//! to take over or remove.
+//!
 //! Probing never happens inside a write transaction. The walk is blocking work
 //! and runs on a blocking thread; the probes are asynchronous and run outside
 //! any transaction; the writes are grouped into short transactions so the
@@ -22,7 +30,7 @@
 //! transaction that writes them, which is what makes an owned folder's content
 //! permanent in its owner's personal library.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -40,7 +48,7 @@ use hearthsound_db::Database;
 use hearthsound_jobs::{Job, JobError, JobHandler, JobQueue, NewJob};
 use hearthsound_media::ProbeResult;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use crate::artists_split::split_artists;
@@ -284,6 +292,19 @@ struct FoundFile {
     size: i64,
     /// The file modification time in unix milliseconds.
     mtime_ms: i64,
+}
+
+/// A media file row an enclosing folder holds under a folder's root.
+///
+/// A file belongs to the deepest folder that contains it, so such a row is the
+/// scanned folder's to keep: its scan re-points it instead of indexing the same
+/// file again, which is what keeps the track and everything hanging off it.
+#[derive(Debug, Clone)]
+struct InheritedFile {
+    /// The path relative to the scanned folder's root.
+    rel_path: String,
+    /// The row as the enclosing folder stores it.
+    state: media_files::StoredFileState,
 }
 
 /// A file waiting to be written, with its probe result.
@@ -707,16 +728,26 @@ impl LibraryScanner {
             .await?
             .ok_or(LibraryError::UnknownFolder { folder_id })?;
         // Overlapping folders are allowed, and a file belongs to the deepest
-        // folder that contains it, so this folder's walk skips the roots of the
-        // folders inside it.
+        // folder that contains it: this folder's walk skips the roots of the
+        // folders inside it, and the rows the folders around it hold for the
+        // files it walks are taken over below.
         let all_folders = folders::list_library_folders(&mut read).await?;
         // One read of the folder's rows replaces a lookup per walked file.
-        let stored = media_files::list_folder_media_files(&mut read, folder.id).await?;
+        let mut stored = media_files::list_folder_media_files(&mut read, folder.id).await?;
+        let inherited = inherited_files(&mut read, &all_folders, &folder).await?;
         drop(read);
 
+        let skip = folders::nested_roots(&all_folders, &folder);
+        // The rows inside a nested folder's root are that folder's to take
+        // over, so this folder's prune leaves them alone: pruning them would
+        // delete the track the nested folder is about to adopt.
+        let nested: Vec<String> = skip
+            .iter()
+            .filter_map(|path| path.strip_prefix(&folder.path).ok())
+            .filter_map(|relative| relative.to_str().map(str::to_owned))
+            .collect();
         let walk_root = folder.path.clone();
         let walk_subtrees = subtrees.clone();
-        let skip = folders::nested_roots(&all_folders, &folder);
         let outcome =
             tokio::task::spawn_blocking(move || walk(&walk_root, &walk_subtrees, &skip)).await??;
         let found = outcome.found;
@@ -730,12 +761,28 @@ impl LibraryScanner {
         };
         self.progress(folder.id, "indexing", &report, None);
 
+        let seen: HashSet<String> = found.iter().map(|file| file.rel_path.clone()).collect();
+        // An existing root with nothing in it is what an unmounted bind mount
+        // looks like, so neither the rows this folder holds nor the rows an
+        // enclosing folder holds here may go until a scan sees content again.
+        let rows_at_risk = stored.len() + inherited.len();
+        let prunable = !(outcome.root_empty && rows_at_risk > 0);
+        if prunable {
+            self.take_over(
+                &folder,
+                inherited,
+                &mut stored,
+                &seen,
+                &subtrees,
+                &mut report,
+            )
+            .await?;
+        }
+
         // The files whose size or modification time changed, with the track
         // their stored row belongs to. A full scan probes every file.
-        let mut seen: HashSet<String> = HashSet::with_capacity(found.len());
         let mut changed: Vec<(FoundFile, Option<EntityId>)> = Vec::new();
         for file in found {
-            seen.insert(file.rel_path.clone());
             let state = stored.get(&file.rel_path).copied();
             if !request.full
                 && let Some(state) = state
@@ -787,19 +834,18 @@ impl LibraryScanner {
             .await?;
 
         self.progress(folder.id, "pruning", &report, None);
-        if outcome.root_empty && !stored.is_empty() {
-            // An existing root with nothing in it is what an unmounted bind
-            // mount looks like, so pruning would delete a library that is only
-            // out of reach. The rows stay until a scan sees content again.
+        if prunable {
+            self.prune(&folder, &seen, &subtrees, &nested, &mut report)
+                .await?;
+        } else {
+            // The rows stay until a scan sees content again.
             report.prune_refused = true;
             tracing::warn!(
                 folder = %folder.id,
                 path = %folder.path.display(),
-                files = stored.len(),
+                files = rows_at_risk,
                 "refused to prune a folder whose root is empty; the disk may be unmounted"
             );
-        } else {
-            self.prune(&folder, &seen, &subtrees, &mut report).await?;
         }
         Ok(report)
     }
@@ -878,10 +924,173 @@ impl LibraryScanner {
         Ok(())
     }
 
+    /// Takes over the rows an enclosing folder holds under this folder's root.
+    ///
+    /// A file belongs to the deepest folder that contains it, so the rows an
+    /// enclosing folder holds for the files under this root are this folder's:
+    /// re-pointing them, rather than indexing the same file again, keeps the
+    /// track and with it the likes, saves, ratings, playlist entries and plays
+    /// the track carries.
+    ///
+    /// Three cases are handled together:
+    ///
+    /// - a file this folder has no row for is adopted, so its row keeps its id
+    ///   and its track, and an owned folder pins the adopted track as it pins
+    ///   the files it indexes;
+    /// - a row whose file is gone is removed, exactly as the prune removes a
+    ///   row this folder holds for a vanished file;
+    /// - a second row for the same file - what a database indexed before this
+    ///   rule looks like - is removed, keeping the enclosing folder's track,
+    ///   which is the older of the two and the one a like or a playlist entry
+    ///   was made against while the file had no deeper owner.
+    ///
+    /// The rows are written in batches of [`DELETE_BATCH`], one short
+    /// transaction each.
+    ///
+    /// # Parameters
+    ///
+    /// - `folder`: the folder being scanned.
+    /// - `inherited`: the rows the enclosing folders hold under this root, the
+    ///   deepest folder's first.
+    /// - `stored`: this folder's rows, updated with the rows taken over, so the
+    ///   rest of the scan treats an adopted file as already indexed.
+    /// - `seen`: the relative paths the walk found.
+    /// - `subtrees`: the directories the walk was restricted to; empty means
+    ///   the whole folder. A row outside them is left alone, exactly as the
+    ///   prune leaves a row outside them alone.
+    /// - `report`: the counters to update.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when a statement fails; the batch is rolled
+    /// back, so it can be retried.
+    async fn take_over(
+        &self,
+        folder: &LibraryFolder,
+        inherited: Vec<InheritedFile>,
+        stored: &mut HashMap<String, media_files::StoredFileState>,
+        seen: &HashSet<String>,
+        subtrees: &[String],
+        report: &mut ScanReport,
+    ) -> Result<(), LibraryError> {
+        if inherited.is_empty() {
+            return Ok(());
+        }
+        // The row of the deepest enclosing folder keeps the file: the rows a
+        // folder further out holds for it are the duplicates.
+        let mut claimed: HashSet<&str> = HashSet::with_capacity(inherited.len());
+        for chunk in inherited.chunks(DELETE_BATCH) {
+            // The batch reads before it writes; see [`READ_THEN_WRITE`].
+            let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+            let mut removed: Vec<EntityId> = Vec::new();
+            for file in chunk {
+                if !in_subtrees(&file.rel_path, subtrees) {
+                    continue;
+                }
+                if !seen.contains(&file.rel_path) || !claimed.insert(file.rel_path.as_str()) {
+                    self.drop_media_file(&mut tx, file.state, report, &mut removed)
+                        .await?;
+                    continue;
+                }
+                // The row this folder already holds for the file is the
+                // duplicate: the enclosing folder's row is the older one.
+                if let Some(duplicate) = stored.remove(&file.rel_path) {
+                    self.drop_media_file(&mut tx, duplicate, report, &mut removed)
+                        .await?;
+                }
+                media_files::repoint_folder_media_file(
+                    &mut tx,
+                    file.state.id,
+                    folder.id,
+                    &file.rel_path,
+                )
+                .await?;
+                // An owned folder's content is permanent in its owner's
+                // library, and an adopted file is not written by the flush that
+                // pins the files it indexes.
+                if folder.owner_user_id.is_some() {
+                    retention::add_pin_reason(&mut tx, file.state.track_id, PinReason::Folder)
+                        .await?;
+                }
+                stored.insert(file.rel_path.clone(), file.state);
+                tracing::debug!(
+                    folder = %folder.id,
+                    path = %file.rel_path,
+                    track = %file.state.track_id,
+                    "took over a row an enclosing folder indexed"
+                );
+            }
+            tx.commit().await?;
+            for track_id in removed {
+                self.publish_track_change(track_id, LibraryChange::Removed);
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes one media file row and the track it leaves with no files.
+    ///
+    /// The row is re-read first, because a folder removal may have taken it
+    /// while the scan was walking. A track left with no files is deleted when
+    /// it was created by scanning and demoted to `remote` when it came from the
+    /// catalog.
+    ///
+    /// # Parameters
+    ///
+    /// - `tx`: the transaction to write on.
+    /// - `state`: the row as the scan read it.
+    /// - `report`: the counters to update.
+    /// - `removed`: the tracks deleted, for the caller's events.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when a statement fails.
+    async fn drop_media_file(
+        &self,
+        tx: &mut SqliteConnection,
+        state: media_files::StoredFileState,
+        report: &mut ScanReport,
+        removed: &mut Vec<EntityId>,
+    ) -> Result<(), LibraryError> {
+        if media_files::get_media_file(&mut *tx, state.id)
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
+        media_files::delete_media_file(&mut *tx, state.id).await?;
+        report.files_removed += 1;
+        let remaining = media_files::list_media_files_for_track(&mut *tx, state.track_id).await?;
+        if !remaining.is_empty() {
+            return Ok(());
+        }
+        match tracks::get_track(&mut *tx, state.track_id).await? {
+            Some(track) if track.origin == Origin::Local => {
+                tracks::delete_track(&mut *tx, state.track_id).await?;
+                report.tracks_removed += 1;
+                removed.push(state.track_id);
+            }
+            Some(_) => {
+                tracks::set_track_availability(
+                    &mut *tx,
+                    state.track_id,
+                    Availability::Remote,
+                    None,
+                )
+                .await?;
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
     /// Removes the rows of files that are gone from the folder.
     ///
     /// Only the rows inside the scanned subtrees are considered, so a scan of
-    /// one directory never removes a row outside it.
+    /// one directory never removes a row outside it, and only the rows this
+    /// folder owns are considered: a row under the root of a folder inside it
+    /// is that folder's to take over or remove, and pruning it here would
+    /// delete the track the nested folder adopts.
     ///
     /// The rows are read once and then removed in batches of [`DELETE_BATCH`],
     /// one short transaction each: a prune of a large folder must not hold the
@@ -895,6 +1104,8 @@ impl LibraryScanner {
     /// - `seen`: the relative paths the walk found.
     /// - `subtrees`: the directories the walk was restricted to; empty means
     ///   the whole folder.
+    /// - `nested`: the nested library folders' paths, relative to the folder
+    ///   root, whose rows this folder leaves alone.
     /// - `report`: the counters to update.
     ///
     /// # Errors
@@ -905,6 +1116,7 @@ impl LibraryScanner {
         folder: &LibraryFolder,
         seen: &HashSet<String>,
         subtrees: &[String],
+        nested: &[String],
         report: &mut ScanReport,
     ) -> Result<(), LibraryError> {
         let mut read = self.readers.acquire().await?;
@@ -912,7 +1124,11 @@ impl LibraryScanner {
         drop(read);
         let missing: Vec<media_files::StoredFileState> = existing
             .iter()
-            .filter(|(rel_path, _)| !seen.contains(*rel_path) && in_subtrees(rel_path, subtrees))
+            .filter(|(rel_path, _)| {
+                !seen.contains(*rel_path)
+                    && in_subtrees(rel_path, subtrees)
+                    && !inside_nested_root(rel_path, nested)
+            })
             .map(|(_, state)| *state)
             .collect();
 
@@ -921,36 +1137,8 @@ impl LibraryScanner {
             let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
             let mut removed: Vec<EntityId> = Vec::new();
             for state in chunk {
-                if media_files::get_media_file(&mut tx, state.id)
-                    .await?
-                    .is_none()
-                {
-                    continue;
-                }
-                media_files::delete_media_file(&mut tx, state.id).await?;
-                report.files_removed += 1;
-                let remaining =
-                    media_files::list_media_files_for_track(&mut tx, state.track_id).await?;
-                if !remaining.is_empty() {
-                    continue;
-                }
-                match tracks::get_track(&mut tx, state.track_id).await? {
-                    Some(track) if track.origin == Origin::Local => {
-                        tracks::delete_track(&mut tx, state.track_id).await?;
-                        report.tracks_removed += 1;
-                        removed.push(state.track_id);
-                    }
-                    Some(_) => {
-                        tracks::set_track_availability(
-                            &mut tx,
-                            state.track_id,
-                            Availability::Remote,
-                            None,
-                        )
-                        .await?;
-                    }
-                    None => {}
-                }
+                self.drop_media_file(&mut tx, *state, report, &mut removed)
+                    .await?;
             }
             tx.commit().await?;
             for track_id in removed {
@@ -1298,6 +1486,61 @@ impl WalkOutcome {
     }
 }
 
+/// Collects the rows the enclosing folders hold under a folder's root.
+///
+/// A file belongs to the deepest folder that contains it, so every row an
+/// enclosing folder holds for a file under this root belongs to this folder's
+/// scan to keep: it re-points the row instead of indexing the same file again.
+/// Only the paths below the folder's root are read, so a scan of a small folder
+/// inside a big one costs what the small folder holds, not what the big one
+/// does.
+///
+/// # Parameters
+///
+/// - `conn`: the connection to read on.
+/// - `known`: every library folder.
+/// - `folder`: the folder whose scan is about to run.
+///
+/// # Returns
+///
+/// One entry per row, the rows of the deepest enclosing folder first, so the
+/// first row for a path is the one that keeps the track. A row whose path is
+/// not expressible as a UTF-8 path relative to the folder is left out: no
+/// walked file can carry such a path either.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when a query fails.
+async fn inherited_files(
+    conn: &mut SqliteConnection,
+    known: &[LibraryFolder],
+    folder: &LibraryFolder,
+) -> Result<Vec<InheritedFile>, LibraryError> {
+    let mut inherited: Vec<InheritedFile> = Vec::new();
+    for enclosing in folders::enclosing_folders(known, folder) {
+        let Ok(inside) = folder.path.strip_prefix(&enclosing.path) else {
+            continue;
+        };
+        let Some(prefix) = inside.to_str() else {
+            continue;
+        };
+        let rows = media_files::list_folder_media_files_under(conn, enclosing.id, prefix).await?;
+        for (rel_path, state) in rows {
+            let Some(under) = rel_path
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.strip_prefix('/'))
+            else {
+                continue;
+            };
+            inherited.push(InheritedFile {
+                rel_path: under.to_owned(),
+                state,
+            });
+        }
+    }
+    Ok(inherited)
+}
+
 /// Walks a folder, or the listed subtrees of it, and returns its audio files.
 ///
 /// The walk follows symbolic links, including ones whose target is outside the
@@ -1590,6 +1833,25 @@ fn in_subtrees(rel_path: &str, subtrees: &[String]) -> bool {
                 Some(rest) => rest.starts_with('/'),
                 None => false,
             })
+}
+
+/// Reports whether a stored path is inside a directory that is a library folder
+/// of its own.
+///
+/// # Parameters
+///
+/// - `rel_path`: the stored path, relative to the folder root.
+/// - `nested`: the nested library folders' paths, relative to the folder root.
+///
+/// # Returns
+///
+/// `true` when the path is at or under one of them.
+fn inside_nested_root(rel_path: &str, nested: &[String]) -> bool {
+    nested.iter().any(|root| {
+        rel_path
+            .strip_prefix(root.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
 }
 
 /// Reports whether an extension names an audio file the scanner recognises.

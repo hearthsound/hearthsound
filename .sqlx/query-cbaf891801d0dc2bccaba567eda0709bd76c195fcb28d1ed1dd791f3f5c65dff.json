@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE media_files SET folder_id = ?, rel_path = ? WHERE id = ? AND storage = 'folder'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "cbaf891801d0dc2bccaba567eda0709bd76c195fcb28d1ed1dd791f3f5c65dff"
+}
