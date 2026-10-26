@@ -14,6 +14,24 @@ use tokio::io::AsyncReadExt;
 /// for a fixed time.
 const FIRST_BYTES_DEADLINE: Duration = Duration::from_secs(30);
 
+/// How long a dropped child may take to exit and return its permit.
+const RELEASE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Waits until no child holds a permit.
+///
+/// A dropped process keeps its slot until it has actually exited, so a test
+/// cannot read the count back immediately after the drop.
+async fn wait_for_idle(runner: &FfmpegRunner) {
+    let deadline = std::time::Instant::now() + RELEASE_DEADLINE;
+    while runner.in_flight() > 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a dropped child never returned its permit"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// The argument vector of an ffmpeg that runs until it is killed.
 fn endless_args() -> Vec<std::ffi::OsString> {
     vec![
@@ -85,9 +103,10 @@ async fn waits_for_a_free_slot_before_spawning() {
         "the second child started without a permit"
     );
 
-    // Dropping a running child gives its permit back and kills it.
+    // Dropping a running child kills it and gives its permit back once it has
+    // exited.
     drop(first);
-    assert_eq!(runner.in_flight(), 0);
+    wait_for_idle(&runner).await;
 
     let second = tokio::time::timeout(Duration::from_secs(5), runner.spawn(endless_args()))
         .await
@@ -95,7 +114,7 @@ async fn waits_for_a_free_slot_before_spawning() {
         .unwrap();
     assert_eq!(runner.in_flight(), 1);
     drop(second);
-    assert_eq!(runner.in_flight(), 0);
+    wait_for_idle(&runner).await;
 }
 
 #[tokio::test]
@@ -124,7 +143,41 @@ async fn grows_the_cap_when_the_setting_changes() {
 
     drop(first);
     drop(second);
-    assert_eq!(runner.in_flight(), 0);
+    wait_for_idle(&runner).await;
+}
+
+/// A dropped child keeps its slot until it has exited, so the budget never runs
+/// a replacement beside the process it is tearing down.
+#[tokio::test]
+async fn dropping_a_child_keeps_its_permit_until_it_exits() {
+    let runner = FfmpegRunner::new(None, 1);
+    let first = runner.spawn(endless_args()).await.unwrap();
+    assert_eq!(runner.in_flight(), 1);
+
+    drop(first);
+    assert_eq!(
+        runner.in_flight(),
+        1,
+        "the permit must outlive the child it guards"
+    );
+
+    // The child is killed with `SIGKILL`, so the window between the drop and its
+    // exit is short; what the test can assert without a child that ignores
+    // signals is that the slot is not handed out while the old child holds it,
+    // and that it comes back exactly once.
+    wait_for_idle(&runner).await;
+    let second = tokio::time::timeout(RELEASE_DEADLINE, runner.spawn(endless_args()))
+        .await
+        .expect("the freed slot starts the next child")
+        .unwrap();
+    assert_eq!(runner.in_flight(), 1);
+    assert_eq!(
+        runner.max_concurrent(),
+        1,
+        "the budget reports the cap in force"
+    );
+    drop(second);
+    wait_for_idle(&runner).await;
 }
 
 #[tokio::test]
@@ -176,6 +229,6 @@ async fn kills_the_child_when_its_handle_is_dropped() {
         .expect("the pipe closed after the drop")
         .unwrap();
     assert!(total > 0, "the child produced no samples");
-    assert_eq!(runner.in_flight(), 0, "the permit was not released");
+    wait_for_idle(&runner).await;
     assert!(pid.is_some());
 }

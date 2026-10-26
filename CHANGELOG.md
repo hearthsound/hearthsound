@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The ffmpeg concurrency cap is one explicit counter: a cap lowered while children run is reached as they finish instead of being silently exceeded, a later raise adds only the difference, and a dropped process returns its slot only after it has exited.
 - A job handler that panics fails its own job permanently and leaves its worker claiming, instead of taking the worker down and holding the job until its lock expires.
 - A job whose worker keeps dying is failed once its attempts are used up, instead of being reclaimed for the life of the process.
 - A job's attempt count is its claim token: a worker whose lock expired can no longer complete, fail or permanently fail the attempt another worker has since reclaimed.
