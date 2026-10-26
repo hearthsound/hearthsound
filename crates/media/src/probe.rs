@@ -23,8 +23,10 @@
 //! ```
 
 use std::fs::File;
+use std::future::Future;
 use std::io::BufReader;
 use std::path::Path;
+use std::time::Duration;
 
 use lofty::config::ParseOptions;
 use lofty::file::{AudioFile, FileType, TaggedFile, TaggedFileExt};
@@ -354,6 +356,12 @@ fn extract_picture_blocking(path: &Path) -> Result<Option<Artwork>, MediaError> 
     Ok(None)
 }
 
+/// How long a `symphonia` decode check may take.
+///
+/// A pathological or damaged file must not hold the import that is verifying it
+/// for ever; two minutes is well past a normal decode of a full-length track.
+const DECODE_VERIFY_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Decodes a media file from end to end.
 ///
 /// The file is decoded with `symphonia` when `symphonia` has a decoder for its
@@ -374,20 +382,74 @@ fn extract_picture_blocking(path: &Path) -> Result<Option<Artwork>, MediaError> 
 /// # Errors
 ///
 /// Returns [`MediaError::Decode`] when the file cannot be decoded from start to
-/// finish, and [`MediaError::Io`] when it cannot be read at all.
+/// finish, and [`MediaError::Io`] when it cannot be read at all. A decode that
+/// outlives [`DECODE_VERIFY_TIMEOUT`] is reported as a decode failure.
 pub async fn verify_decodes(
     path: &Path,
     runner: &FfmpegRunner,
 ) -> Result<DecodeReport, MediaError> {
+    verify_decodes_within(path, runner, DECODE_VERIFY_TIMEOUT).await
+}
+
+/// Decodes a media file from end to end, waiting at most `timeout`.
+///
+/// The wait is bounded, but `spawn_blocking` cannot be cancelled: a decoder that
+/// never returns still costs one blocking thread. It no longer holds a job or an
+/// acquisition, which is what the bound is for.
+///
+/// # Parameters
+///
+/// - `path`: the file to decode.
+/// - `runner`: the ffmpeg runner used for the fallback decode.
+/// - `timeout`: how long the `symphonia` decode may take.
+///
+/// # Errors
+///
+/// Returns the errors of [`verify_decodes`], and [`MediaError::Decode`] naming
+/// the bound when the decode does not finish within it.
+async fn verify_decodes_within(
+    path: &Path,
+    runner: &FfmpegRunner,
+    timeout: Duration,
+) -> Result<DecodeReport, MediaError> {
     let owned = path.to_path_buf();
-    let outcome = tokio::task::spawn_blocking(move || symphonia_decode(&owned))
-        .await
-        .map_err(MediaError::task_failed)?;
+    let outcome = bounded(timeout, async move {
+        tokio::task::spawn_blocking(move || symphonia_decode(&owned))
+            .await
+            .map_err(MediaError::task_failed)
+    })
+    .await
+    .ok_or_else(|| {
+        MediaError::decode(
+            path,
+            format!(
+                "the decode check did not finish within {} s",
+                timeout.as_secs()
+            ),
+        )
+    })??;
     match outcome {
         Ok(report) => Ok(report),
         Err(SymphoniaFailure::Unsupported(message)) => ffmpeg_decode(path, runner, &message).await,
         Err(SymphoniaFailure::Failed(message)) => Err(MediaError::decode(path, message)),
     }
+}
+
+/// Runs `task`, giving up on its result after `timeout`.
+///
+/// The task itself is not cancelled - `spawn_blocking` cannot be - but the
+/// caller stops waiting for it.
+///
+/// # Parameters
+///
+/// - `timeout`: how long to wait.
+/// - `task`: the work to wait for.
+///
+/// # Returns
+///
+/// The task's value, or `None` when it did not finish in time.
+async fn bounded<T>(timeout: Duration, task: impl Future<Output = T>) -> Option<T> {
+    tokio::time::timeout(timeout, task).await.ok()
 }
 
 /// Why `symphonia` could not verify a file.
@@ -851,6 +913,22 @@ fn non_empty<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
 mod tests {
     use super::*;
     use symphonia::core::errors::Error as SymphoniaError;
+
+    #[tokio::test]
+    async fn a_bounded_task_that_never_finishes_reports_nothing() {
+        let outcome = bounded(Duration::from_millis(10), async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            7
+        })
+        .await;
+        assert_eq!(outcome, None, "the bound is what ends the wait");
+    }
+
+    #[tokio::test]
+    async fn a_bounded_task_that_finishes_reports_its_value() {
+        let outcome = bounded(Duration::from_millis(50), async { 7 }).await;
+        assert_eq!(outcome, Some(7));
+    }
 
     #[test]
     fn a_probe_that_runs_out_of_stream_falls_back_to_ffmpeg() {

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A decode check during an import gives up after two minutes and fails the verification instead of holding the import (and a blocking thread) for ever.
 - A scheduled job keeps its local-time rule and the DST effect is written down: a spring-forward gap means one missed run and a repeated hour means one run, and `TZ` decides the zone in a container.
 - A reload after an external write is retried for up to thirty-six seconds before it is left to the next write, so a busy database no longer leaves the process serving the previous settings and provider registry until something else commits.
 - The serving process holds `<data>/server.lock` for its lifetime: a command that would migrate the database refuses while a server runs, a command that needs no migration runs normally beside one, and a database migrated by a newer binary is refused instead of served.
