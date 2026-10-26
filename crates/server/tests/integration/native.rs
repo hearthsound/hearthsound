@@ -108,6 +108,27 @@ async fn a_missing_or_wrong_credential_is_unauthenticated() {
     fixture.stop().await;
 }
 
+/// A method a known path does not support is a problem document too.
+#[tokio::test]
+async fn an_unsupported_method_is_method_not_allowed() {
+    let fixture = Fixture::new().await;
+
+    let response = bearer(
+        &fixture,
+        reqwest::Method::DELETE,
+        "/api/v1/system/info",
+        None,
+    )
+    .await;
+    assert_problem(response, StatusCode::METHOD_NOT_ALLOWED, "method-not-allowed").await;
+
+    // An unknown path still answers `not-found` whatever its method is.
+    let response = bearer(&fixture, reqwest::Method::DELETE, "/api/v1/nothing/here", None).await;
+    assert_problem(response, StatusCode::NOT_FOUND, "not-found").await;
+
+    fixture.stop().await;
+}
+
 /// The OpenAPI document is public and lists the resources and both
 /// credential schemes.
 #[tokio::test]

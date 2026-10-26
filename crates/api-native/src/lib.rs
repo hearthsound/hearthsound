@@ -265,6 +265,9 @@ pub fn router(state: NativeState) -> Router {
     )
     .route("/api/v1", any(not_found))
     .route("/api/v1/{*rest}", any(not_found))
+    // A known path with an unmatched method would otherwise be answered by
+    // axum's empty default; a client of this API always gets a problem document.
+    .method_not_allowed_fallback(|| async { Problem::method_not_allowed() })
     .with_state(state)
 }
 

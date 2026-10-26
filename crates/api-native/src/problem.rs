@@ -19,7 +19,9 @@
 //! | `not-found` | 404 | the resource does not exist |
 //! | `not-in-source` | 404 | a queue's `from` track is not in the collection |
 //! | `invalid-request` | 400 | the request is malformed or names something invalid |
+//! | `invalid-order` | 400 | a playlist reorder does not list every position exactly once |
 //! | `unknown-source` | 400 | a queue names a collection this server does not know |
+//! | `method-not-allowed` | 405 | the path exists but does not support that method |
 //! | `conflict` | 409 | the request contradicts the current state |
 //! | `too-large` | 413 | an upload exceeds `uploads.max_file_bytes` |
 //! | `unsupported-media` | 415 | an upload is not audio the library indexes |
@@ -235,6 +237,16 @@ impl Problem {
             "not-in-source",
             "Track not in the source",
             detail,
+        )
+    }
+
+    /// A path this server serves does not support the request's method.
+    pub fn method_not_allowed() -> Problem {
+        Problem::new(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method-not-allowed",
+            "Method not allowed",
+            "This path does not support that method.",
         )
     }
 
