@@ -30,6 +30,26 @@
 //! than not reporting it, and a rate-limited answer reschedules the row for the
 //! delay the service asked for without counting a failed attempt.
 //!
+//! # What is retried and what is parked
+//!
+//! A delivery outcome has two classes. `Unavailable` and a rate limit are
+//! transient: the row keeps its place in the queue and is tried again on the
+//! backoff schedule. `NotFound`, `Unauthorized`, `InvalidConfig` and `Internal`
+//! are terminal - a service that does not know the listen, a revoked token, a
+//! configuration it rejects, or a plugin that failed internally will answer the
+//! same way next time - so the row is parked at once: its state is `failed`,
+//! its `last_error` names the class, and it is never retried. The counters
+//! [`ScrobbleOutbox::counters`] returns and the link view an administrator
+//! reads show a parked row, so a revoked token is visible immediately instead
+//! of after a week of silent retries.
+//!
+//! A service that rejects a whole batch can still accept most of it, so a
+//! terminal failure of a batch of more than one listen is re-submitted one row
+//! at a time: the rows the service accepts are delivered and only the ones it
+//! rejects are parked. A queued row this host cannot read at all (a payload
+//! that is not valid JSON) is parked on its own, so one bad row never blocks
+//! the rows behind it.
+//!
 //! The server runs one delivery pass a minute through the `scrobble.deliver`
 //! job and starts another pass whenever an enqueue rings the outbox's
 //! [`ScrobbleOutbox::kick`], so the common case is a scrobble that reaches the
@@ -81,6 +101,13 @@ const BACKOFF_MS: [i64; 5] = [
 
 /// How often the delivery worker runs a pass when nothing rings its kick.
 const IDLE_PASS_INTERVAL: Duration = Duration::from_secs(60);
+
+/// The stored reason of a listen whose queued row this host cannot read.
+///
+/// The payload is written by this host, so a row that does not parse was
+/// damaged; it will not parse on a second attempt either, which is why the row
+/// is parked instead of retried.
+const MALFORMED_LISTEN: &str = "a queued listen is not valid JSON";
 
 /// The job kind of the scrobble delivery pass.
 pub const SCROBBLE_DELIVER_JOB_KIND: &str = "scrobble.deliver";
@@ -839,9 +866,35 @@ impl ScrobbleDeliverer {
                 batch.push(&rows[end]);
                 end += 1;
             }
-            let outcome = self.listens(&target, &context, &batch, &mut pacer).await;
-            self.apply(outcome, &batch, now, report).await?;
             index = end;
+            // A row this host cannot read is parked on its own; the rest of the
+            // batch is still submitted, so one bad row never blocks the rows
+            // behind it.
+            let (valid, malformed) = Self::parse_listens(&batch);
+            for row in &malformed {
+                self.park(row, MALFORMED_LISTEN, now, report).await?;
+            }
+            let listens: Vec<Listen> = valid.iter().map(|(_, listen)| listen.clone()).collect();
+            if listens.is_empty() {
+                continue;
+            }
+            let outcome = self.listens(&target, &context, &listens, &mut pacer).await;
+            if matches!(outcome, Outcome::Permanent(_)) && valid.len() > 1 {
+                // A service rejects a batch as a whole even when it accepts most
+                // of it, so a terminal answer is retried one row at a time: the
+                // rows the service takes are delivered and only the ones it
+                // rejects are parked.
+                for (row, listen) in &valid {
+                    let single = self
+                        .listens(&target, &context, std::slice::from_ref(listen), &mut pacer)
+                        .await;
+                    self.apply(single, std::slice::from_ref(row), now, report)
+                        .await?;
+                }
+                continue;
+            }
+            let submitted: Vec<&DueRow> = valid.iter().map(|(row, _)| *row).collect();
+            self.apply(outcome, &submitted, now, report).await?;
         }
         Ok(())
     }
@@ -886,24 +939,21 @@ impl ScrobbleDeliverer {
     ///
     /// - `target`: the instance.
     /// - `context`: the listener's context.
-    /// - `batch`: the rows to submit.
+    /// - `listens`: the parsed listens of the rows to submit.
     /// - `pacer`: the instance's pacing.
     ///
     /// # Returns
     ///
-    /// The outcome every row of the batch shares.
+    /// The outcome every listen of the batch shares.
     async fn listens(
         &self,
         target: &ScrobbleTarget,
         context: &UserContext,
-        batch: &[&DueRow],
+        listens: &[Listen],
         pacer: &mut Pacer,
     ) -> Outcome {
-        let Some(listens) = Self::parse_listens(batch) else {
-            return Outcome::Malformed("a queued listen is not valid JSON");
-        };
         pacer.wait().await;
-        match target.provider.submit_listens(context, &listens).await {
+        match target.provider.submit_listens(context, listens).await {
             Ok(()) => Outcome::Delivered,
             Err(error) => Outcome::from_error(error),
         }
@@ -976,6 +1026,9 @@ impl ScrobbleDeliverer {
 
     /// Applies the outcome of a call to every row it covered.
     ///
+    /// A delivered row is deleted, a deferred one is rescheduled, a transient
+    /// failure walks the backoff, and a permanent one is parked.
+    ///
     /// # Parameters
     ///
     /// - `outcome`: what the call did.
@@ -1011,12 +1064,55 @@ impl ScrobbleDeliverer {
                     self.fail(row, &error, now, report).await?;
                 }
             }
+            Outcome::Permanent(error) => {
+                for row in rows {
+                    self.park(row, &error, now, report).await?;
+                }
+            }
             Outcome::Malformed(error) => {
                 for row in rows {
-                    self.fail(row, error, now, report).await?;
+                    self.park(row, error, now, report).await?;
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Parks a row a service rejected for good.
+    ///
+    /// The row is moved to `failed` at once, with the rejection in
+    /// `last_error`, and is never picked up again: the counters and the link
+    /// view show it to the listener instead of a retry schedule that cannot
+    /// succeed.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the row the service rejected.
+    /// - `error`: what the service rejected it for.
+    /// - `now`: the instant the pass considers current.
+    /// - `report`: the running totals.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActivityError::Database`] when the row cannot be updated.
+    async fn park(
+        &self,
+        row: &DueRow,
+        error: &str,
+        now: i64,
+        report: &mut DeliveryReport,
+    ) -> Result<(), ActivityError> {
+        sqlx::query!(
+            "UPDATE scrobble_outbox
+             SET attempts = attempts + 1, last_error = ?, state = 'failed', next_attempt_at = ?
+             WHERE id = ?",
+            error,
+            now,
+            row.id.as_slice(),
+        )
+        .execute(&self.outbox.writer)
+        .await?;
+        report.gave_up += 1;
         Ok(())
     }
 
@@ -1137,20 +1233,27 @@ impl ScrobbleDeliverer {
 
     /// Parses the listens a batch carries.
     ///
+    /// A row whose payload is not a valid listen is reported separately instead
+    /// of failing the batch, so the rows around it are still delivered.
+    ///
     /// # Parameters
     ///
     /// - `batch`: the rows to parse.
     ///
     /// # Returns
     ///
-    /// The listens, or `None` when a row is not a valid listen payload.
-    fn parse_listens(batch: &[&DueRow]) -> Option<Vec<Listen>> {
-        let mut listens = Vec::with_capacity(batch.len());
+    /// The parseable rows with their listens, in queue order, and the rows this
+    /// host cannot read.
+    fn parse_listens<'a>(batch: &[&'a DueRow]) -> (Vec<(&'a DueRow, Listen)>, Vec<&'a DueRow>) {
+        let mut valid = Vec::with_capacity(batch.len());
+        let mut malformed = Vec::new();
         for row in batch {
-            let payload = serde_json::from_str::<ListenPayloadOwned>(&row.payload).ok()?;
-            listens.push(payload.listen);
+            match serde_json::from_str::<ListenPayloadOwned>(&row.payload) {
+                Ok(payload) => valid.push((*row, payload.listen)),
+                Err(_) => malformed.push(*row),
+            }
         }
-        Some(listens)
+        (valid, malformed)
     }
 
     /// Runs delivery passes until the server shuts down.
@@ -1187,7 +1290,8 @@ pub struct DeliveryReport {
     pub delivered: u32,
     /// The rows whose attempt failed.
     pub failed: u32,
-    /// The rows that were given up on.
+    /// The rows that were given up on: the ones older than the outbox's
+    /// deadline and the ones a service rejected permanently.
     pub gave_up: u32,
     /// The rows a service asked to delay.
     pub deferred: u32,
@@ -1334,14 +1438,23 @@ enum Outcome {
     Delivered,
     /// The service asked for a delay of this many milliseconds.
     RateLimited(i64),
-    /// The call failed with this message.
+    /// The call failed and may succeed later, with this message.
     Failed(String),
+    /// The call failed in a way that will not change, with this message.
+    ///
+    /// A parked row is never retried: the service rejected it for a reason a
+    /// second attempt cannot fix.
+    Permanent(String),
     /// The queued payload or opinion cannot be delivered at all.
     Malformed(&'static str),
 }
 
 impl Outcome {
     /// Maps a provider error onto an outcome.
+    ///
+    /// A rate limit and an unavailable service are transient; every other
+    /// variant is terminal, which is the contract
+    /// [`hearthsound_core::ProviderError`] states.
     ///
     /// # Parameters
     ///
@@ -1351,11 +1464,20 @@ impl Outcome {
     ///
     /// The outcome.
     fn from_error(error: hearthsound_core::ProviderError) -> Outcome {
+        use hearthsound_core::ProviderError;
         match error {
-            hearthsound_core::ProviderError::RateLimited { retry_after_ms } => {
+            ProviderError::RateLimited { retry_after_ms } => {
                 Outcome::RateLimited(i64::try_from(retry_after_ms).unwrap_or(i64::MAX))
             }
-            other => Outcome::Failed(other.to_string()),
+            // The stored text is the class the error names, so a parked row's
+            // `last_error` says why it is not being retried.
+            ProviderError::Unavailable => Outcome::Failed("unavailable".to_owned()),
+            ProviderError::NotFound => Outcome::Permanent("not found".to_owned()),
+            ProviderError::Unauthorized => Outcome::Permanent("unauthorized".to_owned()),
+            ProviderError::InvalidConfig => {
+                Outcome::Permanent("invalid configuration".to_owned())
+            }
+            ProviderError::Internal => Outcome::Permanent("internal provider error".to_owned()),
         }
     }
 }

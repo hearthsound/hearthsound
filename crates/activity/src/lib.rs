@@ -37,7 +37,11 @@
 //! A play, a now-playing report and a changed opinion are also scrobbles for the
 //! services the listener linked: [`ScrobbleOutbox`] queues one row per linked
 //! instance and [`ScrobbleDeliverer`] drains it with the service's own batching,
-//! pacing and retry rules, so a service that is down loses nothing.
+//! pacing and retry rules, so a service that is down loses nothing. An outcome
+//! is retried when it is transient - the service is unavailable or asked for a
+//! delay - and parked when it is terminal: a listen the service does not know, a
+//! rejected credential or configuration, or a plugin that failed internally is
+//! recorded as `failed` and shown to the listener instead of retried for a week.
 //!
 //! # Examples
 //!

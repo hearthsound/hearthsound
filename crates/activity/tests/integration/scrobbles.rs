@@ -27,7 +27,7 @@ use hearthsound_plugin_host::UserConfigService;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-use crate::common::{insert_album, insert_user, open_database};
+use crate::common::{insert_album, insert_track, insert_user, open_database};
 
 /// The backoff ladder every failed attempt walks, in milliseconds.
 const BACKOFF: [i64; 5] = [60_000, 300_000, 1_800_000, 7_200_000, 43_200_000];
@@ -62,6 +62,9 @@ struct Recorded {
     now_playing: Vec<Listen>,
     /// The feedback the provider received.
     feedback: Vec<(Listen, FeedbackValue)>,
+    /// The titles of every listen submission the provider was asked for, in
+    /// order, so a test can tell a batch apart from single-row submissions.
+    submissions: Vec<Vec<String>>,
     /// When each call started.
     calls: Vec<Instant>,
 }
@@ -73,6 +76,10 @@ struct FakeProvider {
     limits: ScrobbleLimits,
     /// What its calls answer, when the test set a failure.
     error: Arc<Mutex<Option<ProviderError>>>,
+    /// A title the provider rejects permanently, and any batch of more than one
+    /// listen with it, the way a service that refuses one item rejects the
+    /// call that carries it.
+    rejects: Arc<Mutex<Option<String>>>,
     /// What it was asked.
     recorded: Arc<Mutex<Recorded>>,
 }
@@ -83,8 +90,19 @@ impl FakeProvider {
         FakeProvider {
             limits,
             error: Arc::new(Mutex::new(None)),
+            rejects: Arc::new(Mutex::new(None)),
             recorded: Arc::new(Mutex::new(Recorded::default())),
         }
+    }
+
+    /// Makes the provider reject any submission of more than one listen, and
+    /// any submission that names `title`, with `NotFound`.
+    ///
+    /// # Parameters
+    ///
+    /// - `title`: the track title the provider refuses.
+    fn reject_batches_and(&self, title: &str) {
+        *self.rejects.lock().unwrap() = Some(title.to_owned());
     }
 
     /// Makes every later call fail with `error`.
@@ -144,8 +162,16 @@ impl ScrobbleProvider for FakeProvider {
         _user: &UserContext,
         listens: &[Listen],
     ) -> Result<(), ProviderError> {
+        let titles: Vec<String> = listens.iter().map(|listen| listen.title.clone()).collect();
+        let rejection = self.rejects.lock().unwrap().clone();
+        self.recorded.lock().unwrap().submissions.push(titles.clone());
         if let Some(error) = self.begin() {
             return Err(error);
+        }
+        if let Some(rejected) = rejection
+            && (listens.len() > 1 || titles.iter().any(|title| *title == rejected))
+        {
+            return Err(ProviderError::NotFound);
         }
         self.recorded.lock().unwrap().listens.push(listens.to_vec());
         Ok(())
@@ -885,6 +911,229 @@ async fn insert_raw_row(harness: &Harness, created: i64, due: i64) {
         "playId": Uuid::now_v7().to_string(),
     })
     .to_string();
+    sqlx::query(
+        "INSERT INTO scrobble_outbox (
+             id, user_id, instance_id, kind, payload, attempts, next_attempt_at, state
+         ) VALUES (?, ?, ?, 'listen', ?, 0, ?, 'pending')",
+    )
+    .bind(id.as_slice())
+    .bind(harness.user.as_bytes().as_slice())
+    .bind(harness.instances[0].id.as_bytes().as_slice())
+    .bind(payload)
+    .bind(due)
+    .execute(harness.database.writer())
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_revoked_token_parks_a_listen() {
+    let harness = Harness::new(&[limits(10, false)]).await;
+    harness.link_all().await;
+    harness
+        .instance()
+        .provider
+        .fail(ProviderError::Unauthorized);
+    harness
+        .outbox
+        .listen(
+            harness.user,
+            Uuid::now_v7(),
+            harness.track,
+            Some("dsub"),
+            1_700_000_000_000,
+        )
+        .await
+        .unwrap();
+
+    let start = current_time();
+    let report = harness.deliverer.deliver_due(start).await.unwrap();
+
+    assert_eq!(report.gave_up, 1, "a rejected credential is not retried");
+    assert_eq!(report.failed, 0);
+    let rows = harness.rows().await;
+    assert_eq!(rows[0].state, "failed");
+    assert_eq!(rows[0].attempts, 1, "the pass counted the one attempt");
+    assert_eq!(
+        rows[0].next_attempt_at, start,
+        "a parked row is not scheduled again"
+    );
+    assert_eq!(rows[0].last_error.as_deref(), Some("unauthorized"));
+
+    // No later pass touches a parked row, even once the service would accept
+    // it again.
+    harness.instance().provider.recover();
+    let later = harness
+        .deliverer
+        .deliver_due(start + OUTBOX_MAX_AGE_MS)
+        .await
+        .unwrap();
+    assert_eq!(
+        (later.delivered, later.failed, later.gave_up),
+        (0, 0, 0)
+    );
+    assert_eq!(harness.row_count().await, 1);
+}
+
+#[tokio::test]
+async fn a_lastfm_rejection_parks_the_listen_and_shows_in_the_counters() {
+    // `NotFound` is what the Last.fm plugin answers for a batch the service
+    // ignored, so this is the shape a rejected listen arrives in.
+    let harness = Harness::new(&[limits(10, false)]).await;
+    harness.link_all().await;
+    harness.instance().provider.fail(ProviderError::NotFound);
+    let instance = harness.instances[0].id;
+    harness
+        .outbox
+        .listen(
+            harness.user,
+            Uuid::now_v7(),
+            harness.track,
+            Some("dsub"),
+            1_700_000_000_000,
+        )
+        .await
+        .unwrap();
+
+    harness
+        .deliverer
+        .deliver_due(current_time())
+        .await
+        .unwrap();
+
+    let rows = harness.rows().await;
+    assert_eq!(rows[0].state, "failed");
+    assert_eq!(rows[0].last_error.as_deref(), Some("not found"));
+    let counters = harness.outbox.counters(harness.user, instance).await.unwrap();
+    assert_eq!(counters.pending, 0);
+    assert_eq!(counters.failed, 1, "the rejection is visible to the listener");
+    assert_eq!(counters.last_error.as_deref(), Some("not found"));
+}
+
+#[tokio::test]
+async fn an_unavailable_service_keeps_the_backoff() {
+    let harness = Harness::new(&[limits(10, false)]).await;
+    harness.link_all().await;
+    harness
+        .instance()
+        .provider
+        .fail(ProviderError::Unavailable);
+    harness
+        .outbox
+        .listen(
+            harness.user,
+            Uuid::now_v7(),
+            harness.track,
+            Some("dsub"),
+            1_700_000_000_000,
+        )
+        .await
+        .unwrap();
+
+    let start = current_time();
+    let report = harness.deliverer.deliver_due(start).await.unwrap();
+
+    assert_eq!(report.failed, 1);
+    assert_eq!(report.gave_up, 0, "a transient failure is not parked");
+    let rows = harness.rows().await;
+    assert_eq!(rows[0].state, "pending");
+    assert_eq!(rows[0].attempts, 1);
+    assert_eq!(rows[0].next_attempt_at, start + BACKOFF[0]);
+    assert_eq!(rows[0].last_error.as_deref(), Some("unavailable"));
+}
+
+#[tokio::test]
+async fn a_permanent_batch_rejection_isolates_the_bad_row() {
+    let harness = Harness::new(&[limits(10, false)]).await;
+    harness.link_all().await;
+    let library = LibraryRepository::new(&harness.database);
+    let (album, _) = insert_album(&library).await;
+    let bad = insert_track(&library, album, "Bad", 3).await;
+    harness.instance().provider.reject_batches_and("Bad");
+    for track in [harness.track, harness.track, bad] {
+        harness
+            .outbox
+            .listen(
+                harness.user,
+                Uuid::now_v7(),
+                track,
+                Some("dsub"),
+                1_700_000_000_000,
+            )
+            .await
+            .unwrap();
+    }
+
+    let report = harness.deliverer.deliver_due(current_time()).await.unwrap();
+
+    assert_eq!(report.delivered, 2, "the accepted rows were delivered");
+    assert_eq!(report.gave_up, 1, "only the rejected row was parked");
+    let rows = harness.rows().await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].state, "failed");
+    assert_eq!(rows[0].last_error.as_deref(), Some("not found"));
+
+    let submissions = harness.instances[0].provider.recorded().submissions.clone();
+    assert_eq!(submissions.len(), 4, "the batch and one call per row");
+    assert_eq!(submissions[0].len(), 3, "the whole batch was tried first");
+    assert_eq!(
+        submissions[3],
+        vec!["Bad".to_owned()],
+        "the rejected row was re-submitted on its own"
+    );
+}
+
+#[tokio::test]
+async fn one_malformed_row_does_not_block_the_rest() {
+    let harness = Harness::new(&[limits(10, false)]).await;
+    harness.link_all().await;
+    let queued = current_time();
+    insert_listen_row(&harness, queued, queued, "{").await;
+    for _ in 0..2 {
+        harness
+            .outbox
+            .listen(
+                harness.user,
+                Uuid::now_v7(),
+                harness.track,
+                Some("dsub"),
+                1_700_000_000_000,
+            )
+            .await
+            .unwrap();
+    }
+
+    let report = harness
+        .deliverer
+        .deliver_due(current_time())
+        .await
+        .unwrap();
+
+    assert_eq!(report.delivered, 2);
+    assert_eq!(report.gave_up, 1);
+    let rows = harness.rows().await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].state, "failed");
+    assert_eq!(
+        rows[0].last_error.as_deref(),
+        Some("a queued listen is not valid JSON")
+    );
+    let recorded = harness.instances[0].provider.recorded();
+    assert_eq!(recorded.submissions.len(), 1, "one call carried both rows");
+    assert_eq!(recorded.submissions[0].len(), 2);
+}
+
+/// Inserts a listen row with a chosen payload.
+///
+/// # Parameters
+///
+/// - `harness`: the harness whose first instance the row targets.
+/// - `created`: the instant encoded in the row's UUIDv7 id.
+/// - `due`: when the row may be delivered.
+/// - `payload`: the body to store.
+async fn insert_listen_row(harness: &Harness, created: i64, due: i64, payload: &str) {
+    let mut id = [0u8; 16];
+    id[..6].copy_from_slice(&created.to_be_bytes()[2..]);
     sqlx::query(
         "INSERT INTO scrobble_outbox (
              id, user_id, instance_id, kind, payload, attempts, next_attempt_at, state
