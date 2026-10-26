@@ -43,6 +43,7 @@ uuid.workspace = true
 hearthsound-test-support = { path = "../test-support" }
 insta = { workspace = true, features = ["filters"] }
 serde_json.workspace = true
+sqlx.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "process", "rt-multi-thread", "time"] }
 tower = { workspace = true, features = ["util"] }

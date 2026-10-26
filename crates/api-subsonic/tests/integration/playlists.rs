@@ -792,3 +792,139 @@ async fn a_generated_playlist_names_its_service() {
         xml.body
     );
 }
+
+/// A generated playlist carries its service and expiry until its first edit,
+/// and reads back with neither afterwards.
+#[tokio::test]
+async fn a_detached_playlist_reports_no_source_and_no_expiry() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+    let instance = discovery_instance(&fixture).await;
+    let playlists = fixture.state.activity().playlists();
+    let created = playlists
+        .upsert_generated(
+            &hearthsound_activity::SyncedPlaylist {
+                owner_user_id: fixture.user_id.uuid(),
+                source_instance_id: instance,
+                source_ref: "weekly-jams",
+                name: "Weekly Jams",
+                comment: None,
+                expires_at: 4_000,
+                tracks: &[seeded.alpha_tracks[0]],
+            },
+            1,
+        )
+        .await
+        .unwrap()
+        .expect("a new slot is written");
+
+    let generated = get(
+        &app,
+        &format!(
+            "/rest/getPlaylist?id={}&apiKey={}&hearthsound=1&f=json",
+            created.id, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&generated);
+    assert!(
+        generated
+            .body
+            .contains("\"generatedBy\":\"Weekly Jams Service\""),
+        "the pill's service is reported: {}",
+        generated.body
+    );
+    assert!(
+        generated.body.contains("\"expiresAt\":4000"),
+        "the refresh line's expiry is reported: {}",
+        generated.body
+    );
+    assert!(
+        generated.body.contains("\"temporary\":true"),
+        "{}",
+        generated.body
+    );
+
+    // The first edit detaches it.
+    playlists
+        .update(
+            created.id,
+            fixture.user_id.uuid(),
+            &hearthsound_activity::PlaylistUpdate {
+                name: Some("Mine".to_owned()),
+                ..hearthsound_activity::PlaylistUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let detached = get(
+        &app,
+        &format!(
+            "/rest/getPlaylist?id={}&apiKey={}&hearthsound=1&f=json",
+            created.id, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&detached);
+    assert!(
+        !detached.body.contains("generatedBy"),
+        "a detached playlist reports no service: {}",
+        detached.body
+    );
+    assert!(
+        !detached.body.contains("expiresAt"),
+        "a detached playlist never expires: {}",
+        detached.body
+    );
+    assert!(
+        detached.body.contains("\"temporary\":false"),
+        "{}",
+        detached.body
+    );
+
+    // The listing says the same, so a list view can draw the pill too.
+    let listed = get(
+        &app,
+        &format!(
+            "/rest/getPlaylists?apiKey={}&hearthsound=1&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&listed);
+    assert!(
+        !listed.body.contains("generatedBy") && !listed.body.contains("expiresAt"),
+        "the detached playlist lists without its source: {}",
+        listed.body
+    );
+}
+
+/// Inserts a discovery provider instance and returns its id.
+///
+/// # Parameters
+///
+/// - `fixture`: the running fixture.
+async fn discovery_instance(fixture: &Fixture) -> uuid::Uuid {
+    let plugin_id = "com.example.detach-projection";
+    sqlx::query(
+        "INSERT INTO plugins (id, version, api, manifest, sha256, source, enabled, installed_at) \
+         VALUES (?, '0.1.0', 'hearthsound:plugin@0.3.0', '{}', x'00', 'sideload', 1, 0)",
+    )
+    .bind(plugin_id)
+    .execute(fixture.database.writer())
+    .await
+    .unwrap();
+    let id = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO provider_instances \
+             (id, plugin_id, slug, display_name, enabled, created_at, updated_at) \
+         VALUES (?, ?, 'weekly', 'Weekly Jams Service', 1, 0, 0)",
+    )
+    .bind(id.as_bytes().as_slice())
+    .bind(plugin_id)
+    .execute(fixture.database.writer())
+    .await
+    .unwrap();
+    id
+}
