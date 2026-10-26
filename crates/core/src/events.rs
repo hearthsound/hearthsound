@@ -562,28 +562,25 @@ impl EventBus {
     /// assert_eq!(receiver.try_recv().unwrap().audience, Audience::User(owner));
     /// ```
     pub fn publish_for(&self, audience: Audience, event: ServerEvent) -> u64 {
-        let id = {
-            let mut state = self.lock();
-            let id = state.next_id;
-            state.next_id += 1;
-            let envelope = EventEnvelope {
-                id,
-                at: now_millis(),
-                audience,
-                event,
-            };
-            state.events.push_back(envelope.clone());
-            if state.events.len() > self.capacity {
-                state.events.pop_front();
-            }
-            // The send is made under the same lock that assigned the id, so two
-            // publishers cannot deliver one envelope's id before another's: a
-            // live subscriber sees the ids in order, exactly as `replay_after`
-            // serves them. A send fails only when the bus has no live
-            // subscriber, and the event is in the replay buffer either way.
-            let _ = self.sender.send(envelope);
-            id
+        // The lock is held until the event is in the replay buffer and on the
+        // channel, so two publishers cannot deliver one envelope's id before
+        // another's: a live subscriber sees the ids in order, exactly as
+        // `replay_after` serves them. A send fails only when the bus has no live
+        // subscriber, and the event is in the replay buffer either way.
+        let mut state = self.lock();
+        let id = state.next_id;
+        state.next_id += 1;
+        let envelope = EventEnvelope {
+            id,
+            at: now_millis(),
+            audience,
+            event,
         };
+        state.events.push_back(envelope.clone());
+        if state.events.len() > self.capacity {
+            state.events.pop_front();
+        }
+        let _ = self.sender.send(envelope);
         id
     }
 
