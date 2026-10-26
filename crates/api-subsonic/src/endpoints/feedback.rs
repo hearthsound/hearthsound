@@ -126,12 +126,18 @@ async fn toggle(call: &Call, like: bool) -> Encoded {
     call.encode(Response::ok())
 }
 
-/// Acquires the remote tracks of what a user just liked or saved.
+/// Acquires the remote tracks of what a user just liked or saved, and moves the
+/// files the library already holds into the user's save folder.
 ///
 /// A like and a save are adoptions (`library.acquire_on_save`), so a liked or
 /// saved track or album that is not stored is acquired at priority `queue` under
 /// the user's permission and quota. The change is already recorded; a refusal or
 /// an error here is only logged.
+///
+/// The move runs first, because it needs no download: a track the library
+/// already holds is the user's own file and belongs in the folder they chose
+/// (`library.save_folder`). A failed move is logged the same way, so a like is
+/// never lost to it.
 ///
 /// # Parameters
 ///
@@ -155,6 +161,14 @@ pub(super) async fn adopt_saved(call: &Call, user: Uuid, entities: &[(EntityKind
         .collect();
     if named.is_empty() {
         return;
+    }
+    if let Err(error) = prefetch
+        .orchestrator()
+        .save_folders()
+        .move_saved(user, &named)
+        .await
+    {
+        tracing::warn!(%user, %error, "could not move saved music into its save folder");
     }
     if let Err(error) = acquire_saved(
         prefetch.orchestrator(),
