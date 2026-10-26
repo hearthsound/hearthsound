@@ -839,3 +839,51 @@ async fn the_artwork_sweep_deletes_old_rows_and_files() {
         env.artwork_files()
     );
 }
+
+/// A catalog album's cover is served from the reference a listing promoted,
+/// without reading the album from its instance.
+///
+/// The reference a search promoted, or a discography listing holds, already
+/// carries the cover URLs. Asking the instance for the album as well is one
+/// provider call per card, and those calls are what queued a page's own reads
+/// behind a grid of covers on a rate-limited instance.
+#[tokio::test]
+async fn a_cover_of_a_promoted_album_costs_no_provider_call() {
+    let (env, server) = caching_env().await;
+    let service = env.service();
+    let album = catalog_id("hello", EntityKind::Album, "hello-album-1");
+    let reference = format!(
+        r#"{{"id":"hello-album-1","title":"Hello Album","artists":[{{"name":"Hello Artist","ids":[]}}],"year":2020,"images":[{},{}]}}"#,
+        json!({"url": format!("{}/cover-250.png", server.uri()), "width": 250}),
+        json!({"url": format!("{}/cover-500.png", server.uri()), "width": 500}),
+    );
+    crate::common::write_cache_row(
+        &env.database,
+        env.instance_id("hello"),
+        hearthsound_catalog::RequestKey::album_ref("hello-album-1").as_str(),
+        &reference,
+        Some(crate::common::now_millis() + 60_000),
+    )
+    .await;
+    let rows = crate::common::count_cache_rows(&env.database).await;
+
+    let cover = service
+        .cover_art(&CoverArtRequest {
+            id: ClientId::Catalog(album),
+            size: Some(300),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(cover.bytes, IMAGE);
+    assert_eq!(
+        crate::common::count_cache_rows(&env.database).await,
+        rows,
+        "the album must not be read from its instance"
+    );
+    assert_eq!(
+        requested_paths(&server).await,
+        vec!["/cover-500.png"],
+        "only the image itself is fetched"
+    );
+}

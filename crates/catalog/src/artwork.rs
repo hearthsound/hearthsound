@@ -111,12 +111,19 @@ enum LayerCover {
 impl CatalogService {
     /// Serves the cover art of an entity.
     ///
-    /// The artwork layer is asked first: every instance in the `artwork` layer,
-    /// in the order the administrator set, is asked for the entity's picture
-    /// under `artwork.timeout_ms`, and the first one that delivers an image has
-    /// it served. An instance that fails is skipped, and an entity no artwork
-    /// instance delivers a picture of falls back to the instance that issued
-    /// it, which is where its own images are.
+    /// The images the catalog layers already cached come first: the record of a
+    /// catalog album, artist or track, or the album reference a listing or a
+    /// search promoted, names the entity's own cover, and serving it costs no
+    /// provider call. That is what keeps a grid of cards from spending the
+    /// instance's rate limit one lookup per cover and queueing the page reads
+    /// behind it.
+    ///
+    /// When nothing is cached, the artwork layer is asked: every instance in the
+    /// `artwork` layer, in the order the administrator set, is asked for the
+    /// entity's picture under `artwork.timeout_ms`, and the first one that
+    /// delivers an image has it served. An instance that fails is skipped, and an
+    /// entity no artwork instance delivers a picture of falls back to the instance
+    /// that issued it, which is where its own images are.
     ///
     /// # Parameters
     ///
@@ -133,6 +140,13 @@ impl CatalogService {
     /// [`CatalogError::Unavailable`] when nothing answered and an instance could
     /// not answer right now, which is what a client retries.
     pub async fn cover_art(&self, request: &CoverArtRequest) -> Result<CoverArt, CatalogError> {
+        if let Some(images) = self.cached_entity_images(&request.id).await
+            && !images.is_empty()
+        {
+            return self
+                .issuing_cover_with(&request.id, images, request.size)
+                .await;
+        }
         let transient = match self.artwork_cover(request).await? {
             LayerCover::Found(cover) => return Ok(cover),
             LayerCover::Missing { transient } => transient,
@@ -143,6 +157,46 @@ impl CatalogService {
                 None => Err(CatalogError::NotFound),
             },
             answered => answered,
+        }
+    }
+
+    /// Returns the images the catalog layers already cached for an entity.
+    ///
+    /// Nothing is asked of a provider. A catalog entity is read from its own
+    /// record, and an album from the reference a listing promoted when its record
+    /// was never read; a stored entity is read through the alias that names its
+    /// catalog counterpart.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the entity the cover is wanted for.
+    ///
+    /// # Returns
+    ///
+    /// The cached images - empty when the cached answer names none - or `None`
+    /// when nothing about the entity is cached and when its kind carries no
+    /// picture of its own.
+    async fn cached_entity_images(&self, id: &ClientId) -> Option<Vec<Image>> {
+        let catalog = match id {
+            ClientId::Catalog(catalog) => catalog.clone(),
+            ClientId::Entity(_) => {
+                let (slug, kind, provider_id) = self.issuing_instance(id).await.ok()?;
+                CatalogId::new(slug, kind, provider_id).ok()?
+            }
+        };
+        match catalog.kind() {
+            EntityKind::Album => {
+                if let Ok(Some(found)) = self.cached_album(&catalog).await {
+                    return Some(found.album.images);
+                }
+                let found = self.cached_album_ref(&catalog).await.ok().flatten()?;
+                Some(found.album.images)
+            }
+            EntityKind::Artist => {
+                let found = self.cached_artist(&catalog).await.ok().flatten()?;
+                Some(found.artist.images)
+            }
+            _ => None,
         }
     }
 
@@ -492,7 +546,34 @@ impl CatalogService {
     async fn issuing_cover_art(&self, request: &CoverArtRequest) -> Result<CoverArt, CatalogError> {
         let (slug, kind, provider_id) = self.issuing_instance(&request.id).await?;
         let images = self.entity_images(&slug, kind, &provider_id).await?;
-        let image = pick_image(&images, request.size).ok_or(CatalogError::NotFound)?;
+        self.issuing_cover_with(&request.id, images, request.size)
+            .await
+    }
+
+    /// Serves one of an entity's images through the instance that issued it.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the entity the cover is wanted for.
+    /// - `images`: the renditions the entity describes, cached or fetched.
+    /// - `size`: the requested size in pixels.
+    ///
+    /// # Returns
+    ///
+    /// The image's MIME type and its bytes.
+    ///
+    /// # Errors
+    ///
+    /// The errors [`issuing_cover_art`](CatalogService::issuing_cover_art) and
+    /// [`CatalogError::NotFound`] when `images` is empty.
+    async fn issuing_cover_with(
+        &self,
+        id: &ClientId,
+        images: Vec<Image>,
+        size: Option<u32>,
+    ) -> Result<CoverArt, CatalogError> {
+        let (slug, kind, provider_id) = self.issuing_instance(id).await?;
+        let image = pick_image(&images, size).ok_or(CatalogError::NotFound)?;
         let key = cache_key(&slug, kind, &provider_id, image);
 
         if let Some(cached) = self.cached_cover(&key).await {

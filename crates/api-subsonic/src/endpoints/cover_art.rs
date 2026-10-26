@@ -55,7 +55,7 @@ use axum::http::header::{
 };
 use axum::response::{IntoResponse, Response as HttpResponse};
 use hearthsound_catalog::{CatalogError, CoverArtRequest};
-use hearthsound_core::{ClientId, EntityId, IdPrefix, Slug};
+use hearthsound_core::{ClientId, EntityId, IdPrefix};
 use hearthsound_library::LibraryRepository;
 use hearthsound_library::artwork::{CoverArt, track_cover};
 use hearthsound_library::thumbnails::thumbnail_size;
@@ -122,10 +122,7 @@ pub async fn get_cover_art(call: BinaryCall) -> HttpResponse {
         Err(()) => return bad_request("size"),
     };
     match ClientId::parse(value) {
-        Ok(ClientId::Catalog(catalog)) => {
-            let slug = catalog.slug().clone();
-            proxy(&call, &ClientId::Catalog(catalog), &slug, size).await
-        }
+        Ok(ClientId::Catalog(catalog)) => proxy(&call, &ClientId::Catalog(catalog), size).await,
         Ok(ClientId::Entity(entity)) => stored(&call, entity, size).await,
         Err(error) => {
             tracing::debug!(
@@ -403,14 +400,12 @@ async fn first_track_cover(
 /// - `call`: the authenticated call.
 /// - `id`: the entity to fetch cover art of, in the form the catalog layer
 ///   resolves: a catalog id by itself, or a stored entity id through its alias.
-/// - `slug`: the instance that issued the entity, which names the instance a
-///   refusal is logged and worded for; the bytes carry their own cache policy.
 /// - `size`: the requested size in pixels.
 ///
 /// # Returns
 ///
 /// The image response, or one of the refusal codes of the module header.
-async fn proxy(call: &BinaryCall, id: &ClientId, slug: &Slug, size: Option<u32>) -> HttpResponse {
+async fn proxy(call: &BinaryCall, id: &ClientId, size: Option<u32>) -> HttpResponse {
     let catalog = call.state().catalog();
     let request = CoverArtRequest {
         id: id.clone(),
@@ -425,7 +420,7 @@ async fn proxy(call: &BinaryCall, id: &ClientId, slug: &Slug, size: Option<u32>)
                 cache_control: cache_control(cover.cache_policy),
             },
         ),
-        Err(error) => catalog_failure(slug, &error),
+        Err(error) => catalog_failure(id, &error),
     }
 }
 
@@ -663,9 +658,13 @@ fn requested_size(call: &BinaryCall) -> Result<Option<u32>, ()> {
 
 /// Answers that a catalog instance cannot serve an image right now.
 ///
+/// The refusal names the id the client asked for and, separately, the instance
+/// that could not answer: an operator reading the log needs both, and a line
+/// that reported only the instance agreed with no client request.
+///
 /// # Parameters
 ///
-/// - `slug`: the instance that failed.
+/// - `id`: the entity the client asked cover art of.
 /// - `error`: the failure the catalog layer reported.
 ///
 /// # Returns
@@ -675,6 +674,7 @@ fn requested_size(call: &BinaryCall) -> Result<Option<u32>, ()> {
 /// every failure a later retry may get past. A failure of this server rather
 /// than of the instance is HTTP 500.
 fn catalog_failure(id: &dyn std::fmt::Display, error: &CatalogError) -> HttpResponse {
+    let instance = error.instance().unwrap_or("");
     match error {
         CatalogError::NotFound => {
             tracing::debug!(
@@ -686,6 +686,7 @@ fn catalog_failure(id: &dyn std::fmt::Display, error: &CatalogError) -> HttpResp
         CatalogError::RateLimited { retry_after_ms, .. } => {
             tracing::debug!(
                 id = %id,
+                instance,
                 retry_after_ms,
                 "the catalog rate limited a cover art request"
             );
@@ -698,6 +699,7 @@ fn catalog_failure(id: &dyn std::fmt::Display, error: &CatalogError) -> HttpResp
         | CatalogError::InvalidEntity { .. } => {
             tracing::warn!(
                 id = %id,
+                instance,
                 error = %error,
                 "the catalog could not serve a cover image"
             );
@@ -805,6 +807,7 @@ struct Served {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hearthsound_core::{CatalogId, EntityKind, Slug};
 
     #[test]
     fn the_tag_follows_the_bytes() {
@@ -816,11 +819,17 @@ mod tests {
         );
     }
 
+    /// Builds the catalog album id the refusal tests ask about.
+    fn album() -> ClientId {
+        ClientId::Catalog(
+            CatalogId::new(Slug::new("deezer").unwrap(), EntityKind::Album, "302127").unwrap(),
+        )
+    }
+
     #[test]
     fn a_rate_limited_instance_carries_its_delay() {
-        let slug = Slug::new("deezer").unwrap();
         let response = catalog_failure(
-            &slug,
+            &album(),
             &CatalogError::RateLimited {
                 instance: "deezer".to_owned(),
                 retry_after_ms: 1_500,
@@ -839,9 +848,8 @@ mod tests {
 
     #[test]
     fn an_instance_that_cannot_answer_counts_as_unavailable() {
-        let slug = Slug::new("deezer").unwrap();
         let response = catalog_failure(
-            &slug,
+            &album(),
             &CatalogError::Unavailable {
                 instance: "deezer".to_owned(),
             },

@@ -39,7 +39,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use hearthsound_core::providers::{CatalogAlbum, CatalogTrack, credit_provider_id};
+use hearthsound_core::providers::{CatalogAlbum, CatalogArtist, CatalogTrack, credit_provider_id};
 use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, IdPrefix, Layer, Slug};
 use hearthsound_library::query::{self, AlbumDetail, Scope};
 use hearthsound_library::{Album, Track, albums, artists};
@@ -570,16 +570,18 @@ impl CatalogService {
 
     /// Resolves the catalog artist a stored artist pairs with.
     ///
-    /// The recorded alias is tried first. When `by_name` is set, the artist's
-    /// name is searched too, and a match is recorded for the next visit.
+    /// The recorded alias is tried first, and its cached record when it has one.
+    /// When `by_name` is set, the artist's name is searched too, and a match is
+    /// recorded for the next visit.
     ///
     /// # Parameters
     ///
     /// - `artist`: the stored artist.
     /// - `layer`: the catalog instances, in the administrator's order.
     /// - `depth`: how much the page may pair and write. A `Cached` read uses the
-    ///   cached provider answer of a recorded alias and never searches by name;
-    ///   a `Library` read uses neither.
+    ///   cached provider answer of a recorded alias - or, when only the alias is
+    ///   cached, the alias itself, which is enough to read the discography the
+    ///   cache holds - and never searches by name; a `Library` read uses neither.
     ///
     /// # Returns
     ///
@@ -603,6 +605,14 @@ impl CatalogService {
         {
             match self.page_artist(&id, depth).await {
                 Ok(Some(found)) => return Ok(Some(found)),
+                Ok(None) if depth == PageDepth::Cached => {
+                    // The artist's own record was never read, but the alias names
+                    // it and the discography may be cached from another page (the
+                    // enrichment of one of its albums lists the whole discography).
+                    // A cache-only page pairs through the alias instead of
+                    // withholding a listing the cache holds, and writes nothing.
+                    return self.alias_pairing(artist, &alias, &id).await;
+                }
                 Ok(None) => return Ok(None),
                 Err(CatalogError::NotFound) => {}
                 Err(error) => tracing::debug!(
@@ -649,6 +659,87 @@ impl CatalogService {
                 .await;
         }
         Ok(found)
+    }
+
+    /// Leaves every album reference a listing named in the cache under its own
+    /// key.
+    ///
+    /// A discography lists its albums with their cover URLs, and a card's cover
+    /// is requested by album id rather than through the listing. Storing the
+    /// references under `album_ref` is what lets those requests answer from the
+    /// cache: without it each card would ask the instance for the album it was
+    /// already told about, and a rate-limited instance would queue the page's own
+    /// reads behind a grid of covers.
+    ///
+    /// A write that fails is logged by the cache and dropped: the page it was
+    /// promoted for is already built, and the next listing promotes again.
+    ///
+    /// # Parameters
+    ///
+    /// - `slug`: the instance that issued the references.
+    /// - `references`: the albums the listing named.
+    async fn promote_album_refs(&self, slug: &Slug, references: &[CatalogAlbumRefResult]) {
+        let Some(instance) = self.registry().instance(slug.as_str()) else {
+            return;
+        };
+        let entries: Vec<(crate::cache::RequestKey, crate::wire::WireAlbumRef)> = references
+            .iter()
+            .map(|reference| {
+                (
+                    crate::cache::RequestKey::album_ref(&reference.album.id),
+                    crate::wire::WireAlbumRef::from(&reference.album),
+                )
+            })
+            .collect();
+        self.cache()
+            .fill_many(instance.id(), &entries, crate::cache::ENTITY_CACHE_TTL)
+            .await;
+    }
+
+    /// Pairs a stored artist with the catalog artist its alias names, without a
+    /// provider call.
+    ///
+    /// The record the catalog instance would return is unknown after a cache-only
+    /// read, but a page needs only the provider id to read the discography and the
+    /// top tracks the cache already holds, and the stored row supplies the name.
+    ///
+    /// # Parameters
+    ///
+    /// - `artist`: the stored artist.
+    /// - `alias`: the recorded `p:<slug>` alias.
+    /// - `id`: the catalog id the alias names.
+    ///
+    /// # Returns
+    ///
+    /// The catalog artist the page pairs with, or `None` when the stored row is
+    /// gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when the stored read fails.
+    async fn alias_pairing(
+        &self,
+        artist: EntityId,
+        alias: &ProviderAlias,
+        id: &CatalogId,
+    ) -> Result<Option<CatalogArtistResult>, CatalogError> {
+        let stored = {
+            let mut conn = self.database().readers().acquire().await?;
+            artists::get_artist(&mut conn, artist).await?
+        };
+        let Some(stored) = stored else {
+            return Ok(None);
+        };
+        Ok(Some(CatalogArtistResult {
+            id: id.clone(),
+            artist: CatalogArtist {
+                id: alias.provider_id.clone(),
+                name: stored.name,
+                images: Vec::new(),
+                ids: Vec::new(),
+                album_count: None,
+            },
+        }))
     }
 
     /// Finds the stored artist a catalog artist is the same act as.
@@ -983,6 +1074,11 @@ impl CatalogService {
                 u32::try_from(references.len()).unwrap_or(u32::MAX) >= MAX_PAGE_ALBUMS;
             if !references.is_empty() {
                 let slug = catalog.id.slug().clone();
+                // Every reference the listing named is what a card's cover is
+                // served from, so the listing leaves each one behind under its own
+                // key: a grid of covers then costs one image each instead of one
+                // provider lookup per card.
+                self.promote_album_refs(&slug, &references).await;
                 let provider_ids: Vec<String> = references
                     .iter()
                     .map(|reference| reference.album.id.clone())
