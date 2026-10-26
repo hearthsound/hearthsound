@@ -919,3 +919,64 @@ async fn a_parked_album_job_creates_no_per_track_rows() {
         );
     }
 }
+
+/// An admission whose staging directory cannot be created is failed, not left
+/// queued, and the track is not left `acquiring`.
+///
+/// The row is committed before the directory is created, so a filesystem that
+/// refuses is a failure of that acquisition and not an admission that never
+/// happened: the ledger has to say so, or a queued row waits for a worker that
+/// can never stage anything.
+#[tokio::test]
+async fn an_unwritable_staging_root_fails_the_admission() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = Env::normal(&[]).await;
+    let track = env.remote_track("Hello Song", "Hello Artist").await;
+    let staging = env.staging.clone();
+    let readable = std::fs::metadata(&staging).unwrap().permissions();
+    std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let requested = env
+        .orchestrator
+        .request(AcquireRequest::new(track, Priority::Queue, "test"))
+        .await;
+    std::fs::set_permissions(&staging, readable).unwrap();
+
+    let error = requested.expect_err("a staging root that refuses must fail the request");
+    assert!(
+        matches!(error, hearthsound_acquire::AcquireError::Io { .. }),
+        "the refusal is reported as a filesystem error, got {error}"
+    );
+
+    let rows = env
+        .orchestrator
+        .repository()
+        .list(&hearthsound_acquire::repo::ListFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "the admission's row is durable");
+    let row = &rows[0];
+    assert_eq!(row.state, AcquisitionState::Failed);
+    assert_eq!(row.failure_reason, Some(FailureReason::BackendUnavailable));
+    assert!(
+        !env.orchestrator.staging_dir(row.id).exists(),
+        "no staging directory was left behind"
+    );
+    assert_eq!(
+        env.track(track).await.availability,
+        Availability::Remote,
+        "the track is handed back, not left acquiring"
+    );
+    assert!(
+        env.log(row.id)
+            .await
+            .iter()
+            .any(|entry| entry.state == AcquisitionState::Failed
+                && entry
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("staging directory"))),
+        "the ledger says why the admission failed"
+    );
+}
