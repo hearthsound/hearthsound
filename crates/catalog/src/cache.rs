@@ -119,6 +119,30 @@ impl RequestKey {
         RequestKey(format!("album|id={}", encode(provider_id)))
     }
 
+    /// Builds the key of an album reference lookup.
+    ///
+    /// A reference is the compact album a search result or an artist listing
+    /// carries; it is kept under its own key so it never stands in for a
+    /// tracklist and a tracklist never stands in for it.
+    ///
+    /// # Parameters
+    ///
+    /// - `provider_id`: the provider's own album id.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hearthsound_catalog::cache::RequestKey;
+    ///
+    /// assert_eq!(
+    ///     RequestKey::album_ref("hello-album-1").as_str(),
+    ///     "album-ref|id=13:hello-album-1"
+    /// );
+    /// ```
+    pub fn album_ref(provider_id: &str) -> RequestKey {
+        RequestKey(format!("album-ref|id={}", encode(provider_id)))
+    }
+
     /// Builds the key of an artist lookup.
     ///
     /// # Parameters
@@ -557,6 +581,116 @@ impl Cache {
             .await;
     }
 
+    /// Reads a response that is still fresh, treating a failure as a miss.
+    ///
+    /// This is the read every cache-only service method uses: a request that
+    /// must not call a provider cannot fail because the cache tier is busy, so a
+    /// read failure is logged and reported as no answer.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance`: the instance id part of the key.
+    /// - `key`: the canonical request key.
+    ///
+    /// # Returns
+    ///
+    /// The stored response, or `None` when it is absent, stale, undecodable or
+    /// unreadable.
+    pub(crate) async fn read<T>(&self, instance: Uuid, key: &RequestKey) -> Option<T>
+    where
+        T: DeserializeOwned,
+    {
+        match self.get::<T>(instance, key).await {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    instance = %instance,
+                    request = key.as_str(),
+                    error = %error,
+                    "a cached catalog response could not be read"
+                );
+                None
+            }
+        }
+    }
+
+    /// Stores responses of one shape in the persistent tier, in one statement.
+    ///
+    /// A single fill is this call with one entry.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance`: the instance id part of every key.
+    /// - `entries`: the request keys and the responses, in their stored form.
+    /// - `ttl`: how long every stored response stays fresh.
+    pub(crate) async fn fill_many<W>(
+        &self,
+        instance: Uuid,
+        entries: &[(RequestKey, W)],
+        ttl: Duration,
+    ) where
+        W: Serialize,
+    {
+        let mut encoded = Vec::with_capacity(entries.len());
+        for (key, value) in entries {
+            if let Some(json) = encode_for_cache(instance, key, value) {
+                encoded.push((key.clone(), json));
+            }
+        }
+        self.fill_encoded(instance, &encoded, ttl).await;
+    }
+
+    /// Writes already-encoded responses in one statement.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance`: the instance id part of every key.
+    /// - `entries`: the request keys and their encoded responses.
+    /// - `ttl`: how long every stored response stays fresh.
+    async fn fill_encoded(
+        &self,
+        instance: Uuid,
+        entries: &[(RequestKey, String)],
+        ttl: Duration,
+    ) -> bool {
+        if entries.is_empty() {
+            return false;
+        }
+        let now = now_millis();
+        let expires_at = now.saturating_add(duration_millis(ttl));
+        let instance_bytes = instance.as_bytes();
+        let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "INSERT INTO catalog_cache (instance_id, request_key, response, fetched_at, \
+             expires_at) ",
+        );
+        builder.push_values(entries, |mut row, (key, json)| {
+            row.push_bind(instance_bytes.as_slice())
+                .push_bind(key.as_str())
+                .push_bind(json.as_str())
+                .push_bind(now)
+                .push_bind(expires_at);
+        });
+        builder.push(
+            " ON CONFLICT (instance_id, request_key) DO UPDATE SET \
+             response = excluded.response, fetched_at = excluded.fetched_at, \
+             expires_at = excluded.expires_at \
+             WHERE catalog_cache.expires_at IS NOT NULL \
+               AND catalog_cache.expires_at <= excluded.fetched_at",
+        );
+        match builder.build().execute(self.database.writer()).await {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(
+                    instance = %instance,
+                    entries = entries.len(),
+                    error = %error,
+                    "catalog responses could not be cached"
+                );
+                false
+            }
+        }
+    }
+
     /// Deletes every expired row.
     ///
     /// A non-expiring row is never deleted: a `NULL` `expires_at` means the
@@ -577,6 +711,35 @@ impl Cache {
         .execute(self.database.writer())
         .await?;
         Ok(deleted.rows_affected())
+    }
+}
+
+/// Encodes one response for the persistent tier.
+///
+/// # Parameters
+///
+/// - `instance`: the instance id, for the log line.
+/// - `key`: the request key, for the log line.
+/// - `value`: the response, in its stored form.
+///
+/// # Returns
+///
+/// The JSON to store, or `None` when it cannot be encoded.
+fn encode_for_cache<W>(instance: Uuid, key: &RequestKey, value: &W) -> Option<String>
+where
+    W: Serialize,
+{
+    match serde_json::to_string(value) {
+        Ok(json) => Some(json),
+        Err(error) => {
+            tracing::warn!(
+                instance = %instance,
+                request = key.as_str(),
+                error = %error,
+                "a catalog response could not be encoded for the cache"
+            );
+            None
+        }
     }
 }
 

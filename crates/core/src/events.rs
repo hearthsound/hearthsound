@@ -85,6 +85,9 @@ pub enum ServerEvent {
     /// The server has something to tell the client that no other event covers.
     #[serde(rename = "system.notice")]
     SystemNotice(SystemNotice),
+    /// Catalog extras for an entity were fetched and cached.
+    #[serde(rename = "catalog.enriched")]
+    CatalogEnriched(CatalogEnriched),
 }
 
 impl ServerEvent {
@@ -118,6 +121,7 @@ impl ServerEvent {
             ServerEvent::PluginStatus(_) => "plugin.status",
             ServerEvent::QueuePrefetch(_) => "queue.prefetch",
             ServerEvent::SystemNotice(_) => "system.notice",
+            ServerEvent::CatalogEnriched(_) => "catalog.enriched",
         }
     }
 }
@@ -314,6 +318,21 @@ pub struct SystemNotice {
     /// A machine readable code, when the notice has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+}
+
+/// The payload of a `catalog.enriched` event.
+///
+/// The event is published when a `catalog.enrich` job has fetched an entity's
+/// missing catalog extras, so the page that asked can refetch without a reload.
+/// It reaches the listener whose page asked (administrators receive it under the
+/// existing audience rule).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogEnriched {
+    /// The entity's client id, exactly as the page that asked named it.
+    pub entity_id: String,
+    /// The entity kind: `artist` or `album`.
+    pub kind: EntityKind,
 }
 
 /// Who may receive an event over the event stream.

@@ -23,6 +23,10 @@
 //!   writes. A stored entity the caller's scopes hold answers from stored rows
 //!   without touching the catalog at all, which is what a third-party app
 //!   syncing a library needs.
+//! - [`PageDepth::Cached`] is what a first-party page read uses: it pairs through
+//!   recorded aliases and through the answers the catalog layers already cached,
+//!   never calls a provider and never writes. A cold entity answers from the
+//!   library alone and a `catalog.enrich` job fills the rest.
 //!
 //! ## Privacy
 //!
@@ -61,9 +65,16 @@ pub enum PageDepth {
     /// stored entity inside a scope answers from stored rows, without a catalog
     /// call.
     Library,
+    /// Pair by alias and by cached provider answers only; never call a provider
+    /// and never write.
+    ///
+    /// This is the depth of a first-party page read: the page answers from the
+    /// library plus whatever the catalog layers already cached, and the extras a
+    /// cold entity lacks are fetched by a `catalog.enrich` job.
+    Cached,
     /// Pair by alias, then by name or title, and record what the page found.
     ///
-    /// This is the depth of the first-party client and of the native API.
+    /// This is the depth of the enrichment job and of the native API.
     Full,
 }
 
@@ -150,7 +161,7 @@ impl CatalogService {
     /// Only these slugs may issue an entity of a page: an alias pointing at an
     /// instance that no longer serves the catalog layer names an entity no
     /// lookup can reach.
-    fn catalog_layer(&self) -> Vec<Slug> {
+    pub(crate) fn catalog_layer(&self) -> Vec<Slug> {
         self.registry()
             .layers(Layer::Catalog)
             .iter()
@@ -362,6 +373,96 @@ impl CatalogService {
         Ok(found)
     }
 
+    /// Reads one catalog artist at the depth the caller asked for.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the catalog id of the artist.
+    /// - `depth`: how much the page may spend.
+    ///
+    /// # Returns
+    ///
+    /// The artist, or `None` when it is unknown and when the cached depth has no
+    /// answer for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when a live read fails.
+    async fn page_artist(
+        &self,
+        id: &CatalogId,
+        depth: PageDepth,
+    ) -> Result<Option<CatalogArtistResult>, CatalogError> {
+        if depth == PageDepth::Cached {
+            return self.cached_artist(id).await;
+        }
+        match self.artist(id).await {
+            Ok(found) => Ok(Some(found)),
+            Err(CatalogError::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Reads one catalog album with its tracklist at the depth the caller asked
+    /// for.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the catalog id of the album.
+    /// - `depth`: how much the page may spend.
+    ///
+    /// # Returns
+    ///
+    /// The album, or `None` when it is unknown and when the cached depth has no
+    /// answer for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when a live read fails.
+    async fn page_album(
+        &self,
+        id: &CatalogId,
+        depth: PageDepth,
+    ) -> Result<Option<CatalogAlbumResult>, CatalogError> {
+        if depth == PageDepth::Cached {
+            return self.cached_album(id).await;
+        }
+        match self.album(id).await {
+            Ok(found) => Ok(Some(found)),
+            Err(CatalogError::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Reads an artist's album listing at the depth the caller asked for.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the catalog id of the artist.
+    /// - `limit`: the page size.
+    /// - `offset`: the offset.
+    /// - `depth`: how much the page may spend.
+    ///
+    /// # Returns
+    ///
+    /// The listing, or `None` when the cached depth has no answer for that page.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when a live read fails.
+    async fn page_artist_albums(
+        &self,
+        id: &CatalogId,
+        limit: u32,
+        offset: u32,
+        depth: PageDepth,
+    ) -> Result<Option<Vec<CatalogAlbumRefResult>>, CatalogError> {
+        if depth == PageDepth::Cached {
+            return self.cached_artist_albums(id, limit, offset).await;
+        }
+        self.artist_albums(id, limit, offset).await.map(Some)
+    }
+
     /// Resolves the catalog artist a stored artist pairs with.
     ///
     /// The recorded alias is tried first. When `by_name` is set, the artist's
@@ -371,7 +472,9 @@ impl CatalogService {
     ///
     /// - `artist`: the stored artist.
     /// - `layer`: the catalog instances, in the administrator's order.
-    /// - `by_name`: whether a name search may establish the pair.
+    /// - `depth`: how much the page may pair and write. A `Cached` read uses the
+    ///   cached provider answer of a recorded alias and never searches by name;
+    ///   a `Library` read uses neither.
     ///
     /// # Returns
     ///
@@ -381,17 +484,22 @@ impl CatalogService {
     ///
     /// Returns [`CatalogError`] when a stored read or an alias read fails; a
     /// pairing by name that fails is logged and reported as `None`.
-    async fn catalog_artist_of_stored(
+    pub(crate) async fn catalog_artist_of_stored(
         &self,
         artist: EntityId,
         layer: &[Slug],
-        by_name: bool,
+        depth: PageDepth,
     ) -> Result<Option<CatalogArtistResult>, CatalogError> {
+        if depth == PageDepth::Library {
+            return Ok(None);
+        }
         if let Some(alias) = self.catalog_alias(artist, layer).await?
             && let Ok(id) = catalog_id(&alias.slug, EntityKind::Artist, &alias.provider_id)
         {
-            match self.artist(&id).await {
-                Ok(found) => return Ok(Some(found)),
+            match self.page_artist(&id, depth).await {
+                Ok(Some(found)) => return Ok(Some(found)),
+                Ok(None) => return Ok(None),
+                Err(CatalogError::NotFound) => {}
                 Err(error) => tracing::debug!(
                     %error,
                     artist = %artist,
@@ -399,8 +507,15 @@ impl CatalogService {
                 ),
             }
         }
-        if !by_name {
-            return Ok(None);
+        if depth == PageDepth::Cached {
+            let name = {
+                let mut conn = self.database().readers().acquire().await?;
+                artists::get_artist(&mut conn, artist).await?
+            };
+            let Some(name) = name else {
+                return Ok(None);
+            };
+            return Ok(self.cached_artist_by_name(&name.name).await);
         }
         let name = {
             let mut conn = self.database().readers().acquire().await?;
@@ -422,7 +537,9 @@ impl CatalogService {
                 return Ok(None);
             }
         };
-        if let Some(found) = &found {
+        if let Some(found) = &found
+            && depth == PageDepth::Full
+        {
             self.record_alias(artist, EntityKind::Artist, &found.id)
                 .await;
         }
@@ -567,13 +684,34 @@ impl CatalogService {
     /// # Errors
     ///
     /// Returns [`CatalogError`] when a read fails.
-    async fn catalog_album_of_stored(
+    pub(crate) async fn catalog_album_of_stored(
         &self,
         album: EntityId,
         detail: &AlbumDetail,
         layer: &[Slug],
         depth: PageDepth,
     ) -> Result<Option<CatalogAlbumRefResult>, CatalogError> {
+        if depth == PageDepth::Library {
+            return Ok(None);
+        }
+        if depth == PageDepth::Cached {
+            // A cached read pairs through the recorded alias only: a name search
+            // and a discography walk are provider calls.
+            let Some(alias) = self.catalog_alias(album, layer).await? else {
+                return Ok(None);
+            };
+            let Ok(id) = catalog_id(&alias.slug, EntityKind::Album, &alias.provider_id) else {
+                return Ok(None);
+            };
+            let Some(found) = self.cached_album(&id).await? else {
+                let reference = self.cached_album_ref(&id).await?;
+                return Ok(reference);
+            };
+            return Ok(Some(CatalogAlbumRefResult {
+                id: found.id,
+                album: crate::service::album_ref_of(&found.album),
+            }));
+        }
         let Some(artist) = detail.artists.first().map(|artist| artist.id).or_else(|| {
             detail
                 .tracks
@@ -583,7 +721,7 @@ impl CatalogService {
             return Ok(None);
         };
         let Some(catalog_artist) = self
-            .catalog_artist_of_stored(artist, layer, depth == PageDepth::Full)
+            .catalog_artist_of_stored(artist, layer, depth)
             .await?
         else {
             return Ok(None);
@@ -674,18 +812,16 @@ impl CatalogService {
                 }
                 let visible = self.scope_of_artist(scopes, *entity).await?;
                 let mut catalog = None;
-                if depth == PageDepth::Full || visible.is_none() {
+                if depth != PageDepth::Library || visible.is_none() {
                     catalog = self
-                        .catalog_artist_of_stored(*entity, &layer, depth == PageDepth::Full)
+                        .catalog_artist_of_stored(*entity, &layer, depth)
                         .await?;
                 }
                 (Some(*entity), catalog, visible)
             }
             ClientId::Catalog(catalog_id) if catalog_id.kind() == EntityKind::Artist => {
-                let fetched = match self.artist(catalog_id).await {
-                    Ok(found) => found,
-                    Err(CatalogError::NotFound) => return Ok(None),
-                    Err(error) => return Err(error),
+                let Some(fetched) = self.page_artist(catalog_id, depth).await? else {
+                    return Ok(None);
                 };
                 let namespace = provider_namespace(catalog_id.slug());
                 let mut stored = self
@@ -713,8 +849,12 @@ impl CatalogService {
         let mut albums: Vec<PageAlbum> = Vec::new();
         let mut emitted: HashSet<EntityId> = HashSet::new();
         if let Some(catalog) = &catalog {
-            let references = match self.artist_albums(&catalog.id, MAX_PAGE_ALBUMS, 0).await {
-                Ok(found) => found,
+            let references = match self
+                .page_artist_albums(&catalog.id, MAX_PAGE_ALBUMS, 0, depth)
+                .await
+            {
+                Ok(Some(found)) => found,
+                Ok(None) => Vec::new(),
                 Err(error) => {
                     tracing::debug!(
                         %error,
@@ -733,7 +873,7 @@ impl CatalogService {
                 let mut by_provider_id =
                     provider_aliases(self.database(), &slug, EntityKind::Album, &provider_ids)
                         .await?;
-                if depth == PageDepth::Full
+                if depth != PageDepth::Library
                     && let Some(artist) = stored_head
                 {
                     let stored_albums = {
@@ -765,7 +905,9 @@ impl CatalogService {
                             by_provider_id.insert(references[*index].album.id.clone(), *album);
                             recorded.push((*album, references[*index].album.id.clone()));
                         }
-                        self.record_album_aliases(&slug, &recorded).await;
+                        if depth == PageDepth::Full {
+                            self.record_album_aliases(&slug, &recorded).await;
+                        }
                     }
                 }
                 for reference in &references {
@@ -829,13 +971,13 @@ impl CatalogService {
                 };
                 let visible = self.scope_of_album(scopes, *entity).await?;
                 let mut fetched = None;
-                if (depth == PageDepth::Full || visible.is_none())
+                if (depth != PageDepth::Library || visible.is_none())
                     && let Some(reference) = self
                         .catalog_album_of_stored(*entity, &detail, &layer, depth)
                         .await?
                 {
-                    match self.album(&reference.id).await {
-                        Ok(album) => fetched = Some(album),
+                    match self.page_album(&reference.id, depth).await {
+                        Ok(album) => fetched = album,
                         Err(error) if visible.is_none() => return Err(error),
                         Err(error) => tracing::debug!(
                             %error,
@@ -847,10 +989,29 @@ impl CatalogService {
                 (Some(*entity), fetched, visible)
             }
             ClientId::Catalog(catalog_id) if catalog_id.kind() == EntityKind::Album => {
-                let fetched = match self.album(catalog_id).await {
-                    Ok(found) => found,
-                    Err(CatalogError::NotFound) => return Ok(None),
-                    Err(error) => return Err(error),
+                let fetched = match self.page_album(catalog_id, depth).await? {
+                    Some(found) => found,
+                    // The hero of a cold album page is the cached reference: the
+                    // title and the credits are known, the tracklist arrives with
+                    // the enrichment.
+                    None => match self.cached_album_ref(catalog_id).await? {
+                        Some(reference) => CatalogAlbumResult {
+                            id: reference.id.clone(),
+                            album: CatalogAlbum {
+                                id: reference.album.id,
+                                title: reference.album.title,
+                                artists: reference.album.artists,
+                                release_date: None,
+                                album_type: None,
+                                upc: None,
+                                genres: Vec::new(),
+                                images: reference.album.images,
+                                tracks: Vec::new(),
+                                ids: Vec::new(),
+                            },
+                        },
+                        None => return Ok(None),
+                    },
                 };
                 let namespace = provider_namespace(catalog_id.slug());
                 let mut stored = self

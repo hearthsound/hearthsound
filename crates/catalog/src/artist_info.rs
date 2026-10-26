@@ -65,7 +65,7 @@ impl CatalogService {
             let Some(provider) = instance.metadata() else {
                 continue;
             };
-            if let Some(cached) = self.cached_artist_info(instance.id(), &key).await {
+            if let Some(cached) = self.cached_artist_info_of(instance.id(), &key).await {
                 match cached {
                     Some(info) => return Ok(Some(info)),
                     None => continue,
@@ -113,7 +113,7 @@ impl CatalogService {
     /// # Returns
     ///
     /// The answer, or `None` when the cache does not hold one.
-    async fn cached_artist_info(
+    pub(crate) async fn cached_artist_info_of(
         &self,
         instance: uuid::Uuid,
         key: &RequestKey,

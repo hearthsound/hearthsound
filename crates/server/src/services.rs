@@ -60,7 +60,7 @@ use hearthsound_activity::{
 use hearthsound_api_native::{NativeServices, NativeState};
 use hearthsound_api_subsonic::{PendingSource, SubsonicState};
 use hearthsound_auth::{Authenticator, Sessions, SetupGate, TrustedProxies, Users};
-use hearthsound_catalog::{CatalogService, DiscoveryService, LinkedUserContexts};
+use hearthsound_catalog::{CatalogService, DiscoveryService, ENRICH_JOB_KIND, LinkedUserContexts};
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_config::keys;
 use hearthsound_config::secret::{SecretBox, SecretKey};
@@ -94,7 +94,7 @@ use tower_http::cors::CorsLayer;
 use crate::error::ServerError;
 use crate::jobs::{
     KvSweepJobHandler, PLUGIN_HEALTH_JOB_KIND, PLUGIN_HEALTH_SCHEDULE, PLUGIN_KV_SWEEP_CRON,
-    PLUGIN_KV_SWEEP_JOB_KIND, PluginHealthJobHandler,
+    PLUGIN_KV_SWEEP_JOB_KIND, PluginHealthJobHandler, EnrichJobHandler,
 };
 use crate::web::WebAssets;
 
@@ -444,6 +444,14 @@ impl Services {
             Arc::new(PluginHealthJobHandler::new(
                 Arc::clone(&registry),
                 settings.clone(),
+            )),
+        );
+        runner.register(
+            ENRICH_JOB_KIND,
+            Arc::new(EnrichJobHandler::new(
+                Arc::clone(&catalog),
+                Arc::clone(&discovery),
+                Arc::clone(&events),
             )),
         );
         let runner = Arc::new(runner);

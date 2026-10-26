@@ -60,6 +60,7 @@ pub mod artwork;
 pub mod cache;
 pub mod dedupe;
 pub mod discovery;
+pub mod enrichment;
 mod error;
 mod identity;
 mod materialize;
@@ -77,6 +78,9 @@ pub use dedupe::{
 pub use discovery::{
     DiscoveryService, InstancePlaylist, LinkedUserContexts, NoUserContexts, ResolvedAlbum,
     ResolvedArtist, SimilarArtistAlbums, UserContextSource,
+};
+pub use enrichment::{
+    ENRICH_JOB_KIND, EnrichJobPayload, Enrichment, TOP_TRACKS_CACHE_LIMIT,
 };
 pub use error::CatalogError;
 pub use identity::{IDENTITY_MATCH_THRESHOLD, IdentityRequest, ResolvedRecording};

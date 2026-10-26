@@ -29,13 +29,16 @@ use hearthsound_core::{CatalogId, EntityKind, Layer, ProviderError, Slug};
 use hearthsound_db::Database;
 use hearthsound_plugin_host::{ProviderRegistry, RegistryInstance};
 use moka::future::Cache as MemoryCache;
+use uuid::Uuid;
 use tokio::time::error::Elapsed;
 
 use crate::artwork::REFUSED_IMAGE_TTL;
 use crate::cache::{Cache, ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
 use crate::dedupe::normalize;
 use crate::error::CatalogError;
-use crate::wire::{WireAlbum, WireAlbumRefs, WireArtist, WireResults, WireTrack, WireTracks};
+use crate::wire::{
+    WireAlbum, WireAlbumRef, WireAlbumRefs, WireArtist, WireResults, WireTrack, WireTracks,
+};
 
 /// A track a catalog provider returned, with the id that names it.
 ///
@@ -175,6 +178,12 @@ struct Inner {
     /// asked again until its entry expires. A tile grid of a hundred covers
     /// therefore costs one refusal per image, not one per visit.
     refused_images: MemoryCache<String, ()>,
+    /// The `(kind, id, listener)` pairs an enrichment run already holds.
+    ///
+    /// A page's burst of reads asks for the same enrichment three times; the map
+    /// keeps the second and third from queueing a job, and a completed run
+    /// releases the key so a later visit may ask again.
+    enriching: std::sync::Mutex<std::collections::HashMap<(String, String, Uuid), std::time::Instant>>,
     /// The catalog artist a normalized name resolved to.
     ///
     /// Resolving a name is a catalog search, and a browse page asks for the same
@@ -252,6 +261,7 @@ impl CatalogService {
                 missing_images,
                 refused_images,
                 artist_resolutions,
+                enriching: std::sync::Mutex::new(std::collections::HashMap::new()),
             }),
         }
     }
@@ -286,6 +296,17 @@ impl CatalogService {
     /// tiers.
     pub(crate) fn cache(&self) -> &Cache {
         &self.inner.cache
+    }
+
+    /// Returns the map of enrichment requests in flight.
+    ///
+    /// The map keeps a page's burst of reads from queueing one job per read, and
+    /// `enrichment` prunes it on every claim so an abandoned request cannot
+    /// suppress a later one.
+    pub(crate) fn enriching(
+        &self,
+    ) -> &std::sync::Mutex<std::collections::HashMap<(String, String, Uuid), std::time::Instant>> {
+        &self.inner.enriching
     }
 
     /// Returns the directory cached cover images are written to.
@@ -566,7 +587,7 @@ impl CatalogService {
                 },
             )
             .await?;
-        albums
+        Vec::<CatalogAlbumRef>::from(albums)
             .into_iter()
             .map(|album| album_ref_result(id.slug(), album))
             .collect()
@@ -754,7 +775,11 @@ impl CatalogService {
                 )
                 .await;
             match outcome {
-                Ok(results) => return search_result(instance.slug(), results),
+                Ok(results) => {
+                    let found = search_result(instance.slug(), results)?;
+                    self.promote_search(&instance, &found).await;
+                    return Ok(found);
+                }
                 Err(error) => failure = Some(error),
             }
         }
@@ -763,6 +788,362 @@ impl CatalogService {
             Some(error) => Err(error),
             None => Ok(CatalogSearch::default()),
         }
+    }
+
+    /// Reads a cached album with its tracklist.
+    ///
+    /// A cache-only read never calls a provider: a miss is an answer, which is
+    /// what lets a page state that the extras have not arrived yet.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the catalog id of an album.
+    ///
+    /// # Returns
+    ///
+    /// The cached album, or `None` when the instance has not answered for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::NotFound`] when the id does not name an album and
+    /// [`CatalogError::InvalidEntity`] when a cached provider id cannot be named.
+    pub async fn cached_album(
+        &self,
+        id: &CatalogId,
+    ) -> Result<Option<CatalogAlbumResult>, CatalogError> {
+        require_kind(id, EntityKind::Album)?;
+        let Some(instance) = self.inner.registry.instance(id.slug().as_str()) else {
+            return Ok(None);
+        };
+        let Some(album) = self
+            .inner
+            .cache
+            .read::<WireAlbum>(instance.id(), &RequestKey::album(id.provider_id()))
+            .await
+        else {
+            return Ok(None);
+        };
+        Ok(Some(CatalogAlbumResult {
+            id: catalog_id(id.slug(), EntityKind::Album, &album.id)?,
+            album: CatalogAlbum::from(album),
+        }))
+    }
+
+    /// Reads a cached album reference.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the catalog id of an album.
+    ///
+    /// # Returns
+    ///
+    /// The cached reference, or `None` when the instance has not answered for
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::NotFound`] when the id does not name an album and
+    /// [`CatalogError::InvalidEntity`] when a cached provider id cannot be named.
+    pub async fn cached_album_ref(
+        &self,
+        id: &CatalogId,
+    ) -> Result<Option<CatalogAlbumRefResult>, CatalogError> {
+        require_kind(id, EntityKind::Album)?;
+        let Some(instance) = self.inner.registry.instance(id.slug().as_str()) else {
+            return Ok(None);
+        };
+        let Some(album) = self
+            .inner
+            .cache
+            .read::<WireAlbumRef>(instance.id(), &RequestKey::album_ref(id.provider_id()))
+            .await
+        else {
+            return Ok(None);
+        };
+        Ok(Some(CatalogAlbumRefResult {
+            id: catalog_id(id.slug(), EntityKind::Album, &album.id)?,
+            album: CatalogAlbumRef::from(album),
+        }))
+    }
+
+    /// Reads a cached artist.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the catalog id of an artist.
+    ///
+    /// # Returns
+    ///
+    /// The cached artist, or `None` when the instance has not answered for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::NotFound`] when the id does not name an artist and
+    /// [`CatalogError::InvalidEntity`] when a cached provider id cannot be named.
+    pub async fn cached_artist(
+        &self,
+        id: &CatalogId,
+    ) -> Result<Option<CatalogArtistResult>, CatalogError> {
+        require_kind(id, EntityKind::Artist)?;
+        let Some(instance) = self.inner.registry.instance(id.slug().as_str()) else {
+            return Ok(None);
+        };
+        let Some(artist) = self
+            .inner
+            .cache
+            .read::<WireArtist>(instance.id(), &RequestKey::artist(id.provider_id()))
+            .await
+        else {
+            return Ok(None);
+        };
+        Ok(Some(CatalogArtistResult {
+            id: catalog_id(id.slug(), EntityKind::Artist, &artist.id)?,
+            artist: CatalogArtist::from(artist),
+        }))
+    }
+
+    /// Reads a cached artist album listing.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the catalog id of an artist.
+    /// - `limit`: the page size that was asked for.
+    /// - `offset`: the offset that was asked for.
+    ///
+    /// # Returns
+    ///
+    /// The cached listing, or `None` when the instance has not answered for that
+    /// page.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::NotFound`] when the id does not name an artist and
+    /// [`CatalogError::InvalidEntity`] when a cached provider id cannot be named.
+    pub async fn cached_artist_albums(
+        &self,
+        id: &CatalogId,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Option<Vec<CatalogAlbumRefResult>>, CatalogError> {
+        require_kind(id, EntityKind::Artist)?;
+        let Some(instance) = self.inner.registry.instance(id.slug().as_str()) else {
+            return Ok(None);
+        };
+        let Some(albums) = self
+            .inner
+            .cache
+            .read::<WireAlbumRefs>(
+                instance.id(),
+                &RequestKey::artist_albums(id.provider_id(), limit, offset),
+            )
+            .await
+        else {
+            return Ok(None);
+        };
+        Vec::<CatalogAlbumRef>::from(albums)
+            .into_iter()
+            .map(|album| album_ref_result(id.slug(), album))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
+    }
+
+    /// Reads a cached artist top-track listing.
+    ///
+    /// The enrichment run caches a full listing under
+    /// [`TOP_TRACKS_CACHE_LIMIT`](crate::TOP_TRACKS_CACHE_LIMIT), so a page that
+    /// asks for fewer tracks answers from that entry and truncates it.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the catalog id of an artist.
+    /// - `limit`: how many tracks the caller wants.
+    ///
+    /// # Returns
+    ///
+    /// The cached tracks, or `None` when the instance has not answered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::NotFound`] when the id does not name an artist and
+    /// [`CatalogError::InvalidEntity`] when a cached provider id cannot be named.
+    pub async fn cached_artist_top_tracks(
+        &self,
+        id: &CatalogId,
+        limit: u32,
+    ) -> Result<Option<Vec<CatalogTrackResult>>, CatalogError> {
+        require_kind(id, EntityKind::Artist)?;
+        let Some(instance) = self.inner.registry.instance(id.slug().as_str()) else {
+            return Ok(None);
+        };
+        let mut tracks = None;
+        if limit < crate::enrichment::TOP_TRACKS_CACHE_LIMIT {
+            tracks = self
+                .inner
+                .cache
+                .read::<WireTracks>(
+                    instance.id(),
+                    &RequestKey::artist_top_tracks(
+                        id.provider_id(),
+                        crate::enrichment::TOP_TRACKS_CACHE_LIMIT,
+                    ),
+                )
+                .await;
+        }
+        if tracks.is_none() {
+            tracks = self
+                .inner
+                .cache
+                .read::<WireTracks>(
+                    instance.id(),
+                    &RequestKey::artist_top_tracks(id.provider_id(), limit),
+                )
+                .await;
+        }
+        let Some(tracks) = tracks else {
+            return Ok(None);
+        };
+        let wanted = usize::try_from(limit).unwrap_or(usize::MAX);
+        Vec::<CatalogTrack>::from(tracks)
+            .into_iter()
+            .take(wanted)
+            .map(|track| track_result(id.slug(), track))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
+    }
+
+    /// Reads a cached catalog search.
+    ///
+    /// The instances are walked in the administrator's order, exactly as
+    /// [`CatalogService::search`] walks them; the first cached answer wins and a
+    /// provider is never asked.
+    ///
+    /// # Parameters
+    ///
+    /// - `query`: the query a caller would send.
+    ///
+    /// # Returns
+    ///
+    /// The cached answer, or `None` when no instance has one and when catalog
+    /// search is disabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::Setting`] when the settings snapshot no longer
+    /// holds a valid value for a key the cap or the toggle is read from.
+    pub async fn cached_search(
+        &self,
+        query: &CatalogQuery,
+    ) -> Result<Option<CatalogSearch>, CatalogError> {
+        let settings = self.settings_snapshot();
+        if !settings.get(keys::SEARCH_CATALOG_ENABLED)? {
+            return Ok(None);
+        }
+        let cap = settings.get(keys::SEARCH_CATALOG_MAX_RESULTS)?;
+        let query = effective_query(query, cap);
+        if query.limit == 0 {
+            return Ok(None);
+        }
+        let key = RequestKey::search(&query);
+        for instance in self.inner.registry.layers(Layer::Catalog) {
+            let Some(results) = self
+                .inner
+                .cache
+                .read::<WireResults>(instance.id(), &key)
+                .await
+            else {
+                continue;
+            };
+            return search_result(instance.slug(), CatalogResults::from(results)).map(Some);
+        }
+        Ok(None)
+    }
+
+    /// Reads the catalog artist a name already resolved to.
+    ///
+    /// Only a resolution this process already made is consulted: the call never
+    /// searches, which is what makes it safe on a read that must not spend
+    /// provider quota.
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: the artist's name.
+    ///
+    /// # Returns
+    ///
+    /// The cached artist, or `None` when the name was never resolved or its
+    /// artist has not been cached.
+    pub async fn cached_artist_by_name(&self, name: &str) -> Option<CatalogArtistResult> {
+        let wanted = normalize(name);
+        if wanted.is_empty() {
+            return None;
+        }
+        let id = self.inner.artist_resolutions.get(&wanted).await?;
+        self.cached_artist(&id).await.ok().flatten()
+    }
+
+    /// Reads what the metadata layer already answered about an artist.
+    ///
+    /// # Parameters
+    ///
+    /// - `request`: the artist's name and the identifiers the server has.
+    ///
+    /// # Returns
+    ///
+    /// The cached information of the first instance in the administrator's order
+    /// that knows the artist, or `None` when none answered yet.
+    pub async fn cached_artist_info(
+        &self,
+        request: &hearthsound_core::providers::ArtistInfoRequest,
+    ) -> Option<hearthsound_core::providers::ArtistInfo> {
+        let key = RequestKey::artist_info(request);
+        for instance in self.inner.registry.layers(Layer::Metadata) {
+            if let Some(Some(info)) = self.cached_artist_info_of(instance.id(), &key).await {
+                return Some(info);
+            }
+        }
+        None
+    }
+
+    /// Caches what a search answered, so a click-through costs no provider call.
+    ///
+    /// The promoted artist record is the same one `get-artist` returns, and the
+    /// promoted album is the reference record, kept under its own key so it never
+    /// stands in for a tracklist. A fill failure is logged and dropped: the
+    /// search already answered.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance`: the instance that answered the search.
+    /// - `found`: the answer.
+    async fn promote_search(&self, instance: &Arc<RegistryInstance>, found: &CatalogSearch) {
+        let artists: Vec<(RequestKey, WireArtist)> = found
+            .artists
+            .iter()
+            .map(|artist| {
+                (
+                    RequestKey::artist(artist.id.provider_id()),
+                    WireArtist::from(&artist.artist),
+                )
+            })
+            .collect();
+        self.inner
+            .cache
+            .fill_many(instance.id(), &artists, ENTITY_CACHE_TTL)
+            .await;
+        let albums: Vec<(RequestKey, WireAlbumRef)> = found
+            .albums
+            .iter()
+            .map(|album| {
+                (
+                    RequestKey::album_ref(album.id.provider_id()),
+                    WireAlbumRef::from(&album.album),
+                )
+            })
+            .collect();
+        self.inner
+            .cache
+            .fill_many(instance.id(), &albums, ENTITY_CACHE_TTL)
+            .await;
     }
 
     /// Deletes the expired rows of the persistent cache tier.
@@ -966,6 +1347,25 @@ fn album_ref_result(
 ) -> Result<CatalogAlbumRefResult, CatalogError> {
     let id = catalog_id(slug, EntityKind::Album, &album.id)?;
     Ok(CatalogAlbumRefResult { id, album })
+}
+
+/// Builds the reference form of a full album.
+///
+/// # Parameters
+///
+/// - `album`: the album the provider returned.
+///
+/// # Returns
+///
+/// The compact record a search result or an artist listing carries.
+pub(crate) fn album_ref_of(album: &CatalogAlbum) -> CatalogAlbumRef {
+    CatalogAlbumRef {
+        id: album.id.clone(),
+        title: album.title.clone(),
+        artists: album.artists.clone(),
+        year: crate::pages::release_year(album.release_date.as_deref()),
+        images: album.images.clone(),
+    }
 }
 
 /// Builds a catalog id, reporting an empty provider id as an invalid entity.

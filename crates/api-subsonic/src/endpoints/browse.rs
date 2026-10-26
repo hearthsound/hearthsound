@@ -140,6 +140,7 @@ pub async fn get_artist(call: Call) -> Encoded {
         Ok(None) => return call.encode(Response::failed(SubsonicError::not_found())),
         Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
     };
+    catalog::request_enrichment(&call, &id).await;
     let database = call.state().database();
     let user_id = call.principal().user_id.uuid();
 
@@ -276,6 +277,7 @@ pub async fn get_album(call: Call) -> Encoded {
         Ok(None) => return call.encode(Response::failed(SubsonicError::not_found())),
         Err(error) => return call.encode(Response::failed(catalog::failure(&error))),
     };
+    catalog::request_enrichment(&call, &id).await;
     let database = call.state().database();
     let user_id = call.principal().user_id.uuid();
 
@@ -959,12 +961,14 @@ fn page_track_id(track: &PageTrack) -> ClientId {
 ///
 /// # Returns
 ///
-/// [`PageDepth::Full`] when the client opted into the vendor extension, and
-/// [`PageDepth::Library`] otherwise: a third-party client keeps the library-only
-/// answer for a stored id.
+/// [`PageDepth::Cached`] when the client opted into the vendor extension, and
+/// [`PageDepth::Library`] otherwise. A first-party page never waits for a
+/// provider: it answers from the library plus the cached catalog answers, and
+/// the read then asks for the extras through a `catalog.enrich` job. A
+/// third-party client keeps the library-only answer for a stored id.
 fn page_depth(call: &Call) -> PageDepth {
     if call.params().vendor_enabled() {
-        PageDepth::Full
+        PageDepth::Cached
     } else {
         PageDepth::Library
     }

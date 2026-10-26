@@ -1,0 +1,132 @@
+//! Integration tests for the cache-only page reads and the enrichment run.
+//!
+//! A page read answers from the library and the cached catalog answers, and a
+//! `catalog.enrich` run fetches what is missing. The assertions are made on the
+//! page and on the cache table, so a provider call that should not happen is
+//! visible as a cache row that should not exist.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use crate::common::{Env, count_cache_rows};
+use hearthsound_catalog::{PageDepth, PageAlbum};
+use hearthsound_core::{ClientId, Layer};
+use hearthsound_library::query::Scope;
+use hearthsound_test_support::DISCOGRAPHY_CATALOG;
+
+/// Builds an environment with the discography fixture as the catalog layer.
+///
+/// The fixture's artist released three albums, one of them a remaster.
+async fn discography_env() -> Env {
+    let env = Env::new().await;
+    env.instance(
+        "disco",
+        DISCOGRAPHY_CATALOG,
+        "com.example.discography-catalog",
+        serde_json::json!({}),
+    )
+    .await;
+    env.assign(Layer::Catalog, &["disco"]).await;
+    env
+}
+
+/// The scopes a page is read in for this test: the server-wide view.
+fn scopes() -> [Scope; 1] {
+    [Scope::server_for_principal(true)]
+}
+
+#[tokio::test]
+async fn a_cached_page_answers_from_the_library_without_a_provider_call() {
+    let env = discography_env().await;
+    let (_, _, artist) = env
+        .stored_album_with_track("First Light", "Discography Artist", 2001)
+        .await;
+    let service = env.service();
+
+    let page = service
+        .artist_page(&ClientId::Entity(artist), &scopes(), PageDepth::Cached)
+        .await
+        .unwrap()
+        .expect("the stored artist answers");
+
+    assert_eq!(page.albums.len(), 1, "only the library album is listed");
+    assert!(matches!(page.albums[0], PageAlbum::Stored(_)));
+    assert_eq!(
+        count_cache_rows(&env.database).await,
+        0,
+        "a cached page must not call a provider"
+    );
+}
+
+#[tokio::test]
+async fn enriching_a_stored_artist_fills_the_page_for_the_next_visit() {
+    let env = discography_env().await;
+    let (_, _, artist) = env
+        .stored_album_with_track("First Light", "Discography Artist", 2001)
+        .await;
+    let service = env.service();
+    let id = ClientId::Entity(artist);
+
+    let report = service.enrich(&id).await.unwrap();
+    assert!(report.enriched, "the catalog answered the artist");
+    assert!(report.artist.is_some(), "a discovery warm-up has a seed");
+    assert!(
+        count_cache_rows(&env.database).await > 0,
+        "the run cached what it fetched"
+    );
+
+    let page = service
+        .artist_page(&id, &scopes(), PageDepth::Cached)
+        .await
+        .unwrap()
+        .expect("the page answers");
+    assert!(
+        page.albums.len() >= 3,
+        "the catalog discography is listed from the cache: {}",
+        page.albums.len()
+    );
+    let catalogs = page
+        .albums
+        .iter()
+        .filter(|album| matches!(album, PageAlbum::Catalog(_)))
+        .count();
+    assert!(catalogs >= 2, "the albums the library lacks are catalog ones");
+}
+
+#[tokio::test]
+async fn enriching_a_catalog_album_fills_its_tracklist_and_artist_listing() {
+    let env = discography_env().await;
+    let service = env.service();
+    let album = crate::common::catalog_id("disco", hearthsound_core::EntityKind::Album, "disco-album-1");
+
+    let report = service.enrich(&ClientId::Catalog(album.clone())).await.unwrap();
+    assert!(report.enriched);
+    assert!(service.cached_album(&album).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn one_enrichment_per_entity_and_listener_is_claimed_at_a_time() {
+    let env = discography_env().await;
+    let (_, _, artist) = env
+        .stored_album_with_track("First Light", "Discography Artist", 2001)
+        .await;
+    let service = env.service();
+    let id = ClientId::Entity(artist);
+    let user = uuid::Uuid::from_u128(7);
+
+    assert!(service.begin_enrichment(&id, user).await);
+    assert!(
+        !service.begin_enrichment(&id, user).await,
+        "a burst of reads queues one job"
+    );
+    assert!(
+        service
+            .begin_enrichment(&id, uuid::Uuid::from_u128(8))
+            .await,
+        "another listener is a different request"
+    );
+    service.finish_enrichment(&id, user).await;
+    assert!(
+        service.begin_enrichment(&id, user).await,
+        "a completed run can be asked for again"
+    );
+}

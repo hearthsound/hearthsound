@@ -8,6 +8,7 @@
 mod catalog_cache;
 mod catalog_dedupe;
 mod catalog_service;
+mod enrichment;
 mod common;
 mod cover_art;
 mod identity;
