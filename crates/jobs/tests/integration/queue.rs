@@ -210,7 +210,7 @@ async fn extend_lock_holds_a_claim_past_its_original_deadline() {
         "1.8 s into a 1.2 s lock the heartbeat still holds the claim"
     );
 
-    assert!(queue.complete(enqueued.id).await.unwrap());
+    assert!(queue.complete(enqueued.id, claimed.attempts).await.unwrap());
     assert!(
         !queue.extend_lock(enqueued.id).await.unwrap(),
         "a job that is no longer running cannot be extended"
@@ -224,11 +224,11 @@ async fn complete_deletes_the_job() {
     let queue = JobQueue::new(&database, QueueOptions::default());
 
     let enqueued = queue.enqueue(NewJob::new("library.scan")).await.unwrap();
-    queue.claim().await.unwrap().unwrap();
+    let claimed = queue.claim().await.unwrap().unwrap();
 
-    assert!(queue.complete(enqueued.id).await.unwrap());
+    assert!(queue.complete(enqueued.id, claimed.attempts).await.unwrap());
     assert_eq!(queue.get(enqueued.id).await.unwrap(), None);
-    assert!(!queue.complete(enqueued.id).await.unwrap());
+    assert!(!queue.complete(enqueued.id, claimed.attempts).await.unwrap());
 }
 
 #[tokio::test]
@@ -245,7 +245,7 @@ async fn fail_retries_with_backoff_then_leaves_a_dead_job() {
 
         let before = now_millis();
         let outcome = queue
-            .fail(claimed.id, "temporarily unavailable")
+            .fail(claimed.id, claimed.attempts, "temporarily unavailable")
             .await
             .unwrap();
         let after = now_millis();
@@ -278,7 +278,10 @@ async fn fail_retries_with_backoff_then_leaves_a_dead_job() {
 
     let claimed = queue.claim().await.unwrap().unwrap();
     assert_eq!(claimed.attempts, 3);
-    let outcome = queue.fail(claimed.id, "still broken").await.unwrap();
+    let outcome = queue
+        .fail(claimed.id, claimed.attempts, "still broken")
+        .await
+        .unwrap();
     assert_eq!(outcome, Some(FailureOutcome::Dead));
 
     let dead = queue.get(enqueued.id).await.unwrap().unwrap();
@@ -300,11 +303,11 @@ async fn fail_permanently_skips_the_retry_schedule() {
     let queue = JobQueue::new(&database, QueueOptions::default());
 
     let enqueued = queue.enqueue(NewJob::new("library.scan")).await.unwrap();
-    queue.claim().await.unwrap().unwrap();
+    let claimed = queue.claim().await.unwrap().unwrap();
 
     assert!(
         queue
-            .fail_permanently(enqueued.id, "no handler")
+            .fail_permanently(enqueued.id, claimed.attempts, "no handler")
             .await
             .unwrap()
     );
@@ -334,6 +337,57 @@ async fn cancel_removes_a_job() {
     assert_eq!(listed[0].id, second.id);
 }
 
+/// A worker whose lock expired cannot write the outcome of the attempt it
+/// lost: the claim token is the attempt count, and the reclaimed attempt is the
+/// one that owns the row.
+#[tokio::test]
+async fn a_stale_worker_cannot_complete_or_fail_a_reclaimed_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let queue = JobQueue::new(
+        &database,
+        QueueOptions {
+            // Wide enough that a slow runner's writes between the sleeps cannot
+            // eat the margin, so the reclaim is the only thing that happens.
+            lock_duration: Duration::from_millis(400),
+            retry: RetryPolicy::default(),
+        },
+    );
+
+    let enqueued = queue.enqueue(NewJob::new("library.scan")).await.unwrap();
+    let stale = queue.claim().await.unwrap().unwrap();
+    assert_eq!(stale.attempts, 1);
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let reclaimed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(job) = queue.claim().await.unwrap() {
+                break job;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the expired claim must be reclaimed");
+    assert_eq!(reclaimed.id, enqueued.id);
+    assert_eq!(reclaimed.attempts, 2);
+
+    assert!(
+        !queue.complete(stale.id, stale.attempts).await.unwrap(),
+        "a lost claim cannot complete the job"
+    );
+    assert_eq!(
+        queue.fail(stale.id, stale.attempts, "late").await.unwrap(),
+        None,
+        "a lost claim cannot fail the job"
+    );
+
+    let running = queue.get(enqueued.id).await.unwrap().unwrap();
+    assert_eq!(running.state, JobState::Running);
+    assert_eq!(running.attempts, 2);
+    assert_eq!(running.last_error, None);
+}
+
 #[tokio::test]
 async fn missing_jobs_are_noops() {
     let dir = tempfile::tempdir().unwrap();
@@ -341,10 +395,10 @@ async fn missing_jobs_are_noops() {
     let queue = JobQueue::new(&database, QueueOptions::default());
     let missing = hearthsound_core::new_uuid_v7();
 
-    assert!(!queue.complete(missing).await.unwrap());
+    assert!(!queue.complete(missing, 1).await.unwrap());
     assert!(!queue.cancel(missing).await.unwrap());
     assert!(!queue.extend_lock(missing).await.unwrap());
-    assert!(!queue.fail_permanently(missing, "gone").await.unwrap());
-    assert_eq!(queue.fail(missing, "gone").await.unwrap(), None);
+    assert!(!queue.fail_permanently(missing, 1, "gone").await.unwrap());
+    assert_eq!(queue.fail(missing, 1, "gone").await.unwrap(), None);
     assert_eq!(queue.get(missing).await.unwrap(), None);
 }

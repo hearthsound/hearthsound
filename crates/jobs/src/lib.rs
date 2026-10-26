@@ -40,7 +40,7 @@
 //! let job = queue.enqueue(hearthsound_jobs::NewJob::new("library.scan")).await?;
 //! assert_eq!(job.kind.as_str(), "library.scan");
 //!
-//! queue.complete(job.id).await?;
+//! queue.complete(job.id, job.attempts).await?;
 //! # Ok(())
 //! # }
 //! ```

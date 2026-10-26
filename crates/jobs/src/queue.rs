@@ -10,6 +10,12 @@
 //! job whose worker died, which is recognized by its expired `locked_until`.
 //! Delivery is therefore at-least-once: a handler must tolerate running for a
 //! job it already ran.
+//!
+//! The attempt count is the claim token. Every claim, a reclaim included,
+//! increments it, and [`JobQueue::complete`], [`JobQueue::fail`] and
+//! [`JobQueue::fail_permanently`] write only against the count the caller was
+//! handed: a worker whose claim expired must not overwrite the outcome of the
+//! attempt it lost.
 
 use std::time::Duration;
 
@@ -494,7 +500,7 @@ impl Job {
 ///
 /// queue.enqueue(hearthsound_jobs::NewJob::new("library.scan")).await?;
 /// while let Some(job) = queue.claim().await? {
-///     queue.complete(job.id).await?;
+///     queue.complete(job.id, job.attempts).await?;
 /// }
 /// # Ok(())
 /// # }
@@ -610,6 +616,11 @@ impl JobQueue {
     /// statement reclaims a job that is still `running` with an expired lock,
     /// which is how work survives a worker that died mid-handler.
     ///
+    /// The returned attempt count is the claim token: the worker passes it back
+    /// to [`JobQueue::complete`], [`JobQueue::fail`] and
+    /// [`JobQueue::fail_permanently`], so a worker that lost the claim cannot
+    /// write the outcome of the attempt it lost.
+    ///
     /// # Returns
     ///
     /// The claimed job, or `None` when nothing is due.
@@ -681,19 +692,26 @@ impl JobQueue {
     /// # Parameters
     ///
     /// - `id`: the job to delete.
+    /// - `attempts`: the attempt count [`JobQueue::claim`] returned, the claim
+    ///   token the completion is written against.
     ///
     /// # Returns
     ///
-    /// `true` when a row was deleted, `false` when the job no longer exists
-    /// because it was cancelled or already completed.
+    /// `true` when a row was deleted, `false` when the job is no longer the one
+    /// the caller claimed: it was cancelled, already completed, or reclaimed by
+    /// another worker after this claim expired.
     ///
     /// # Errors
     ///
     /// Returns [`JobsError::Database`] when the statement fails.
-    pub async fn complete(&self, id: Uuid) -> Result<bool, JobsError> {
-        let result = sqlx::query!("DELETE FROM jobs WHERE id = ?", id.as_bytes().as_slice())
-            .execute(&self.writer)
-            .await?;
+    pub async fn complete(&self, id: Uuid, attempts: i64) -> Result<bool, JobsError> {
+        let result = sqlx::query!(
+            "DELETE FROM jobs WHERE id = ? AND attempts = ?",
+            id.as_bytes().as_slice(),
+            attempts,
+        )
+        .execute(&self.writer)
+        .await?;
         Ok(result.rows_affected() == 1)
     }
 
@@ -703,6 +721,9 @@ impl JobQueue {
     /// interrupted, and its later completion is a no-op. A handler that fails
     /// after its job was cancelled finds no row to fail, so the runner only logs
     /// that the job disappeared.
+    ///
+    /// Cancellation is by id alone, without the claim token: a cancellation must
+    /// reach a running job whatever attempt of it the worker holds.
     ///
     /// # Parameters
     ///
@@ -716,7 +737,10 @@ impl JobQueue {
     ///
     /// Returns [`JobsError::Database`] when the statement fails.
     pub async fn cancel(&self, id: Uuid) -> Result<bool, JobsError> {
-        self.complete(id).await
+        let result = sqlx::query!("DELETE FROM jobs WHERE id = ?", id.as_bytes().as_slice())
+            .execute(&self.writer)
+            .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     /// Records a failed attempt, retrying the job or leaving it dead.
@@ -731,29 +755,39 @@ impl JobQueue {
     /// # Parameters
     ///
     /// - `id`: the job that failed.
+    /// - `attempts`: the attempt count [`JobQueue::claim`] returned. A failure
+    ///   reported for any other attempt is discarded.
     /// - `error`: the failure to store as the job's last error.
     ///
     /// # Returns
     ///
-    /// What happened to the job, or `None` when the job no longer exists.
+    /// What happened to the job, or `None` when the job no longer exists or was
+    /// reclaimed by another worker: the claim the caller held is not the claim
+    /// the row is at.
     ///
     /// # Errors
     ///
     /// Returns [`JobsError::Database`] when a statement fails.
-    pub async fn fail(&self, id: Uuid, error: &str) -> Result<Option<FailureOutcome>, JobsError> {
+    pub async fn fail(
+        &self,
+        id: Uuid,
+        attempts: i64,
+        error: &str,
+    ) -> Result<Option<FailureOutcome>, JobsError> {
         let mut transaction = self.writer.begin().await?;
-        let attempts = sqlx::query_scalar!(
-            "SELECT attempts FROM jobs WHERE id = ?",
+        let claimed = sqlx::query_scalar!(
+            "SELECT attempts FROM jobs WHERE id = ? AND attempts = ?",
             id.as_bytes().as_slice(),
+            attempts,
         )
         .fetch_optional(&mut *transaction)
         .await?;
-        let Some(attempts) = attempts else {
+        let Some(claimed) = claimed else {
             return Ok(None);
         };
 
         let now = now_millis();
-        let outcome = match self.options.retry.delay_after(attempts) {
+        let outcome = match self.options.retry.delay_after(claimed) {
             Some(delay) => {
                 let run_at = add(now, delay);
                 sqlx::query!(
@@ -771,7 +805,7 @@ impl JobQueue {
                 FailureOutcome::Retried { run_at }
             }
             None => {
-                mark_dead(&mut transaction, id, error, now).await?;
+                mark_dead(&mut transaction, id, claimed, error, now).await?;
                 FailureOutcome::Dead
             }
         };
@@ -788,18 +822,26 @@ impl JobQueue {
     /// # Parameters
     ///
     /// - `id`: the job to fail.
+    /// - `attempts`: the attempt count [`JobQueue::claim`] returned, so a stale
+    ///   worker cannot fail a job another worker has since reclaimed.
     /// - `error`: the failure to store as the job's last error.
     ///
     /// # Returns
     ///
-    /// `true` when the job was marked failed, `false` when it no longer exists.
+    /// `true` when the job was marked failed, `false` when it no longer exists
+    /// or is at another attempt.
     ///
     /// # Errors
     ///
     /// Returns [`JobsError::Database`] when the statement fails.
-    pub async fn fail_permanently(&self, id: Uuid, error: &str) -> Result<bool, JobsError> {
+    pub async fn fail_permanently(
+        &self,
+        id: Uuid,
+        attempts: i64,
+        error: &str,
+    ) -> Result<bool, JobsError> {
         let mut connection = self.writer.acquire().await?;
-        let changed = mark_dead(&mut connection, id, error, now_millis()).await?;
+        let changed = mark_dead(&mut connection, id, attempts, error, now_millis()).await?;
         Ok(changed)
     }
 
@@ -915,22 +957,27 @@ async fn insert(connection: &mut SqliteConnection, job: &NewJob) -> Result<JobRo
 
 /// Marks a job dead, keeping its error.
 ///
+/// The write is scoped to one attempt, so a worker that lost its claim leaves
+/// the row alone.
+///
 /// # Returns
 ///
-/// `true` when the job existed.
+/// `true` when the job existed at that attempt.
 async fn mark_dead(
     connection: &mut SqliteConnection,
     id: Uuid,
+    attempts: i64,
     error: &str,
     now: i64,
 ) -> Result<bool, JobsError> {
     let result = sqlx::query!(
         "UPDATE jobs
          SET state = 'failed', locked_until = NULL, last_error = ?, updated_at = ?
-         WHERE id = ?",
+         WHERE id = ? AND attempts = ?",
         error,
         now,
         id.as_bytes().as_slice(),
+        attempts,
     )
     .execute(&mut *connection)
     .await?;

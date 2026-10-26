@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM jobs WHERE id = ? AND attempts = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "dde141ebdea241323140df91f2879ebe746c4bb64f51d7225396582d5db930fe"
+}

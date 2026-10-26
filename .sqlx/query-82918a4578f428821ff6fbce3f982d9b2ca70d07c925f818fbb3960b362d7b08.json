@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT attempts FROM jobs WHERE id = ?",
+  "query": "SELECT attempts FROM jobs WHERE id = ? AND attempts = ?",
   "describe": {
     "columns": [
       {
@@ -16,11 +16,11 @@
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 2
     },
     "nullable": [
       false
     ]
   },
-  "hash": "9a07c3e718eed268b928e9c353c8970b01b88b9b2e153a7ffe83c3e02a57019d"
+  "hash": "82918a4578f428821ff6fbce3f982d9b2ca70d07c925f818fbb3960b362d7b08"
 }

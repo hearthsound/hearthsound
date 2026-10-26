@@ -14,6 +14,11 @@
 //! - the workers sleep on a poll interval, but a local enqueue wakes one
 //!   immediately, so latency does not come from polling.
 //!
+//! Delivery is at-least-once: a job whose worker died is reclaimed, so a handler
+//! must tolerate running for a job it already ran. The attempt count a claim
+//! returns is the claim token the outcome is written against, so a worker whose
+//! claim expired must not overwrite the outcome of the attempt it lost.
+//!
 //! Shutdown is cooperative: triggering the [`Shutdown`] stops the workers from
 //! claiming new work, and [`JobRunner::run`] then waits for the handlers that
 //! are already running, up to the configured timeout.
@@ -382,7 +387,7 @@ async fn run_job(
     let Some(handler) = handlers.get(&job.kind) else {
         tracing::warn!(job = %job.id, kind = %job.kind, "no handler is registered for this job kind");
         let error = format!("no handler is registered for kind `{}`", job.kind);
-        if let Err(error) = queue.fail_permanently(job.id, &error).await {
+        if let Err(error) = queue.fail_permanently(job.id, job.attempts, &error).await {
             tracing::error!(job = %job.id, %error, "failing a job with no handler failed");
         }
         return;
@@ -397,8 +402,18 @@ async fn run_job(
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "job completed",
             );
-            if let Err(error) = queue.complete(job.id).await {
-                tracing::error!(job = %job.id, %error, "completing a job failed");
+            match queue.complete(job.id, job.attempts).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(
+                        job = %job.id,
+                        attempts = job.attempts,
+                        "the job was reclaimed by another worker; the result of this attempt is discarded",
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(job = %job.id, %error, "completing a job failed");
+                }
             }
         }
         Err(error) => {
@@ -410,7 +425,7 @@ async fn run_job(
                 error = error.message(),
                 "job failed",
             );
-            match queue.fail(job.id, error.message()).await {
+            match queue.fail(job.id, job.attempts, error.message()).await {
                 Ok(Some(FailureOutcome::Retried { run_at })) => {
                     tracing::info!(job = %job.id, run_at, "job rescheduled for another attempt");
                 }
@@ -418,7 +433,11 @@ async fn run_job(
                     tracing::warn!(job = %job.id, "job used up its attempts and is now failed");
                 }
                 Ok(None) => {
-                    tracing::warn!(job = %job.id, "the job was cancelled while it ran");
+                    tracing::warn!(
+                        job = %job.id,
+                        attempts = job.attempts,
+                        "the job was reclaimed by another worker; the result of this attempt is discarded",
+                    );
                 }
                 Err(fail_error) => {
                     tracing::error!(job = %job.id, %fail_error, "failing a job failed");
