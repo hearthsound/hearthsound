@@ -1222,6 +1222,9 @@ async fn a_catalog_album_shows_a_stored_recording_as_the_stored_track() {
     )
     .unwrap();
 
+    fixture
+        .enrich(&hearthsound_core::ClientId::Catalog(album_id.clone()))
+        .await;
     let answer = get(
         &fixture.app(),
         &format!(

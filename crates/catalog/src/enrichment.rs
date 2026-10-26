@@ -125,6 +125,10 @@ impl CatalogService {
             }
             ClientId::Catalog(catalog) if catalog.kind() == EntityKind::Artist => {
                 let found = self.artist(catalog).await?;
+                // Pairing the catalog artist with the stored act of its name is
+                // what makes a cached page opened by the catalog id show the
+                // stored artist, and it records the alias for every later read.
+                self.stored_artist_of_catalog(&found, &layer).await?;
                 self.artist_albums(&found.id, MAX_PAGE_ALBUMS, 0).await?;
                 self.artist_top_tracks(&found.id, TOP_TRACKS_CACHE_LIMIT)
                     .await
@@ -170,6 +174,16 @@ impl CatalogService {
             }
             ClientId::Catalog(catalog) if catalog.kind() == EntityKind::Album => {
                 let found = self.album(catalog).await?;
+                // Pairing the catalog album with the stored release of the same
+                // title is what makes a cached page opened by the catalog id show
+                // the stored album.
+                if let Some(stored) = self
+                    .stored_album_of_catalog(catalog.slug(), &found.album)
+                    .await?
+                {
+                    self.record_alias(stored, EntityKind::Album, &found.id)
+                        .await;
+                }
                 // The artist page has its own discography: reading it here means
                 // the album page that was opened also fills the artist it links
                 // to, so that page does not pay for the same listing again.

@@ -207,7 +207,7 @@ impl CatalogService {
     /// - `entity`: the stored row.
     /// - `kind`: the kind of the row.
     /// - `catalog`: the catalog id that names the same entity.
-    async fn record_alias(&self, entity: EntityId, kind: EntityKind, catalog: &CatalogId) {
+    pub(crate) async fn record_alias(&self, entity: EntityId, kind: EntityKind, catalog: &CatalogId) {
         let namespace = provider_namespace(catalog.slug());
         let outcome = async {
             let mut tx = self.database().writer().begin().await?;
@@ -564,7 +564,7 @@ impl CatalogService {
     /// # Errors
     ///
     /// Returns [`CatalogError`] when a read fails.
-    async fn stored_artist_of_catalog(
+    pub(crate) async fn stored_artist_of_catalog(
         &self,
         catalog: &CatalogArtistResult,
         layer: &[Slug],
@@ -604,7 +604,7 @@ impl CatalogService {
     /// # Errors
     ///
     /// Returns [`CatalogError`] when a read fails.
-    async fn stored_album_of_catalog(
+    pub(crate) async fn stored_album_of_catalog(
         &self,
         slug: &Slug,
         album: &CatalogAlbum,

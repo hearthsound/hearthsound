@@ -834,6 +834,20 @@ impl Fixture {
     /// # Panics
     ///
     /// Panics when no built instance carries the slug.
+    /// Primes the catalog cache for one entity, as a background enrichment run
+    /// does.
+    ///
+    /// A vendor page read answers from the library and the cached catalog data
+    /// only, so a test that asserts the merged page primes the cache first and
+    /// then reads. A cold read is asserted on its own, without this call.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the stored or catalog id of the entity.
+    pub async fn enrich(&self, id: &hearthsound_core::ClientId) {
+        self.catalog.enrich(id).await.unwrap();
+    }
+
     pub fn instance_id(&self, slug: &str) -> uuid::Uuid {
         self.registry
             .instance(slug)

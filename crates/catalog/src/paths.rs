@@ -51,6 +51,20 @@ pub const ORDINAL_SEPARATOR: &str = "--";
 /// segment from.
 const EMPTY_SEGMENT: &str = "untitled";
 
+/// Whether a path resolution may call a catalog provider.
+///
+/// A first-party path lookup must not spend provider quota: it resolves through
+/// the library and the answers the catalog layers already cached, and the page
+/// it opens asks for the rest through a `catalog.enrich` job. A native or internal
+/// lookup resolves live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathMode {
+    /// Pair by name and title, and call providers as needed.
+    Live,
+    /// Pair through recorded aliases and cached provider answers only.
+    Cached,
+}
+
 /// Folds a name into one URL path segment.
 ///
 /// The name is normalized the way deduplication folds a title (lowercase,
@@ -325,9 +339,10 @@ impl CatalogService {
         &self,
         segment: &str,
         scopes: &[Scope],
+        mode: PathMode,
     ) -> Result<Option<ResolvedPath>, CatalogError> {
         let (base, ordinal) = parse_segment(segment);
-        let candidates = self.artist_candidates(&base, scopes).await?;
+        let candidates = self.artist_candidates(&base, scopes, mode).await?;
         let Some(candidate) = candidates.get(ordinal) else {
             return Ok(None);
         };
@@ -367,13 +382,14 @@ impl CatalogService {
         artist_segment: &str,
         album_segment: &str,
         scopes: &[Scope],
+        mode: PathMode,
     ) -> Result<Option<ResolvedPath>, CatalogError> {
         let (base, ordinal) = parse_segment(album_segment);
         let (artist_base, _) = parse_segment(artist_segment);
-        let Some(artist) = self.resolve_artist_path(artist_segment, scopes).await? else {
+        let Some(artist) = self.resolve_artist_path(artist_segment, scopes, mode).await? else {
             return Ok(None);
         };
-        let listing = self.album_listing(&artist.id, scopes).await?;
+        let listing = self.album_listing(&artist.id, scopes, mode).await?;
         let segments = assign_segments(listing.iter().map(|entry| entry.title.as_str()));
         let wanted = with_ordinal(&base, ordinal);
         if let Some(index) = segments.iter().position(|assigned| *assigned == wanted) {
@@ -389,8 +405,9 @@ impl CatalogService {
             limit: 10,
             offset: 0,
         };
-        let found = match self.search(&query).await {
-            Ok(found) => found,
+        let found = match self.search_for_path(&query, mode).await {
+            Ok(Some(found)) => found,
+            Ok(None) => return Ok(None),
             Err(error) => {
                 tracing::debug!(
                     %error,
@@ -442,10 +459,11 @@ impl CatalogService {
         &self,
         id: &ClientId,
         scopes: &[Scope],
+        mode: PathMode,
     ) -> Result<Option<ResolvedPath>, CatalogError> {
         match kind_of(id) {
-            Some(EntityKind::Artist) => self.artist_path_of(id, scopes).await,
-            Some(EntityKind::Album) => self.album_path_of(id, scopes).await,
+            Some(EntityKind::Artist) => self.artist_path_of(id, scopes, mode).await,
+            Some(EntityKind::Album) => self.album_path_of(id, scopes, mode).await,
             _ => Ok(None),
         }
     }
@@ -460,6 +478,7 @@ impl CatalogService {
         &self,
         id: &ClientId,
         scopes: &[Scope],
+        mode: PathMode,
     ) -> Result<Option<ResolvedPath>, CatalogError> {
         let name = match id {
             ClientId::Entity(entity) => {
@@ -477,7 +496,7 @@ impl CatalogService {
                     }
                 }
             }
-            ClientId::Catalog(catalog) => match self.artist(catalog).await {
+            ClientId::Catalog(catalog) => match self.artist_at(catalog, mode).await {
                 Ok(found) => found.artist.name,
                 Err(error) => {
                     tracing::debug!(
@@ -490,7 +509,7 @@ impl CatalogService {
             },
         };
         let base = segment(&name);
-        let candidates = self.artist_candidates(&base, scopes).await?;
+        let candidates = self.artist_candidates(&base, scopes, mode).await?;
         let identity = self.identity_of(id, EntityKind::Artist).await?;
         let Some(index) = candidates
             .iter()
@@ -522,6 +541,7 @@ impl CatalogService {
         &self,
         id: &ClientId,
         scopes: &[Scope],
+        mode: PathMode,
     ) -> Result<Option<ResolvedPath>, CatalogError> {
         let (title, artist, artist_segment) = match id {
             ClientId::Entity(entity) => {
@@ -535,7 +555,7 @@ impl CatalogService {
                 (album.title, artist, artist_segment)
             }
             ClientId::Catalog(catalog) => {
-                let found = match self.album(catalog).await {
+                let found = match self.album_at(catalog, mode).await {
                     Ok(found) => found,
                     Err(error) => {
                         tracing::debug!(
@@ -567,9 +587,9 @@ impl CatalogService {
             return Ok(None);
         };
         if let Some(artist) = artist
-            && let Some(artist_path) = self.artist_path_of(&artist, scopes).await?
+            && let Some(artist_path) = self.artist_path_of(&artist, scopes, mode).await?
         {
-            let listing = self.album_listing(&artist_path.id, scopes).await?;
+            let listing = self.album_listing(&artist_path.id, scopes, mode).await?;
             let segments = assign_segments(listing.iter().map(|entry| entry.title.as_str()));
             let identity = self.identity_of(id, EntityKind::Album).await?;
             if let Some(index) = listing.iter().position(|entry| identity.matches(&entry.id)) {
@@ -605,8 +625,13 @@ impl CatalogService {
         &self,
         artist: &ClientId,
         scopes: &[Scope],
+        mode: PathMode,
     ) -> Result<Vec<ListingAlbum>, CatalogError> {
-        let Some(page) = self.artist_page(artist, scopes, PageDepth::Full).await? else {
+        let depth = match mode {
+            PathMode::Cached => PageDepth::Cached,
+            PathMode::Live => PageDepth::Full,
+        };
+        let Some(page) = self.artist_page(artist, scopes, depth).await? else {
             return Ok(Vec::new());
         };
         let stored_ids: Vec<EntityId> = page
@@ -668,6 +693,7 @@ impl CatalogService {
         &self,
         base: &str,
         scopes: &[Scope],
+        mode: PathMode,
     ) -> Result<Vec<ArtistCandidate>, CatalogError> {
         let mut candidates: Vec<ArtistCandidate> = Vec::new();
         let mut stored: Vec<_> = {
@@ -702,12 +728,13 @@ impl CatalogService {
             limit: 10,
             offset: 0,
         };
-        let hits: Vec<CatalogArtistResult> = match self.search(&query).await {
-            Ok(found) => found
+        let hits: Vec<CatalogArtistResult> = match self.search_for_path(&query, mode).await {
+            Ok(Some(found)) => found
                 .artists
                 .into_iter()
                 .filter(|hit| segment(&hit.artist.name) == base)
                 .collect(),
+            Ok(None) => return Ok(candidates),
             Err(error) => {
                 tracing::debug!(
                     %error,
@@ -765,6 +792,76 @@ impl CatalogService {
             }
         }
         Ok(candidates)
+    }
+
+    /// Searches the catalog for a path, using the cache at the cached mode.
+    ///
+    /// # Parameters
+    ///
+    /// - `query`: the query.
+    /// - `mode`: whether a provider may be called.
+    ///
+    /// # Returns
+    ///
+    /// The answer, or `None` when the cached mode has none.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when the live search fails or a setting cannot be
+    /// read.
+    async fn search_for_path(
+        &self,
+        query: &CatalogQuery,
+        mode: PathMode,
+    ) -> Result<Option<crate::service::CatalogSearch>, CatalogError> {
+        match mode {
+            PathMode::Cached => self.cached_search(query).await,
+            PathMode::Live => self.search(query).await.map(Some),
+        }
+    }
+
+    /// Reads one catalog artist at the mode the caller asked for.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the catalog id of the artist.
+    /// - `mode`: whether a provider may be called.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::NotFound`] when the cached mode has no answer for
+    /// it, and whatever a live read returns.
+    async fn artist_at(
+        &self,
+        id: &CatalogId,
+        mode: PathMode,
+    ) -> Result<CatalogArtistResult, CatalogError> {
+        match mode {
+            PathMode::Cached => self.cached_artist(id).await?.ok_or(CatalogError::NotFound),
+            PathMode::Live => self.artist(id).await,
+        }
+    }
+
+    /// Reads one catalog album at the mode the caller asked for.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the catalog id of the album.
+    /// - `mode`: whether a provider may be called.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::NotFound`] when the cached mode has no answer for
+    /// it, and whatever a live read returns.
+    async fn album_at(
+        &self,
+        id: &CatalogId,
+        mode: PathMode,
+    ) -> Result<crate::service::CatalogAlbumResult, CatalogError> {
+        match mode {
+            PathMode::Cached => self.cached_album(id).await?.ok_or(CatalogError::NotFound),
+            PathMode::Live => self.album(id).await,
+        }
     }
 
     /// Reads the ids an entity id names, from both directions.

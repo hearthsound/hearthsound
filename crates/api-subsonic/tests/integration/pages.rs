@@ -9,7 +9,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use hearthsound_core::{CatalogId, EntityId, EntityKind, Slug};
+use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, Slug};
 
 use crate::common::{Fixture, assert_ok, get};
 
@@ -38,6 +38,19 @@ fn catalog_id(kind: EntityKind, provider_id: &str) -> String {
     CatalogId::new(Slug::new(SLUG).unwrap(), kind, provider_id)
         .unwrap()
         .to_string()
+}
+
+/// Primes the cache for one entity the way a background enrichment run does.
+///
+/// A vendor page read answers from the library and the cached catalog data, so
+/// the merged page is asserted after priming. The cold read is a test of its own.
+///
+/// # Parameters
+///
+/// - `fixture`: the fixture whose cache is filled.
+/// - `id`: the stored or catalog id to enrich.
+async fn prime(fixture: &Fixture, id: ClientId) {
+    fixture.enrich(&id).await;
 }
 
 /// A fixture with the discography catalog installed and a library holding two
@@ -160,6 +173,13 @@ async fn album_page(fixture: &Fixture, id: &str) -> serde_json::Value {
 #[tokio::test]
 async fn a_library_artist_lists_the_whole_discography() {
     let seed = seeded().await;
+    let cold = artist_page(&seed.fixture, &seed.artist.to_string(), true).await;
+    assert_eq!(
+        album_ids(&cold),
+        vec![seed.basement.to_string(), seed.second_wind.to_string()],
+        "a cold page answers from the library alone and never waits for the catalog"
+    );
+    prime(&seed.fixture, ClientId::Entity(seed.artist)).await;
     let body = artist_page(&seed.fixture, &seed.artist.to_string(), true).await;
 
     assert_eq!(
@@ -195,6 +215,8 @@ async fn a_library_artist_lists_the_whole_discography() {
 #[tokio::test]
 async fn a_catalog_artist_opens_as_the_stored_artist() {
     let seed = seeded().await;
+    let artist = CatalogId::new(Slug::new(SLUG).unwrap(), EntityKind::Artist, ARTIST).unwrap();
+    prime(&seed.fixture, ClientId::Catalog(artist)).await;
     let body = artist_page(&seed.fixture, &catalog_id(EntityKind::Artist, ARTIST), true).await;
 
     let artist = &body["subsonic-response"]["artist"];
@@ -216,6 +238,7 @@ async fn a_catalog_artist_opens_as_the_stored_artist() {
 #[tokio::test]
 async fn a_library_album_lists_the_whole_tracklist() {
     let seed = seeded().await;
+    prime(&seed.fixture, ClientId::Entity(seed.second_wind)).await;
     let body = album_page(&seed.fixture, &seed.second_wind.to_string()).await;
 
     assert_eq!(
@@ -238,6 +261,8 @@ async fn a_library_album_lists_the_whole_tracklist() {
 #[tokio::test]
 async fn a_catalog_album_opens_as_the_stored_album() {
     let seed = seeded().await;
+    let album = CatalogId::new(Slug::new(SLUG).unwrap(), EntityKind::Album, SECOND_WIND).unwrap();
+    prime(&seed.fixture, ClientId::Catalog(album)).await;
     let body = album_page(&seed.fixture, &catalog_id(EntityKind::Album, SECOND_WIND)).await;
 
     let album = &body["subsonic-response"]["album"];
@@ -258,6 +283,8 @@ async fn a_catalog_album_opens_as_the_stored_album() {
 #[tokio::test]
 async fn pairing_records_the_provider_alias() {
     let seed = seeded().await;
+    prime(&seed.fixture, ClientId::Entity(seed.artist)).await;
+    prime(&seed.fixture, ClientId::Entity(seed.second_wind)).await;
     artist_page(&seed.fixture, &seed.artist.to_string(), true).await;
     album_page(&seed.fixture, &seed.second_wind.to_string()).await;
 
@@ -334,6 +361,8 @@ async fn without_a_catalog_layer_the_pages_fall_back_to_the_library() {
 async fn a_non_administrator_sees_stored_albums_outside_their_library_by_catalog_id() {
     let seed = seeded().await;
     let (_, key) = seed.fixture.account(&[]).await;
+    let artist = CatalogId::new(Slug::new(SLUG).unwrap(), EntityKind::Artist, ARTIST).unwrap();
+    prime(&seed.fixture, ClientId::Catalog(artist)).await;
 
     let response = get(
         &seed.fixture.app(),
@@ -564,6 +593,8 @@ async fn a_stored_album_is_listed_once_in_search() {
 #[tokio::test]
 async fn a_member_carries_the_readable_path() {
     let seed = seeded().await;
+    prime(&seed.fixture, ClientId::Entity(seed.artist)).await;
+    prime(&seed.fixture, ClientId::Entity(seed.second_wind)).await;
     let body = artist_page(&seed.fixture, &seed.artist.to_string(), true).await;
     let artist = &body["subsonic-response"]["artist"];
     assert_eq!(

@@ -10,6 +10,7 @@
 //! only when the request carries `hearthsound=1` and answers Subsonic error 70
 //! without it.
 
+use hearthsound_catalog::paths::PathMode;
 use hearthsound_catalog::ResolvedPath;
 use hearthsound_core::{ClientId, EntityKind};
 
@@ -60,12 +61,16 @@ pub async fn hs_resolve(call: Call) -> Encoded {
             let Ok(id) = ClientId::parse(id) else {
                 return call.encode(Response::failed(SubsonicError::not_found()));
             };
-            catalog.path_of(&id, &scopes).await
+            catalog.path_of(&id, &scopes, PathMode::Cached).await
         }
         (None, Some(artist), Some(album)) => {
-            catalog.resolve_album_path(artist, album, &scopes).await
+            catalog.resolve_album_path(artist, album, &scopes, PathMode::Cached).await
         }
-        (None, Some(artist), None) => catalog.resolve_artist_path(artist, &scopes).await,
+        (None, Some(artist), None) => {
+            catalog
+                .resolve_artist_path(artist, &scopes, PathMode::Cached)
+                .await
+        }
         (None, None, _) => {
             return call.encode(Response::failed(SubsonicError::missing_parameter("artist")));
         }
