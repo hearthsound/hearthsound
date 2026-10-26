@@ -303,3 +303,45 @@ fn catalog_artist() -> String {
     .expect("the fixture id is valid")
     .to_string()
 }
+
+/// A stored artist's biography is served on every first-party read once the
+/// enrichment run has fetched it, including after a browser refresh.
+///
+/// The first-party read answers from the cache alone, so a biography the run
+/// stored has to be found by the identifiers the page asks with. It also has to
+/// be fetched at all for a library artist no catalog instance knows: the
+/// metadata layer answers by name, so the biography does not depend on a catalog
+/// pairing.
+#[tokio::test]
+async fn a_stored_artist_keeps_its_biography_across_refreshes() {
+    use hearthsound_core::ClientId;
+
+    let (fixture, seeded) = fixture().await;
+    fixture
+        .install_metadata_layer(&[serde_json::json!({
+            "artists": [{
+                "name": "The Cardinals",
+                "biography": "A quartet from the valley.",
+            }],
+        })])
+        .await;
+    fixture.enrich(&ClientId::Entity(seeded.cardinals)).await;
+    let app = fixture.app();
+
+    for attempt in 0..2 {
+        let json = get(
+            &app,
+            &format!(
+                "/rest/getArtistInfo2?id={}&hearthsound=1&apiKey={}&f=json",
+                seeded.cardinals, fixture.api_key
+            ),
+        )
+        .await;
+        assert_ok(&json);
+        assert!(
+            json.body.contains("A quartet from the valley."),
+            "read {attempt} lost the biography: {}",
+            json.body
+        );
+    }
+}

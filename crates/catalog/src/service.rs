@@ -1200,6 +1200,14 @@ impl CatalogService {
 
     /// Reads what the metadata layer already answered about an artist.
     ///
+    /// The instances are walked in the administrator's order, and each one is
+    /// asked for every key the artist's answer may be stored under (see
+    /// [`artist_info_keys`](crate::artist_info)): the caller's own set of
+    /// identifiers, one key per identifier, and the name alone. Without that a
+    /// biography written by the enrichment run - which merges a stored artist's
+    /// MusicBrainz id with the catalog artist's identifiers - would be invisible
+    /// to the page reading with only one of the two.
+    ///
     /// # Parameters
     ///
     /// - `request`: the artist's name and the identifiers the server has.
@@ -1212,9 +1220,9 @@ impl CatalogService {
         &self,
         request: &hearthsound_core::providers::ArtistInfoRequest,
     ) -> Option<hearthsound_core::providers::ArtistInfo> {
-        let key = RequestKey::artist_info(request);
+        let keys = crate::artist_info::artist_info_keys(request);
         for instance in self.inner.registry.layers(Layer::Metadata) {
-            if let Some(Some(info)) = self.cached_artist_info_of(instance.id(), &key).await {
+            if let Some(Some(info)) = self.cached_artist_info_in(instance.id(), &keys).await {
                 return Some(info);
             }
         }

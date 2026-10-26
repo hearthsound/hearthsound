@@ -94,10 +94,15 @@ impl CatalogService {
                     .catalog_artist_of_stored(*entity, &layer, PageDepth::Full)
                     .await?
                 else {
+                    // The library holds an artist no catalog instance knows. Its
+                    // page still asks for a biography and a portrait, and the
+                    // metadata and artwork layers answer by name, so they are read
+                    // without a catalog pairing; a later visit shows them.
+                    self.warm_library_artist(*entity).await;
                     return Ok(Enrichment::default());
                 };
                 self.artist_albums(&catalog.id, MAX_PAGE_ALBUMS, 0).await?;
-                self.warm_artist_extras(*entity, &catalog).await;
+                self.warm_artist_extras(*entity, &catalog, id).await;
                 Ok(Enrichment {
                     artist: Some(self.seed_of(*entity, &catalog).await),
                     enriched: true,
@@ -231,10 +236,13 @@ impl CatalogService {
     ///
     /// - `artist`: the stored artist.
     /// - `catalog`: the catalog artist it pairs with.
+    /// - `requested`: the id the page asked with, which is the id its cached
+    ///   portraits are read back by.
     async fn warm_artist_extras(
         &self,
         artist: EntityId,
         catalog: &crate::service::CatalogArtistResult,
+        requested: &ClientId,
     ) {
         self.artist_top_tracks(&catalog.id, TOP_TRACKS_CACHE_LIMIT)
             .await
@@ -256,7 +264,7 @@ impl CatalogService {
                     "the metadata layer could not describe an artist"
                 )
             });
-        self.artist_portraits(&ClientId::Catalog(catalog.id.clone()))
+        self.artist_portraits(requested)
             .await
             .map(|_| ())
             .unwrap_or_else(|error| {
@@ -266,6 +274,82 @@ impl CatalogService {
                     "the artwork layer could not describe an artist's portraits"
                 )
             });
+    }
+
+    /// Fetches what the metadata and artwork layers know about a library artist.
+    ///
+    /// A stored artist no catalog instance knows still has a biography and a
+    /// portrait when a metadata or artwork provider recognizes the name, so the
+    /// page's extras are read without a catalog pairing. A failure is logged and
+    /// skipped: the run already answered the page.
+    ///
+    /// # Parameters
+    ///
+    /// - `artist`: the stored artist.
+    async fn warm_library_artist(&self, artist: EntityId) {
+        if let Some(request) = self.stored_info_request(artist).await {
+            self.artist_info(&request)
+                .await
+                .map(|_| ())
+                .unwrap_or_else(|error| {
+                    tracing::warn!(
+                        %error,
+                        artist = %artist,
+                        "the metadata layer could not describe a library artist"
+                    )
+                });
+        }
+        self.artist_portraits(&ClientId::Entity(artist))
+            .await
+            .map(|_| ())
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    %error,
+                    artist = %artist,
+                    "the artwork layer could not describe a library artist's portraits"
+                )
+            });
+    }
+
+    /// Builds the information request of a stored artist from its own row.
+    ///
+    /// # Parameters
+    ///
+    /// - `artist`: the stored artist.
+    ///
+    /// # Returns
+    ///
+    /// The name and the identifiers the library recorded, or `None` when the
+    /// artist cannot be read.
+    async fn stored_info_request(&self, artist: EntityId) -> Option<ArtistInfoRequest> {
+        let mut conn = match self.database().readers().acquire().await {
+            Ok(conn) => conn,
+            Err(error) => {
+                tracing::warn!(%error, artist = %artist, "a stored artist could not be read");
+                return None;
+            }
+        };
+        let stored = match hearthsound_library::artists::get_artist(&mut conn, artist).await {
+            Ok(stored) => stored,
+            Err(error) => {
+                tracing::warn!(%error, artist = %artist, "a stored artist could not be read");
+                return None;
+            }
+        }?;
+        let ids = stored
+            .mb_artist_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(|id| ExternalId {
+                namespace: MB_ARTIST.to_owned(),
+                value: id.to_owned(),
+            })
+            .into_iter()
+            .collect();
+        Some(ArtistInfoRequest {
+            name: stored.name,
+            ids,
+        })
     }
 
     /// Builds the information request of a stored artist, merged with its catalog
@@ -284,48 +368,23 @@ impl CatalogService {
         artist: EntityId,
         catalog: &crate::service::CatalogArtistResult,
     ) -> ArtistInfoRequest {
-        let stored = {
-            let mut conn = match self.database().readers().acquire().await {
-                Ok(conn) => conn,
-                Err(error) => {
-                    tracing::warn!(%error, artist = %artist, "a stored artist could not be read");
-                    return ArtistInfoRequest {
-                        name: catalog.artist.name.clone(),
-                        ids: catalog.artist.ids.clone(),
-                    };
-                }
-            };
-            match hearthsound_library::artists::get_artist(&mut conn, artist).await {
-                Ok(stored) => stored,
-                Err(error) => {
-                    tracing::warn!(%error, artist = %artist, "a stored artist could not be read");
-                    None
-                }
-            }
+        let mut request = match self.stored_info_request(artist).await {
+            Some(request) => request,
+            None => ArtistInfoRequest {
+                name: catalog.artist.name.clone(),
+                ids: Vec::new(),
+            },
         };
-        let mut ids: Vec<ExternalId> = Vec::new();
-        if let Some(stored) = &stored
-            && let Some(mbid) = stored.mb_artist_id.as_deref().filter(|id| !id.is_empty())
-        {
-            ids.push(ExternalId {
-                namespace: MB_ARTIST.to_owned(),
-                value: mbid.to_owned(),
-            });
-        }
         for id in &catalog.artist.ids {
-            if !ids
+            if !request
+                .ids
                 .iter()
                 .any(|known| known.namespace == id.namespace && known.value == id.value)
             {
-                ids.push(id.clone());
+                request.ids.push(id.clone());
             }
         }
-        ArtistInfoRequest {
-            name: stored
-                .map(|stored| stored.name)
-                .unwrap_or_else(|| catalog.artist.name.clone()),
-            ids,
-        }
+        request
     }
 
     /// Returns the discovery seed of a stored artist paired with its catalog one.

@@ -357,3 +357,145 @@ async fn a_discography_that_could_not_be_listed_is_marked_incomplete() {
     );
     assert!(!page.albums.is_empty(), "the library album is still listed");
 }
+
+/// A stored artist page lists the discography another page's enrichment already
+/// cached, before the artist's own record was ever read.
+///
+/// The alias names the catalog artist, and the listing is enough for the page:
+/// requiring the artist's record as well is what made a stored artist show only
+/// its library albums until a second visit.
+#[tokio::test]
+async fn a_stored_artist_lists_a_cached_discography_before_its_record_is_read() {
+    let env = discography_env().await;
+    let (_, _, artist) = env
+        .stored_album_with_track("First Light", "Discography Artist", 2001)
+        .await;
+    let service = env.service();
+    let catalog = crate::common::catalog_id(
+        "disco",
+        hearthsound_core::EntityKind::Artist,
+        "disco-artist-1",
+    );
+
+    // Another page - the artist's album page, say - enriched the discography
+    // without reading the artist's own record.
+    service
+        .artist_albums(&catalog, hearthsound_catalog::MAX_PAGE_ALBUMS, 0)
+        .await
+        .unwrap();
+    assert!(
+        service.cached_artist(&catalog).await.unwrap().is_none(),
+        "the artist record itself was never cached"
+    );
+    crate::common::write_alias(
+        &env.database,
+        "p:disco",
+        hearthsound_core::EntityKind::Artist,
+        "disco-artist-1",
+        artist,
+    )
+    .await;
+    let page = service
+        .artist_page(&ClientId::Entity(artist), &scopes(), PageDepth::Cached)
+        .await
+        .unwrap()
+        .expect("the stored artist answers");
+
+    assert!(
+        page.albums
+            .iter()
+            .any(|album| matches!(album, PageAlbum::Catalog(_))),
+        "the cached discography is listed on the first read: {:?}",
+        page.albums.len()
+    );
+    assert_eq!(
+        artist_record_rows(&env.database).await,
+        0,
+        "a cache-only page never reads the artist's own record from the provider"
+    );
+
+    // The listing's references are left behind for the covers: a card's cover is
+    // requested by album id, and without them each card is a provider lookup.
+    let listed = page
+        .albums
+        .iter()
+        .find_map(|album| match album {
+            PageAlbum::Catalog(reference) => Some(reference.id.clone()),
+            PageAlbum::Stored(_) => None,
+        })
+        .expect("the page lists a catalog album");
+    assert!(
+        service.cached_album_ref(&listed).await.unwrap().is_some(),
+        "the listing promoted the album's reference into the cache"
+    );
+}
+
+/// Counts the cached album records of the discography fixture's artist.
+///
+/// # Parameters
+///
+/// - `database`: the database to read.
+///
+/// # Returns
+///
+/// The number of `artist|id=` rows, which only a provider read writes.
+async fn artist_record_rows(database: &hearthsound_db::Database) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM catalog_cache WHERE request_key LIKE 'artist|id=%'")
+        .fetch_one(database.readers())
+        .await
+        .unwrap()
+}
+
+/// A library artist no catalog instance knows still gets its biography.
+///
+/// The metadata layer answers by name, so a biography does not depend on a
+/// catalog pairing: without the run the page of a stored act never had one.
+#[tokio::test]
+async fn a_library_artist_gets_its_biography_without_a_catalog_counterpart() {
+    use hearthsound_core::providers::ArtistInfoRequest;
+
+    let env = Env::new().await;
+    env.instance(
+        "metadata",
+        hearthsound_test_support::METADATA_FIXTURE,
+        crate::common::METADATA_ID,
+        serde_json::json!({
+            "artists": [{
+                "name": "Self Defense Family",
+                "biography": "A band from upstate New York.",
+            }],
+        }),
+    )
+    .await;
+    env.assign(Layer::Metadata, &["metadata"]).await;
+    let (_, _, artist) = env
+        .stored_album_with_track(
+            "Have You Considered Punk Music",
+            "Self Defense Family",
+            2018,
+        )
+        .await;
+    let service = env.service();
+
+    let report = service.enrich(&ClientId::Entity(artist)).await.unwrap();
+    assert!(
+        !report.enriched,
+        "there is no catalog discography to add to a library-only artist"
+    );
+
+    // The page reads with the stored artist's own identifiers, which is what the
+    // biography has to be found under.
+    let info = service
+        .cached_artist_info(&ArtistInfoRequest {
+            name: "Self Defense Family".to_owned(),
+            ids: vec![hearthsound_core::providers::ExternalId {
+                namespace: "mb-artist".to_owned(),
+                value: "44444444-4444-4444-8444-444444444444".to_owned(),
+            }],
+        })
+        .await;
+    assert_eq!(
+        info.and_then(|info| info.biography).as_deref(),
+        Some("A band from upstate New York.")
+    );
+}

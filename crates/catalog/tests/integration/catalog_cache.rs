@@ -427,3 +427,79 @@ async fn an_empty_top_tracks_answer_lives_for_an_hour() {
     assert_eq!(service.artist_top_tracks(&artist, 5).await.unwrap(), full);
     assert_eq!(count_cache_rows(&env.database).await, rows);
 }
+
+/// A biography written for one set of identifiers is read back with another.
+///
+/// The set a caller holds differs by path: the enrichment run merges a stored
+/// artist's MusicBrainz id with its catalog artist's identifiers, a stored
+/// artist's page asks with the MusicBrainz id alone, and a catalog page asks
+/// with whatever its instance reported - or with nothing, as Deezer reports no
+/// artist identifiers at all. Writing one key was what made a biography show
+/// once and vanish after a refresh.
+#[tokio::test]
+async fn a_biography_is_read_back_with_a_different_set_of_identifiers() {
+    use hearthsound_core::providers::{ArtistInfoRequest, ExternalId};
+
+    let env = Env::new().await;
+    env.instance(
+        "metadata",
+        hearthsound_test_support::METADATA_FIXTURE,
+        crate::common::METADATA_ID,
+        serde_json::json!({
+            "artists": [{
+                "name": "Hello Artist",
+                "mbid": "44444444-4444-4444-8444-444444444444",
+                "biography": "A greeting in human form.",
+            }],
+        }),
+    )
+    .await;
+    env.assign(Layer::Metadata, &["metadata"]).await;
+    let service = env.service();
+
+    let mbid = |value: &str| ExternalId {
+        namespace: "mb-artist".to_owned(),
+        value: value.to_owned(),
+    };
+    let written = ArtistInfoRequest {
+        name: "Hello Artist".to_owned(),
+        ids: vec![
+            mbid("44444444-4444-4444-8444-444444444444"),
+            ExternalId {
+                namespace: "deezer".to_owned(),
+                value: "42".to_owned(),
+            },
+        ],
+    };
+    let stored = service
+        .artist_info(&written)
+        .await
+        .unwrap()
+        .expect("the metadata layer knows the artist");
+    assert_eq!(
+        stored.biography.as_deref(),
+        Some("A greeting in human form.")
+    );
+
+    // The stored artist's page asks with the MusicBrainz id alone.
+    let page = ArtistInfoRequest {
+        name: "Hello Artist".to_owned(),
+        ids: vec![mbid("44444444-4444-4444-8444-444444444444")],
+    };
+    let read = service
+        .cached_artist_info(&page)
+        .await
+        .expect("the biography is cached for one of those identifiers");
+    assert_eq!(read.biography.as_deref(), Some("A greeting in human form."));
+
+    // A catalog artist whose instance reports no identifiers asks by name only.
+    let named = ArtistInfoRequest {
+        name: "Hello Artist".to_owned(),
+        ids: Vec::new(),
+    };
+    let read = service
+        .cached_artist_info(&named)
+        .await
+        .expect("the biography is cached under the artist's name too");
+    assert_eq!(read.biography.as_deref(), Some("A greeting in human form."));
+}
