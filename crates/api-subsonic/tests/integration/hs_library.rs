@@ -22,6 +22,12 @@ use hearthsound_library::query::{personal_album_ids, personal_artist_ids, person
 use crate::common::seed::library;
 use crate::common::{Fixture, SNAPSHOT_FILTERS, assert_error, assert_ok, get};
 
+/// The filters a snapshot of a body naming entity ids needs.
+///
+/// The ids of a seeded library carry a time-based payload, so a snapshot that
+/// names one has to mask it; the timestamps are masked by the shared filters.
+const ID_FILTERS: [(&str, &str); 2] = [SNAPSHOT_FILTERS[0], (r"(?:tr|al|ar|pl)_[0-9a-z]+", "ID")];
+
 /// Reads the `libraryCounts` members out of a JSON body.
 ///
 /// # Parameters
@@ -125,7 +131,7 @@ async fn in_personal_library(fixture: &Fixture, kind: EntityKind, entity: Entity
 }
 
 #[tokio::test]
-async fn saving_a_track_pins_it_and_answers_an_empty_response() {
+async fn saving_a_track_pins_it_and_answers_its_result() {
     let (fixture, _, tracks) = fixture(2).await;
     let app = fixture.app();
 
@@ -138,7 +144,9 @@ async fn saving_a_track_pins_it_and_answers_an_empty_response() {
     )
     .await;
     assert_ok(&probe);
-    insta::assert_snapshot!("hs-save-json", &probe.body);
+    insta::with_settings!({filters => ID_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("hs-save-json", &probe.body);
+    });
     assert!(in_personal_library(&fixture, EntityKind::Track, tracks[0]).await);
     assert!(is_pinned(&fixture, tracks[0]).await);
     assert!(
@@ -161,7 +169,9 @@ async fn saving_answers_the_xml_encoding_as_well() {
     )
     .await;
     assert_ok(&probe);
-    insta::assert_snapshot!("hs-save-xml", &probe.body);
+    insta::with_settings!({filters => ID_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("hs-save-xml", &probe.body);
+    });
 }
 
 #[tokio::test]
@@ -194,7 +204,9 @@ async fn saving_an_album_pins_its_member_tracks() {
     )
     .await;
     assert_ok(&probe);
-    insta::assert_snapshot!("hs-unsave-json", &probe.body);
+    insta::with_settings!({filters => ID_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("hs-unsave-json", &probe.body);
+    });
     for track in &tracks {
         assert!(
             !is_pinned(&fixture, *track).await,
@@ -226,7 +238,9 @@ async fn unsaving_answers_the_xml_encoding_as_well() {
     )
     .await;
     assert_ok(&probe);
-    insta::assert_snapshot!("hs-unsave-xml", &probe.body);
+    insta::with_settings!({filters => ID_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("hs-unsave-xml", &probe.body);
+    });
 }
 
 #[tokio::test]
@@ -243,7 +257,9 @@ async fn feedback_like_behaves_like_a_star() {
     )
     .await;
     assert_ok(&probe);
-    insta::assert_snapshot!("hs-set-feedback-json", &probe.body);
+    insta::with_settings!({filters => ID_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("hs-set-feedback-json", &probe.body);
+    });
     assert!(is_liked(&fixture, EntityKind::Track, tracks[0]).await);
     assert!(is_pinned(&fixture, tracks[0]).await);
 
@@ -275,7 +291,9 @@ async fn feedback_answers_the_xml_encoding_as_well() {
     )
     .await;
     assert_ok(&probe);
-    insta::assert_snapshot!("hs-set-feedback-xml", &probe.body);
+    insta::with_settings!({filters => ID_FILTERS.to_vec()}, {
+        insta::assert_snapshot!("hs-set-feedback-xml", &probe.body);
+    });
 }
 
 #[tokio::test]
@@ -462,8 +480,10 @@ async fn a_feedback_value_outside_the_three_is_refused() {
     assert!(!is_disliked(&fixture, EntityKind::Track, tracks[0]).await);
 }
 
+/// A library write applies each id on its own and reports the ones it could
+/// not apply, so a bulk action tells the truth about what it did.
 #[tokio::test]
-async fn a_library_write_naming_an_unknown_id_is_refused() {
+async fn a_library_write_reports_the_ids_it_could_not_apply() {
     let (fixture, _, _) = fixture(1).await;
     let app = fixture.app();
     let unknown = EntityId::new(hearthsound_core::IdPrefix::Track);
@@ -477,7 +497,20 @@ async fn a_library_write_naming_an_unknown_id_is_refused() {
             ),
         )
         .await;
-        assert_error(&probe, 70);
+        assert_ok(&probe);
+        assert!(
+            probe
+                .body
+                .contains("\"bulkResult\":{\"applied\":[],\"failed\":[{"),
+            "{endpoint} did not report the refused id: {}",
+            probe.body
+        );
+        assert!(
+            probe.body.contains(&format!("\"id\":\"{unknown}\""))
+                && probe.body.contains("\"reason\":\"not found\""),
+            "{endpoint} named no reason: {}",
+            probe.body
+        );
     }
 
     let probe = get(
@@ -488,7 +521,12 @@ async fn a_library_write_naming_an_unknown_id_is_refused() {
         ),
     )
     .await;
-    assert_error(&probe, 70);
+    assert_ok(&probe);
+    assert!(
+        probe.body.contains("\"reason\":\"not found\""),
+        "{}",
+        probe.body
+    );
 
     // A playlist id is not an entity that carries feedback.
     let playlist = EntityId::new(hearthsound_core::IdPrefix::Playlist);
@@ -500,7 +538,12 @@ async fn a_library_write_naming_an_unknown_id_is_refused() {
         ),
     )
     .await;
-    assert_error(&probe, 70);
+    assert_ok(&probe);
+    assert!(
+        probe.body.contains(&format!("\"id\":\"{playlist}\"")),
+        "{}",
+        probe.body
+    );
 }
 
 #[tokio::test]
@@ -621,7 +664,7 @@ async fn converting_another_accounts_playlist_is_not_authorized() {
         ),
     )
     .await;
-    assert_error(&probe, 50);
+    assert_error(&probe, 70);
     assert!(
         is_pinned(&fixture, tracks[0]).await,
         "the refused conversion changed nothing"
@@ -851,4 +894,122 @@ async fn the_counts_match_the_listings_they_size() {
     )
     .await;
     assert_error(&standard, 70);
+}
+
+/// A bulk like answers the ids it applied and the ones it did not, and applies
+/// the good ones.
+#[tokio::test]
+async fn a_bulk_like_answers_which_ids_it_applied() {
+    let (fixture, album, tracks) = fixture(2).await;
+    let app = fixture.app();
+    let gone = EntityId::new(IdPrefix::Track);
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsSetFeedback?apiKey={}&hearthsound=1&f=json&id={}&id={gone}&id={}&value=like",
+            fixture.api_key, tracks[0], album
+        ),
+    )
+    .await;
+    assert_ok(&probe);
+    assert!(
+        probe
+            .body
+            .contains(&format!("\"applied\":[\"{}\",\"{album}\"]", tracks[0])),
+        "the applied ids are named in request order: {}",
+        probe.body
+    );
+    assert!(
+        probe.body.contains(&format!(
+            "\"failed\":[{{\"id\":\"{gone}\",\"reason\":\"not found\"}}]"
+        )),
+        "the refused id and its reason are named: {}",
+        probe.body
+    );
+
+    assert!(is_liked(&fixture, EntityKind::Track, tracks[0]).await);
+    assert!(is_liked(&fixture, EntityKind::Album, album).await);
+    assert!(
+        !is_liked(&fixture, EntityKind::Track, gone).await,
+        "no like is stored for an id that does not resolve"
+    );
+}
+
+/// A bulk save and a bulk unsave answer the same shape.
+#[tokio::test]
+async fn a_bulk_save_and_unsave_answer_the_same_shape() {
+    let (fixture, album, tracks) = fixture(2).await;
+    let app = fixture.app();
+    let gone = EntityId::new(IdPrefix::Track);
+
+    let saved = get(
+        &app,
+        &format!(
+            "/rest/hsSave?apiKey={}&hearthsound=1&f=json&id={}&id={gone}&id={album}",
+            fixture.api_key, tracks[0]
+        ),
+    )
+    .await;
+    assert_ok(&saved);
+    assert!(
+        saved
+            .body
+            .contains(&format!("\"applied\":[\"{}\",\"{album}\"]", tracks[0])),
+        "{}",
+        saved.body
+    );
+    assert!(
+        saved.body.contains(&format!(
+            "\"failed\":[{{\"id\":\"{gone}\",\"reason\":\"not found\"}}]"
+        )),
+        "{}",
+        saved.body
+    );
+    assert!(in_personal_library(&fixture, EntityKind::Track, tracks[0]).await);
+    assert!(in_personal_library(&fixture, EntityKind::Album, album).await);
+
+    let unsaved = get(
+        &app,
+        &format!(
+            "/rest/hsUnsave?apiKey={}&hearthsound=1&f=json&id={}&id={gone}",
+            fixture.api_key, tracks[0]
+        ),
+    )
+    .await;
+    assert_ok(&unsaved);
+    assert!(
+        unsaved
+            .body
+            .contains(&format!("\"applied\":[\"{}\"]", tracks[0])),
+        "{}",
+        unsaved.body
+    );
+    assert!(
+        unsaved.body.contains(&format!(
+            "\"failed\":[{{\"id\":\"{gone}\",\"reason\":\"not found\"}}]"
+        )),
+        "{}",
+        unsaved.body
+    );
+    assert!(!in_personal_library(&fixture, EntityKind::Track, tracks[0]).await);
+}
+
+/// A bulk write that names no id is still a malformed request.
+#[tokio::test]
+async fn a_bulk_write_without_ids_is_error_10() {
+    let (fixture, _, _) = fixture(1).await;
+    let app = fixture.app();
+
+    for endpoint in ["hsSave", "hsUnsave", "hsSetFeedback"] {
+        let probe = get(
+            &app,
+            &format!(
+                "/rest/{endpoint}?apiKey={}&hearthsound=1&f=json&value=like",
+                fixture.api_key
+            ),
+        )
+        .await;
+        assert_error(&probe, 10);
+    }
 }

@@ -27,6 +27,12 @@
 //! Every endpoint here belongs to the `hearthsound` vendor extension, so each one
 //! is answered only when the request carries `hearthsound=1` and answers Subsonic
 //! error 70 without it.
+//!
+//! The three bulk writes - `hsSave`, `hsUnsave` and `hsSetFeedback` - apply each
+//! id in a transaction of its own and answer a `bulkResult` member naming the ids
+//! they applied and the ones they did not, with a reason. A client that selected
+//! thirty songs therefore learns that twenty-nine landed and which one did not,
+//! instead of seeing one error and guessing.
 
 use hearthsound_activity::Feedback;
 use hearthsound_core::EntityKind;
@@ -37,18 +43,9 @@ use crate::auth::Call;
 use crate::browse;
 use crate::response::{Encoded, Response, SubsonicError, codes};
 use crate::scope;
-use crate::value::Object;
+use crate::value::{Array, Object};
 
 use super::feedback::{adopt_saved, resolve};
-
-/// The operation name a save reports.
-const SAVE_OPERATION: &str = "hsSave";
-
-/// The operation name an unsave reports.
-const UNSAVE_OPERATION: &str = "hsUnsave";
-
-/// The operation name a feedback change reports.
-const FEEDBACK_OPERATION: &str = "hsSetFeedback";
 
 /// The operation name a playlist lifetime change reports.
 const LIFETIME_OPERATION: &str = "hsSetPlaylistLifetime";
@@ -77,28 +74,41 @@ const NONE: &str = "none";
 ///
 /// # Returns
 ///
-/// An empty successful envelope, or a failed envelope.
+/// A successful envelope carrying `bulkResult`, or a failed envelope.
 ///
 /// # Errors
 ///
-/// Answers Subsonic error 70 when the request does not carry `hearthsound=1` and
-/// when a value is not an id of a kind the library holds or names no stored
-/// entity, error 10 when it names no entity, and a generic error when a catalog
-/// id cannot be materialized or a write fails.
+/// Answers Subsonic error 70 when the request does not carry `hearthsound=1`
+/// and error 10 when it names no id. Each id is applied in its own transaction,
+/// so an id that fails does not undo the others and is reported in
+/// `bulkResult.failed` with its reason instead of failing the request.
 pub async fn hs_save(call: Call) -> Encoded {
     if !call.vendor_enabled() {
         return call.encode(Response::failed(SubsonicError::not_found()));
     }
-    let entities = match named(&call).await {
-        Ok(entities) => entities,
+    let named = match resolved(&call).await {
+        Ok(named) => named,
         Err(error) => return call.encode(Response::failed(error)),
     };
     let user = call.principal().user_id.uuid();
-    if let Err(error) = call.state().activity().save(user, &entities).await {
-        return call.encode(Response::failed(browse::failure(SAVE_OPERATION, &error)));
+    let activity = call.state().activity();
+    let mut applied = Vec::new();
+    let mut failed = Vec::new();
+    let mut adopted = Vec::new();
+    for entry in named {
+        match entry.entity {
+            Ok((kind, entity)) => match activity.save(user, &[(kind, entity)]).await {
+                Ok(()) => {
+                    applied.push(entry.raw);
+                    adopted.push((kind, entity));
+                }
+                Err(error) => failed.push((entry.raw, error.to_string())),
+            },
+            Err(reason) => failed.push((entry.raw, reason)),
+        }
     }
-    adopt_saved(&call, user, &entities).await;
-    call.encode(Response::ok())
+    adopt_saved(&call, user, &adopted).await;
+    call.encode(bulk_result(applied, failed))
 }
 
 /// Answers `hsUnsave`: removes the named entities from the personal library.
@@ -115,24 +125,33 @@ pub async fn hs_save(call: Call) -> Encoded {
 ///
 /// # Returns
 ///
-/// An empty successful envelope, or a failed envelope.
+/// A successful envelope carrying `bulkResult`, or a failed envelope.
 ///
 /// # Errors
 ///
-/// Answers the errors [`hs_save`] documents.
+/// Answers the errors [`hs_save`] documents, with the same per-id answer.
 pub async fn hs_unsave(call: Call) -> Encoded {
     if !call.vendor_enabled() {
         return call.encode(Response::failed(SubsonicError::not_found()));
     }
-    let entities = match named(&call).await {
-        Ok(entities) => entities,
+    let named = match resolved(&call).await {
+        Ok(named) => named,
         Err(error) => return call.encode(Response::failed(error)),
     };
     let user = call.principal().user_id.uuid();
-    if let Err(error) = call.state().activity().unsave(user, &entities).await {
-        return call.encode(Response::failed(browse::failure(UNSAVE_OPERATION, &error)));
+    let activity = call.state().activity();
+    let mut applied = Vec::new();
+    let mut failed = Vec::new();
+    for entry in named {
+        match entry.entity {
+            Ok((kind, entity)) => match activity.unsave(user, &[(kind, entity)]).await {
+                Ok(()) => applied.push(entry.raw),
+                Err(error) => failed.push((entry.raw, error.to_string())),
+            },
+            Err(reason) => failed.push((entry.raw, reason)),
+        }
     }
-    call.encode(Response::ok())
+    call.encode(bulk_result(applied, failed))
 }
 
 /// Answers `hsSetFeedback`: records or removes the account's opinion of the
@@ -140,9 +159,8 @@ pub async fn hs_unsave(call: Call) -> Encoded {
 ///
 /// The same `value` is applied to every id the request names, in request order:
 /// `like` is the `star` operation and adopts what it saves, `dislike` replaces a
-/// like and pins nothing, and `none` removes whichever the account held. A
-/// failure on one id leaves the changes the earlier ids made, which is the same
-/// rule `hsAcquire` follows.
+/// like and pins nothing, and `none` removes whichever the account held. Each id
+/// is one transaction, so an id that fails leaves the others as they are.
 ///
 /// # Parameters
 ///
@@ -152,21 +170,20 @@ pub async fn hs_unsave(call: Call) -> Encoded {
 ///
 /// # Returns
 ///
-/// An empty successful envelope, or a failed envelope.
+/// A successful envelope carrying `bulkResult`, or a failed envelope.
 ///
 /// # Errors
 ///
-/// Answers Subsonic error 70 when the request does not carry `hearthsound=1` and
-/// when a value is not an id of a kind that carries feedback or names no stored
-/// entity, error 10 when it names no entity or no `value`, error 0 when `value`
-/// is none of the three, and a generic error when a catalog id cannot be
-/// materialized or a write fails.
+/// Answers Subsonic error 70 when the request does not carry `hearthsound=1`,
+/// error 10 when the request names no id or no `value`, and error 0 when `value`
+/// is none of the three. A failing id is reported in `bulkResult.failed`
+/// instead.
 pub async fn hs_set_feedback(call: Call) -> Encoded {
     if !call.vendor_enabled() {
         return call.encode(Response::failed(SubsonicError::not_found()));
     }
-    let entities = match named(&call).await {
-        Ok(entities) => entities,
+    let named = match resolved(&call).await {
+        Ok(named) => named,
         Err(error) => return call.encode(Response::failed(error)),
     };
     let Some(value) = parameter(&call, "value") else {
@@ -185,18 +202,25 @@ pub async fn hs_set_feedback(call: Call) -> Encoded {
     };
     let user = call.principal().user_id.uuid();
     let activity = call.state().activity();
-    for (kind, entity) in &entities {
-        if let Err(error) = activity.set_feedback(user, *kind, *entity, feedback).await {
-            return call.encode(Response::failed(browse::failure(
-                FEEDBACK_OPERATION,
-                &error,
-            )));
+    let mut applied = Vec::new();
+    let mut failed = Vec::new();
+    let mut adopted = Vec::new();
+    for entry in named {
+        match entry.entity {
+            Ok((kind, entity)) => match activity.set_feedback(user, kind, entity, feedback).await {
+                Ok(()) => {
+                    applied.push(entry.raw);
+                    adopted.push((kind, entity));
+                }
+                Err(error) => failed.push((entry.raw, error.to_string())),
+            },
+            Err(reason) => failed.push((entry.raw, reason)),
         }
     }
     if feedback == Feedback::Like {
-        adopt_saved(&call, user, &entities).await;
+        adopt_saved(&call, user, &adopted).await;
     }
-    call.encode(Response::ok())
+    call.encode(bulk_result(applied, failed))
 }
 
 /// Answers `hsGetLibraryCounts`: how many items each library list holds.
@@ -418,36 +442,77 @@ fn playlist_failure(error: &hearthsound_activity::ActivityError) -> SubsonicErro
     }
 }
 
-/// Reads the entities a request names, materializing catalog ids.
+/// One id a bulk request named, with how it resolved.
+struct BulkId {
+    /// The value as the client wrote it, which is what the answer names.
+    raw: String,
+    /// The entity it names, or the reason it could not be resolved.
+    entity: Result<(EntityKind, Uuid), String>,
+}
+
+/// Resolves every id a bulk request names, one by one.
+///
+/// A value that does not resolve is not a request error here: a bulk write
+/// applies what it can and says what it could not, so the reason travels in the
+/// answer. A request that names no id is still malformed.
 ///
 /// # Parameters
 ///
-/// - `call`: the authenticated call, whose `id` parameter is read.
+/// - `call`: the authenticated call.
 ///
 /// # Returns
 ///
-/// One entry per value, in request order, as the kind and the stored id.
+/// One entry per id, in request order.
 ///
 /// # Errors
 ///
-/// Answers Subsonic error 10 when the request names no entity, error 70 when a
-/// value is not an id of a kind the library holds or names no stored entity, and
-/// a generic error carrying the catalog's message when a catalog id cannot be
-/// materialized.
-async fn named(call: &Call) -> Result<Vec<(EntityKind, Uuid)>, SubsonicError> {
-    let mut entities = Vec::new();
+/// Answers Subsonic error 10 when the request names no id.
+async fn resolved(call: &Call) -> Result<Vec<BulkId>, SubsonicError> {
+    let mut named = Vec::new();
     for value in call.params().get_all("id") {
         if value.is_empty() {
             continue;
         }
         // The id itself decides the kind, so a request may name tracks, albums
         // and artists in one call.
-        entities.push(resolve(call, "id", value, None).await?);
+        let entity = match resolve(call, "id", value, None).await {
+            Ok(pair) => Ok(pair),
+            Err(error) if error.code() == codes::NOT_FOUND => Err("not found".to_owned()),
+            Err(_) => Err("the catalog could not store this id".to_owned()),
+        };
+        named.push(BulkId {
+            raw: value.to_owned(),
+            entity,
+        });
     }
-    if entities.is_empty() {
+    if named.is_empty() {
         return Err(SubsonicError::missing_parameter("id"));
     }
-    Ok(entities)
+    Ok(named)
+}
+
+/// Builds the answer of a bulk write.
+///
+/// # Parameters
+///
+/// - `applied`: the ids that were applied, in request order.
+/// - `failed`: the ids that were not, each with its reason.
+///
+/// # Returns
+///
+/// A successful envelope whose `bulkResult` names both lists. A client that does
+/// not read the member sees the same successful answer it always did.
+fn bulk_result(applied: Vec<String>, failed: Vec<(String, String)>) -> Response {
+    let failed: Vec<Object> = failed
+        .into_iter()
+        .map(|(id, reason)| Object::new().set("id", id).set("reason", reason))
+        .collect();
+    Response::ok().member(
+        "bulkResult",
+        Object::new()
+            .set("applied", Array::new(applied))
+            .set("failed", Array::new(failed)),
+    )
 }
 
 /// Returns the value of a required parameter.
