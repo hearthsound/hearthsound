@@ -9,13 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A generated playlist the listener made permanent keeps its lifetime across the daily sync: the sync rewrites its contents, never its expiry, so the expiry sweep no longer deletes a playlist the listener kept.
+- A scrobble a service rejects permanently - an unknown listen, a rejected token or configuration, or a plugin that failed internally - is parked at once instead of being retried for a week; the account's provider link shows it. An unavailable service or a rate limit is still retried on the backoff schedule. One unreadable queued row no longer blocks the rows behind it, and a service that refuses a whole batch has it re-submitted row by row, so only the rows it rejects are parked.
+- Queuing a like, dislike or clear for the linked services runs off the request path, and each service's limits are reused for ten minutes, so a slow plugin no longer delays a like.
+- One reported play suppresses one scrobble: a second submission of the same track is recorded, so a repeat or a second client is not swallowed.
+- Playing a track again after the current listen already counted - repeat-one included - is a new play instead of part of the first session; a restart before the threshold continues the same session.
+- The open playback session of every client is stored, so a server restart mid-track keeps the listen: a session still inside its track continues, and one whose client went quiet records the play it earned at startup.
+- A generated playlist whose track suggestions the catalog cannot resolve, or cannot store, is left as it was instead of being rewritten short: a transient provider failure no longer deletes its tracks.
+
 - Catalog artist results carry the provider's album count and a `coverArt` id for the artist picture; a library album and an online album are kept apart when their release years differ by more than one; editing a provider instance drops its cached answers; an empty chart is remembered for an hour.
 - Pairing a stored album costs one title search, and the metadata and artwork layers are asked in parallel under one deadline.
 - Browse pages answer from the library and the cached catalog data only; a `catalog.enrich` job fetches the missing extras, publishes `catalog.enriched` to the listener whose page asked, and the open page refreshes without a reload.
 - Search results promote their artists and album references into the cache, so opening a result costs no catalog call.
+- `playlist.changed` is delivered to the playlist's owner and to administrators only, instead of every connected account.
 
 ### Added
 
+- Liking, unliking, saving and unsaving publish `library.changed` to the account whose library changed (and to administrators), carrying the entity's client id and whether it was added or removed. A repeated like or a dislike of something that was never liked publishes nothing.
 - An acquisition that cannot be attempted waits for a source instead of failing:
   when the acquisition layer serves no instance, or the instance it chose does
   not answer, the job returns to `queued` with `parkReason` `no-source` or
