@@ -97,9 +97,7 @@ impl CatalogService {
         request: &ArtistInfoRequest,
         deadline: tokio::time::Instant,
     ) -> Option<ArtistInfo> {
-        let Some(provider) = instance.metadata() else {
-            return None;
-        };
+        let provider = instance.metadata()?;
         if let Some(cached) = self.cached_artist_info_of(instance.id(), key).await {
             return cached;
         }

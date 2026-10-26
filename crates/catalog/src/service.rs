@@ -605,7 +605,7 @@ impl CatalogService {
             return Ok(None);
         }
         let key = (wanted_artist.clone(), wanted_title.clone());
-        let year = year.map(|year| i64::from(year));
+        let year = year.map(i64::from);
         if let Some(known) = self.inner.album_resolutions.get(&key).await {
             // The remembered answer is re-checked against the year: the same
             // artist and title at a release two years away is a different album,

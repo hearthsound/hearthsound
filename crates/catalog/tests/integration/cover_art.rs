@@ -652,3 +652,71 @@ async fn artist_info_is_answered_by_the_metadata_layer() {
         .unwrap();
     assert!(unknown.is_none(), "an unknown artist is not an error");
 }
+
+/// Serves one image after a delay, so a slow instance can be modelled.
+///
+/// # Parameters
+///
+/// - `server`: the server to mount the endpoint on.
+/// - `name`: the image's path.
+/// - `delay`: how long the endpoint waits before answering.
+async fn serve_slow_image(server: &MockServer, name: &str, delay: std::time::Duration) {
+    Mock::given(method("GET"))
+        .and(path(name.to_owned()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "image/png")
+                .set_body_bytes(IMAGE)
+                .set_delay(delay),
+        )
+        .mount(server)
+        .await;
+}
+
+/// Reads an artist's portraits from two instances that both answer.
+#[tokio::test]
+async fn the_earlier_artwork_instance_wins_a_portrait() {
+    let fast = MockServer::start().await;
+    serve_image(&fast, "/portrait.png", 200).await;
+    let slow = MockServer::start().await;
+    serve_slow_image(
+        &slow,
+        "/portrait.png",
+        std::time::Duration::from_millis(500),
+    )
+    .await;
+
+    let env = Env::new().await;
+    for (slug, url) in [("first", fast.uri()), ("second", slow.uri())] {
+        env.instance(
+            slug,
+            ARTWORK_FIXTURE,
+            ARTWORK_FIXTURE_ID,
+            json!({
+                "imageUrl": url,
+                "albums": [],
+                "artists": [{
+                    "title": "Hello Artist",
+                    "images": [{ "path": "/portrait.png", "width": 500 }],
+                }],
+            }),
+        )
+        .await;
+    }
+    env.assign(Layer::Artwork, &["first", "second"]).await;
+    let artist = env.stored_artist("Hello Artist").await;
+
+    let started = std::time::Instant::now();
+    let portraits = env
+        .service()
+        .artist_portraits(&ClientId::Entity(artist))
+        .await
+        .unwrap();
+
+    assert_eq!(portraits.len(), 1, "the earlier instance answers");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(400),
+        "the answer does not wait for the slower instance: {:?}",
+        started.elapsed()
+    );
+}

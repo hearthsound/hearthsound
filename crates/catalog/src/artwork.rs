@@ -176,49 +176,81 @@ impl CatalogService {
         }
         let timeout = artwork_timeout(&self.settings_snapshot())?;
         let key = RequestKey::artwork(subject.kind, &subject);
+        let deadline = tokio::time::Instant::now() + timeout;
 
-        for instance in instances {
-            let Some(provider) = instance.artwork() else {
-                continue;
-            };
-            let images = match self.cached_images(instance.id(), &key).await {
-                Some(images) => images,
-                None => {
-                    let asked =
-                        tokio::time::timeout(timeout, provider.find_artwork(&subject)).await;
-                    match asked {
-                        Ok(Ok(images)) => {
-                            let ttl = if images.is_empty() {
-                                EMPTY_ARTWORK_TTL
-                            } else {
-                                ARTWORK_TTL
-                            };
-                            self.store_images(instance.id(), &key, &images, ttl).await;
-                            images
-                        }
-                        Ok(Err(error)) => {
-                            tracing::debug!(
-                                instance = instance.slug().as_str(),
-                                %error,
-                                "an artwork instance could not answer an artist portrait request"
-                            );
-                            continue;
-                        }
-                        Err(_) => {
-                            tracing::warn!(
-                                instance = instance.slug().as_str(),
-                                "an artwork instance did not answer an artist portrait request in time"
-                            );
-                            continue;
-                        }
-                    }
-                }
-            };
+        // Every instance is asked at once and the first answer in the
+        // administrator's order wins, so a portrait costs one instance's deadline
+        // rather than the sum of them.
+        let answers =
+            futures_util::future::join_all(instances.iter().map(|instance| {
+                self.layer_images(instance, &subject, &key, deadline, "a portrait")
+            }))
+            .await;
+        for images in answers.into_iter().flatten() {
             if !images.is_empty() {
                 return Ok(images);
             }
         }
         Ok(Vec::new())
+    }
+
+    /// Returns the images one artwork instance described, or `None` when it did
+    /// not answer before the deadline.
+    ///
+    /// A cached answer is returned without asking the instance, and an answer that
+    /// was fetched is stored under the lifetime its emptiness deserves.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance`: the instance to ask.
+    /// - `subject`: the subject the picture is for.
+    /// - `key`: the subject's cache key.
+    /// - `deadline`: the instant the whole fan-out stops waiting.
+    /// - `operation`: what was asked for, for the log lines.
+    ///
+    /// # Returns
+    ///
+    /// The images, or `None` when the instance failed or was too slow.
+    async fn layer_images(
+        &self,
+        instance: &RegistryInstance,
+        subject: &ArtworkSubject,
+        key: &RequestKey,
+        deadline: tokio::time::Instant,
+        operation: &'static str,
+    ) -> Option<Vec<Image>> {
+        let provider = instance.artwork()?;
+        if let Some(images) = self.cached_images(instance.id(), key).await {
+            return Some(images);
+        }
+        match tokio::time::timeout_at(deadline, provider.find_artwork(subject)).await {
+            Ok(Ok(images)) => {
+                let ttl = if images.is_empty() {
+                    EMPTY_ARTWORK_TTL
+                } else {
+                    ARTWORK_TTL
+                };
+                self.store_images(instance.id(), key, &images, ttl).await;
+                Some(images)
+            }
+            Ok(Err(error)) => {
+                tracing::debug!(
+                    instance = instance.slug().as_str(),
+                    %error,
+                    operation,
+                    "an artwork instance could not answer"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::warn!(
+                    instance = instance.slug().as_str(),
+                    operation,
+                    "an artwork instance did not answer in time"
+                );
+                None
+            }
+        }
     }
 
     /// Reads the portrait renditions the artwork layer already described.
@@ -306,53 +338,32 @@ impl CatalogService {
         }
         let subject = self.subject(&request.id).await?;
         let timeout = artwork_timeout(&self.settings_snapshot())?;
+        let key = RequestKey::artwork(subject.kind, &subject);
+        let deadline = tokio::time::Instant::now() + timeout;
         let mut transient = None;
 
-        for instance in instances {
-            let Some(provider) = instance.artwork() else {
+        // The lookup is a provider call per instance, so every instance is asked
+        // at once; the bytes are fetched from the first instance in the
+        // administrator's order that described an image, which keeps the transfer
+        // on one instance.
+        let answers = futures_util::future::join_all(
+            instances
+                .iter()
+                .map(|instance| self.layer_images(instance, &subject, &key, deadline, "a cover")),
+        )
+        .await;
+        for (instance, answer) in instances.iter().zip(answers) {
+            let Some(images) = answer else {
+                // The failure was logged where it happened; a retry may get past
+                // an unavailable instance, a missing image may not.
+                transient = Some(instance.slug().as_str().to_owned());
                 continue;
-            };
-            let key = RequestKey::artwork(subject.kind, &subject);
-            let images = match self.cached_images(instance.id(), &key).await {
-                Some(images) => images,
-                None => {
-                    let asked =
-                        tokio::time::timeout(timeout, provider.find_artwork(&subject)).await;
-                    match asked {
-                        Ok(Ok(images)) => {
-                            let ttl = if images.is_empty() {
-                                EMPTY_ARTWORK_TTL
-                            } else {
-                                ARTWORK_TTL
-                            };
-                            self.store_images(instance.id(), &key, &images, ttl).await;
-                            images
-                        }
-                        Ok(Err(error)) => {
-                            tracing::debug!(
-                                instance = instance.slug().as_str(),
-                                %error,
-                                "an artwork instance could not answer"
-                            );
-                            transient = Some(instance.slug().as_str().to_owned());
-                            continue;
-                        }
-                        Err(_) => {
-                            tracing::warn!(
-                                instance = instance.slug().as_str(),
-                                "an artwork instance did not answer in time"
-                            );
-                            transient = Some(instance.slug().as_str().to_owned());
-                            continue;
-                        }
-                    }
-                }
             };
             let Some(image) = pick_image(&images, request.size) else {
                 continue;
             };
             match self
-                .fetch_layer_image(&instance, subject.kind, &subject, image)
+                .fetch_layer_image(instance, subject.kind, &subject, image)
                 .await
             {
                 Ok(cover) => return Ok(LayerCover::Found(cover)),
