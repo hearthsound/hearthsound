@@ -360,6 +360,18 @@ pub(crate) async fn refresh_pins(
 ) -> Result<(), ActivityError> {
     match kind {
         EntityKind::Track => {
+            // A track that has no row cannot be liked or saved: the pin would
+            // refer to nothing, and `user_feedback` has no foreign key to catch
+            // it.
+            let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM tracks WHERE id = ?")
+                .bind(entity_id.as_bytes().as_slice())
+                .fetch_optional(&mut *conn)
+                .await?;
+            if exists.is_none() {
+                return Err(ActivityError::UnknownTrack {
+                    id: EntityId::from_uuid(IdPrefix::Track, entity_id).to_string(),
+                });
+            }
             refresh_user_library_pin(conn, EntityId::from_uuid(IdPrefix::Track, entity_id)).await?;
         }
         EntityKind::Album => {
@@ -400,7 +412,8 @@ pub(crate) async fn refresh_pins(
 ///
 /// Returns [`ActivityError::Database`] when the likes cannot be read and
 /// [`ActivityError::Library`] when the pin or the availability cannot be
-/// written.
+/// written. A track with no row is reported as [`ActivityError::UnknownTrack`]
+/// by the caller that changes its pins, rather than as an unpinned track.
 pub async fn refresh_user_library_pin(
     conn: &mut SqliteConnection,
     track_id: EntityId,

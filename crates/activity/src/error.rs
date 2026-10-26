@@ -82,4 +82,15 @@ pub enum ActivityError {
     /// A stored list of client ids is not valid JSON.
     #[error("stored list is not valid JSON: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// A track was named that has no row.
+    ///
+    /// A like or a save of a track the library does not hold would write a
+    /// personal row that refers to nothing, so it is refused instead of stored:
+    /// the track does not exist, which is what the caller is told.
+    #[error("track `{id}` does not exist")]
+    UnknownTrack {
+        /// The track's client id.
+        id: String,
+    },
 }

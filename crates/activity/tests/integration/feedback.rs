@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hearthsound_activity::{ActivityService, Feedback};
+use hearthsound_activity::{ActivityError, ActivityService, Feedback};
 use hearthsound_core::events::{Audience, EventBus, LibraryChange, ServerEvent};
 use hearthsound_core::{EntityId, EntityKind, IdPrefix};
 use hearthsound_db::Database;
@@ -478,4 +478,52 @@ async fn a_save_and_an_unsave_publish_library_changes() {
         library_change(&mut received, user).2,
         LibraryChange::Removed
     );
+}
+
+/// A like, a save or a feedback change of a track with no row is an error, and
+/// leaves no personal row that refers to nothing.
+#[tokio::test]
+async fn liking_an_unknown_track_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let activity = ActivityService::new(&database);
+    let user = insert_user(&database).await;
+    let missing = Uuid::now_v7();
+
+    let refused = activity
+        .star(user, &[(EntityKind::Track, missing)])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, ActivityError::UnknownTrack { .. }),
+        "{refused:?}"
+    );
+    let refused = activity
+        .save(user, &[(EntityKind::Track, missing)])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, ActivityError::UnknownTrack { .. }),
+        "{refused:?}"
+    );
+    let refused = activity
+        .set_feedback(user, EntityKind::Track, missing, Feedback::Like)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused, ActivityError::UnknownTrack { .. }),
+        "{refused:?}"
+    );
+
+    // The transaction rolled back, so no feedback and no membership was stored.
+    let likes: i64 = sqlx::query_scalar("SELECT count(*) FROM user_feedback")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(likes, 0);
+    let saved: i64 = sqlx::query_scalar("SELECT count(*) FROM user_library")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(saved, 0);
 }
