@@ -140,6 +140,80 @@ pub(crate) fn artist_index(
         .collect()
 }
 
+/// Builds the `artists` member of `getArtists` in the order the artists came
+/// in.
+///
+/// The default listing is the alphabetical index, which files and sorts its
+/// artists by the article-stripped sort name at projection time. A listing in
+/// another order - by when an artist was stored, or by how often the caller
+/// played it - has no alphabetical meaning, so this keeps the order the query
+/// returned and starts a new `index` group where the letter an artist is filed
+/// under changes. A client that flattens the index therefore reads the order
+/// the request asked for.
+///
+/// # Parameters
+///
+/// - `summaries`: the artists in the requested order, each with its album
+///   count.
+/// - `annotations`: the user's annotations for those artists, keyed by id.
+///
+/// # Returns
+///
+/// The `ArtistsID3` member, with `ignoredArticles` first and the index second.
+pub(crate) fn artists_id3_ordered(
+    summaries: &[ArtistSummary],
+    annotations: &HashMap<Uuid, Annotation>,
+) -> Object {
+    Object::new().set("ignoredArticles", IGNORED_ARTICLES).set(
+        "index",
+        Array::new(artist_index_in_order(summaries, annotations)),
+    )
+}
+
+/// Builds the index groups of an artist listing in the given order.
+///
+/// # Parameters
+///
+/// - `summaries`: the artists in the order to keep.
+/// - `annotations`: the user's annotations for them, keyed by id.
+///
+/// # Returns
+///
+/// One `index` member per run of artists filed under the same letter, in the
+/// order they came in.
+fn artist_index_in_order(
+    summaries: &[ArtistSummary],
+    annotations: &HashMap<Uuid, Annotation>,
+) -> Vec<Object> {
+    let mut groups: Vec<(String, Vec<Object>)> = Vec::new();
+    for summary in summaries {
+        let name = index_name(stripped_sort_name(&summary.artist.sort_name));
+        let artist = artist_id3(
+            &summary.artist,
+            summary.album_count,
+            annotations
+                .get(&summary.artist.id.uuid())
+                .unwrap_or(&Annotation::default()),
+        );
+        if let Some((group, artists)) = groups.last_mut()
+            && *group == name
+        {
+            artists.push(artist);
+            continue;
+        }
+        groups.push((name, vec![artist]));
+    }
+
+    groups
+        .into_iter()
+        .map(|(name, artists)| {
+            Object::new()
+                .set("name", name)
+                .set("artist", Array::new(artists))
+        })
+        .collect()
+}
+
 /// Builds the `indexes` member of `getIndexes`.
 ///
 /// # Parameters

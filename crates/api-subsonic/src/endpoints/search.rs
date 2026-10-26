@@ -33,7 +33,7 @@ use hearthsound_core::EntityKind;
 use hearthsound_core::providers::CatalogQuery;
 use hearthsound_db::Database;
 use hearthsound_library::Artist;
-use hearthsound_library::query::{AlbumSort, Scope, TrackView};
+use hearthsound_library::query::{AlbumSort, ArtistSort, Scope, TrackSort, TrackView};
 use uuid::Uuid;
 
 use crate::auth::Call;
@@ -43,7 +43,7 @@ use crate::state::SubsonicState;
 use crate::value::{Array, Object};
 use crate::{browse, projection, scope};
 
-use super::browse::number;
+use super::browse::{number, song_genre, track_sort};
 
 /// The number of results `search3` returns per kind without a count parameter.
 const DEFAULT_COUNT: i64 = 20;
@@ -143,6 +143,14 @@ impl Matches {
 }
 
 /// Answers `search3`: the artists, albums, and songs matching a query.
+///
+/// An empty `query` lists the scope instead of searching it, and that listing
+/// is the one a client with a sort menu shows: a request carrying
+/// `hearthsound=1` may pass `sort` (`title`, the default, `added`, `played`,
+/// `artist`, `album` or `year`) and `genre` to order and narrow the songs it
+/// lists. A full-text query answers in relevance order, so neither parameter
+/// applies to it, and a request without `hearthsound=1` is answered exactly as
+/// a server without the vendor extension would answer it.
 ///
 /// # Parameters
 ///
@@ -436,6 +444,8 @@ async fn collect(call: &Call) -> Result<Collected, SubsonicError> {
         artists: window(call, "artistCount", "artistOffset")?,
         albums: window(call, "albumCount", "albumOffset")?,
         songs: window(call, "songCount", "songOffset")?,
+        sort: track_sort(call),
+        genre: song_genre(call),
     };
     let settings = call.state().settings_snapshot();
     let mut matches = scoped_matches(call.state().database(), &scopes, &query)
@@ -499,6 +509,8 @@ async fn scoped_matches(
         artists: query.artists.through_end(),
         albums: query.albums.through_end(),
         songs: query.songs.through_end(),
+        sort: query.sort,
+        genre: query.genre,
     };
     let mut merged = Matches::default();
     let mut artists = HashSet::new();
@@ -737,6 +749,12 @@ struct Search<'a> {
     albums: Window,
     /// The song window.
     songs: Window,
+    /// The order an empty-query song listing is read in. A full-text search
+    /// answers in relevance order, so the order applies to the listing only.
+    sort: TrackSort,
+    /// The genre an empty-query song listing is narrowed to, when the request
+    /// named one through the vendor extension.
+    genre: Option<&'a str>,
 }
 
 /// Collects the local matches of a search.
@@ -770,9 +788,14 @@ async fn local_matches(
     let (artist_window, album_window, song_window) = (&query.artists, &query.albums, &query.songs);
     let mut matches = Matches::default();
     if text.is_empty() {
-        let summaries =
-            browse::artists_page(database, scope, artist_window.count, artist_window.offset)
-                .await?;
+        let summaries = browse::artists_page(
+            database,
+            scope,
+            ArtistSort::Name,
+            artist_window.count,
+            artist_window.offset,
+        )
+        .await?;
         let albums = browse::albums(
             database,
             scope,
@@ -781,8 +804,15 @@ async fn local_matches(
             album_window.offset,
         )
         .await?;
-        let views =
-            browse::list_tracks(database, scope, song_window.count, song_window.offset).await?;
+        let views = browse::list_tracks(
+            database,
+            scope,
+            query.sort,
+            query.genre,
+            song_window.count,
+            song_window.offset,
+        )
+        .await?;
         matches.artists = summaries
             .into_iter()
             .map(|summary| LocalArtist {

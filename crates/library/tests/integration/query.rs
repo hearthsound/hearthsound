@@ -4,17 +4,19 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use hearthsound_core::{Availability, EntityId, EntityKind, StorageClass};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_library::query::{
-    self, AlbumSort, Scope, ServerBrowse, content_type_for, sanitize_match,
+    self, AlbumSort, ArtistSort, Scope, ServerBrowse, TrackSort, content_type_for, sanitize_match,
 };
 use hearthsound_library::{
     Album, AlbumInput, ArtistCredit, LibraryRepository, ManagedMediaFile, Origin, ScannedMediaFile,
     StorageRoots, TrackInput,
 };
+use uuid::Uuid;
 
 async fn migrated(dir: &Path) -> Database {
     let db = Database::open(&dir.join("hearthsound.db")).await.unwrap();
@@ -455,7 +457,9 @@ async fn the_personal_library_is_the_union_of_its_sources() {
         "the artist of a liked track is in the library"
     );
 
-    let artists = query::list_artists(&mut conn, scope, -1, 0).await.unwrap();
+    let artists = query::list_artists(&mut conn, scope, ArtistSort::Name, -1, 0)
+        .await
+        .unwrap();
     let names: Vec<&str> = artists.iter().map(|a| a.artist.name.as_str()).collect();
     assert!(names.contains(&"Owned Artist"));
     assert!(names.contains(&"Liked Artist"));
@@ -483,7 +487,7 @@ async fn the_personal_library_is_the_union_of_its_sources() {
         user_id: seeded.other,
     };
     assert!(
-        query::list_artists(&mut conn, stranger, -1, 0)
+        query::list_artists(&mut conn, stranger, ArtistSort::Name, -1, 0)
             .await
             .unwrap()
             .is_empty()
@@ -514,7 +518,9 @@ async fn track_listings_follow_the_scope_and_page() {
         user_id: seeded.user,
     };
 
-    let listed = query::list_tracks(&mut conn, scope, -1, 0).await.unwrap();
+    let listed = query::list_tracks(&mut conn, scope, TrackSort::Title, None, -1, 0)
+        .await
+        .unwrap();
     let titles: Vec<&str> = listed
         .iter()
         .map(|view| view.track.title.as_str())
@@ -530,15 +536,19 @@ async fn track_listings_follow_the_scope_and_page() {
     let mut sorted = titles.clone();
     sorted.sort();
     assert_eq!(titles, sorted);
-    let page_one = query::list_tracks(&mut conn, scope, 2, 0).await.unwrap();
-    let page_two = query::list_tracks(&mut conn, scope, 2, 2).await.unwrap();
+    let page_one = query::list_tracks(&mut conn, scope, TrackSort::Title, None, 2, 0)
+        .await
+        .unwrap();
+    let page_two = query::list_tracks(&mut conn, scope, TrackSort::Title, None, 2, 2)
+        .await
+        .unwrap();
     assert_eq!(page_one.len(), 2);
     assert!(page_two.iter().all(|view| !page_one.contains(view)));
 
     // The server scope adds the permanent library tracks and the evictable
     // cache one, and the disabled view offers nothing.
     let everything = Scope::Server(ServerBrowse::All);
-    let listed = query::list_tracks(&mut conn, everything, -1, 0)
+    let listed = query::list_tracks(&mut conn, everything, TrackSort::Title, None, -1, 0)
         .await
         .unwrap();
     let titles: Vec<&str> = listed
@@ -550,7 +560,7 @@ async fn track_listings_follow_the_scope_and_page() {
 
     let disabled = Scope::Server(ServerBrowse::Disabled);
     assert!(
-        query::list_tracks(&mut conn, disabled, -1, 0)
+        query::list_tracks(&mut conn, disabled, TrackSort::Title, None, -1, 0)
             .await
             .unwrap()
             .is_empty()
@@ -598,7 +608,7 @@ async fn the_server_scope_holds_every_stored_track() {
             .is_empty()
     );
     assert!(
-        query::list_artists(&mut conn, disabled, -1, 0)
+        query::list_artists(&mut conn, disabled, ArtistSort::Name, -1, 0)
             .await
             .unwrap()
             .is_empty()
@@ -629,7 +639,7 @@ async fn the_counts_match_the_listings_they_size() {
         },
         Scope::Server(ServerBrowse::All),
     ] {
-        let artists = query::list_artists(&mut conn, scope, -1, 0)
+        let artists = query::list_artists(&mut conn, scope, ArtistSort::Name, -1, 0)
             .await
             .unwrap()
             .len() as i64;
@@ -637,7 +647,7 @@ async fn the_counts_match_the_listings_they_size() {
             .await
             .unwrap()
             .len() as i64;
-        let tracks = query::list_tracks(&mut conn, scope, -1, 0)
+        let tracks = query::list_tracks(&mut conn, scope, TrackSort::Title, None, -1, 0)
             .await
             .unwrap()
             .len() as i64;
@@ -1482,4 +1492,494 @@ async fn starred_entities_and_the_last_modified_instant() {
         scanned + 1_000,
         "the folder's last scan is part of the instant"
     );
+}
+
+/// A library built for the order tests: three artists, three albums with
+/// distinct years, four tracks with distinct titles, creation instants, and
+/// plays, one of them carrying a genre.
+struct Ordered {
+    /// The migrated database.
+    db: Database,
+    /// The account whose library the tracks are in.
+    user: Uuid,
+    /// Another account, whose library is empty.
+    other: Uuid,
+}
+
+/// Records a play of a track at one instant.
+///
+/// # Parameters
+///
+/// - `db`: the database to write to.
+/// - `user`: the account that played the track.
+/// - `track`: the track played.
+/// - `at`: when the play started, in unix milliseconds.
+async fn play_at(db: &Database, user: Uuid, track: EntityId, at: i64) {
+    sqlx::query(
+        "INSERT INTO plays (id, user_id, track_id, started_at, listened_ms, audio_delivered) \
+         VALUES (?, ?, ?, ?, 1000, 1)",
+    )
+    .bind(Uuid::now_v7().as_bytes().as_slice())
+    .bind(user.as_bytes().as_slice())
+    .bind(track.uuid().as_bytes().as_slice())
+    .bind(at)
+    .execute(db.writer())
+    .await
+    .unwrap();
+}
+
+/// Moves a track's creation instant.
+///
+/// # Parameters
+///
+/// - `db`: the database to write to.
+/// - `track`: the track to stamp.
+/// - `at`: the instant, in unix milliseconds.
+async fn created_at_of_track(db: &Database, track: EntityId, at: i64) {
+    sqlx::query("UPDATE tracks SET created_at = ? WHERE id = ?")
+        .bind(at)
+        .bind(track.uuid().as_bytes().as_slice())
+        .execute(db.writer())
+        .await
+        .unwrap();
+}
+
+/// Moves an artist's creation instant.
+///
+/// # Parameters
+///
+/// - `db`: the database to write to.
+/// - `artist`: the artist to stamp.
+/// - `at`: the instant, in unix milliseconds.
+async fn created_at_of_artist(db: &Database, artist: EntityId, at: i64) {
+    sqlx::query("UPDATE artists SET created_at = ? WHERE id = ?")
+        .bind(at)
+        .bind(artist.uuid().as_bytes().as_slice())
+        .execute(db.writer())
+        .await
+        .unwrap();
+}
+
+/// Inserts a released album with one credited artist.
+///
+/// # Parameters
+///
+/// - `library`: the repository to write with.
+/// - `artist`: the credited artist's name.
+/// - `title`: the album title.
+/// - `year`: the release year.
+///
+/// # Returns
+///
+/// The album id and the artist id.
+async fn released_album(
+    library: &LibraryRepository,
+    artist: &str,
+    title: &str,
+    year: i64,
+) -> (EntityId, EntityId) {
+    let mut album = AlbumInput::new(title, Origin::Local);
+    album.year = Some(year);
+    let credits = [ArtistCredit::new(artist, "main")];
+    let album_id = library.upsert_album(&album, &credits).await.unwrap();
+    let artist_id = library.list_album_artists(album_id).await.unwrap()[0].id;
+    (album_id, artist_id)
+}
+
+/// Inserts a track with its own credit and genres.
+///
+/// # Parameters
+///
+/// - `library`: the repository to write with.
+/// - `album`: the album the track belongs to.
+/// - `artist`: the credited artist's name.
+/// - `title`: the track title.
+/// - `genres`: the genres the track carries.
+///
+/// # Returns
+///
+/// The track id.
+async fn credited_track(
+    library: &LibraryRepository,
+    album: EntityId,
+    artist: &str,
+    title: &str,
+    genres: &[&str],
+) -> EntityId {
+    let mut input = TrackInput::new(title, Origin::Local, Availability::Local);
+    input.album_id = Some(album);
+    input.display_artist = Some(artist.to_owned());
+    let genres: Vec<String> = genres.iter().map(|genre| (*genre).to_owned()).collect();
+    library
+        .insert_track(&input, &[ArtistCredit::new(artist, "main")], &genres)
+        .await
+        .unwrap()
+}
+
+/// Builds the library the order tests read.
+///
+/// The rows are chosen so every order has a different first row:
+///
+/// | Track | Artist | Album | Year | Created | Played |
+/// |---|---|---|---|---|---|
+/// | `Aardvark` | Zulu | `Alpha Album` | 2005 | 50 | 100 |
+/// | `Bravo` | Mike | `Middle Album` | 2010 | 200 | never |
+/// | `Charlie` | Alpha | `Zeta Album` | 1990 | 100 | 900 |
+/// | `Delta` | Zulu | `Alpha Album` | 2005 | 300 | 500 |
+///
+/// `Charlie` carries `rock` and `Bravo` carries `jazz`, so a genre filter keeps
+/// one of them.
+async fn ordered(dir: &Path) -> Ordered {
+    let db = migrated(dir).await;
+    let library = LibraryRepository::new(&db);
+    let user = insert_user(&db, "listener").await;
+    let other = insert_user(&db, "other").await;
+    let owned = dir.join("ordered");
+    std::fs::create_dir(&owned).unwrap();
+    let folder = library
+        .add_library_folder(&owned, Some(user))
+        .await
+        .unwrap();
+
+    let (alpha_album, zulu) = released_album(&library, "Zulu", "Alpha Album", 2005).await;
+    let (middle_album, mike) = released_album(&library, "Mike", "Middle Album", 2010).await;
+    let (zeta_album, alpha) = released_album(&library, "Alpha", "Zeta Album", 1990).await;
+
+    let aardvark = credited_track(&library, alpha_album, "Zulu", "Aardvark", &[]).await;
+    let bravo = credited_track(&library, middle_album, "Mike", "Bravo", &["jazz"]).await;
+    let charlie = credited_track(&library, zeta_album, "Alpha", "Charlie", &["rock"]).await;
+    let delta = credited_track(&library, alpha_album, "Zulu", "Delta", &[]).await;
+    for (track, name) in [
+        (aardvark, "aardvark.mp3"),
+        (bravo, "bravo.mp3"),
+        (charlie, "charlie.mp3"),
+        (delta, "delta.mp3"),
+    ] {
+        attach_folder(&library, track, folder.id, name).await;
+    }
+
+    created_at_of_track(&db, aardvark, 50).await;
+    created_at_of_track(&db, bravo, 200).await;
+    created_at_of_track(&db, charlie, 100).await;
+    created_at_of_track(&db, delta, 300).await;
+
+    created_at_of_artist(&db, alpha, 10).await;
+    created_at_of_artist(&db, zulu, 20).await;
+    created_at_of_artist(&db, mike, 30).await;
+
+    play_at(&db, user, charlie, 900).await;
+    play_at(&db, user, delta, 500).await;
+    play_at(&db, user, aardvark, 100).await;
+
+    Ordered { db, user, other }
+}
+
+/// Saving an album adds its songs to the account's Songs and its artist to its
+/// Artists, and liking one does the same; another account's library is
+/// untouched.
+#[tokio::test]
+async fn a_saved_or_liked_album_puts_its_songs_and_artist_in_the_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let seeded = seed(dir.path()).await;
+    let mut conn = seeded.db.readers().acquire().await.unwrap();
+    let scope = Scope::Personal {
+        user_id: seeded.user,
+    };
+    let stranger = Scope::Personal {
+        user_id: seeded.other,
+    };
+
+    let generic_track = seeded
+        .library
+        .get_track(seeded.generic_track)
+        .await
+        .unwrap()
+        .unwrap();
+    let generic_album = generic_track.album_id.unwrap();
+    let cache_track = seeded
+        .library
+        .get_track(seeded.cache_track)
+        .await
+        .unwrap()
+        .unwrap();
+    let cache_album = cache_track.album_id.unwrap();
+
+    let before = query::count_tracks(&mut conn, scope).await.unwrap();
+    let artists_before = query::count_artists(&mut conn, scope).await.unwrap();
+
+    // The album of a generic folder is in nobody's library and its song is in
+    // nobody's Songs, which is what the album's own listing already showed.
+    assert!(
+        query::album_in_scope(&mut conn, scope, generic_album)
+            .await
+            .unwrap()
+            .eq(&false),
+        "a generic album is in nobody's library before it is saved"
+    );
+    assert!(
+        query::track(&mut conn, scope, seeded.generic_track)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    save(&seeded.db, seeded.user, EntityKind::Album, generic_album).await;
+    like(&seeded.db, seeded.user, EntityKind::Album, cache_album).await;
+
+    // Both albums now hold the account's songs, so each song is in its Songs.
+    for track in [seeded.generic_track, seeded.cache_track] {
+        assert!(
+            query::track_in_scope(&mut conn, scope, track)
+                .await
+                .unwrap(),
+            "the song of a saved or liked album is in the library"
+        );
+    }
+    let listed: Vec<EntityId> = query::list_tracks(&mut conn, scope, TrackSort::Title, None, -1, 0)
+        .await
+        .unwrap()
+        .iter()
+        .map(|view| view.track.id)
+        .collect();
+    assert!(listed.contains(&seeded.generic_track));
+    assert!(listed.contains(&seeded.cache_track));
+    assert_eq!(
+        query::count_tracks(&mut conn, scope).await.unwrap(),
+        before + 2,
+        "the count follows the listing"
+    );
+    assert_eq!(
+        query::personal_track_ids(
+            &mut conn,
+            seeded.user,
+            &[seeded.generic_track, seeded.cache_track]
+        )
+        .await
+        .unwrap(),
+        HashSet::from([seeded.generic_track, seeded.cache_track])
+    );
+
+    // The artist of each album is in the account's Artists, with its album.
+    let names: Vec<String> = query::list_artists(&mut conn, scope, ArtistSort::Name, -1, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.artist.name)
+        .collect();
+    assert!(names.contains(&"Generic Artist".to_owned()));
+    assert!(names.contains(&"Cache Artist".to_owned()));
+    assert_eq!(
+        query::count_artists(&mut conn, scope).await.unwrap(),
+        artists_before + 2,
+        "the artist of a saved album is an artist of the library"
+    );
+    assert!(
+        query::artist_in_scope(&mut conn, scope, seeded.generic_artist)
+            .await
+            .unwrap(),
+        "the artist of a saved album is in the library"
+    );
+    let generic = query::artist_detail(&mut conn, scope, seeded.generic_artist)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(generic.albums.len(), 1);
+    assert_eq!(generic.albums[0].id, generic_album);
+
+    // A search finds them too, because it searches the same scope.
+    let found = query::search(&mut conn, scope, "generic", &[EntityKind::Track], 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(found.tracks.len(), 1);
+    assert_eq!(found.tracks[0].track.id, seeded.generic_track);
+
+    // Another account still holds nothing of it.
+    for track in [seeded.generic_track, seeded.cache_track] {
+        assert!(
+            !query::track_in_scope(&mut conn, stranger, track)
+                .await
+                .unwrap(),
+            "a save belongs to the account that made it"
+        );
+    }
+    assert!(
+        query::list_tracks(&mut conn, stranger, TrackSort::Title, None, -1, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !query::artist_in_scope(&mut conn, stranger, seeded.generic_artist)
+            .await
+            .unwrap()
+    );
+    assert_eq!(query::count_artists(&mut conn, stranger).await.unwrap(), 0);
+}
+
+/// Every song order lists the whole scope in its own first row, and the count
+/// of the scope does not depend on the order.
+#[tokio::test]
+async fn song_orders_start_with_the_row_their_order_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let ordered = ordered(dir.path()).await;
+    let mut conn = ordered.db.readers().acquire().await.unwrap();
+    let scope = Scope::Personal {
+        user_id: ordered.user,
+    };
+
+    let mut firsts = Vec::new();
+    for (sort, expected) in [
+        (TrackSort::Title, "Aardvark"),
+        (TrackSort::Added, "Delta"),
+        (TrackSort::Played { user: ordered.user }, "Charlie"),
+        (TrackSort::Artist, "Charlie"),
+        (TrackSort::Album, "Aardvark"),
+        (TrackSort::Year, "Bravo"),
+    ] {
+        let listed = query::list_tracks(&mut conn, scope, sort, None, -1, 0)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 4, "{sort:?} lists the whole scope");
+        assert_eq!(
+            listed[0].track.title, expected,
+            "{sort:?} starts at {expected}"
+        );
+        firsts.push(listed[0].track.title.clone());
+        assert_eq!(
+            query::count_tracks(&mut conn, scope).await.unwrap(),
+            4,
+            "{sort:?} does not change the count"
+        );
+    }
+    assert_eq!(
+        firsts,
+        [
+            "Aardvark", "Delta", "Charlie", "Charlie", "Aardvark", "Bravo"
+        ],
+        "the orders are not the same order"
+    );
+
+    // The album order keeps the tracks with an album before the album-less
+    // ones, and the year order lists the newest release first.
+    let by_album: Vec<String> = query::list_tracks(&mut conn, scope, TrackSort::Album, None, -1, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|view| view.track.title)
+        .collect();
+    assert_eq!(by_album, ["Aardvark", "Delta", "Bravo", "Charlie"]);
+    let by_year: Vec<String> = query::list_tracks(&mut conn, scope, TrackSort::Year, None, -1, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|view| view.track.title)
+        .collect();
+    assert_eq!(by_year, ["Bravo", "Aardvark", "Delta", "Charlie"]);
+
+    // The genre filter narrows the listing to the songs that carry it, and the
+    // order still applies.
+    let rock: Vec<String> =
+        query::list_tracks(&mut conn, scope, TrackSort::Title, Some("Rock"), -1, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|view| view.track.title)
+            .collect();
+    assert_eq!(rock, ["Charlie"], "the genre name folds to the stored form");
+    let jazz: Vec<String> =
+        query::list_tracks(&mut conn, scope, TrackSort::Title, Some("jazz"), -1, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|view| view.track.title)
+            .collect();
+    assert_eq!(jazz, ["Bravo"]);
+    assert!(
+        query::list_tracks(&mut conn, scope, TrackSort::Title, Some("polka"), -1, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Paging walks an order without repeats.
+    let page_one = query::list_tracks(&mut conn, scope, TrackSort::Year, None, 2, 0)
+        .await
+        .unwrap();
+    let page_two = query::list_tracks(&mut conn, scope, TrackSort::Year, None, 2, 2)
+        .await
+        .unwrap();
+    assert!(page_two.iter().all(|view| !page_one.contains(view)));
+
+    // Another account's library holds none of it, whatever the order.
+    let stranger = Scope::Personal {
+        user_id: ordered.other,
+    };
+    assert!(
+        query::list_tracks(&mut conn, stranger, TrackSort::Year, None, -1, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Every artist order lists the whole scope in its own first row.
+#[tokio::test]
+async fn artist_orders_start_with_the_artist_their_order_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let ordered = ordered(dir.path()).await;
+    let mut conn = ordered.db.readers().acquire().await.unwrap();
+    let scope = Scope::Personal {
+        user_id: ordered.user,
+    };
+
+    let mut firsts = Vec::new();
+    for (sort, expected) in [
+        (ArtistSort::Name, "Alpha"),
+        (ArtistSort::Added, "Mike"),
+        (ArtistSort::Played { user: ordered.user }, "Zulu"),
+    ] {
+        let listed = query::list_artists(&mut conn, scope, sort, -1, 0)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 3, "{sort:?} lists the whole scope");
+        assert_eq!(
+            listed[0].artist.name, expected,
+            "{sort:?} starts at {expected}"
+        );
+        firsts.push(listed[0].artist.name.clone());
+        assert_eq!(
+            query::count_artists(&mut conn, scope).await.unwrap(),
+            3,
+            "{sort:?} does not change the count"
+        );
+    }
+    assert_eq!(firsts, ["Alpha", "Mike", "Zulu"]);
+
+    let by_name: Vec<String> = query::list_artists(&mut conn, scope, ArtistSort::Name, -1, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.artist.name)
+        .collect();
+    assert_eq!(by_name, ["Alpha", "Mike", "Zulu"]);
+    let by_added: Vec<String> = query::list_artists(&mut conn, scope, ArtistSort::Added, -1, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.artist.name)
+        .collect();
+    assert_eq!(by_added, ["Mike", "Zulu", "Alpha"]);
+    let by_played: Vec<String> = query::list_artists(
+        &mut conn,
+        scope,
+        ArtistSort::Played { user: ordered.user },
+        -1,
+        0,
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|summary| summary.artist.name)
+    .collect();
+    assert_eq!(by_played, ["Zulu", "Alpha", "Mike"]);
 }

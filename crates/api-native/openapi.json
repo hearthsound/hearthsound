@@ -2574,7 +2574,7 @@
           "library"
         ],
         "summary": "Queues a whole collection for the caller's player.",
-        "description": "One request answers every track of the collection, in the collection's own\norder: the library's sort order for `songs`, the like order for `liked`, the\nupload order for `uploads`, the playlist's own order, and the artist's play\ncount order. Nothing is paged and nothing is truncated.\n\n# Parameters\n\n- `authed`: the caller, whose library the collection is read from.\n- `state`: the shared services.\n- `query`: the source and, optionally, the track to start at.\n\n# Returns\n\nThe collection's items, the position of `from` in them (`0` when absent),\nand the source.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `unknown-source` (400) for a\nsource this server does not offer, `not-found` (404) when the playlist or\nartist is unknown or outside the caller's library, `not-in-source`\n(404) when `from` is not one of the collection's tracks, and `internal` when\nthe read fails.",
+        "description": "One request answers every track of the collection, in the collection's own\norder: the requested order for `songs` (by title when the request names\nnone), the like order for `liked`, the upload order for `uploads`, the\nplaylist's own order, and the artist's play count order. Nothing is paged\nand nothing is truncated.\n\n# Parameters\n\n- `authed`: the caller, whose library the collection is read from.\n- `state`: the shared services.\n- `query`: the source, the track to start at, and the order a `songs`\n  source is read in.\n\n# Returns\n\nThe collection's items, the position of `from` in them (`0` when absent),\nand the source.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `unknown-source` (400) for a\nsource this server does not offer, `not-found` (404) when the playlist or\nartist is unknown or outside the caller's library, `not-in-source`\n(404) when `from` is not one of the collection's tracks, and `internal` when\nthe read fails.",
         "operationId": "collection_queue",
         "parameters": [
           {
@@ -2590,6 +2590,15 @@
             "name": "from",
             "in": "query",
             "description": "The track id the player starts at; absent starts at the first item",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "The order a `songs` queue is read in: `title`, `added`, `played`, `artist`, `album` or `year`",
             "required": false,
             "schema": {
               "type": "string"

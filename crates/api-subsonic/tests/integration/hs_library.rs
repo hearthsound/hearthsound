@@ -992,7 +992,23 @@ async fn a_bulk_save_and_unsave_answer_the_same_shape() {
         "{}",
         unsaved.body
     );
+    // The album is still saved and its tracks follow it into the library, so
+    // the track is only out of the library once the album is unsaved too.
+    assert!(
+        in_personal_library(&fixture, EntityKind::Track, tracks[0]).await,
+        "a saved album keeps its member tracks in the library"
+    );
+    let album_unsaved = get(
+        &app,
+        &format!(
+            "/rest/hsUnsave?apiKey={}&hearthsound=1&f=json&id={album}",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&album_unsaved);
     assert!(!in_personal_library(&fixture, EntityKind::Track, tracks[0]).await);
+    assert!(!in_personal_library(&fixture, EntityKind::Album, album).await);
 }
 
 /// A bulk write that names no id is still a malformed request.

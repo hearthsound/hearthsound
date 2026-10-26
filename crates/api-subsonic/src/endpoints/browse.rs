@@ -12,7 +12,7 @@ use futures_util::stream::{self, StreamExt, TryStreamExt};
 use hearthsound_activity::Annotation;
 use hearthsound_catalog::{AlbumHead, ArtistHead, PageAlbum, PageDepth, PageTrack};
 use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, IdPrefix, Slug};
-use hearthsound_library::query::{AlbumDetail, AlbumSort, Scope};
+use hearthsound_library::query::{AlbumDetail, AlbumSort, ArtistSort, Scope, TrackSort};
 use uuid::Uuid;
 
 use crate::auth::Call;
@@ -45,9 +45,18 @@ const UNSUPPORTED_LIST_TYPE: &str = "Unsupported album list type.";
 /// and reports the ignored articles beside it, so a client can explain the
 /// grouping to a user.
 ///
+/// A request carrying `hearthsound=1` may pass `sort` to order the index by
+/// `name` (the default, the alphabetical index), `added` (the artist stored
+/// most recently first) or `played` (the artist the caller played most often
+/// first). A listing in an order other than the alphabetical one keeps that
+/// order and starts a new group where the letter an artist is filed under
+/// changes, so a client that flattens the index reads the requested order. A
+/// request without `hearthsound=1` is answered exactly as a server without the
+/// vendor extension would answer it.
+///
 /// # Parameters
 ///
-/// - `call`: the authenticated call.
+/// - `call`: the authenticated call, whose `sort` names the order.
 ///
 /// # Returns
 ///
@@ -62,7 +71,8 @@ pub async fn get_artists(call: Call) -> Encoded {
         Ok(scope) => scope,
         Err(error) => return call.encode(Response::failed(error)),
     };
-    let summaries = match browse::artists(call.state().database(), scope).await {
+    let sort = artist_sort(&call);
+    let summaries = match browse::artists(call.state().database(), scope, sort).await {
         Ok(summaries) => summaries,
         Err(error) => {
             return call.encode(Response::failed(browse::failure("getArtists", &error)));
@@ -85,9 +95,14 @@ pub async fn get_artists(call: Call) -> Encoded {
             return call.encode(Response::failed(browse::failure("getArtists", &error)));
         }
     };
-    call.respond(
-        Response::ok().member("artists", projection::artists_id3(&summaries, &annotations)),
-    )
+    call.respond(Response::ok().member(
+        "artists",
+        if sort == ArtistSort::Name {
+            projection::artists_id3(&summaries, &annotations)
+        } else {
+            projection::artists_id3_ordered(&summaries, &annotations)
+        },
+    ))
     .await
 }
 
@@ -581,7 +596,7 @@ pub async fn get_indexes(call: Call) -> Encoded {
         return call.encode(Response::ok().member("indexes", unchanged));
     }
 
-    let summaries = match browse::artists(database, scope).await {
+    let summaries = match browse::artists(database, scope, ArtistSort::Name).await {
         Ok(summaries) => summaries,
         Err(error) => {
             return call.encode(Response::failed(browse::failure("getIndexes", &error)));
@@ -1277,6 +1292,94 @@ fn album_sort(call: &Call, list_type: &str) -> Result<AlbumSort, SubsonicError> 
                 "an unsupported album list type was requested"
             );
             Err(SubsonicError::new(codes::GENERIC, UNSUPPORTED_LIST_TYPE))
+        }
+    }
+}
+
+/// Reads the order of a song listing request.
+///
+/// The order is a vendor parameter: it is read only when the request carries
+/// `hearthsound=1`, because the standard search has no order and a request that
+/// did not opt in must be answered exactly as a server without the extension
+/// would answer it.
+///
+/// An unknown value is ignored rather than refused, because a sort is a display
+/// preference a client may have learned from a newer server.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, whose `sort` names the order.
+///
+/// # Returns
+///
+/// The order to list the songs in; [`TrackSort::Title`] for an absent or
+/// unknown value.
+pub(super) fn track_sort(call: &Call) -> TrackSort {
+    if !call.params().vendor_enabled() {
+        return TrackSort::Title;
+    }
+    let user = call.principal().user_id.uuid();
+    match call.get("sort").map(str::trim) {
+        Some("added") => TrackSort::Added,
+        Some("played") => TrackSort::Played { user },
+        Some("artist") => TrackSort::Artist,
+        Some("album") => TrackSort::Album,
+        Some("year") => TrackSort::Year,
+        Some("title") | Some("") | None => TrackSort::Title,
+        Some(other) => {
+            tracing::debug!(sort = other, "an unknown song order was ignored");
+            TrackSort::Title
+        }
+    }
+}
+
+/// Reads the genre a song listing is narrowed to.
+///
+/// Like [`track_sort`], the filter is a vendor parameter: without
+/// `hearthsound=1` it is not read, so a standard search answer is unchanged.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, whose `genre` names the genre.
+///
+/// # Returns
+///
+/// The genre to filter on, or `None` when the request names none.
+pub(super) fn song_genre(call: &Call) -> Option<&str> {
+    if !call.params().vendor_enabled() {
+        return None;
+    }
+    call.get("genre")
+        .map(str::trim)
+        .filter(|genre| !genre.is_empty())
+}
+
+/// Reads the order of an artist index request.
+///
+/// The order is a vendor parameter, read like [`track_sort`]: only with
+/// `hearthsound=1`, and an unknown value is ignored.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, whose `sort` names the order.
+///
+/// # Returns
+///
+/// The order to list the artists in; [`ArtistSort::Name`] for an absent or
+/// unknown value.
+fn artist_sort(call: &Call) -> ArtistSort {
+    if !call.params().vendor_enabled() {
+        return ArtistSort::Name;
+    }
+    match call.get("sort").map(str::trim) {
+        Some("added") => ArtistSort::Added,
+        Some("played") => ArtistSort::Played {
+            user: call.principal().user_id.uuid(),
+        },
+        Some("name") | Some("") | None => ArtistSort::Name,
+        Some(other) => {
+            tracing::debug!(sort = other, "an unknown artist order was ignored");
+            ArtistSort::Name
         }
     }
 }

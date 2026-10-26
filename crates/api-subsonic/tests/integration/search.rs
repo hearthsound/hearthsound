@@ -750,3 +750,205 @@ async fn a_catalog_artist_page_count_wins_over_the_payload_count() {
         page.body
     );
 }
+
+/// Returns the titles of the songs of a `search3` answer, in response order.
+///
+/// # Parameters
+///
+/// - `body`: the response body.
+///
+/// # Returns
+///
+/// The song titles, in the order the response lists them.
+fn song_titles(body: &str) -> Vec<String> {
+    let document: serde_json::Value = serde_json::from_str(body).unwrap();
+    document["subsonic-response"]["searchResult3"]["song"]
+        .as_array()
+        .map(|songs| {
+            songs
+                .iter()
+                .map(|song| song["title"].as_str().unwrap().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Saves the two albums the seeded account does not hold, stamps the instants
+/// the orders read, and plays one song, so every song order has a sequence of
+/// its own.
+///
+/// # Returns
+///
+/// The fixture and the seeded ids.
+async fn ordered_songs() -> (Fixture, Seeded) {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+    for album in [seeded.bright, seeded.delta] {
+        let saved = get(
+            &app,
+            &format!(
+                "/rest/hsSave?apiKey={}&hearthsound=1&f=json&id={album}",
+                fixture.api_key
+            ),
+        )
+        .await;
+        assert_ok(&saved);
+    }
+    for (track, at) in [
+        (seeded.alpha_tracks[0], 400),
+        (seeded.alpha_tracks[1], 100),
+        (seeded.bright_track, 200),
+        (seeded.delta_track, 300),
+    ] {
+        sqlx::query("UPDATE tracks SET created_at = ? WHERE id = ?")
+            .bind(at)
+            .bind(track.uuid().as_bytes().as_slice())
+            .execute(fixture.database.writer())
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO plays (id, user_id, track_id, started_at, listened_ms, audio_delivered) \
+         VALUES (?, ?, ?, 500, 200000, 1)",
+    )
+    .bind(uuid::Uuid::now_v7().as_bytes().as_slice())
+    .bind(fixture.user_id.uuid().as_bytes().as_slice())
+    .bind(seeded.alpha_tracks[1].uuid().as_bytes().as_slice())
+    .execute(fixture.database.writer())
+    .await
+    .unwrap();
+    (fixture, seeded)
+}
+
+/// The vendor `sort` and `genre` parameters order and narrow the songs an
+/// empty query lists, and a request without `hearthsound=1` is answered exactly
+/// as before.
+#[tokio::test]
+async fn the_vendor_parameters_order_and_narrow_the_song_listing() {
+    let (fixture, _) = ordered_songs().await;
+    let app = fixture.app();
+
+    let listing = |extra: &str| {
+        format!(
+            "/rest/search3?query=&musicFolderId=1&artistCount=0&albumCount=0&songCount=100\
+             &apiKey={}&f=json{extra}",
+            fixture.api_key
+        )
+    };
+    let mut firsts = Vec::new();
+    for (sort, expected) in [
+        ("", vec!["Ocean", "One", "Signal", "Zero"]),
+        ("&sort=added", vec!["Zero", "Ocean", "Signal", "One"]),
+        ("&sort=played", vec!["One", "Ocean", "Signal", "Zero"]),
+        ("&sort=artist", vec!["Signal", "Ocean", "One", "Zero"]),
+        ("&sort=album", vec!["One", "Zero", "Signal", "Ocean"]),
+        ("&sort=year", vec!["Ocean", "Signal", "One", "Zero"]),
+    ] {
+        let probe = get(&app, &listing(&format!("&hearthsound=1{sort}"))).await;
+        assert_ok(&probe);
+        assert_eq!(song_titles(&probe.body), expected, "sort={sort}");
+        firsts.push(expected[0].to_owned());
+    }
+    assert_eq!(
+        firsts,
+        ["Ocean", "Zero", "One", "Signal", "One", "Ocean"],
+        "each order starts where its own rule puts it"
+    );
+
+    // An unknown order falls back to the title order instead of failing.
+    let unknown = get(&app, &listing("&hearthsound=1&sort=nonsense")).await;
+    assert_ok(&unknown);
+    assert_eq!(
+        song_titles(&unknown.body),
+        ["Ocean", "One", "Signal", "Zero"],
+        "an unknown order is ignored"
+    );
+
+    // The genre filter narrows the listing, and composes with an order.
+    let rock = get(&app, &listing("&hearthsound=1&genre=Rock")).await;
+    assert_ok(&rock);
+    assert_eq!(song_titles(&rock.body), ["One", "Zero"]);
+    let ambient = get(&app, &listing("&hearthsound=1&genre=ambient&sort=year")).await;
+    assert_ok(&ambient);
+    assert_eq!(song_titles(&ambient.body), ["Ocean"]);
+    let unknown_genre = get(&app, &listing("&hearthsound=1&genre=polka")).await;
+    assert_ok(&unknown_genre);
+    assert!(song_titles(&unknown_genre.body).is_empty());
+
+    // Without the vendor opt-in the parameters change nothing, so a standard
+    // client's answer is the one it always got.
+    let plain = get(
+        &app,
+        &format!(
+            "/rest/search3?query=&musicFolderId=1&artistCount=0&albumCount=0&songCount=100\
+             &sort=year&genre=Rock&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&plain);
+    assert_eq!(
+        song_titles(&plain.body),
+        ["Ocean", "One", "Signal", "Zero"],
+        "a request without hearthsound=1 is answered in title order"
+    );
+}
+
+/// Saving an album adds its songs to the account's Songs and its artist to its
+/// Artists, and leaves another account's library alone.
+#[tokio::test]
+async fn saving_an_album_lists_its_songs_and_artist_for_that_account_only() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+    let (_, other_key) = fixture.account(&[]).await;
+
+    let songs = |key: &str| {
+        format!(
+            "/rest/search3?query=&musicFolderId=1&artistCount=0&albumCount=0&songCount=100\
+             &apiKey={key}&f=json"
+        )
+    };
+    let artists = |key: &str| format!("/rest/getArtists?musicFolderId=1&apiKey={key}&f=json");
+
+    // The album of a generic folder is in nobody's library, so its song and its
+    // artist are in nobody's lists.
+    let before = get(&app, &songs(&fixture.api_key)).await;
+    assert_ok(&before);
+    assert!(!before.body.contains(&seeded.bright_track.to_string()));
+    let before_artists = get(&app, &artists(&fixture.api_key)).await;
+    assert_ok(&before_artists);
+    assert!(!before_artists.body.contains("2 Mello"));
+
+    let saved = get(
+        &app,
+        &format!(
+            "/rest/hsSave?apiKey={}&hearthsound=1&f=json&id={}",
+            fixture.api_key, seeded.bright
+        ),
+    )
+    .await;
+    assert_ok(&saved);
+
+    let after = get(&app, &songs(&fixture.api_key)).await;
+    assert_ok(&after);
+    assert_eq!(
+        song_titles(&after.body),
+        ["One", "Signal", "Zero"],
+        "the saved album's song joins the songs listing"
+    );
+    let after_artists = get(&app, &artists(&fixture.api_key)).await;
+    assert_ok(&after_artists);
+    assert!(
+        after_artists.body.contains("2 Mello"),
+        "the saved album's artist joins the artist index: {}",
+        after_artists.body
+    );
+
+    // Another account's library holds none of it.
+    let other_songs = get(&app, &songs(&other_key)).await;
+    assert_ok(&other_songs);
+    assert!(!other_songs.body.contains(&seeded.bright_track.to_string()));
+    let other_artists = get(&app, &artists(&other_key)).await;
+    assert_ok(&other_artists);
+    assert!(!other_artists.body.contains("2 Mello"));
+}

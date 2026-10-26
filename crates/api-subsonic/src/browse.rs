@@ -16,8 +16,8 @@ use hearthsound_core::EntityId;
 use hearthsound_core::EntityKind;
 use hearthsound_db::Database;
 use hearthsound_library::query::{
-    AlbumDetail, AlbumSort, ArtistDetail, ArtistSummary, GenreCount, Scope, SearchResults,
-    TrackView,
+    AlbumDetail, AlbumSort, ArtistDetail, ArtistSort, ArtistSummary, GenreCount, Scope,
+    SearchResults, TrackSort, TrackView,
 };
 use hearthsound_library::{Album, Artist, LibraryError, MediaFile, artists, media_files, query};
 use uuid::Uuid;
@@ -515,9 +515,10 @@ pub(crate) async fn random_tracks(
 pub(crate) async fn artists(
     database: &Database,
     scope: Scope,
+    sort: ArtistSort,
 ) -> Result<Vec<ArtistSummary>, LibraryError> {
     let mut conn = database.readers().acquire().await?;
-    query::list_artists(&mut conn, scope, -1, 0).await
+    query::list_artists(&mut conn, scope, sort, -1, 0).await
 }
 
 /// Lists the artists in scope, paged.
@@ -539,11 +540,12 @@ pub(crate) async fn artists(
 pub(crate) async fn artists_page(
     database: &Database,
     scope: Scope,
+    sort: ArtistSort,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<ArtistSummary>, LibraryError> {
     let mut conn = database.readers().acquire().await?;
-    query::list_artists(&mut conn, scope, limit, offset).await
+    query::list_artists(&mut conn, scope, sort, limit, offset).await
 }
 
 /// Lists the tracks in scope, paged.
@@ -568,11 +570,13 @@ pub(crate) async fn artists_page(
 pub(crate) async fn list_tracks(
     database: &Database,
     scope: Scope,
+    sort: TrackSort,
+    genre: Option<&str>,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<TrackView>, LibraryError> {
     let mut conn = database.readers().acquire().await?;
-    query::list_tracks(&mut conn, scope, limit, offset).await
+    query::list_tracks(&mut conn, scope, sort, genre, limit, offset).await
 }
 
 /// Searches the local full-text index for one entity kind.

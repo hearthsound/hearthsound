@@ -1321,3 +1321,135 @@ async fn an_artist_lists_an_album_whose_tracks_credit_it() {
     .await;
     assert_ok(&opened);
 }
+
+/// Returns the names of the artists of a `getArtists` answer, in the order a
+/// client that flattens the index reads them.
+///
+/// # Parameters
+///
+/// - `body`: the response body.
+///
+/// # Returns
+///
+/// The artist names, in index order.
+fn artist_names(body: &str) -> Vec<String> {
+    let document: serde_json::Value = serde_json::from_str(body).unwrap();
+    document["subsonic-response"]["artists"]["index"]
+        .as_array()
+        .map(|indexes| {
+            indexes
+                .iter()
+                .flat_map(|index| index["artist"].as_array().cloned().unwrap_or_default())
+                .map(|artist| artist["name"].as_str().unwrap().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Saves the two albums the seeded account does not hold, stamps the instants
+/// the orders read, and plays two artists, so every artist order has a sequence
+/// of its own.
+///
+/// # Returns
+///
+/// The fixture and the seeded ids.
+async fn ordered_artists() -> (Fixture, Seeded) {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+    for album in [seeded.bright, seeded.delta] {
+        let saved = get(
+            &app,
+            &format!(
+                "/rest/hsSave?apiKey={}&hearthsound=1&f=json&id={album}",
+                fixture.api_key
+            ),
+        )
+        .await;
+        assert_ok(&saved);
+    }
+    for (artist, at) in [
+        (seeded.cardinals, 300),
+        (seeded.mello, 200),
+        (seeded.elmar, 100),
+    ] {
+        sqlx::query("UPDATE artists SET created_at = ? WHERE id = ?")
+            .bind(at)
+            .bind(artist.uuid().as_bytes().as_slice())
+            .execute(fixture.database.writer())
+            .await
+            .unwrap();
+    }
+    for (track, plays) in [(seeded.delta_track, 2), (seeded.alpha_tracks[0], 1)] {
+        for index in 0..plays {
+            sqlx::query(
+                "INSERT INTO plays (id, user_id, track_id, started_at, listened_ms, audio_delivered) \
+                 VALUES (?, ?, ?, ?, 200000, 1)",
+            )
+            .bind(uuid::Uuid::now_v7().as_bytes().as_slice())
+            .bind(fixture.user_id.uuid().as_bytes().as_slice())
+            .bind(track.uuid().as_bytes().as_slice())
+            .bind(1_000 + index)
+            .execute(fixture.database.writer())
+            .await
+            .unwrap();
+        }
+    }
+    (fixture, seeded)
+}
+
+/// The vendor `sort` parameter orders the artist index, and a request without
+/// `hearthsound=1` is answered in the alphabetical index it always got.
+#[tokio::test]
+async fn the_vendor_sort_parameter_orders_the_artist_index() {
+    let (fixture, _) = ordered_artists().await;
+    let app = fixture.app();
+
+    let index = |extra: &str| {
+        format!(
+            "/rest/getArtists?musicFolderId=1&apiKey={}&f=json{extra}",
+            fixture.api_key
+        )
+    };
+
+    let default = get(&app, &index("&hearthsound=1")).await;
+    assert_ok(&default);
+    assert_eq!(
+        artist_names(&default.body),
+        ["2 Mello", "The Cardinals", "El Mar"],
+        "the default order is the alphabetical index, which files by the stripped name"
+    );
+
+    let mut firsts = Vec::new();
+    for (sort, expected) in [
+        ("&sort=name", vec!["2 Mello", "The Cardinals", "El Mar"]),
+        ("&sort=added", vec!["The Cardinals", "2 Mello", "El Mar"]),
+        ("&sort=played", vec!["El Mar", "The Cardinals", "2 Mello"]),
+    ] {
+        let probe = get(&app, &index(&format!("&hearthsound=1{sort}"))).await;
+        assert_ok(&probe);
+        assert_eq!(artist_names(&probe.body), expected, "sort={sort}");
+        firsts.push(expected[0].to_owned());
+    }
+    assert_eq!(
+        firsts,
+        ["2 Mello", "The Cardinals", "El Mar"],
+        "each order starts where its own rule puts it"
+    );
+
+    // An unknown order falls back to the alphabetical index instead of failing.
+    let unknown = get(&app, &index("&hearthsound=1&sort=nonsense")).await;
+    assert_ok(&unknown);
+    assert_eq!(
+        artist_names(&unknown.body),
+        ["2 Mello", "The Cardinals", "El Mar"]
+    );
+
+    // Without the vendor opt-in the parameter changes nothing.
+    let plain = get(&app, &index("&sort=played")).await;
+    assert_ok(&plain);
+    assert_eq!(
+        artist_names(&plain.body),
+        ["2 Mello", "The Cardinals", "El Mar"],
+        "a request without hearthsound=1 is answered in the alphabetical index"
+    );
+}

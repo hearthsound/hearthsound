@@ -16,9 +16,10 @@
 use axum::Json;
 use axum::extract::State;
 use hearthsound_core::{EntityId, IdPrefix};
-use hearthsound_library::query::{self, QueueCollection, QueueItem};
+use hearthsound_library::query::{self, QueueCollection, QueueItem, TrackSort};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 use crate::auth::Authed;
 use crate::extract::QueryParams;
@@ -54,6 +55,11 @@ pub struct QueueQuery {
     /// The track the player starts at; absent starts at the first item.
     #[serde(default)]
     pub from: Option<String>,
+    /// The order a `songs` queue is read in: `title`, `added`, `played`,
+    /// `artist`, `album` or `year`. Absent lists the songs by title, and the
+    /// order of every other source is that source's own.
+    #[serde(default)]
+    pub sort: Option<String>,
 }
 
 /// One track of a queue.
@@ -148,9 +154,12 @@ pub struct QueueView {
 ///
 /// Answers `unknown-source` when the name is not one of the listed sources, and
 /// `not-found` when a prefixed source does not carry a valid id of its kind.
-pub(crate) fn collection_of(source: &str) -> Result<QueueCollection, Problem> {
+pub(crate) fn collection_of(
+    source: &str,
+    songs_sort: TrackSort,
+) -> Result<QueueCollection, Problem> {
     match source {
-        SOURCE_SONGS => Ok(QueueCollection::Songs),
+        SOURCE_SONGS => Ok(QueueCollection::Songs(songs_sort)),
         SOURCE_LIKED => Ok(QueueCollection::Liked),
         SOURCE_UPLOADS => Ok(QueueCollection::Uploads),
         _ => {
@@ -169,6 +178,34 @@ pub(crate) fn collection_of(source: &str) -> Result<QueueCollection, Problem> {
                 _ => Err(unknown_source(source)),
             }
         }
+    }
+}
+
+/// Reads the order a `songs` queue is read in.
+///
+/// The tokens are the ones the Subsonic listing takes, so a client passes the
+/// same value to both. An absent or unknown value lists the songs by title.
+///
+/// # Parameters
+///
+/// - `sort`: the `sort` the request carried.
+/// - `user`: the account whose plays a `played` order reads.
+///
+/// # Returns
+///
+/// The order to read the songs in.
+fn songs_sort(sort: Option<&str>, user: Uuid) -> TrackSort {
+    match sort.map(str::trim) {
+        Some("added") => TrackSort::Added,
+        Some("played") => TrackSort::Played { user },
+        Some("artist") => TrackSort::Artist,
+        Some("album") => TrackSort::Album,
+        Some("year") => TrackSort::Year,
+        Some(other) => {
+            tracing::debug!(sort = other, "an unknown songs order was ignored");
+            TrackSort::Title
+        }
+        None => TrackSort::Title,
     }
 }
 
@@ -223,7 +260,7 @@ pub(crate) fn missing(collection: QueueCollection) -> Problem {
         QueueCollection::Artist(_) | QueueCollection::ArtistTop(_) => {
             Problem::not_found("No artist with that id is in this account's library.")
         }
-        QueueCollection::Songs | QueueCollection::Liked | QueueCollection::Uploads => {
+        QueueCollection::Songs(_) | QueueCollection::Liked | QueueCollection::Uploads => {
             Problem::not_found("No collection lives at that source.")
         }
     }
@@ -232,15 +269,17 @@ pub(crate) fn missing(collection: QueueCollection) -> Problem {
 /// Queues a whole collection for the caller's player.
 ///
 /// One request answers every track of the collection, in the collection's own
-/// order: the library's sort order for `songs`, the like order for `liked`, the
-/// upload order for `uploads`, the playlist's own order, and the artist's play
-/// count order. Nothing is paged and nothing is truncated.
+/// order: the requested order for `songs` (by title when the request names
+/// none), the like order for `liked`, the upload order for `uploads`, the
+/// playlist's own order, and the artist's play count order. Nothing is paged
+/// and nothing is truncated.
 ///
 /// # Parameters
 ///
 /// - `authed`: the caller, whose library the collection is read from.
 /// - `state`: the shared services.
-/// - `query`: the source and, optionally, the track to start at.
+/// - `query`: the source, the track to start at, and the order a `songs`
+///   source is read in.
 ///
 /// # Returns
 ///
@@ -261,6 +300,7 @@ pub(crate) fn missing(collection: QueueCollection) -> Problem {
     params(
         ("source" = String, Query, description = "The collection: `songs`, `liked`, `uploads`, `playlist:<id>`, `artist:<id>` or `artist-top:<id>`"),
         ("from" = Option<String>, Query, description = "The track id the player starts at; absent starts at the first item"),
+        ("sort" = Option<String>, Query, description = "The order a `songs` queue is read in: `title`, `added`, `played`, `artist`, `album` or `year`"),
     ),
     responses(
         (status = 200, description = "The whole collection, in its own order", body = QueueView),
@@ -275,7 +315,10 @@ pub async fn collection_queue(
     State(state): State<NativeState>,
     QueryParams(query): QueryParams<QueueQuery>,
 ) -> Result<Json<QueueView>, Problem> {
-    let collection = collection_of(&query.source)?;
+    let collection = collection_of(
+        &query.source,
+        songs_sort(query.sort.as_deref(), authed.user_id()),
+    )?;
     let read = {
         let mut conn = state
             .database()

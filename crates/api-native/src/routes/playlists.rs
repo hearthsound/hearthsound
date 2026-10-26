@@ -21,7 +21,7 @@ use hearthsound_core::EntityId;
 use hearthsound_core::IdPrefix;
 use hearthsound_core::events::{Audience, PlaylistChanged, ServerEvent};
 use hearthsound_core::{ClientId, EntityKind};
-use hearthsound_library::query::{self, QueueCollection, Scope};
+use hearthsound_library::query::{self, QueueCollection, Scope, TrackSort};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -262,9 +262,9 @@ async fn source_tracks(
     if let Some(value) = source.strip_prefix("album:") {
         return album_tracks(state, user, is_admin, value).await;
     }
-    let collection = library::collection_of(source)?;
+    let collection = library::collection_of(source, TrackSort::Title)?;
     match collection {
-        QueueCollection::Songs
+        QueueCollection::Songs(_)
         | QueueCollection::Liked
         | QueueCollection::Uploads
         | QueueCollection::ArtistTop(_) => Err(library::unknown_source(source)),

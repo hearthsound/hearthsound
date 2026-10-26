@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH scope_tracks(track_id) AS ( SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'track' UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'track' AND value = 'like' UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id WHERE p.owner_user_id = ? AND p.is_temporary = 0 UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id WHERE mf.storage = 'folder' AND lf.owner_user_id = ? UNION SELECT t.id FROM tracks t WHERE t.album_id IN ( SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'album' UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' AND value = 'like') ) SELECT al.id FROM search_fts JOIN albums al ON al.rowid = search_fts.rowid / 4 WHERE search_fts MATCH ? AND search_fts.rowid % 4 = 2 AND (al.id IN (SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id) OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ? AND entity_kind = 'album' AND entity_id = al.id) OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' AND value = 'like' AND entity_id = al.id)) ORDER BY rank LIMIT ? OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "77d4400cde426f66810006e7995cdf2d5173711a32e5fa96e9ef72e30ee891be"
+}

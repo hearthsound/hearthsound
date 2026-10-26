@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The personal library holds the tracks of an album the account saved or liked, so saving or liking an album puts its songs in Songs and its artist in Artists; one scope helper now feeds the listings, the counts, the search and every queue.
 - `log.level` covers Hearthsound's own records only; a new `log.dependencies` level (default `error`) covers every other crate, so a scan no longer drowns the log in a tag reader's warnings and `log.level = "debug"` no longer turns on third-party debug output.
 - `admin update-user` validates the password and every limit before its first write, so a refused value no longer leaves the account disabled or renamed by a command that then failed.
 - `admin add-folder` queues the folder's first scan, so a folder full of files is indexed without running `hearthsound scan` afterwards; with no server running the job waits in the queue for the next one.
@@ -57,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `search3` (and `search2`) order an empty-query song listing by a vendor `sort` - `title`, `added`, `played`, `artist`, `album` or `year` - and narrow it by `genre`; `getArtists` orders its index by `sort` - `name`, `added` or `played`; `GET /api/v1/library/queue` takes `sort` for its `songs` source. Each is read only with `hearthsound=1`, so a standard client's response is byte-identical to before.
 - `POST /api/v1/setup/check` reports whether a setup link is still the live one
   without spending it, so the setup wizard can refuse a stale link before it
   draws its form. A wrong token answers `403 invalid-setup-token`, a server that

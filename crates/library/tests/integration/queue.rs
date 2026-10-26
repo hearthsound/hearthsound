@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use hearthsound_core::{Availability, EntityId, IdPrefix, StorageClass};
 use hearthsound_db::{Database, MIGRATOR};
-use hearthsound_library::query::{QueueCollection, QueueItem, queue};
+use hearthsound_library::query::{QueueCollection, QueueItem, TrackSort, queue};
 use hearthsound_library::{
     AlbumInput, ArtistCredit, LibraryRepository, ManagedMediaFile, Origin, ScannedMediaFile,
     TrackInput,
@@ -390,10 +390,14 @@ async fn the_songs_queue_lists_the_personal_library_in_sort_order() {
     let seeded = seed(dir.path()).await;
     let mut conn = seeded.db.readers().acquire().await.unwrap();
 
-    let items = queue(&mut conn, seeded.user, QueueCollection::Songs)
-        .await
-        .unwrap()
-        .expect("songs always reads");
+    let items = queue(
+        &mut conn,
+        seeded.user,
+        QueueCollection::Songs(TrackSort::Title),
+    )
+    .await
+    .unwrap()
+    .expect("songs always reads");
 
     // Sorted by the folded title: alpha one, alpha two, bravo one, mike
     // folder, yankee upload, zulu upload.
@@ -435,10 +439,14 @@ async fn the_songs_queue_lists_the_personal_library_in_sort_order() {
 
     // The scope is the caller's, so the other account sees only its own
     // folder track.
-    let others = queue(&mut conn, seeded.other, QueueCollection::Songs)
-        .await
-        .unwrap()
-        .unwrap();
+    let others = queue(
+        &mut conn,
+        seeded.other,
+        QueueCollection::Songs(TrackSort::Title),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(ids(&others), vec![seeded.other_track]);
 }
 
@@ -614,7 +622,7 @@ async fn a_six_thousand_track_library_queues_in_order() {
 
     let mut conn = db.readers().acquire().await.unwrap();
     let started = Instant::now();
-    let items = queue(&mut conn, user, QueueCollection::Songs)
+    let items = queue(&mut conn, user, QueueCollection::Songs(TrackSort::Title))
         .await
         .unwrap()
         .unwrap();
@@ -631,4 +639,60 @@ async fn a_six_thousand_track_library_queues_in_order() {
         elapsed < GENERATED_BUDGET,
         "a queue of {GENERATED} tracks took {elapsed:?}"
     );
+}
+
+/// The songs queue is read in the order it carries, so a player handed the
+/// queue plays the list in the order the client shows.
+#[tokio::test]
+async fn the_songs_queue_follows_the_requested_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let seeded = seed(dir.path()).await;
+    let mut conn = seeded.db.readers().acquire().await.unwrap();
+
+    // The one played track comes first in the recently played order, and the
+    // rest follow in title order.
+    let played = queue(
+        &mut conn,
+        seeded.user,
+        QueueCollection::Songs(TrackSort::Played { user: seeded.user }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        ids(&played),
+        vec![
+            seeded.alpha_two,
+            seeded.alpha_one,
+            seeded.bravo_one,
+            seeded.folder_track,
+            seeded.upload_two,
+            seeded.upload_one,
+        ]
+    );
+
+    // The album order keeps the album-less track last, because an album title
+    // cannot place it.
+    let by_album = queue(
+        &mut conn,
+        seeded.user,
+        QueueCollection::Songs(TrackSort::Album),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        ids(&by_album),
+        vec![
+            seeded.alpha_one,
+            seeded.alpha_two,
+            seeded.bravo_one,
+            seeded.folder_track,
+            seeded.upload_two,
+            seeded.upload_one,
+        ]
+    );
+
+    // Every order reads the whole collection, so the count never changes.
+    assert_eq!(played.len(), by_album.len());
 }

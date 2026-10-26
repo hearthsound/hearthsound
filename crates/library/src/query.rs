@@ -4,11 +4,12 @@
 //!
 //! - the **personal library** of one user, which is the union of the tracks the
 //!   user saved or uploaded, the tracks the user liked, the tracks on the user's
-//!   non-temporary playlists, and the tracks whose file lives in a folder
-//!   associated with the user (`library_folders.owner_user_id`). Albums and
-//!   artists follow by containment: an album is in the library when it is saved
-//!   or liked or when it holds at least one library track, and an artist when it
-//!   is saved or liked or is credited on one;
+//!   non-temporary playlists, the tracks whose file lives in a folder
+//!   associated with the user (`library_folders.owner_user_id`), and the tracks
+//!   of an album the user saved or liked. Albums and artists follow by
+//!   containment: an album is in the library when it is saved or liked or when
+//!   it holds at least one library track, and an artist when it is saved or
+//!   liked or is credited on one;
 //! - the **server** scope, which holds everything stored and is offered to
 //!   administrators only; everyone else reads nothing from it.
 //!
@@ -181,6 +182,67 @@ impl AlbumSort {
             _ => None,
         }
     }
+}
+
+/// How a song listing is ordered.
+///
+/// An order changes only the sequence: the listing always holds every track of
+/// the scope, so a client can page it and a count of the scope stays the number
+/// of its rows. The variant a user's own activity decides carries the user it is
+/// read for, because a play is per user.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_library::query::TrackSort;
+///
+/// assert_eq!(TrackSort::Title, TrackSort::Title);
+/// assert_ne!(TrackSort::Title, TrackSort::Artist);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackSort {
+    /// Alphabetically by the track's sort title, with the id as a tie breaker.
+    Title,
+    /// The track stored most recently first.
+    Added,
+    /// The track the user played most recently first, the ones never played
+    /// last.
+    Played {
+        /// The account whose plays are read.
+        user: Uuid,
+    },
+    /// Alphabetically by the track's first credited artist, then by title.
+    Artist,
+    /// Alphabetically by the album's sort title, then by title.
+    Album,
+    /// The album's release year, newest first, then by title.
+    Year,
+}
+
+/// How an artist listing is ordered.
+///
+/// The variants a user's own activity decides carry the user they are read for,
+/// because a play is per user.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_library::query::ArtistSort;
+///
+/// assert_eq!(ArtistSort::Name, ArtistSort::Name);
+/// assert_ne!(ArtistSort::Name, ArtistSort::Added);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtistSort {
+    /// Alphabetically by the artist's sort name, with the id as a tie breaker.
+    Name,
+    /// The artist stored most recently first.
+    Added,
+    /// The artist the user played most often first, the ones never played last.
+    Played {
+        /// The account whose plays are read.
+        user: Uuid,
+    },
 }
 
 /// An artist with the number of albums it has in scope.
@@ -564,12 +626,13 @@ pub async fn artist_detail(
 ///
 /// - `conn`: the connection or transaction to read on.
 /// - `scope`: the scope to filter by.
+/// - `sort`: how to order the artists.
 /// - `limit`: the maximum number of artists; a negative limit is unbounded.
 /// - `offset`: how many artists to skip.
 ///
 /// # Returns
 ///
-/// The artists ordered by sort name, with the id as a tie breaker. An artist
+/// The artists in the requested order, with the id as a tie breaker. An artist
 /// whose albums and tracks are all outside the scope is not returned.
 ///
 /// # Errors
@@ -578,81 +641,54 @@ pub async fn artist_detail(
 pub async fn list_artists(
     conn: &mut SqliteConnection,
     scope: Scope,
+    sort: ArtistSort,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<ArtistSummary>, LibraryError> {
-    let rows = match scope {
-        Scope::Personal { user_id } => {
-            let user = user_id.as_bytes().as_slice();
-            sqlx::query_as!(
-                ArtistSummaryRow,
-                "WITH scope_tracks(track_id) AS ( \
-                     SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'track' \
-                     UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'track' AND value = 'like' \
-                     UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id \
-                         WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
-                     UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
-                         WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
-                 ) \
-                 SELECT ar.id, ar.name, ar.sort_name, ar.mb_artist_id, ar.origin, ar.created_at, \
-                        ar.updated_at, \
-                        (SELECT COUNT(DISTINCT al.id) FROM albums al \
-                           JOIN album_artists aa ON aa.album_id = al.id AND aa.artist_id = ar.id \
-                           JOIN tracks t ON t.album_id = al.id \
-                           JOIN scope_tracks st ON st.track_id = t.id) AS album_count \
-                 FROM artists ar \
-                 WHERE ar.id IN (SELECT ta.artist_id FROM track_artists ta \
-                                   JOIN scope_tracks st ON st.track_id = ta.track_id) \
-                    OR ar.id IN (SELECT aa.artist_id FROM album_artists aa WHERE aa.album_id IN ( \
-                           SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id)) \
-                    OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ? AND entity_kind = 'artist' \
-                                 AND entity_id = ar.id) \
-                    OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'artist' \
-                                 AND value = 'like' AND entity_id = ar.id) \
-                 ORDER BY ar.sort_name, ar.id LIMIT ? OFFSET ?",
-                user,
-                user,
-                user,
-                user,
-                user,
-                user,
-                limit,
-                offset,
-            )
-            .fetch_all(&mut *conn)
-            .await?
-        }
-        Scope::Server(view) => {
-            if view == ServerBrowse::Disabled {
-                return Ok(Vec::new());
-            }
-            let (available, cached) = view.availability_pair();
-            sqlx::query_as!(
-                ArtistSummaryRow,
-                "WITH scope_tracks(track_id) AS ( \
-                     SELECT id FROM tracks WHERE availability IN (?, ?) \
-                 ) \
-                 SELECT ar.id, ar.name, ar.sort_name, ar.mb_artist_id, ar.origin, ar.created_at, \
-                        ar.updated_at, \
-                        (SELECT COUNT(DISTINCT al.id) FROM albums al \
-                           JOIN album_artists aa ON aa.album_id = al.id AND aa.artist_id = ar.id \
-                           JOIN tracks t ON t.album_id = al.id \
-                           JOIN scope_tracks st ON st.track_id = t.id) AS album_count \
-                 FROM artists ar \
-                 WHERE ar.id IN (SELECT ta.artist_id FROM track_artists ta \
-                                   JOIN scope_tracks st ON st.track_id = ta.track_id) \
-                    OR ar.id IN (SELECT aa.artist_id FROM album_artists aa WHERE aa.album_id IN ( \
-                           SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id)) \
-                 ORDER BY ar.sort_name, ar.id LIMIT ? OFFSET ?",
-                available,
-                cached,
-                limit,
-                offset,
-            )
-            .fetch_all(&mut *conn)
-            .await?
-        }
-    };
+    if scope == Scope::Server(ServerBrowse::Disabled) {
+        return Ok(Vec::new());
+    }
+    // The projection and the scope are shared by both scopes, the personal one
+    // adds the membership of an artist the user saved or liked, and two of the
+    // three orders carry a bound user id, so the statement is assembled rather
+    // than written as one compile-checked literal; `queue` and `list_tracks`
+    // build theirs the same way for the same reasons.
+    let mut builder = QueryBuilder::<Sqlite>::new("");
+    push_scope_tracks(&mut builder, scope);
+    builder.push(
+        "SELECT ar.id, ar.name, ar.sort_name, ar.mb_artist_id, ar.origin, ar.created_at, \
+                ar.updated_at, \
+                (SELECT COUNT(DISTINCT al.id) FROM albums al \
+                   JOIN album_artists aa ON aa.album_id = al.id AND aa.artist_id = ar.id \
+                   JOIN tracks t ON t.album_id = al.id \
+                   JOIN scope_tracks st ON st.track_id = t.id) AS album_count \
+         FROM artists ar \
+         WHERE ar.id IN (SELECT ta.artist_id FROM track_artists ta \
+                           JOIN scope_tracks st ON st.track_id = ta.track_id) \
+            OR ar.id IN (SELECT aa.artist_id FROM album_artists aa WHERE aa.album_id IN ( \
+                   SELECT t.album_id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id))",
+    );
+    if let Scope::Personal { user_id } = scope {
+        let user = user_id.as_bytes().to_vec();
+        builder
+            .push(" OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ")
+            .push_bind(user.clone())
+            .push(" AND entity_kind = 'artist' AND entity_id = ar.id)")
+            .push(" OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ")
+            .push_bind(user)
+            .push(" AND entity_kind = 'artist' AND value = 'like' AND entity_id = ar.id)");
+    }
+    builder.push(" ORDER BY ");
+    push_artist_order(&mut builder, sort);
+    builder
+        .push(" LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    let rows = builder
+        .build_query_as::<ArtistSummaryRow>()
+        .fetch_all(&mut *conn)
+        .await?;
     rows.into_iter()
         .map(|row| {
             let album_count = row.album_count;
@@ -662,6 +698,32 @@ pub async fn list_artists(
             })
         })
         .collect()
+}
+
+/// Appends the order of an artist listing.
+///
+/// # Parameters
+///
+/// - `builder`: the query being built, after its `ORDER BY`.
+/// - `sort`: the order to write.
+fn push_artist_order(builder: &mut QueryBuilder<Sqlite>, sort: ArtistSort) {
+    match sort {
+        ArtistSort::Name => {
+            builder.push("ar.sort_name, ar.id");
+        }
+        ArtistSort::Added => {
+            builder.push("ar.created_at DESC, ar.id DESC");
+        }
+        ArtistSort::Played { user } => {
+            builder
+                .push(
+                    "(SELECT count(*) FROM plays p JOIN track_artists ta ON ta.track_id = p.track_id \
+                     WHERE ta.artist_id = ar.id AND p.user_id = ",
+                )
+                .push_bind(user.as_bytes().to_vec())
+                .push(") DESC, ar.sort_name, ar.id");
+        }
+    }
 }
 
 /// Counts the artists in scope.
@@ -694,6 +756,10 @@ pub async fn count_artists(conn: &mut SqliteConnection, scope: Scope) -> Result<
                          WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
                      UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
                          WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
+                     UNION SELECT t.id FROM tracks t WHERE t.album_id IN ( \
+                         SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'album' \
+                         UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' \
+                             AND value = 'like') \
                  ) \
                  SELECT count(*) AS counted FROM artists ar \
                  WHERE ar.id IN (SELECT ta.artist_id FROM track_artists ta \
@@ -704,6 +770,8 @@ pub async fn count_artists(conn: &mut SqliteConnection, scope: Scope) -> Result<
                                  AND entity_id = ar.id) \
                     OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'artist' \
                                  AND value = 'like' AND entity_id = ar.id)",
+                user,
+                user,
                 user,
                 user,
                 user,
@@ -853,17 +921,8 @@ pub async fn list_albums(
 fn push_album_scope(builder: &mut QueryBuilder<Sqlite>, scope: Scope) {
     match scope {
         Scope::Personal { user_id } => {
-            let user = user_id.as_bytes().to_vec();
-            builder
-                .push("SELECT entity_id FROM user_library WHERE user_id = ")
-                .push_bind(user.clone())
-                .push(" AND entity_kind = 'track' UNION SELECT entity_id FROM user_feedback WHERE user_id = ")
-                .push_bind(user.clone())
-                .push(" AND entity_kind = 'track' AND value = 'like' UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id WHERE p.owner_user_id = ")
-                .push_bind(user.clone())
-                .push(" AND p.is_temporary = 0 UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id WHERE mf.storage = 'folder' AND lf.owner_user_id = ")
-                .push_bind(user)
-                .push(") ");
+            push_personal_scope_tracks(builder, user_id.as_bytes().as_slice());
+            builder.push(") ");
         }
         Scope::Server(view) => {
             let (available, cached) = view.availability_pair();
@@ -1029,16 +1088,7 @@ fn push_scope_tracks(builder: &mut QueryBuilder<Sqlite>, scope: Scope) {
     builder.push("WITH scope_tracks(track_id) AS (");
     match scope {
         Scope::Personal { user_id } => {
-            let user = user_id.as_bytes().to_vec();
-            builder
-                .push("SELECT entity_id FROM user_library WHERE user_id = ")
-                .push_bind(user.clone())
-                .push(" AND entity_kind = 'track' UNION SELECT entity_id FROM user_feedback WHERE user_id = ")
-                .push_bind(user.clone())
-                .push(" AND entity_kind = 'track' AND value = 'like' UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id WHERE p.owner_user_id = ")
-                .push_bind(user.clone())
-                .push(" AND p.is_temporary = 0 UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id WHERE mf.storage = 'folder' AND lf.owner_user_id = ")
-                .push_bind(user);
+            push_personal_scope_tracks(builder, user_id.as_bytes().as_slice());
         }
         Scope::Server(view) => {
             let (available, cached) = view.availability_pair();
@@ -1654,6 +1704,10 @@ pub async fn list_albums_for_artist(
                          WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
                      UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
                          WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
+                     UNION SELECT t.id FROM tracks t WHERE t.album_id IN ( \
+                         SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'album' \
+                         UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' \
+                             AND value = 'like') \
                  ) \
                  SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
                         al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.origin, \
@@ -1668,6 +1722,8 @@ pub async fn list_albums_for_artist(
                      OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' \
                                   AND value = 'like' AND entity_id = al.id)) \
                  ORDER BY al.year IS NULL, al.year, al.sort_title, al.id",
+                user,
+                user,
                 user,
                 user,
                 user,
@@ -1715,20 +1771,23 @@ pub async fn list_albums_for_artist(
 /// This is the listing an empty `search3` query answers with: the OpenSubsonic
 /// protocol requires a server to return all its data for an empty query, and an
 /// FTS5 query with no token matches nothing, so the browse layer lists the
-/// scope directly instead. The tracks are ordered by sort title, with the id as
-/// a tie breaker, so the listing is stable across pages.
+/// scope directly instead. The id is the tie breaker of every order, so the
+/// listing is stable across pages whatever order a client asks for.
 ///
 /// # Parameters
 ///
 /// - `conn`: the connection or transaction to read on.
 /// - `scope`: the scope to filter by.
+/// - `sort`: how to order the tracks.
+/// - `genre`: only tracks carrying this genre, when given. The name is compared
+///   to the stored, folded form.
 /// - `limit`: the maximum number of tracks; a negative limit is unbounded.
 /// - `offset`: how many tracks to skip.
 ///
 /// # Returns
 ///
-/// The tracks in scope, each with its album, credited artists, genres, and
-/// preferred file.
+/// The tracks in scope, in the requested order, each with its album, credited
+/// artists, genres, and preferred file.
 ///
 /// # Errors
 ///
@@ -1736,51 +1795,83 @@ pub async fn list_albums_for_artist(
 pub async fn list_tracks(
     conn: &mut SqliteConnection,
     scope: Scope,
+    sort: TrackSort,
+    genre: Option<&str>,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<TrackView>, LibraryError> {
     if let Scope::Server(ServerBrowse::Disabled) = scope {
         return Ok(Vec::new());
     }
-    let rows: Vec<Vec<u8>> = match scope {
-        Scope::Personal { user_id } => {
-            let user = user_id.as_bytes().as_slice();
-            sqlx::query_scalar!(
-                "WITH scope_tracks(track_id) AS ( \
-                     SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'track' \
-                     UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'track' AND value = 'like' \
-                     UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id \
-                         WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
-                     UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
-                         WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
-                 ) \
-                 SELECT t.id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id \
-                 ORDER BY t.sort_title, t.id LIMIT ? OFFSET ?",
-                user,
-                user,
-                user,
-                user,
-                limit,
-                offset,
+    // The scope, the order and the genre filter are shared by both scopes, and
+    // two of the orders carry a bound user id, so the statement is assembled
+    // rather than written as one compile-checked literal; `queue` builds its
+    // songs listing the same way for the same reason.
+    let mut builder = QueryBuilder::<Sqlite>::new("");
+    push_scope_tracks(&mut builder, scope);
+    builder.push("SELECT t.id FROM tracks t JOIN scope_tracks st ON st.track_id = t.id");
+    if let Some(genre) = genre {
+        builder
+            .push(
+                " JOIN track_genres tg ON tg.track_id = t.id \
+                 JOIN genres g ON g.id = tg.genre_id AND g.name = ",
             )
-            .fetch_all(&mut *conn)
-            .await?
-        }
-        Scope::Server(view) => {
-            let (available, cached) = view.availability_pair();
-            sqlx::query_scalar!(
-                "SELECT t.id FROM tracks t WHERE t.availability IN (?, ?) \
-                 ORDER BY t.sort_title, t.id LIMIT ? OFFSET ?",
-                available,
-                cached,
-                limit,
-                offset,
-            )
-            .fetch_all(&mut *conn)
-            .await?
-        }
-    };
+            .push_bind(fold_genre(genre));
+    }
+    builder.push(" ORDER BY ");
+    push_track_order(&mut builder, sort);
+    builder
+        .push(" LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    let rows = builder
+        .build_query_scalar::<Vec<u8>>()
+        .fetch_all(&mut *conn)
+        .await?;
     track_views(conn, rows).await
+}
+
+/// Appends the order of a song listing.
+///
+/// # Parameters
+///
+/// - `builder`: the query being built, after its `ORDER BY`.
+/// - `sort`: the order to write.
+fn push_track_order(builder: &mut QueryBuilder<Sqlite>, sort: TrackSort) {
+    match sort {
+        TrackSort::Title => {
+            builder.push("t.sort_title, t.id");
+        }
+        TrackSort::Added => {
+            builder.push("t.created_at DESC, t.id DESC");
+        }
+        TrackSort::Played { user } => {
+            builder
+                .push("(SELECT max(p.started_at) FROM plays p WHERE p.user_id = ")
+                .push_bind(user.as_bytes().to_vec())
+                .push(" AND p.track_id = t.id) DESC, t.sort_title, t.id");
+        }
+        TrackSort::Artist => {
+            builder.push(
+                "(SELECT ar.sort_name FROM track_artists ta JOIN artists ar ON ar.id = ta.artist_id \
+                 WHERE ta.track_id = t.id ORDER BY ta.position LIMIT 1) NULLS LAST, \
+                 t.sort_title, t.id",
+            );
+        }
+        TrackSort::Album => {
+            builder.push(
+                "(SELECT al.sort_title FROM albums al WHERE al.id = t.album_id) NULLS LAST, \
+                 t.sort_title, t.id",
+            );
+        }
+        TrackSort::Year => {
+            builder.push(
+                "(SELECT al.year FROM albums al WHERE al.id = t.album_id) DESC, \
+                 t.sort_title, t.id",
+            );
+        }
+    }
 }
 
 /// Counts the tracks in scope.
@@ -1814,8 +1905,14 @@ pub async fn count_tracks(conn: &mut SqliteConnection, scope: Scope) -> Result<i
                          WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
                      UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
                          WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
+                     UNION SELECT t.id FROM tracks t WHERE t.album_id IN ( \
+                         SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'album' \
+                         UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' \
+                             AND value = 'like') \
                  ) \
                  SELECT count(*) AS counted FROM tracks t JOIN scope_tracks st ON st.track_id = t.id",
+                user,
+                user,
                 user,
                 user,
                 user,
@@ -1903,19 +2000,28 @@ pub struct QueueItem {
 /// inside the caller's library. The server scope is not offered here, so a
 /// queue can never include a track the caller's library does not hold.
 ///
+/// Only the songs collection has a free order, because it is the one list a
+/// client shows with a sort menu; every other collection has an order of its
+/// own.
+///
 /// # Examples
 ///
 /// ```
 /// use hearthsound_core::{EntityId, IdPrefix};
-/// use hearthsound_library::query::QueueCollection;
+/// use hearthsound_library::query::{QueueCollection, TrackSort};
 ///
 /// let artist = EntityId::new(IdPrefix::Artist);
 /// assert_ne!(QueueCollection::Artist(artist), QueueCollection::ArtistTop(artist));
+/// assert_eq!(
+///     QueueCollection::Songs(TrackSort::Title),
+///     QueueCollection::Songs(TrackSort::Title)
+/// );
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueCollection {
-    /// The caller's whole personal library, in the order the Songs view uses.
-    Songs,
+    /// The caller's whole personal library, in the order the Songs view shows
+    /// it in.
+    Songs(TrackSort),
     /// The tracks the caller liked, most recently liked first.
     Liked,
     /// The tracks the caller uploaded, newest first.
@@ -1936,7 +2042,8 @@ pub enum QueueCollection {
 /// availability and the caller's annotations, so a queue never costs a query
 /// per track. The scope is the caller's personal library, exactly as
 /// [`list_tracks`] defines it, so another user's playlist and unowned folder
-/// content never appear.
+/// content never appear. The songs collection is read in the order it carries,
+/// so a player handed that queue plays the list in the order the client shows.
 ///
 /// # Parameters
 ///
@@ -1961,7 +2068,7 @@ pub async fn queue(
 ) -> Result<Option<Vec<QueueItem>>, LibraryError> {
     let user = user_id.as_bytes().to_vec();
     let visible = match collection {
-        QueueCollection::Songs | QueueCollection::Liked | QueueCollection::Uploads => true,
+        QueueCollection::Songs(_) | QueueCollection::Liked | QueueCollection::Uploads => true,
         QueueCollection::Playlist(id) => playlist_visible(conn, user_id, id).await?,
         QueueCollection::Artist(id) | QueueCollection::ArtistTop(id) => {
             artist_in_scope(conn, Scope::Personal { user_id }, id).await?
@@ -1977,14 +2084,15 @@ pub async fn queue(
     // same way for the same reason.
     let mut builder = QueryBuilder::<Sqlite>::new("");
     match collection {
-        QueueCollection::Songs => {
+        QueueCollection::Songs(sort) => {
             push_personal_scope(&mut builder, &user);
             push_queue_projection(&mut builder, &user);
             builder.push(
                 " FROM tracks t JOIN scope_tracks st ON st.track_id = t.id \
                  LEFT JOIN albums al ON al.id = t.album_id \
-                 ORDER BY t.sort_title, t.id",
+                 ORDER BY ",
             );
+            push_track_order(&mut builder, sort);
         }
         QueueCollection::Liked => {
             push_queue_projection(&mut builder, &user);
@@ -2499,12 +2607,16 @@ async fn search_kind(
                              WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
                          UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
                              WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
+                         UNION SELECT t.id FROM tracks t WHERE t.album_id IN ( \
+                             SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'album' \
+                             UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' \
+                                 AND value = 'like') \
                      ) \
                      SELECT t.id FROM search_fts JOIN tracks t ON t.rowid = search_fts.rowid / 4 \
                      WHERE search_fts MATCH ? AND search_fts.rowid % 4 = 1 \
                        AND t.id IN (SELECT track_id FROM scope_tracks) \
                      ORDER BY rank LIMIT ? OFFSET ?",
-                    user, user, user, user, matched, limit, offset,
+                    user, user, user, user, user, user, matched, limit, offset,
                 )
                 .fetch_all(&mut *conn)
                 .await?,
@@ -2516,6 +2628,10 @@ async fn search_kind(
                              WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
                          UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
                              WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
+                         UNION SELECT t.id FROM tracks t WHERE t.album_id IN ( \
+                             SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'album' \
+                             UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' \
+                                 AND value = 'like') \
                      ) \
                      SELECT al.id FROM search_fts JOIN albums al ON al.rowid = search_fts.rowid / 4 \
                      WHERE search_fts MATCH ? AND search_fts.rowid % 4 = 2 \
@@ -2524,7 +2640,7 @@ async fn search_kind(
                          OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' \
                                       AND value = 'like' AND entity_id = al.id)) \
                      ORDER BY rank LIMIT ? OFFSET ?",
-                    user, user, user, user, matched, user, user, limit, offset,
+                    user, user, user, user, user, user, matched, user, user, limit, offset,
                 )
                 .fetch_all(&mut *conn)
                 .await?,
@@ -2536,6 +2652,10 @@ async fn search_kind(
                              WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
                          UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
                              WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
+                         UNION SELECT t.id FROM tracks t WHERE t.album_id IN ( \
+                             SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'album' \
+                             UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' \
+                                 AND value = 'like') \
                      ) \
                      SELECT ar.id FROM search_fts JOIN artists ar ON ar.rowid = search_fts.rowid / 4 \
                      WHERE search_fts MATCH ? AND search_fts.rowid % 4 = 3 \
@@ -2548,7 +2668,7 @@ async fn search_kind(
                          OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'artist' \
                                       AND value = 'like' AND entity_id = ar.id)) \
                      ORDER BY rank LIMIT ? OFFSET ?",
-                    user, user, user, user, matched, user, user, limit, offset,
+                    user, user, user, user, user, user, matched, user, user, limit, offset,
                 )
                 .fetch_all(&mut *conn)
                 .await?,
@@ -2650,8 +2770,14 @@ pub async fn track_in_scope(
                          WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
                      UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
                          WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
+                     UNION SELECT t.id FROM tracks t WHERE t.album_id IN ( \
+                         SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'album' \
+                         UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' \
+                             AND value = 'like') \
                  ) \
                  SELECT EXISTS (SELECT 1 FROM scope_tracks WHERE track_id = ?)",
+                user,
+                user,
                 user,
                 user,
                 user,
@@ -2730,6 +2856,10 @@ pub async fn album_in_scope(
                          WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
                      UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
                          WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
+                     UNION SELECT t.id FROM tracks t WHERE t.album_id IN ( \
+                         SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'album' \
+                         UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' \
+                             AND value = 'like') \
                  ) \
                  SELECT EXISTS ( \
                      SELECT 1 FROM albums al WHERE al.id = ? \
@@ -2737,6 +2867,8 @@ pub async fn album_in_scope(
                          OR EXISTS (SELECT 1 FROM user_library WHERE user_id = ? AND entity_kind = 'album' AND entity_id = al.id) \
                          OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' \
                                       AND value = 'like' AND entity_id = al.id)))",
+                user,
+                user,
                 user,
                 user,
                 user,
@@ -2819,6 +2951,10 @@ pub async fn artist_in_scope(
                          WHERE p.owner_user_id = ? AND p.is_temporary = 0 \
                      UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id \
                          WHERE mf.storage = 'folder' AND lf.owner_user_id = ? \
+                     UNION SELECT t.id FROM tracks t WHERE t.album_id IN ( \
+                         SELECT entity_id FROM user_library WHERE user_id = ? AND entity_kind = 'album' \
+                         UNION SELECT entity_id FROM user_feedback WHERE user_id = ? AND entity_kind = 'album' \
+                             AND value = 'like') \
                  ) \
                  SELECT EXISTS ( \
                      SELECT 1 FROM artists ar WHERE ar.id = ? \
@@ -2830,6 +2966,8 @@ pub async fn artist_in_scope(
                                       AND entity_id = ar.id) \
                          OR EXISTS (SELECT 1 FROM user_feedback WHERE user_id = ? AND entity_kind = 'artist' \
                                       AND value = 'like' AND entity_id = ar.id)))",
+                user,
+                user,
                 user,
                 user,
                 user,
@@ -3239,19 +3377,43 @@ fn keyed_ids(requested: &[EntityId]) -> HashMap<Vec<u8>, EntityId> {
 /// - `builder`: the builder to append to.
 /// - `user`: the 16 raw bytes of the user id.
 fn push_personal_scope(builder: &mut QueryBuilder<Sqlite>, user: &[u8]) {
+    builder.push("WITH scope_tracks(track_id) AS (");
+    push_personal_scope_tracks(builder, user);
+    builder.push(") ");
+}
+
+/// Writes the tracks of one user's personal library into a builder.
+///
+/// This is the body of the `scope_tracks` common table expression every
+/// personal listing joins against, without the parentheses around it: the
+/// caller writes `WITH scope_tracks(track_id) AS (` first and closes it after.
+/// The tracks are the ones the user saved or uploaded, the ones the user liked,
+/// the ones on a non-temporary playlist the user owns, the ones whose file
+/// lives in a folder the user owns, and the ones on an album the user saved or
+/// liked, because saving or liking an album adopts everything it holds.
+///
+/// The six binds are the user id, in that order: one for each of the four track
+/// sources, one for the saved albums, and one for the liked albums.
+///
+/// # Parameters
+///
+/// - `builder`: the builder to append to.
+/// - `user`: the 16 raw bytes of the user id.
+fn push_personal_scope_tracks(builder: &mut QueryBuilder<Sqlite>, user: &[u8]) {
     builder
-        .push("WITH scope_tracks(track_id) AS (SELECT entity_id FROM user_library WHERE user_id = ")
+        .push("SELECT entity_id FROM user_library WHERE user_id = ")
         .push_bind(user.to_vec())
-        .push(" AND entity_kind = 'track'")
-        .push(" UNION SELECT entity_id FROM user_feedback WHERE user_id = ")
+        .push(" AND entity_kind = 'track' UNION SELECT entity_id FROM user_feedback WHERE user_id = ")
         .push_bind(user.to_vec())
-        .push(" AND entity_kind = 'track' AND value = 'like'")
-        .push(" UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id WHERE p.owner_user_id = ")
+        .push(" AND entity_kind = 'track' AND value = 'like' UNION SELECT pt.track_id FROM playlist_tracks pt JOIN playlists p ON p.id = pt.playlist_id WHERE p.owner_user_id = ")
         .push_bind(user.to_vec())
-        .push(" AND p.is_temporary = 0")
-        .push(" UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id WHERE mf.storage = 'folder' AND lf.owner_user_id = ")
+        .push(" AND p.is_temporary = 0 UNION SELECT mf.track_id FROM media_files mf JOIN library_folders lf ON lf.id = mf.folder_id WHERE mf.storage = 'folder' AND lf.owner_user_id = ")
         .push_bind(user.to_vec())
-        .push(") ");
+        .push(" UNION SELECT t.id FROM tracks t WHERE t.album_id IN (SELECT entity_id FROM user_library WHERE user_id = ")
+        .push_bind(user.to_vec())
+        .push(" AND entity_kind = 'album' UNION SELECT entity_id FROM user_feedback WHERE user_id = ")
+        .push_bind(user.to_vec())
+        .push(" AND entity_kind = 'album' AND value = 'like')");
 }
 
 /// Appends a comma-separated bind list of entity keys and closes it.
