@@ -64,7 +64,7 @@
 //!
 //! # Failures are status codes
 //!
-//! A stream never answers a Subsonic envelope (invariant 6 of the repository
+//! A stream never answers a Subsonic envelope (invariant 5 of the repository
 //! rules): a client that treats any 200 body as audio would play an error
 //! document as noise. [`StreamError`] therefore carries the HTTP status to
 //! answer with - `404` for an id that names no track and for a track that is
