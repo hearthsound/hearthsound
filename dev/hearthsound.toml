@@ -26,6 +26,9 @@ path = "/data/hearthsound.db"
 [log]
 level = "info"
 format = "text"
+# Third-party crates log at error only; set this to `debug` while diagnosing a
+# codec, a watcher or a plugin. `level` covers Hearthsound's own records.
+dependencies = "error"
 
 # Runtime settings live in the database and are edited through the API or the
 # admin UI. A runtime setting can be pinned read-only by putting it in the

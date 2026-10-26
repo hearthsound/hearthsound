@@ -60,6 +60,14 @@ const DEFAULT_LOG_LEVEL: LogLevel = LogLevel::Info;
 /// The log format used when neither the file nor the environment sets one.
 const DEFAULT_LOG_FORMAT: LogFormat = LogFormat::Text;
 
+/// The level every other crate logs at when nothing sets one.
+///
+/// Third-party crates - a tag reader, a filesystem watcher, a codec - log
+/// warnings about files the server reads by the thousand, which drowns the
+/// server's own records at `info`; only their errors are worth a log line by
+/// default, and `log.dependencies` raises it while diagnosing one of them.
+const DEFAULT_DEPENDENCY_LOG_LEVEL: LogLevel = LogLevel::Error;
+
 /// The name of the managed storage directory inside the data directory.
 const STORAGE_DIR: &str = "storage";
 
@@ -294,6 +302,7 @@ impl BootstrapConfig {
             log: LogConfig {
                 level: raw.log.level.unwrap_or(DEFAULT_LOG_LEVEL),
                 format: raw.log.format.unwrap_or(DEFAULT_LOG_FORMAT),
+                dependencies: raw.log.dependencies.unwrap_or(DEFAULT_DEPENDENCY_LOG_LEVEL),
             },
             secrets: SecretsConfig { key_file },
             web: WebConfig {
@@ -359,10 +368,16 @@ pub struct DatabaseConfig {
 /// Log output settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LogConfig {
-    /// Verbosity of the log output.
+    /// Verbosity of Hearthsound's own log output (`log.level`).
     pub level: LogLevel,
     /// Encoding of the log output.
     pub format: LogFormat,
+    /// Verbosity of every other crate's log output (`log.dependencies`).
+    ///
+    /// A third-party crate is any crate whose target does not begin with
+    /// `hearthsound`, so this is what turns a tag reader's per-file warnings off
+    /// while keeping the server's own records at `log.level`.
+    pub dependencies: LogLevel,
 }
 
 /// Secret key material settings.
@@ -628,6 +643,8 @@ struct RawLog {
     level: Option<LogLevel>,
     /// `log.format`.
     format: Option<LogFormat>,
+    /// `log.dependencies`.
+    dependencies: Option<LogLevel>,
 }
 
 /// Raw values of the `secrets` table.
@@ -765,6 +782,7 @@ mod tests {
         assert!(config.server.cors_origins.is_empty());
         assert_eq!(config.log.level, LogLevel::Info);
         assert_eq!(config.log.format, LogFormat::Text);
+        assert_eq!(config.log.dependencies, LogLevel::Error);
         assert_eq!(config.web.root, None);
         assert!(config.settings.is_empty());
     }
@@ -806,6 +824,7 @@ path = "<data>/db/hearthsound.db"
 [log]
 level = "debug"
 format = "json"
+dependencies = "warn"
 
 [secrets]
 key_file = "/run/secrets/hearthsound.key"
@@ -833,6 +852,7 @@ root = "/srv/web"
         );
         assert_eq!(config.log.level, LogLevel::Debug);
         assert_eq!(config.log.format, LogFormat::Json);
+        assert_eq!(config.log.dependencies, LogLevel::Warn);
         assert_eq!(
             config.secrets.key_file,
             PathBuf::from("/run/secrets/hearthsound.key")

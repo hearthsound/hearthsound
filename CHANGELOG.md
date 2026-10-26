@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `log.level` covers Hearthsound's own records only; a new `log.dependencies` level (default `error`) covers every other crate, so a scan no longer drowns the log in a tag reader's warnings and `log.level = "debug"` no longer turns on third-party debug output.
 - `admin update-user` validates the password and every limit before its first write, so a refused value no longer leaves the account disabled or renamed by a command that then failed.
 - `admin add-folder` queues the folder's first scan, so a folder full of files is indexed without running `hearthsound scan` afterwards; with no server running the job waits in the queue for the next one.
 - A refused write to a runtime setting names why: a file-pinned key says the configuration file pins it, and an environment-overridden one says the environment variable sets it.
