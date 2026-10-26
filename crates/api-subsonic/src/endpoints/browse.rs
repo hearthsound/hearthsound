@@ -201,7 +201,7 @@ pub async fn get_artist(call: Call) -> Encoded {
         }
     }
     let album_count = albums.len() as i64;
-    let artist = match &page.head {
+    let mut artist = match &page.head {
         ArtistHead::Stored(artist_id) => {
             let detail = match browse::artist_any(database, *artist_id).await {
                 Ok(Some(detail)) => detail,
@@ -227,6 +227,21 @@ pub async fn get_artist(call: Call) -> Encoded {
         }
         ArtistHead::Catalog(found) => projection::catalog_artist(found, Some(album_count), &suffix),
     };
+    // A page that could not list the whole discography says so, and a cut listing
+    // too, so a client offers a reload instead of presenting the partial work as
+    // the artist's.
+    if call.params().vendor_enabled() {
+        let mut flags = Object::new();
+        if !page.discography_complete {
+            flags = flags.set("discographyComplete", false);
+        }
+        if page.discography_truncated {
+            flags = flags.set("discographyTruncated", true);
+        }
+        if !flags.members().is_empty() {
+            artist = artist.set("hearthsound", flags);
+        }
+    }
     call.respond(Response::ok().member("artist", artist.set("album", Array::new(albums))))
         .await
 }

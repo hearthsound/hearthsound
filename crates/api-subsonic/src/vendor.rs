@@ -664,7 +664,25 @@ fn apply_object(object: &mut Object, members: &HashMap<String, Object>, inherite
     let Some(member) = id_of(object).and_then(|id| members.get(id)).cloned() else {
         return;
     };
-    let member = with_path(object, member, inherited);
+    let mut member = with_path(object, member, inherited);
+    // A member the endpoint set itself carries what the standing cannot know,
+    // such as whether a page could list the whole discography; it is kept for the
+    // fields the computed member does not state.
+    if let Some(existing) = object
+        .members()
+        .iter()
+        .find(|(name, _)| name == "hearthsound")
+        .and_then(|(_, value)| match value {
+            Value::Object(existing) => Some(existing.clone()),
+            _ => None,
+        })
+    {
+        for (name, value) in existing.members() {
+            if !member.members().iter().any(|(known, _)| known == name) {
+                member = member.set(name.clone(), value.clone());
+            }
+        }
+    }
     *object = std::mem::take(object).set("hearthsound", member);
 }
 

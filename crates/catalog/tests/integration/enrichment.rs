@@ -298,3 +298,62 @@ async fn alias_rows(env: &Env, value: &str) -> i64 {
         .await
         .unwrap()
 }
+
+/// A discography a provider could not list is marked incomplete; one that
+/// answered is complete and not cut.
+#[tokio::test]
+async fn a_discography_that_could_not_be_listed_is_marked_incomplete() {
+    use hearthsound_core::{CatalogId, EntityKind, Slug};
+
+    let env = discography_env().await;
+    let service = env.service();
+    let artist = CatalogId::new(
+        Slug::new("disco").unwrap(),
+        EntityKind::Artist,
+        "disco-artist-1",
+    )
+    .unwrap();
+    let page = service
+        .artist_page(&ClientId::Catalog(artist), &scopes(), PageDepth::Full)
+        .await
+        .unwrap()
+        .expect("the artist answers");
+    assert!(
+        page.discography_complete,
+        "the fixture lists its three albums"
+    );
+    assert!(!page.discography_truncated);
+
+    // A stored artist whose instance answers no discography keeps the page
+    // answerable, and the page says the discography is incomplete.
+    let (server, url) = crate::common::catalog_endpoint(
+        200,
+        r#"{"artists":[{"id":"ar-1","name":"Discography Artist"}]}"#,
+        None,
+    )
+    .await;
+    let _ = server;
+    let env = crate::common::Env::new().await;
+    env.instance(
+        "httpcat",
+        hearthsound_test_support::HTTP_CATALOG,
+        crate::common::HTTP_CATALOG_ID,
+        crate::common::http_config(&url),
+    )
+    .await;
+    env.assign(Layer::Catalog, &["httpcat"]).await;
+    let (_, _, artist) = env
+        .stored_album_with_track("An Album", "Discography Artist", 2001)
+        .await;
+    let page = env
+        .service()
+        .artist_page(&ClientId::Entity(artist), &scopes(), PageDepth::Full)
+        .await
+        .unwrap()
+        .expect("the stored artist answers");
+    assert!(
+        !page.discography_complete,
+        "a discography the instance could not answer is incomplete"
+    );
+    assert!(!page.albums.is_empty(), "the library album is still listed");
+}

@@ -509,6 +509,11 @@ impl CatalogService {
     /// pairing a browse page already uses, applied to a search result without
     /// recording anything, so a search never writes.
     ///
+    /// The fold is a display rule and never an identity: nothing is recorded, so
+    /// a later search with a different answer folds differently. A browse page
+    /// does not fold at all (see `pages::stored_artist_of_catalog`), because its
+    /// listing and its links can tell two acts apart.
+    ///
     /// A stored row that already carries an alias for the answering instance is
     /// skipped: the alias table has settled which provider entity it is, and a
     /// second catalog hit of the same name is a different entity.

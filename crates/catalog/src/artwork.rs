@@ -972,6 +972,11 @@ impl CatalogService {
     /// instance may not reach is denied here too, and the bytes are stored when
     /// that instance's manifest allows it.
     ///
+    /// The instance's *current* `catalog.imageCachePolicy` governs storing, not
+    /// serving: an image cached while the policy was `cache` keeps being served
+    /// after the policy is switched to `no-store`, and switching it back resumes
+    /// storing. A `no-store` instance never writes.
+    ///
     /// # Parameters
     ///
     /// - `instance`: the instance that described the image.
@@ -1075,6 +1080,9 @@ impl CatalogService {
     /// The stored image, or `None` when the cache does not hold it. A row whose
     /// file is gone, and a file that cannot be read, are both a miss: the caller
     /// fetches the image again rather than failing.
+    ///
+    /// The read carries no policy check: a cover stored while the instance
+    /// allowed caching is served whatever the policy says now.
     async fn cached_cover(&self, key: &str) -> Option<CoverArt> {
         let row = sqlx::query!(
             "SELECT path, content_type FROM artwork_cache WHERE key = ?",

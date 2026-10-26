@@ -565,6 +565,12 @@ impl CatalogService {
     /// catalog instance already claims is adopted, so two acts whose names
     /// merely resemble each other are not merged.
     ///
+    /// A search response folds an unaliased same-name catalog artist into the
+    /// stored one instead ([`CatalogService::name_twins`]), because a search row
+    /// has no way to tell two identical names apart; a browse page does not,
+    /// because its listing and its links can. The two rules therefore differ on
+    /// purpose, and neither records an alias.
+    ///
     /// # Parameters
     ///
     /// - `catalog`: the catalog artist.
@@ -881,7 +887,8 @@ impl CatalogService {
                     Vec::new()
                 }
             };
-            discography_truncated = u32::try_from(references.len()).unwrap_or(u32::MAX) >= MAX_PAGE_ALBUMS;
+            discography_truncated =
+                u32::try_from(references.len()).unwrap_or(u32::MAX) >= MAX_PAGE_ALBUMS;
             if !references.is_empty() {
                 let slug = catalog.id.slug().clone();
                 let provider_ids: Vec<String> = references
