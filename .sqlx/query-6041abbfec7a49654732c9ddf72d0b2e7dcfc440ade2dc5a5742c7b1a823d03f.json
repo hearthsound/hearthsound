@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM catalog_cache WHERE instance_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "6041abbfec7a49654732c9ddf72d0b2e7dcfc440ade2dc5a5742c7b1a823d03f"
+}

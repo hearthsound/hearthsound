@@ -61,6 +61,9 @@ pub struct NativeServices {
     pub registry: Arc<ProviderRegistry>,
     /// The acquisition orchestrator.
     pub orchestrator: Arc<AcquisitionOrchestrator>,
+    /// The catalog layer, so an edit that changes how an instance answers also
+    /// drops the answers it gave under the old configuration.
+    pub catalog: Arc<hearthsound_catalog::CatalogService>,
     /// The activity service: the repositories the caller's own playlists and
     /// play history are read and written through.
     pub activity: Arc<ActivityService>,

@@ -320,6 +320,20 @@ pub async fn patch_provider(
             .update(&slug, &spec)
             .await
             .map_err(|error| instance_problem(&error))?;
+        // The edit already landed, so a cache that cannot be cleared is a log
+        // line rather than a failed request: the next fetch overwrites the entry.
+        if let Err(error) = state
+            .services()
+            .catalog
+            .invalidate_instance(current.id)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                instance = %current.slug,
+                "the cached answers of an edited instance could not be dropped"
+            );
+        }
     }
 
     // The enable write is not allowed to skip the rebuild: a failure of either

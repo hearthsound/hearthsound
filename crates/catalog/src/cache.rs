@@ -691,6 +691,36 @@ impl Cache {
         }
     }
 
+    /// Deletes every cached answer of one instance.
+    ///
+    /// The key carries the instance id and no configuration of it, so an edit
+    /// that changes the URL, a credential or a host setting makes every stored
+    /// answer wrong. The in-memory tier is flushed whole rather than by predicate:
+    /// it holds a thousand entries and a scan of them would cost more than letting
+    /// the table refill it.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance`: the instance whose answers are dropped.
+    ///
+    /// # Returns
+    ///
+    /// The number of rows deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::Database`] when the delete fails.
+    pub(crate) async fn forget_instance(&self, instance: Uuid) -> Result<u64, CatalogError> {
+        let deleted = sqlx::query!(
+            "DELETE FROM catalog_cache WHERE instance_id = ?",
+            instance.as_bytes().as_slice(),
+        )
+        .execute(self.database.writer())
+        .await?;
+        self.memory.invalidate_all();
+        Ok(deleted.rows_affected())
+    }
+
     /// Deletes every expired row.
     ///
     /// A non-expiring row is never deleted: a `NULL` `expires_at` means the

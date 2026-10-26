@@ -305,3 +305,66 @@ async fn a_cache_read_failure_is_a_miss() {
         "an unreadable cache must not decide which provider answers"
     );
 }
+
+#[tokio::test]
+async fn editing_an_instance_drops_only_its_answers() {
+    let (env, server) = http_env(ONE_TRACK).await;
+    env.instance(
+        "other",
+        HELLO_CATALOG,
+        HELLO_CATALOG_ID,
+        serde_json::json!({}),
+    )
+    .await;
+    let edited = env.instance_id("httpcat");
+    // The second instance is not assigned to a layer, so its id is read from the
+    // row rather than from the registry.
+    let other: Vec<u8> =
+        sqlx::query_scalar("SELECT id FROM provider_instances WHERE slug = 'other'")
+            .fetch_one(env.database.readers())
+            .await
+            .unwrap();
+    let other = uuid::Uuid::from_slice(&other).unwrap();
+    let service = env.service();
+
+    service.search(&query("world")).await.unwrap();
+    write_cache_row(
+        &env.database,
+        other,
+        "search|elsewhere",
+        "{}",
+        Some(now_millis() + 60_000),
+    )
+    .await;
+    assert_eq!(requests(&server).await, 1);
+
+    let deleted = service.invalidate_instance(edited).await.unwrap();
+    assert_eq!(deleted, 1, "only the edited instance loses its rows");
+    assert_eq!(rows_of(&env.database, edited).await, 0);
+    assert_eq!(
+        rows_of(&env.database, other).await,
+        1,
+        "another instance keeps its answer"
+    );
+
+    service.search(&query("world")).await.unwrap();
+    assert_eq!(
+        requests(&server).await,
+        2,
+        "the edited instance is asked again"
+    );
+}
+
+/// Counts the cached rows of one instance.
+///
+/// # Parameters
+///
+/// - `database`: the database to read.
+/// - `instance`: the instance whose rows are counted.
+async fn rows_of(database: &hearthsound_db::Database, instance: uuid::Uuid) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM catalog_cache WHERE instance_id = ?")
+        .bind(instance.as_bytes().as_slice())
+        .fetch_one(database.readers())
+        .await
+        .unwrap()
+}

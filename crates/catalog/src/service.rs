@@ -1148,6 +1148,37 @@ impl CatalogService {
             .await;
     }
 
+    /// Drops every answer an instance gave, so an edit is served from the provider.
+    ///
+    /// A provider instance is edited when its URL, its credential or its host
+    /// settings change, and none of those is part of the cache key: without this
+    /// the old answers would be served for as long as their lifetime lasts. The
+    /// name resolutions and the enrichment claims are cleared with it, because
+    /// both were established against the configuration that no longer exists.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance`: the instance that was edited.
+    ///
+    /// # Returns
+    ///
+    /// The number of cached rows deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::Database`] when the delete fails.
+    pub async fn invalidate_instance(&self, instance: Uuid) -> Result<u64, CatalogError> {
+        let deleted = self.inner.cache.forget_instance(instance).await?;
+        self.inner.artist_resolutions.invalidate_all();
+        lock_enriching(&self.inner.enriching).clear();
+        tracing::debug!(
+            instance = %instance,
+            rows = deleted,
+            "dropped the cached answers of an edited instance"
+        );
+        Ok(deleted)
+    }
+
     /// Deletes the expired rows of the persistent cache tier.
     ///
     /// A stale row is ignored when it is read, so sweeping is housekeeping: it
@@ -1349,6 +1380,27 @@ fn album_ref_result(
 ) -> Result<CatalogAlbumRefResult, CatalogError> {
     let id = catalog_id(slug, EntityKind::Album, &album.id)?;
     Ok(CatalogAlbumRefResult { id, album })
+}
+
+/// Locks the enrichment map, ignoring poisoning.
+///
+/// # Parameters
+///
+/// - `enriching`: the map of enrichment requests in flight.
+///
+/// # Returns
+///
+/// The guard.
+fn lock_enriching(
+    enriching: &std::sync::Mutex<
+        std::collections::HashMap<(String, String, Uuid), std::time::Instant>,
+    >,
+) -> std::sync::MutexGuard<'_, std::collections::HashMap<(String, String, Uuid), std::time::Instant>>
+{
+    match enriching.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 /// Builds the reference form of a full album.
