@@ -353,9 +353,11 @@ impl ActivityService {
     /// the same user and track reported that it delivered no song audio, or a
     /// playback report recorded the same play recently. The report's memory is
     /// consumed by the first scrobble it suppresses, so a second submission of
-    /// the same track is recorded: a Subsonic submission is an explicit
-    /// statement that a play happened, and only a report's own play is deduped
-    /// against it. A submission with no known session is recorded: the client
+    /// the same track is recorded: only a play a report recorded suppresses a
+    /// scrobble, and a Subsonic submission is always recorded, because the
+    /// client states that a play happened. The asymmetry is deliberate - a
+    /// report and the client's own scrobble of it are one play, while two
+    /// submissions are two. A submission with no known session is recorded: the client
     /// heard the song through a stream the server did not serve, or the session
     /// has since expired, and neither is evidence against the play.
     ///
