@@ -836,6 +836,77 @@ impl Playlists {
         Ok(playlist)
     }
 
+    /// Deletes the generated playlists of one instance that are still
+    /// temporary.
+    ///
+    /// Removing a discovery instance must not leave the playlists it produced
+    /// behind with no source: they would linger until their expiry, and a
+    /// re-added instance would create a second copy next to them. So the
+    /// instance's still-temporary playlists go with it, in one transaction that
+    /// also refreshes the playlist pin of every track they held.
+    ///
+    /// A playlist the listener made permanent, or one their first edit detached,
+    /// is kept: it is their playlist even though the slot's source is gone.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance_id`: the provider instance being removed.
+    ///
+    /// # Returns
+    ///
+    /// The deleted playlists as (owner, playlist id), so the caller can tell
+    /// each owner that their playlist is gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActivityError::Database`] when the rows cannot be read or
+    /// deleted and [`ActivityError::Library`] when a pin cannot be updated.
+    pub async fn delete_generated_for_instance(
+        &self,
+        instance_id: Uuid,
+    ) -> Result<Vec<(Uuid, EntityId)>, ActivityError> {
+        let mut tx = self.writer.begin_with(crate::READ_THEN_WRITE).await?;
+        let rows = sqlx::query!(
+            "SELECT id, owner_user_id FROM playlists \
+             WHERE source_instance_id = ? AND is_temporary = 1",
+            instance_id.as_bytes().as_slice(),
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut deleted = Vec::with_capacity(rows.len());
+        let mut tracks = Vec::new();
+        for row in rows {
+            let id = EntityId::from_uuid(IdPrefix::Playlist, Uuid::from_slice(&row.id)?);
+            let owner = Uuid::from_slice(&row.owner_user_id)?;
+            let entries = sqlx::query_scalar!(
+                "SELECT track_id FROM playlist_tracks WHERE playlist_id = ?",
+                row.id.as_slice(),
+            )
+            .fetch_all(&mut *tx)
+            .await?;
+            for track in entries {
+                tracks.push(EntityId::from_uuid(
+                    IdPrefix::Track,
+                    Uuid::from_slice(&track)?,
+                ));
+            }
+            sqlx::query!("DELETE FROM playlists WHERE id = ?", row.id.as_slice())
+                .execute(&mut *tx)
+                .await?;
+            deleted.push((owner, id));
+        }
+        tracks.sort_unstable_by_key(|track| *track.uuid().as_bytes());
+        tracks.dedup();
+        for track in tracks {
+            refresh_playlist_pin(&mut tx, track).await?;
+        }
+        tx.commit().await?;
+        if !deleted.is_empty() {
+            self.signal.notify();
+        }
+        Ok(deleted)
+    }
+
     /// Deletes the temporary playlists whose expiry has passed.
     ///
     /// The entries go with the playlist, and the playlist pin of every track

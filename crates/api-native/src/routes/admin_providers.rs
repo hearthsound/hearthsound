@@ -19,6 +19,8 @@ use std::collections::HashMap;
 use axum::Json;
 use axum::extract::{Path as UrlPath, State};
 use axum::http::StatusCode;
+use hearthsound_core::EntityId;
+use hearthsound_core::events::{Audience, PlaylistChanged, ServerEvent};
 use hearthsound_plugin_host::{InstanceError, InstanceHostConfig, InstanceSpec, InstanceView};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -368,12 +370,15 @@ pub async fn patch_provider(
 /// Removes a provider instance.
 ///
 /// The instance's key-value rows and its layer assignments go with it, and the
-/// registry is rebuilt so it stops serving.
+/// registry is rebuilt so it stops serving. The generated playlists it produced
+/// that are still temporary are deleted in the same operation, and each owner is
+/// told with a `playlist.changed` of `deleted`; a playlist the listener made
+/// permanent or edited is kept, because it is theirs.
 ///
 /// # Errors
 ///
 /// Answers `not-found` for an unknown instance and `internal` when the row
-/// cannot be removed.
+/// cannot be removed or its playlists cannot be deleted.
 #[utoipa::path(
     delete,
     path = "/api/v1/admin/providers/{slug}",
@@ -390,6 +395,25 @@ pub async fn delete_provider(
     State(state): State<NativeState>,
     UrlPath(slug): UrlPath<String>,
 ) -> Result<StatusCode, Problem> {
+    // The playlists go first: if that fails the instance is still there, so
+    // nothing is half done.
+    let row = state
+        .services()
+        .plugin_repository
+        .instance_by_slug(&slug)
+        .await
+        .map_err(|error| problem::internal("reading a provider instance", &error))?;
+    let removed = match row {
+        Some(row) => state
+            .activity()
+            .playlists()
+            .delete_generated_for_instance(row.id)
+            .await
+            .map_err(|error| {
+                problem::internal("deleting a discovery instance's playlists", &error)
+            })?,
+        None => Vec::new(),
+    };
     state
         .services()
         .instances
@@ -397,7 +421,26 @@ pub async fn delete_provider(
         .await
         .map_err(|error| instance_problem(&error))?;
     rebuild(&state).await?;
+    publish_deleted_playlists(&state, removed);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Tells each owner that a playlist of theirs was deleted.
+///
+/// # Parameters
+///
+/// - `state`: the shared services, whose bus carries the events.
+/// - `removed`: the deleted playlists as (owner, playlist id).
+fn publish_deleted_playlists(state: &NativeState, removed: Vec<(uuid::Uuid, EntityId)>) {
+    for (owner, id) in removed {
+        state.services().events.publish_for(
+            Audience::User(owner),
+            ServerEvent::PlaylistChanged(PlaylistChanged {
+                playlist_id: id.to_string(),
+                change: "deleted".to_owned(),
+            }),
+        );
+    }
 }
 
 /// Runs one instance's health check.

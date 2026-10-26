@@ -25,7 +25,8 @@ use axum::extract::multipart::{Field, Multipart};
 use axum::extract::{FromRequest, Path as UrlPath, Request, State};
 use axum::http::StatusCode;
 use hearthsound_config::keys;
-use hearthsound_core::{IdPrefix, new_uuid_v7};
+use hearthsound_core::events::{Audience, PlaylistChanged, ServerEvent};
+use hearthsound_core::{EntityId, IdPrefix, new_uuid_v7};
 use hearthsound_plugin_host::{
     AdminError, AvailablePlugin, AvailableReport, IndexError, InstallError, Manifest,
     PluginRepository, PluginRow, PluginSource, PluginUpdate, RepoError, RepositoryRef,
@@ -636,10 +637,15 @@ pub async fn decline_upgrade(
 
 /// Removes a plugin with its rows, assignments and files.
 ///
+/// The instances the plugin provided go with it by cascade, so the generated
+/// playlists they produced and that are still temporary are deleted first, and
+/// each owner is told with a `playlist.changed` of `deleted`. A playlist the
+/// listener made permanent or edited is kept.
+///
 /// # Errors
 ///
-/// Answers `not-found` for an unknown plugin and `internal` when its files
-/// cannot be removed.
+/// Answers `not-found` for an unknown plugin and `internal` when its files or
+/// its instances' playlists cannot be removed.
 #[utoipa::path(
     delete,
     path = "/api/v1/admin/plugins/{id}",
@@ -656,6 +662,24 @@ pub async fn delete_plugin(
     State(state): State<NativeState>,
     UrlPath(id): UrlPath<String>,
 ) -> Result<StatusCode, Problem> {
+    // The instances disappear by cascade, so their playlists are removed while
+    // the rows that name them still exist.
+    let instances = state
+        .services()
+        .plugin_repository
+        .instances()
+        .await
+        .map_err(|error| problem::internal("reading the provider instances", &error))?;
+    let mut removed = Vec::new();
+    for instance in instances.iter().filter(|row| row.plugin_id == id) {
+        let deleted = state
+            .activity()
+            .playlists()
+            .delete_generated_for_instance(instance.id)
+            .await
+            .map_err(|error| problem::internal("deleting a plugin's playlists", &error))?;
+        removed.extend(deleted);
+    }
     state
         .services()
         .admin
@@ -663,7 +687,26 @@ pub async fn delete_plugin(
         .await
         .map_err(|error| admin_problem(&error))?;
     rebuild(&state).await?;
+    publish_deleted_playlists(&state, removed);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Tells each owner that a playlist of theirs was deleted.
+///
+/// # Parameters
+///
+/// - `state`: the shared services, whose bus carries the events.
+/// - `removed`: the deleted playlists as (owner, playlist id).
+fn publish_deleted_playlists(state: &NativeState, removed: Vec<(uuid::Uuid, EntityId)>) {
+    for (owner, id) in removed {
+        state.services().events.publish_for(
+            Audience::User(owner),
+            ServerEvent::PlaylistChanged(PlaylistChanged {
+                playlist_id: id.to_string(),
+                change: "deleted".to_owned(),
+            }),
+        );
+    }
 }
 
 /// Lists every plugin the reachable indexes offer.

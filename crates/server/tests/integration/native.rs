@@ -3141,6 +3141,7 @@ mod repository_admin {
 }
 
 mod provider_admin {
+    use hearthsound_activity::{Playlists, SyncedPlaylist};
     use hearthsound_core::Layer;
     use hearthsound_plugin_host::{PluginRepository, PluginSource};
     use hearthsound_test_support::{ALBUM_CATALOG, HELLO_CATALOG, HTTP_CATALOG, METADATA_FIXTURE};
@@ -3373,6 +3374,121 @@ mod provider_admin {
         )
         .await;
         assert_eq!(listed["providers"].as_array().unwrap().len(), 0);
+        fixture.stop().await;
+    }
+
+    /// Writes one generated playlist into the given instance's slot.
+    ///
+    /// # Parameters
+    ///
+    /// - `fixture`: the running server.
+    /// - `instance`: the discovery instance the playlist came from.
+    /// - `reference`: the service's slot reference.
+    /// - `name`: the playlist name.
+    ///
+    /// # Returns
+    ///
+    /// The playlist.
+    async fn generated(
+        fixture: &Fixture,
+        instance: uuid::Uuid,
+        reference: &str,
+        name: &str,
+    ) -> hearthsound_activity::Playlist {
+        Playlists::new(fixture.services.database())
+            .upsert_generated(
+                &SyncedPlaylist {
+                    owner_user_id: fixture.user_id,
+                    source_instance_id: instance,
+                    source_ref: reference,
+                    name,
+                    comment: None,
+                    expires_at: i64::MAX,
+                    tracks: &[],
+                },
+                1,
+            )
+            .await
+            .unwrap()
+            .expect("a new slot is written")
+    }
+
+    #[tokio::test]
+    async fn removing_a_discovery_instance_removes_its_temporary_playlists() {
+        let fixture = Fixture::new().await;
+        install_plugin(&fixture, METADATA_FIXTURE, METADATA_ID).await;
+        let created = create_provider(&fixture, "weekly", METADATA_ID).await;
+        let slug = created["slug"].as_str().unwrap().to_owned();
+        let instance = fixture.services.instances().get(&slug).await.unwrap();
+
+        let temporary = generated(&fixture, instance.id, "weekly-jams", "Weekly Jams").await;
+        assert!(temporary.is_temporary);
+        let kept = generated(&fixture, instance.id, "kept", "Kept").await;
+        fixture
+            .services
+            .activity()
+            .playlists()
+            .set_lifetime(kept.id, fixture.user_id, false, None)
+            .await
+            .unwrap();
+
+        let removed = bearer(
+            &fixture,
+            reqwest::Method::DELETE,
+            &format!("/api/v1/admin/providers/{slug}"),
+            None,
+        )
+        .await;
+        assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+
+        let playlists = fixture
+            .services
+            .activity()
+            .playlists()
+            .list(fixture.user_id, Some(fixture.user_id))
+            .await
+            .unwrap();
+        assert_eq!(
+            playlists
+                .iter()
+                .map(|playlist| playlist.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Kept"],
+            "the instance took its temporary playlist and left the kept one"
+        );
+        assert!(playlists[0].id == kept.id);
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
+    async fn removing_a_plugin_removes_its_instances_temporary_playlists() {
+        let fixture = Fixture::new().await;
+        install_plugin(&fixture, METADATA_FIXTURE, METADATA_ID).await;
+        let created = create_provider(&fixture, "weekly", METADATA_ID).await;
+        let slug = created["slug"].as_str().unwrap().to_owned();
+        let instance = fixture.services.instances().get(&slug).await.unwrap();
+        let temporary = generated(&fixture, instance.id, "weekly-jams", "Weekly Jams").await;
+
+        let removed = bearer(
+            &fixture,
+            reqwest::Method::DELETE,
+            &format!("/api/v1/admin/plugins/{METADATA_ID}"),
+            None,
+        )
+        .await;
+        assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+
+        assert!(
+            fixture
+                .services
+                .activity()
+                .playlists()
+                .get(temporary.id, fixture.user_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "the plugin took its instance's temporary playlist"
+        );
         fixture.stop().await;
     }
 

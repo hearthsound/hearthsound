@@ -858,3 +858,100 @@ async fn detaching_pins_the_playlist_tracks() {
         );
     }
 }
+
+/// Deleting an instance removes only its still-temporary generated playlists.
+#[tokio::test]
+async fn deleting_an_instance_removes_only_its_temporary_playlists() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let playlist = Playlists::new(&database);
+    let user = insert_user(&database).await;
+    let instance = insert_discovery_instance(&database).await;
+    let (album, tracks) = insert_album(&library).await;
+    let ids = entities(&tracks);
+
+    // One temporary generated playlist, one the listener made permanent, one
+    // their edit detached, and one they made themselves.
+    let temporary = generated(&playlist, user, instance, &ids).await;
+    let kept = playlist
+        .upsert_generated(
+            &hearthsound_activity::SyncedPlaylist {
+                owner_user_id: user,
+                source_instance_id: instance,
+                source_ref: "weekly-jams-permanent",
+                name: "Kept",
+                comment: None,
+                expires_at: GENERATED_EXPIRY,
+                tracks: &ids,
+            },
+            1_000,
+        )
+        .await
+        .unwrap()
+        .expect("a new slot is written");
+    let permanent = playlist
+        .set_lifetime(kept.id, user, false, None)
+        .await
+        .unwrap();
+    assert!(!permanent.is_temporary);
+    let detached = playlist
+        .upsert_generated(
+            &hearthsound_activity::SyncedPlaylist {
+                owner_user_id: user,
+                source_instance_id: instance,
+                source_ref: "weekly-jams-edited",
+                name: "Edited",
+                comment: None,
+                expires_at: GENERATED_EXPIRY,
+                tracks: &ids,
+            },
+            1_000,
+        )
+        .await
+        .unwrap()
+        .expect("a new slot is written");
+    playlist
+        .update(
+            detached.id,
+            user,
+            &PlaylistUpdate {
+                name: Some("Mine".to_owned()),
+                ..PlaylistUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+    let own = playlist
+        .create(
+            user,
+            "Own",
+            None,
+            false,
+            &[track_id(insert_track(&library, album, "Third", 3).await)],
+        )
+        .await
+        .unwrap();
+
+    let removed = playlist
+        .delete_generated_for_instance(instance)
+        .await
+        .unwrap();
+
+    assert_eq!(removed, vec![(user, temporary.id)]);
+    assert!(playlist.get(temporary.id, user).await.unwrap().is_none());
+    for kept in [kept.id, detached.id, own.id] {
+        assert!(
+            playlist.get(kept, user).await.unwrap().is_some(),
+            "a playlist the listener kept was deleted"
+        );
+    }
+
+    // A track the deleted playlist held is still pinned by the playlist that
+    // also holds it, and is no longer pinned by a playlist that is gone.
+    let mut conn = database.readers().acquire().await.unwrap();
+    let reasons = hearthsound_library::retention::pin_reasons(&mut conn, ids[0])
+        .await
+        .unwrap();
+    assert!(reasons.contains(&hearthsound_core::PinReason::Playlist));
+}
