@@ -237,6 +237,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instance's image cache policy: a `no-store` instance's picture is not cacheable
   by the client.
 
+- A known `/api/v1` path asked with a method it does not support answers `405`
+  `method-not-allowed` as a problem document, instead of an empty 405 with no body.
+- The provider link callback answers a sign-in page when it is opened without a
+  session, so a browser is never shown a problem document for it.
+- A failed provider link words the listener's problem - a rejected token, an
+  incomplete configuration, a rate limit, or an unreachable service - instead of
+  repeating the plugin's protocol word.
+- A live event subscriber receives ids in the order they were assigned, so the
+  `Last-Event-ID` it reports never skips an event.
+
 ### Fixed
 
 - A stored provider secret is never printed by a validation error: the message
