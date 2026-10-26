@@ -1013,3 +1013,22 @@ async fn a_bulk_write_without_ids_is_error_10() {
         assert_error(&probe, 10);
     }
 }
+
+/// Starring a track that has no row answers not found.
+#[tokio::test]
+async fn starring_an_unknown_track_is_not_found() {
+    let (fixture, _, _) = fixture(1).await;
+    let app = fixture.app();
+    let missing = EntityId::new(IdPrefix::Track);
+
+    let probe = get(
+        &app,
+        &format!("/rest/star?id={missing}&apiKey={}&f=json", fixture.api_key),
+    )
+    .await;
+    assert_error(&probe, 70);
+    assert!(
+        !is_liked(&fixture, EntityKind::Track, missing).await,
+        "no like is stored for a track that does not exist"
+    );
+}

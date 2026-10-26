@@ -624,7 +624,9 @@ async fn annotations_for(
 /// The Subsonic error.
 fn failure(operation: &'static str, error: &ActivityError) -> SubsonicError {
     match error {
-        ActivityError::UnknownPlaylist { .. } => SubsonicError::not_found(),
+        ActivityError::UnknownPlaylist { .. } | ActivityError::UnknownTrack { .. } => {
+            SubsonicError::not_found()
+        }
         ActivityError::NotOwner { .. } => SubsonicError::not_authorized(),
         ActivityError::InvalidName { .. } => SubsonicError::new(
             crate::response::codes::GENERIC,
