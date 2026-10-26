@@ -173,7 +173,6 @@ pub async fn get_transcode_stream(call: BinaryCall) -> HttpResponse {
         max_bitrate_kbps: target.as_ref().map(|target| target.bitrate_kbps),
         offset,
         max_channels: target.as_ref().and_then(|target| target.max_channels),
-        estimate_content_length: false,
         can_acquire: call.principal().can_acquire,
     };
     match call.state().stream().serve(&request).await {

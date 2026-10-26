@@ -626,21 +626,43 @@ async fn stream_transcodes_a_time_offset() {
 }
 
 #[tokio::test]
-async fn stream_sets_an_estimated_length() {
+async fn a_transcode_never_declares_a_length() {
     let streamed = streamed_as(AudioFormat::Flac, 2.0, "flac", "flac", 1012).await;
     let app = streamed.fixture.app();
 
     let probe = request(
         &app,
         Method::GET,
-        &format!("{}&format=mp3&estimateContentLength=true", streamed.uri()),
+        &format!(
+            "{}&format=mp3&maxBitRate=96&estimateContentLength=true",
+            streamed.uri()
+        ),
         &[],
     )
     .await;
 
     assert_eq!(probe.status, StatusCode::OK);
-    // Two seconds at the mp3 default of 320 kbit/s.
-    assert_eq!(header_of(&probe, header::CONTENT_LENGTH), "80000");
+    assert!(
+        !probe.headers.contains_key(header::CONTENT_LENGTH),
+        "an encoded body is chunked, because its size is only known when the encoder exits"
+    );
+    assert!(
+        !probe.bytes.is_empty(),
+        "the answer carries the encoded audio"
+    );
+
+    let head = request(
+        &app,
+        Method::HEAD,
+        &format!("{}&format=mp3&estimateContentLength=true", streamed.uri()),
+        &[],
+    )
+    .await;
+    assert_eq!(head.status, StatusCode::OK);
+    assert!(
+        !head.headers.contains_key(header::CONTENT_LENGTH),
+        "the head of a transcode declares no length either"
+    );
 }
 
 #[tokio::test]

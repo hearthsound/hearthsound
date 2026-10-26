@@ -5,8 +5,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use hearthsound_media::{
-    Codec, Container, FfmpegRunner, MediaError, TranscodeFormat, TranscodeRequest,
-    estimate_content_length, probe,
+    Codec, Container, FfmpegRunner, MediaError, TranscodeFormat, TranscodeRequest, probe,
 };
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
 
@@ -162,14 +161,6 @@ async fn honours_the_bitrate_cap() {
     assert!(
         (56_000.0..=72_000.0).contains(&bitrate),
         "a 64 kbit/s request produced {bitrate} bit/s"
-    );
-
-    // The estimate is close to what the encoder produced.
-    let estimate = estimate_content_length(Duration::from_secs(3), 64);
-    let produced = collected.len() as f64;
-    assert!(
-        produced > estimate as f64 * 0.75 && produced < estimate as f64 * 1.35,
-        "estimated {estimate} bytes, produced {produced}"
     );
 
     // A request without a cap uses the format default.

@@ -68,7 +68,6 @@ pub async fn stream(call: BinaryCall) -> Response {
         max_bitrate_kbps,
         offset,
         max_channels: None,
-        estimate_content_length: flag(&call, "estimateContentLength"),
         can_acquire: call.principal().can_acquire,
     };
     match call.state().stream().serve(&request).await {
@@ -215,22 +214,4 @@ fn read_offset(call: &BinaryCall) -> Result<Option<Duration>, ()> {
             Err(())
         }
     }
-}
-
-/// Reads a boolean parameter, which a client writes as `true` or `1`.
-///
-/// # Parameters
-///
-/// - `call`: the authenticated call.
-/// - `name`: the parameter name.
-///
-/// # Returns
-///
-/// `true` for `true` and `1` in any letter case, `false` for everything else,
-/// including an absent parameter.
-fn flag(call: &BinaryCall, name: &str) -> bool {
-    matches!(
-        call.get(name).map(|value| value.trim().to_ascii_lowercase()),
-        Some(value) if value == "true" || value == "1"
-    )
 }

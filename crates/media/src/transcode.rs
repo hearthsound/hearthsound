@@ -454,36 +454,3 @@ impl Stream for ChannelStream {
         self.receiver.poll_recv(cx)
     }
 }
-
-/// Estimates the encoded size of a stream.
-///
-/// The estimate is the transcode's bitrate multiplied by its duration, which is
-/// what the Subsonic `estimateContentLength` parameter asks for: clients need a
-/// length up front, and an exact length is only known once the encoder has
-/// finished.
-///
-/// # Parameters
-///
-/// - `duration`: the length of the stream, after any offset was subtracted.
-/// - `bitrate_kbps`: the bitrate the encoder was asked for.
-///
-/// # Returns
-///
-/// The estimated length in bytes.
-///
-/// # Examples
-///
-/// ```
-/// use std::time::Duration;
-///
-/// use hearthsound_media::estimate_content_length;
-///
-/// // A three minute song at 192 kbit/s is about 4.3 MB.
-/// let estimate = estimate_content_length(Duration::from_secs(180), 192);
-/// assert_eq!(estimate, 4_320_000);
-/// ```
-pub fn estimate_content_length(duration: Duration, bitrate_kbps: u32) -> u64 {
-    let milliseconds = duration.as_millis();
-    let bytes = milliseconds * u128::from(bitrate_kbps) / 8;
-    u64::try_from(bytes).unwrap_or(u64::MAX)
-}

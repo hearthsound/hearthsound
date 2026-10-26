@@ -50,5 +50,4 @@ pub use probe::{
 pub use tags::{ACQUIRED_VIA_KEY, Artwork, TrackTags, write_sidecar_cover, write_tags};
 pub use transcode::{
     AudioStream, TranscodeFormat, TranscodeRequest, TranscodeStream, UnknownTranscodeFormat,
-    estimate_content_length,
 };
