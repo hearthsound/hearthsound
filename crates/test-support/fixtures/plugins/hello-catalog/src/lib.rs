@@ -48,6 +48,9 @@ struct Config {
     /// The cover URL template, when configured.
     #[serde(default)]
     cover_url: Option<String>,
+    /// The number of albums the provider states for its artist, when configured.
+    #[serde(default)]
+    album_count: Option<u32>,
 }
 
 /// Returns the default greeting used when the server config omits one.
@@ -116,13 +119,13 @@ fn hello_album_ref(cover_url: Option<&str>) -> AlbumRef {
 /// # Parameters
 ///
 /// - `cover_url`: the configured cover URL template, when there is one.
-fn hello_artist(cover_url: Option<&str>) -> Artist {
+fn hello_artist(cover_url: Option<&str>, album_count: Option<u32>) -> Artist {
     Artist {
         id: "hello-artist-1".to_string(),
         name: "Hello Artist".to_string(),
         images: cover_images(cover_url),
         ids: artist_ids(),
-        album_count: None,
+        album_count,
     }
 }
 
@@ -260,7 +263,7 @@ impl catalog::Guest for HelloCatalog {
                 vec![]
             },
             artists: if wants(&query.kinds, EntityKind::Artist) {
-                vec![hello_artist(cover_url)]
+                vec![hello_artist(cover_url, config.album_count)]
             } else {
                 vec![]
             },
@@ -298,7 +301,7 @@ impl catalog::Guest for HelloCatalog {
             return Err(ProviderError::NotFound);
         }
         let config: Config = hearthsound_plugin::config::server_config()?;
-        Ok(hello_artist(config.cover_url.as_deref()))
+        Ok(hello_artist(config.cover_url.as_deref(), config.album_count))
     }
 
     fn artist_albums(id: String, limit: u32, offset: u32) -> Result<Vec<AlbumRef>, ProviderError> {

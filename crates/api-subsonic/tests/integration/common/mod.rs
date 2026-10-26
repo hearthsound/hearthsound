@@ -279,6 +279,18 @@ impl Fixture {
     /// album, and artist, so a search response's catalog side is exactly those
     /// three entities under the `hello` slug.
     pub async fn install_hello_catalog(&self) {
+        self.install_hello_catalog_with(serde_json::json!({ "greeting": "Hello" }))
+            .await;
+    }
+
+    /// Installs the `hello-catalog` fixture with the server configuration a test
+    /// writes, and assigns it to the catalog layer.
+    ///
+    /// # Parameters
+    ///
+    /// - `config`: the instance's server configuration, for example a `coverUrl`
+    ///   or an `albumCount`.
+    pub async fn install_hello_catalog_with(&self, config: serde_json::Value) {
         let installed = self
             .host
             .install(&fixture_plugin(HELLO_CATALOG))
@@ -300,7 +312,7 @@ impl Fixture {
                 slug: "hello".to_owned(),
                 plugin_id,
                 display_name: "Hello catalog".to_owned(),
-                server_config: serde_json::json!({ "greeting": "Hello" }),
+                server_config: config,
                 host_config: serde_json::Value::Null,
             })
             .await

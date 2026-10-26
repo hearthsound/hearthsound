@@ -365,7 +365,11 @@ pub(crate) fn starred_artist_ref(artist: &Artist, annotation: &Annotation) -> Ob
 
 /// Builds the artist reference of a catalog artist.
 ///
-/// A catalog artist is not stored, so it carries no user annotation.
+/// A catalog artist is not stored, so it carries no user annotation. It does
+/// carry what a search card draws: the provider's own album count when it states
+/// one, and a cover-art id when it describes a picture. Both members are left out
+/// when the answer holds neither, so a client can tell "no picture" from an id it
+/// cannot fetch.
 ///
 /// # Parameters
 ///
@@ -375,9 +379,17 @@ pub(crate) fn starred_artist_ref(artist: &Artist, annotation: &Annotation) -> Ob
 ///
 /// The reference.
 pub(crate) fn catalog_artist_ref(result: &CatalogArtistResult) -> Object {
-    Object::new()
+    let reference = Object::new()
         .set("id", result.id.to_string())
         .set("name", result.artist.name.clone())
+        .set(
+            "coverArt",
+            cover_art(&result.id, !result.artist.images.is_empty()),
+        );
+    match result.artist.album_count {
+        Some(count) => reference.set("albumCount", i64::from(count)),
+        None => reference,
+    }
 }
 
 /// Builds one `AlbumID3` member.
@@ -1167,26 +1179,32 @@ pub(crate) fn catalog_album(result: &CatalogAlbumResult, title_suffix: &str) -> 
 /// # Parameters
 ///
 /// - `result`: the artist the provider returned, with its catalog id.
-/// - `album_count`: how many albums the artist has, when the caller knows it;
-///   a search result does not.
+/// - `album_count`: how many albums the page lists, when the caller knows it; a
+///   search result does not, and the provider's own count answers instead.
 /// - `title_suffix`: the suffix appended to the name.
 ///
 /// # Returns
 ///
-/// The artist.
+/// The artist, with a `coverArt` id when the provider describes a picture. The
+/// `albumCount` member is left out when neither the caller nor the provider
+/// states a count.
 pub(crate) fn catalog_artist(
     result: &CatalogArtistResult,
-    album_count: i64,
+    album_count: Option<i64>,
     title_suffix: &str,
 ) -> Object {
     let artist = &result.artist;
 
-    Object::new()
+    let object = Object::new()
         .set("id", result.id.to_string())
         .set("name", format!("{}{title_suffix}", artist.name))
-        .set("albumCount", album_count)
+        .set("coverArt", cover_art(&result.id, !artist.images.is_empty()))
         .set("musicBrainzId", music_brainz_id(&artist.ids))
-        .set("sortName", "")
+        .set("sortName", "");
+    match album_count.or(artist.album_count.map(i64::from)) {
+        Some(count) => object.set("albumCount", count),
+        None => object,
+    }
 }
 
 /// Builds the minimal `ArtistID3` reference an entity's credits embed.

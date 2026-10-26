@@ -322,7 +322,7 @@ async fn similar_artist_objects(
                 ));
             }
             ResolvedArtist::Catalog(result) if include_not_present => {
-                objects.push(projection::catalog_artist(&result, 0, &suffix));
+                objects.push(projection::catalog_artist(&result, None, &suffix));
             }
             ResolvedArtist::Catalog(_) => {}
         }

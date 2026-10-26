@@ -586,3 +586,167 @@ fn catalog_list(body: &str, kind: &str) -> Vec<String> {
         .map(str::to_owned)
         .collect()
 }
+
+/// Reads one member of the first catalog artist of a `search3` answer.
+///
+/// # Parameters
+///
+/// - `body`: the JSON response body.
+/// - `member`: the member to read.
+///
+/// # Returns
+///
+/// The member's value, or `None` when the answer leaves it out.
+fn catalog_artist_member(body: &str, member: &str) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(body).unwrap();
+    value["subsonic-response"]["searchResult3"]["artist"][0]
+        .get(member)
+        .cloned()
+}
+
+/// A catalog artist card carries the provider's album count and a cover-art id
+/// when the provider describes a picture, in both encodings and both searches.
+#[tokio::test]
+async fn a_search_card_carries_the_album_count_and_the_picture() {
+    let fixture = Fixture::new().await;
+    fixture
+        .install_hello_catalog_with(serde_json::json!({
+            "greeting": "Hello",
+            "albumCount": 38,
+            "coverUrl": "https://img.example/hello.jpg",
+        }))
+        .await;
+    let app = fixture.app();
+
+    let json = get(
+        &app,
+        &format!(
+            "/rest/search3?query=world&apiKey={}&f=json&hearthsound=1",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&json);
+    let artist = catalog_artist_member(&json.body, "id")
+        .and_then(|id| id.as_str().map(str::to_owned))
+        .expect("the catalog artist is listed");
+    assert_eq!(
+        catalog_artist_member(&json.body, "albumCount"),
+        Some(serde_json::json!(38)),
+        "the provider's count is the card's count: {}",
+        json.body
+    );
+    assert_eq!(
+        catalog_artist_member(&json.body, "coverArt"),
+        Some(serde_json::json!(artist)),
+        "a described picture is addressable through getCoverArt: {}",
+        json.body
+    );
+
+    let xml = get(
+        &app,
+        &format!(
+            "/rest/search3.view?query=world&apiKey={}&hearthsound=1",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&xml);
+    assert!(xml.body.contains("albumCount=\"38\""), "{}", xml.body);
+    assert!(
+        xml.body.contains(&format!("coverArt=\"{artist}\"")),
+        "{}",
+        xml.body
+    );
+
+    let two = get(
+        &app,
+        &format!(
+            "/rest/search2?query=world&apiKey={}&f=json&hearthsound=1",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&two);
+    assert!(
+        two.body.contains("\"albumCount\":38"),
+        "the older search carries both members too: {}",
+        two.body
+    );
+    assert!(
+        two.body.contains(&format!("\"coverArt\":\"{artist}\"")),
+        "{}",
+        two.body
+    );
+}
+
+/// A provider that states no album count and describes no picture leaves both
+/// members out rather than answering zero and an unfetchable id.
+#[tokio::test]
+async fn a_search_card_without_extras_omits_them() {
+    let fixture = Fixture::new().await;
+    fixture.install_hello_catalog().await;
+    let app = fixture.app();
+
+    let json = get(
+        &app,
+        &format!(
+            "/rest/search3?query=world&apiKey={}&f=json&hearthsound=1",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&json);
+    assert_eq!(catalog_artist_member(&json.body, "albumCount"), None);
+    assert_eq!(
+        catalog_artist_member(&json.body, "coverArt"),
+        Some(serde_json::json!("")),
+        "an artist with no picture carries an empty cover-art id: {}",
+        json.body
+    );
+}
+
+/// The album count a page lists wins over the provider's own count.
+#[tokio::test]
+async fn a_catalog_artist_page_count_wins_over_the_payload_count() {
+    let fixture = Fixture::new().await;
+    fixture
+        .install_hello_catalog_with(serde_json::json!({
+            "greeting": "Hello",
+            "albumCount": 38,
+            "coverUrl": "https://img.example/hello.jpg",
+        }))
+        .await;
+    let answer = get(
+        &fixture.app(),
+        &format!(
+            "/rest/search3?query=world&apiKey={}&f=json&hearthsound=1",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&answer);
+    let artist = catalog_artist_member(&answer.body, "id")
+        .and_then(|id| id.as_str().map(str::to_owned))
+        .expect("the catalog artist is listed");
+    fixture
+        .enrich(&hearthsound_core::ClientId::parse(&artist).unwrap())
+        .await;
+
+    let page = get(
+        &fixture.app(),
+        &format!(
+            "/rest/getArtist?id={artist}&apiKey={}&f=json&hearthsound=1",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&page);
+    let value: serde_json::Value = serde_json::from_str(&page.body).unwrap();
+    assert_eq!(
+        value["subsonic-response"]["artist"]["albumCount"],
+        serde_json::json!(1),
+        "the one album the page lists is the count: {}",
+        page.body
+    );
+}

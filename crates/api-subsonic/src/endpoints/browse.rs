@@ -225,7 +225,7 @@ pub async fn get_artist(call: Call) -> Encoded {
             };
             projection::artist_id3(&detail.artist, album_count, &annotation)
         }
-        ArtistHead::Catalog(found) => projection::catalog_artist(found, album_count, &suffix),
+        ArtistHead::Catalog(found) => projection::catalog_artist(found, Some(album_count), &suffix),
     };
     call.respond(Response::ok().member("artist", artist.set("album", Array::new(albums))))
         .await

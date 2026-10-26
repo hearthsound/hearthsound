@@ -196,7 +196,7 @@ pub async fn search3(call: Call) -> Encoded {
             catalog.id.to_string(),
             score_of(query, &catalog.artist.name, None),
         );
-        artists.push(projection::catalog_artist(catalog, 0, &title_suffix));
+        artists.push(projection::catalog_artist(catalog, None, &title_suffix));
     }
 
     let mut albums = Vec::with_capacity(matches.albums.len() + matches.catalog_albums.len());
