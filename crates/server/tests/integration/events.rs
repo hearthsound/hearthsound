@@ -1007,3 +1007,106 @@ async fn a_demoted_administrator_loses_administrator_events() {
     drop(admin);
     fixture.stop().await;
 }
+
+/// The enrichment job publishes its completion to the listener whose page asked.
+#[tokio::test]
+async fn a_finished_enrichment_is_announced_to_its_listener_once() {
+    use hearthsound_catalog::{ENRICH_JOB_KIND, EnrichJobPayload};
+    use hearthsound_core::providers::CatalogQuery;
+    use hearthsound_core::{ClientId, EntityKind};
+    use hearthsound_jobs::{NewJob, Shutdown};
+
+    let fixture = Fixture::new().await;
+    let services = std::sync::Arc::clone(&fixture.services);
+    crate::on_demand::install_catalog(&services).await;
+    services.registry().rebuild().await.unwrap();
+
+    // A catalog artist exists, so the run has something to fetch.
+    let artist = services
+        .catalog()
+        .search(&CatalogQuery {
+            text: "Fixture".to_owned(),
+            kinds: vec![EntityKind::Artist],
+            limit: 10,
+            offset: 0,
+        })
+        .await
+        .unwrap()
+        .artists
+        .into_iter()
+        .next()
+        .expect("the fixture answers an artist");
+    let id = ClientId::Catalog(artist.id.clone());
+    let listener = fixture.user_id;
+
+    let mut events = services.events().subscribe();
+    let shutdown = Shutdown::new();
+    let runner = std::sync::Arc::clone(services.runner());
+    let handle = tokio::spawn({
+        let shutdown = shutdown.clone();
+        async move { runner.run(shutdown).await }
+    });
+
+    assert!(services.catalog().begin_enrichment(&id, listener).await);
+    services
+        .queue()
+        .enqueue(
+            NewJob::new(ENRICH_JOB_KIND)
+                .priority(hearthsound_core::Priority::Queue)
+                .payload(&EnrichJobPayload {
+                    entity_id: id.to_string(),
+                    kind: EntityKind::Artist,
+                    user_id: listener,
+                })
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let envelope = tokio::time::timeout(FRAME_WAIT, async {
+        loop {
+            let envelope = events.recv().await.expect("the bus stays open");
+            if envelope.event.type_str() == "catalog.enriched" {
+                return envelope;
+            }
+        }
+    })
+    .await
+    .expect("the completion is published");
+
+    match &envelope.event {
+        ServerEvent::CatalogEnriched(payload) => {
+            assert_eq!(payload.entity_id, id.to_string());
+            assert_eq!(payload.kind, EntityKind::Artist);
+        }
+        other => panic!(
+            "expected a catalog.enriched event, got {}",
+            other.type_str()
+        ),
+    }
+    assert_eq!(envelope.audience, Audience::User(listener));
+    assert!(envelope.audience.is_visible_to(listener, false));
+    assert!(
+        !envelope
+            .audience
+            .is_visible_to(uuid::Uuid::from_u128(99), false)
+    );
+
+    // The extras are cached now: a cached read answers without a provider call.
+    assert!(
+        services
+            .catalog()
+            .cached_artist(&artist.id)
+            .await
+            .unwrap()
+            .is_some(),
+        "the run cached the artist"
+    );
+    assert!(
+        services.catalog().begin_enrichment(&id, listener).await,
+        "a finished run releases its claim"
+    );
+
+    shutdown.trigger();
+    handle.await.unwrap();
+}
