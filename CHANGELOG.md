@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The startup scan retries the library folder listing five times over eight seconds and logs that the scan was skipped, instead of treating a failed listing as "no folders".
 - Dropping a transcode kills ffmpeg at once even when it has produced no output yet, so a client that disconnects from a stalled source no longer holds a transcode slot.
 - The ffmpeg concurrency cap is one explicit counter: a cap lowered while children run is reached as they finish instead of being silently exceeded, a later raise adds only the difference, and a dropped process returns its slot only after it has exited.
 - A job handler that panics fails its own job permanently and leaves its worker claiming, instead of taking the worker down and holding the job until its lock expires.

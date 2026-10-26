@@ -26,6 +26,7 @@ use hearthsound_core::events::{
 use hearthsound_jobs::Shutdown;
 use hearthsound_library::maintenance::MaintenanceSignal;
 use hearthsound_library::scan::ScanRequest;
+use std::future::Future;
 use std::time::Duration;
 
 use tokio::net::TcpListener;
@@ -34,6 +35,13 @@ use tokio::task::JoinHandle;
 
 use crate::error::ServerError;
 use crate::services::Services;
+
+/// The delays between the attempts to list the library folders at startup.
+///
+/// A database that another process is still writing, or a storage tree that is
+/// not mounted yet, is the case this covers: the listing is retried a few times
+/// before the startup scan is given up on.
+const STARTUP_SCAN_DELAYS: [Duration; 4] = [Duration::from_secs(2); 4];
 
 /// How long the listener gets to finish the responses in flight.
 ///
@@ -313,6 +321,56 @@ fn spawn_workers(
     ]
 }
 
+/// Calls `attempt` until it succeeds, waiting between the failures.
+///
+/// The waits are bounded by `delays`, so the call makes `delays.len() + 1`
+/// attempts at most, and each wait ends early when `shutdown` is triggered: a
+/// starting server must not keep retrying a listing for a process that is
+/// already stopping.
+///
+/// # Parameters
+///
+/// - `delays`: the wait after each failed attempt, in order. An empty slice
+///   means one attempt.
+/// - `shutdown`: the stop signal that abandons the retries.
+/// - `context`: what the attempts were for, recorded on each failure.
+/// - `attempt`: the work, called with the number of the attempt, counting from
+///   one.
+///
+/// # Returns
+///
+/// The first successful value, or `None` when every attempt failed or the
+/// process was stopping.
+pub(crate) async fn with_retries<T, F, Fut, E>(
+    delays: &[Duration],
+    shutdown: &Shutdown,
+    context: &str,
+    mut attempt: F,
+) -> Option<T>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    let total = u32::try_from(delays.len()).unwrap_or(u32::MAX - 1) + 1;
+    for index in 0..total {
+        let number = index + 1;
+        match attempt(number).await {
+            Ok(value) => return Some(value),
+            Err(error) => {
+                tracing::warn!(attempt = number, attempts = total, %error, context, "an attempt failed");
+            }
+        }
+        if let Some(delay) = delays.get(usize::try_from(index).unwrap_or(usize::MAX)) {
+            tokio::select! {
+                () = shutdown.wait() => return None,
+                () = tokio::time::sleep(*delay) => {}
+            }
+        }
+    }
+    None
+}
+
 /// Waits for the HTTP task, cutting the connections after [`HTTP_DRAIN_TIMEOUT`].
 ///
 /// # Parameters
@@ -471,13 +529,28 @@ async fn watch_folders(services: Arc<Services>, shutdown: Shutdown) {
             false
         }
     };
-    if !identity_pass
-        && let Err(error) = services
-            .scanner()
-            .request_scan(services.queue(), &ScanRequest::all())
-            .await
-    {
-        tracing::warn!(%error, "could not request the startup scan of the library folders");
+    if !identity_pass {
+        let requested = with_retries(
+            &STARTUP_SCAN_DELAYS,
+            &shutdown,
+            "could not list the library folders for a startup scan",
+            |_attempt| {
+                let services = Arc::clone(&services);
+                async move {
+                    services
+                        .scanner()
+                        .request_scan(services.queue(), &ScanRequest::all())
+                        .await
+                }
+            },
+        )
+        .await;
+        if requested.is_none() {
+            tracing::error!(
+                attempts = STARTUP_SCAN_DELAYS.len() + 1,
+                "the startup scan was skipped: the library folders could not be listed",
+            );
+        }
     }
 
     shutdown.wait().await;
@@ -575,6 +648,75 @@ mod tests {
         assert!(
             matches!(stopped, Err(ServerError::Workers { failed: 1 })),
             "one panicked worker must be reported"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_startup_folder_listing_is_retried() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let shutdown = Shutdown::new();
+        let value = with_retries(
+            &[Duration::from_millis(1); 4],
+            &shutdown,
+            "could not list the library folders for a startup scan",
+            |_attempt| {
+                let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                async move {
+                    if call < 3 {
+                        Err("the database is busy")
+                    } else {
+                        Ok(call)
+                    }
+                }
+            },
+        )
+        .await;
+        assert_eq!(value, Some(3), "the third attempt succeeds");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_listing_that_never_succeeds_is_given_up_on() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let shutdown = Shutdown::new();
+        let value: Option<()> = with_retries(
+            &[Duration::from_millis(1); 2],
+            &shutdown,
+            "could not list the library folders for a startup scan",
+            |_attempt| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move { Err("still busy") }
+            },
+        )
+        .await;
+        assert_eq!(value, None);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "a retry schedule of two delays allows three attempts"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stopping_process_abandons_the_retries() {
+        let calls = std::sync::atomic::AtomicU32::new(0);
+        let shutdown = Shutdown::new();
+        shutdown.trigger();
+        let value: Option<()> = with_retries(
+            &[Duration::from_secs(30); 4],
+            &shutdown,
+            "could not list the library folders for a startup scan",
+            |_attempt| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move { Err("still busy") }
+            },
+        )
+        .await;
+        assert_eq!(value, None);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the stop signal ends the retries before the attempts are spent"
         );
     }
 
