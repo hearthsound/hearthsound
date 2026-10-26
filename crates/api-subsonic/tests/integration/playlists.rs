@@ -505,8 +505,17 @@ async fn playlists_belong_to_their_owner() {
     .await;
     assert_error(&refused, 70);
 
-    // An administrator may ask, and sees what the account makes visible: the
-    // private playlist is not listed.
+    // An administrator has no exception: the private playlist reads as missing
+    // for them too, so administrating a server is not a way to read one.
+    let hidden = get(
+        &app,
+        &format!("/rest/getPlaylist?id={id}&apiKey={admin_key}&f=json"),
+    )
+    .await;
+    assert_error(&hidden, 70);
+
+    // An administrator may ask for the listing, and sees what the account makes
+    // visible: the private playlist is not listed.
     let listed = get(
         &app,
         &format!("/rest/getPlaylists?username=echo&apiKey={admin_key}&f=json"),

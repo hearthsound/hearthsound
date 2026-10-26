@@ -23,8 +23,9 @@
 //! own, or for an offset into the track is answered by one ffmpeg process
 //! instead. A transcode is not the stored representation, so it carries no
 //! validators and no ranges: it is answered with `200`, `Accept-Ranges: none`,
-//! and the encoded bytes as they are produced, chunked unless
-//! `estimateContentLength` asked for a length.
+//! and the encoded bytes as they are produced, chunked and never with a
+//! declared length. The first encoded chunk is awaited before the status is
+//! committed, so an encoder that fails to start is answered `500`.
 //!
 //! # Pending streams
 //!
@@ -80,7 +81,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use futures_util::{TryStream, TryStreamExt};
+use futures_util::{StreamExt, TryStream, TryStreamExt, stream};
 use hearthsound_acquire::AcquireError;
 use hearthsound_acquire::orchestrator::{
     AcquireOutcome, AcquireRequest, AcquisitionHandle, AcquisitionOrchestrator, AcquisitionProgress,
@@ -93,7 +94,7 @@ use hearthsound_core::{ClientId, EntityId, FailureReason, IdPrefix, Priority};
 use hearthsound_db::Database;
 use hearthsound_library::query::{self, PreferredFile};
 use hearthsound_library::{LibraryError, MediaFile, StorageRoots, tracks};
-use hearthsound_media::{FfmpegRunner, TranscodeFormat, TranscodeRequest, estimate_content_length};
+use hearthsound_media::{FfmpegRunner, TranscodeFormat, TranscodeRequest};
 use tower_http::services::ServeFile;
 use uuid::Uuid;
 
@@ -126,9 +127,6 @@ pub struct StreamRequest {
     pub offset: Option<Duration>,
     /// How many channels a transcode carries, when the request caps them.
     pub max_channels: Option<u8>,
-    /// Whether `estimateContentLength` asked for an estimated `Content-Length`
-    /// on a transcode rather than no length at all.
-    pub estimate_content_length: bool,
     /// Whether the requester may acquire a track the server has not stored.
     ///
     /// The endpoint passes the principal's `can_acquire` permission, because a
@@ -556,15 +554,19 @@ impl StreamService {
             return Err(StreamError::NotFound);
         };
 
-        let track = self.resolve_target(&request.id).await?;
+        // The permission is checked before the id is resolved: resolving an
+        // `x_` id materializes a catalog entity into a stored row, and an
+        // account that may not acquire must not write one.
         if !request.can_acquire {
             tracing::debug!(
-                track = %track,
+                id = %request.id,
                 user = %request.user_id,
                 "refused a pending stream for a user who may not acquire"
             );
             return Err(StreamError::Forbidden);
         }
+
+        let track = self.resolve_target(&request.id).await?;
 
         let outcome = source
             .request(
@@ -890,9 +892,14 @@ impl StreamService {
     /// A transcode is one ffmpeg process per request and its output does not
     /// exist until that process runs, so the response has no validators and no
     /// ranges: the client is told `Accept-Ranges: none` and receives the whole
-    /// stream from the start offset on. The encoder's output is chunked, unless
-    /// `estimateContentLength` asked for a length, which is an estimate of
-    /// duration times bitrate and not the exact size the encoder will produce.
+    /// stream from the start offset on. The body is chunked and carries no
+    /// `Content-Length`, because the encoder's byte count is only known when it
+    /// exits and HTTP requires a declared length to be exact; an
+    /// `estimateContentLength=true` request is accepted and changes nothing.
+    ///
+    /// The status is decided before the response is committed: the first encoded
+    /// chunk is awaited, so an encoder that cannot start is answered `500`
+    /// instead of a `200` whose body is an error.
     ///
     /// A `HEAD` request is answered from the request alone: the head of a
     /// transcode is known without encoding anything, so no ffmpeg process is
@@ -900,16 +907,15 @@ impl StreamService {
     ///
     /// # Parameters
     ///
-    /// - `request`: the request, whose `estimateContentLength` decides whether
-    ///   the response carries a length.
+    /// - `request`: the request, whose method and account the answer needs.
     /// - `track`: the track being streamed, for the stream session.
     /// - `file`: the media file row and the path ffmpeg reads.
     /// - `plan`: the format, the bitrate cap, and the start offset.
     ///
     /// # Errors
     ///
-    /// Returns a server-side error when ffmpeg cannot be started or a header
-    /// cannot be built.
+    /// Returns a server-side error when ffmpeg cannot be started, when it fails
+    /// before its first chunk, or when a header cannot be built.
     async fn serve_transcode(
         &self,
         request: &StreamRequest,
@@ -925,14 +931,6 @@ impl StreamService {
             HeaderValue::from_static(plan.format.content_type()),
         );
         headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("none"));
-        if request.estimate_content_length
-            && let Some(length) = estimated_length(file.media_file.duration_ms, plan)
-        {
-            headers.insert(
-                header::CONTENT_LENGTH,
-                HeaderValue::from_str(&length.to_string()).map_err(internal)?,
-            );
-        }
         if request.method == Method::HEAD {
             return Ok(response);
         }
@@ -947,7 +945,16 @@ impl StreamService {
         if plan.max_channels.is_some() {
             transcode = transcode.max_channels(plan.max_channels);
         }
-        let encoded = self.ffmpeg.transcode(&transcode).await.map_err(internal)?;
+        let mut encoded = Box::pin(self.ffmpeg.transcode(&transcode).await.map_err(internal)?);
+        // The status is committed to 200 as soon as the body is handed over, so
+        // the first chunk is awaited first: an encoder that fails to start then
+        // answers 500 instead of a 200 whose body is an error. A slower encoder
+        // simply streams into the committed response.
+        let first = match tokio::time::timeout(FIRST_CHUNK_TIMEOUT, encoded.next()).await {
+            Ok(Some(Err(error))) => return Err(internal(error)),
+            Ok(Some(Ok(chunk))) => Some(chunk),
+            Ok(None) | Err(_) => None,
+        };
 
         let (delivered, flag) = AudioDelivered::flag();
         self.sessions.register(
@@ -957,7 +964,7 @@ impl StreamService {
             delivered,
         );
         self.record_access(file.media_file.id);
-        *response.body_mut() = delivered_body(encoded, flag);
+        *response.body_mut() = delivered_body(stream::iter(first.map(Ok)).chain(encoded), flag);
         Ok(response)
     }
 
@@ -1087,6 +1094,10 @@ impl PendingSource for AcquisitionOrchestrator {
 /// How long a client is told to wait after a `503`.
 const RETRY_AFTER_SECS: u64 = 10;
 
+/// How long the first encoded chunk may take before the response commits to
+/// `200`; a slower encoder streams into the committed response.
+const FIRST_CHUNK_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// The pending-stream mode `stream.pending.mode` selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingMode {
@@ -1212,6 +1223,11 @@ struct TranscodePlan {
 /// which is what the clients of this protocol expect of a server that caps the
 /// bitrate.
 ///
+/// `format=raw` is answered from the stored file byte for byte, so `timeOffset`
+/// and `maxBitRate` are ignored with it: an offset can only be honoured by
+/// transcoding, which is no longer the stored bytes. A client that wants either
+/// omits `format`.
+///
 /// # Parameters
 ///
 /// - `request`: the request's format, cap, and offset.
@@ -1309,25 +1325,6 @@ fn plan(format: TranscodeFormat, request: &StreamRequest) -> TranscodePlan {
 /// remaining duration, which is what `estimateContentLength` asks for; the
 /// exact length is only known once the encoder has finished.
 ///
-/// # Parameters
-///
-/// - `duration_ms`: the file's duration, when the probe recorded one.
-/// - `plan`: the format, the cap, and the start offset.
-///
-/// # Returns
-///
-/// The estimated length in bytes, or `None` when the duration is unknown, in
-/// which case the response carries no length at all.
-fn estimated_length(duration_ms: Option<i64>, plan: &TranscodePlan) -> Option<u64> {
-    let duration = Duration::from_millis(u64::try_from(duration_ms?).ok()?);
-    let remaining = duration.saturating_sub(plan.offset.unwrap_or_default());
-    let bitrate_kbps = plan
-        .max_bitrate_kbps
-        .unwrap_or_else(|| plan.format.default_bitrate_kbps())
-        .max(8);
-    Some(estimate_content_length(remaining, bitrate_kbps))
-}
-
 /// The validators of one file response.
 ///
 /// The `ETag` is strong and derived from the file's size, its modification time

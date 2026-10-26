@@ -21,7 +21,8 @@ use super::scrobble::resolve;
 /// # Parameters
 ///
 /// - `call`: the authenticated call. `mediaId` names the track, `mediaType` is
-///   `song`, `positionMs` is how far into it the client is, `state` is
+///   `song`, `positionMs` is how far into it the client is - a position past the
+///   track's end is applied as its end, `state` is
 ///   `starting`, `playing`, `paused`, or `stopped`, `playbackRate` is the rate
 ///   (default 1.0), and `ignoreScrobble` asks the server to record no play for
 ///   the session.
@@ -64,7 +65,7 @@ pub async fn report_playback(call: Call) -> Encoded {
             "positionMs",
         )));
     };
-    let position_ms = match position.parse::<i64>() {
+    let reported_ms = match position.parse::<i64>() {
         Ok(position) => position.max(0),
         Err(_) => {
             return call.encode(Response::failed(SubsonicError::new(
@@ -117,6 +118,15 @@ pub async fn report_playback(call: Call) -> Encoded {
         Err(error) => {
             return call.encode(Response::failed(browse::failure("reportPlayback", &error)));
         }
+    };
+
+    // A position past the end of the track is applied as the end of the track:
+    // the activity layer turns the position into earned listening time, so an
+    // impossible one would inflate the credit and every completion test with it.
+    let position_ms = if duration_ms > 0 {
+        reported_ms.min(duration_ms)
+    } else {
+        reported_ms
     };
 
     // A report and a scrobble of the same client must key the same row, so an

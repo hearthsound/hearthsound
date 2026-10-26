@@ -312,3 +312,38 @@ async fn an_unnamed_client_reports_under_the_default_name() {
     );
     assert_eq!(listed[0].client, hearthsound_activity::DEFAULT_CLIENT);
 }
+
+/// A position past the end of the track is applied as the end of it.
+#[tokio::test]
+async fn an_impossible_position_is_clamped_to_the_track_length() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+    let track = seeded.alpha_tracks[0];
+    let row = hearthsound_library::LibraryRepository::new(&fixture.database)
+        .get_track(track)
+        .await
+        .unwrap()
+        .unwrap();
+    let duration = row.duration_ms.expect("the seeded track has a duration");
+    assert!(duration > 0);
+
+    let reported = get(
+        &app,
+        &format!(
+            "/rest/reportPlayback?mediaId={track}&mediaType=song&positionMs=9999999&state=playing&c=Clamp&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&reported);
+
+    let stored: i64 =
+        sqlx::query_scalar("SELECT position_ms FROM now_playing WHERE client = 'Clamp'")
+            .fetch_one(fixture.database.readers())
+            .await
+            .unwrap();
+    assert_eq!(
+        stored, duration,
+        "a position past the end is stored as the track's length"
+    );
+}

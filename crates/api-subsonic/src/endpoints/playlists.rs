@@ -2,9 +2,10 @@
 //! `updatePlaylist`, and `deletePlaylist`.
 //!
 //! A playlist belongs to the account that created it: only its owner may change
-//! it, and only its owner and an administrator may see a private one. The rows
-//! and the pin maintenance are the activity layer's; this module reads the
-//! parameters, resolves the ids, and projects the responses.
+//! it, and it is visible to its owner and, when it is public, to every signed-in
+//! account. An administrator has no exception. The rows and the pin maintenance
+//! are the activity layer's; this module reads the parameters, resolves the ids,
+//! and projects the responses.
 
 use std::collections::HashMap;
 
@@ -28,7 +29,8 @@ const PLAYLIST_PREFIX: IdPrefix = IdPrefix::Playlist;
 /// # Parameters
 ///
 /// - `call`: the authenticated call. `username` asks for another account's
-///   playlists, which only an administrator may do.
+///   playlists, which only an administrator may do, and narrows the listing to
+///   that account's visible - that is, public - playlists.
 ///
 /// # Returns
 ///

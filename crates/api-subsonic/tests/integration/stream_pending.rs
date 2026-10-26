@@ -634,3 +634,33 @@ async fn a_catalog_id_is_materialized_and_held_until_its_file_is_ready() {
     assert_eq!(collect(response).await, bytes);
     assert_eq!(source.calls(), 1, "the catalog track reaches acquisition");
 }
+
+/// A user who may not acquire cannot make a catalog stream materialize anything.
+#[tokio::test]
+async fn a_denied_user_materializes_no_catalog_track() {
+    let source = FakeSource::new(Script::Waiting);
+    let fixture = Fixture::with_pending(source.clone()).await;
+    let app = fixture.app();
+    fixture.install_hello_catalog().await;
+    let id = CatalogId::new(Slug::new("hello").unwrap(), EntityKind::Track, HELLO_TRACK).unwrap();
+    let key = fixture.account_with(&[]).await;
+
+    let response = start(&app, &format!("/rest/stream?id={id}&apiKey={key}")).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(collect(response).await.is_empty());
+
+    // The refusal comes before the id is resolved, so the catalog entity was
+    // not written into the library as a stored track.
+    let aliases: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM external_ids WHERE namespace = 'p:hello' AND value = ?",
+    )
+    .bind(HELLO_TRACK)
+    .fetch_one(fixture.database.readers())
+    .await
+    .unwrap();
+    assert_eq!(
+        aliases, 0,
+        "a user who may not acquire wrote no materialized row"
+    );
+    assert_eq!(source.calls(), 0);
+}

@@ -264,3 +264,48 @@ async fn a_scrobble_time_is_bounded() {
         .unwrap();
     assert_eq!(plays, 0, "the refused scrobble recorded nothing");
 }
+
+/// A scrobble whose id cannot be resolved writes no play for the ids before it.
+#[tokio::test]
+async fn an_unresolvable_id_writes_no_play_for_the_earlier_ids() {
+    let (fixture, seeded) = fixture().await;
+    fixture.install_hello_catalog().await;
+    let app = fixture.app();
+    let track = seeded.alpha_tracks[0];
+    let unresolved = CatalogId::new(
+        Slug::new("hello").unwrap(),
+        EntityKind::Track,
+        "hello-track-1",
+    )
+    .unwrap();
+
+    // A catalog id resolves through `external_ids`; without the table the
+    // lookup fails, which is the failure that has to refuse the request before
+    // anything is written.
+    sqlx::query("ALTER TABLE external_ids RENAME TO external_ids_unavailable")
+        .execute(fixture.database.writer())
+        .await
+        .unwrap();
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/scrobble?id={track}&id={unresolved}&apiKey={}&f=json",
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&probe, 0);
+
+    let plays = fixture
+        .state
+        .activity()
+        .plays()
+        .play_count(fixture.user_id.uuid(), track.uuid())
+        .await
+        .unwrap();
+    assert_eq!(
+        plays, 0,
+        "the request is refused before any of its ids is recorded"
+    );
+}

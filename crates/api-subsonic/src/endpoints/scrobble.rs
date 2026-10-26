@@ -2,10 +2,10 @@
 //!
 //! A client reports playback with `scrobble`. Each `id` is a track to record; a
 //! submission (`submission=true`, the default) records a play through the
-//! activity service, and a now-playing report (`submission=false`) is accepted
-//! and discarded. The service itself enforces the "no song audio delivered"
-//! guard, so a client that gave up before any audio arrived does not create a
-//! false play.
+//! activity service, and a now-playing report (`submission=false`) is stored so
+//! `getNowPlaying` lists it. The service itself enforces the "no song audio
+//! delivered" guard, so a client that gave up before any audio arrived does not
+//! create a false play.
 //!
 //! Only a stored track is recorded. A catalog id (`x_`) names an entity the
 //! server may not have stored yet: the id is resolved through the provider
@@ -47,7 +47,8 @@ const MAX_SCROBBLE_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 ///
 /// # Returns
 ///
-/// An empty successful envelope.
+/// An empty successful envelope. A now-playing report is stored so
+/// `getNowPlaying` lists it.
 ///
 /// # Errors
 ///
@@ -59,6 +60,10 @@ const MAX_SCROBBLE_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 /// A `time` a few minutes in the future is clamped to now, because a client
 /// clock may be fast; one far in the future would otherwise keep a now-playing
 /// row visible for as long as it claimed.
+///
+/// A request with an id that cannot be resolved is refused before any play is
+/// written: every id is resolved first, so a malformed id late in the list cannot
+/// leave the earlier ids recorded under a failed answer.
 pub async fn scrobble(call: Call) -> Encoded {
     let ids: Vec<String> = call.get_all("id").map(str::to_owned).collect();
     if ids.is_empty() {
@@ -88,12 +93,19 @@ pub async fn scrobble(call: Call) -> Encoded {
     let submission = submission(&call);
     let user_id = call.principal().user_id.uuid();
 
+    // Every id is resolved before anything is written: `resolve` has no write
+    // side effect, so a bad id late in the list costs the request instead of
+    // leaving the earlier ids recorded under a failed answer.
+    let mut tracks = Vec::with_capacity(ids.len());
     for value in &ids {
-        let track_id = match resolve(&call, value).await {
-            Ok(Some(track_id)) => track_id,
+        match resolve(&call, value).await {
+            Ok(Some(track_id)) => tracks.push(track_id),
             Ok(None) => continue,
             Err(()) => return call.encode(Response::failed(SubsonicError::generic())),
-        };
+        }
+    }
+
+    for track_id in tracks {
         let scrobble = Scrobble {
             user_id,
             track_id: track_id.uuid(),
