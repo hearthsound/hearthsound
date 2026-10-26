@@ -499,3 +499,39 @@ async fn a_library_artist_gets_its_biography_without_a_catalog_counterpart() {
         Some("A band from upstate New York.")
     );
 }
+
+/// A chart leaves each track behind for its cover.
+///
+/// A song row's cover is requested by track id, and the track's record names the
+/// album whose image it is. Without the promotion every chart row's cover is a
+/// provider lookup, which on a rate-limited instance is what left rows blank.
+#[tokio::test]
+async fn a_cached_chart_leaves_its_tracks_behind_for_their_covers() {
+    let env = discography_env().await;
+    let service = env.service();
+    let artist = crate::common::catalog_id(
+        "disco",
+        hearthsound_core::EntityKind::Artist,
+        "disco-artist-1",
+    );
+
+    let chart = service.cached_artist_top_tracks(&artist, 5).await.unwrap();
+    assert!(chart.is_none(), "nothing is cached before the first read");
+
+    service.artist_top_tracks(&artist, 5).await.unwrap();
+    let chart = service
+        .cached_artist_top_tracks(&artist, 5)
+        .await
+        .unwrap()
+        .expect("the chart was cached");
+    assert!(!chart.is_empty());
+    let track = crate::common::catalog_id(
+        "disco",
+        hearthsound_core::EntityKind::Track,
+        chart[0].id.provider_id(),
+    );
+    assert!(
+        service.cached_track(&track).await.unwrap().is_some(),
+        "the chart leaves each track behind for its cover"
+    );
+}

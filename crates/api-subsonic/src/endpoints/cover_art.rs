@@ -684,7 +684,9 @@ fn catalog_failure(id: &dyn std::fmt::Display, error: &CatalogError) -> HttpResp
             not_found(id)
         }
         CatalogError::RateLimited { retry_after_ms, .. } => {
-            tracing::debug!(
+            // A rate-limited cover is the operator's business: it is why a grid of
+            // cards shows empty frames, and the client only sees a bare 503.
+            tracing::warn!(
                 id = %id,
                 instance,
                 retry_after_ms,

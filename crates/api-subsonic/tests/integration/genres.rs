@@ -823,3 +823,65 @@ fn song_ids(body: &str, member: &str) -> Vec<String> {
         .map(|song| song["id"].as_str().unwrap().to_owned())
         .collect()
 }
+
+/// A stored artist's top songs include the catalog chart its counterpart reports
+/// once the enrichment run has cached it.
+///
+/// The chart is what makes the panel the artist's most popular songs rather than
+/// the most played files; a library-only read shows one song and never the other
+/// five. The local rows stay first and a chart song the library already lists is
+/// not repeated.
+#[tokio::test]
+async fn a_stored_artists_top_songs_include_the_cached_catalog_chart() {
+    use hearthsound_core::ClientId;
+
+    let (fixture, seeded) = fixture().await;
+    fixture.install_discography_catalog().await;
+    sqlx::query(
+        "INSERT INTO external_ids (namespace, value, entity_kind, entity_id) \
+         VALUES ('p:disco', 'disco-artist-1', 'artist', ?)",
+    )
+    .bind(seeded.cardinals.uuid().as_bytes().as_slice())
+    .execute(fixture.database.writer())
+    .await
+    .unwrap();
+    fixture.enrich(&ClientId::Entity(seeded.cardinals)).await;
+    let app = fixture.app();
+
+    let listed = get(
+        &app,
+        &format!(
+            "/rest/getTopSongs?id={}&hearthsound=1&count=10&apiKey={}&f=json",
+            seeded.cardinals, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&listed);
+    let ids = song_ids(&listed.body, "topSongs");
+    assert!(
+        ids.iter().any(|id| id.starts_with("x_disco_t_")),
+        "the cached chart is listed: {}",
+        listed.body
+    );
+    assert!(
+        listed.body.contains("First Light"),
+        "the chart's first track is named: {}",
+        listed.body
+    );
+    let mut titles: Vec<String> = serde_json::from_str::<serde_json::Value>(&listed.body).unwrap()
+        ["subsonic-response"]["topSongs"]["song"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|song| song["title"].as_str().unwrap().to_owned())
+        .collect();
+    let count = titles.len();
+    titles.sort();
+    titles.dedup();
+    assert_eq!(
+        count,
+        titles.len(),
+        "no song is listed twice: {}",
+        listed.body
+    );
+}

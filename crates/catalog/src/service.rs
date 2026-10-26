@@ -25,7 +25,7 @@ use hearthsound_core::providers::{
     CatalogAlbum, CatalogAlbumRef, CatalogArtist, CatalogProvider, CatalogQuery, CatalogResults,
     CatalogTrack,
 };
-use hearthsound_core::{CatalogId, EntityKind, Layer, ProviderError, Slug};
+use hearthsound_core::{CatalogId, EntityId, EntityKind, Layer, ProviderError, Slug};
 use hearthsound_db::Database;
 use hearthsound_plugin_host::{ProviderRegistry, RegistryInstance};
 use moka::future::Cache as MemoryCache;
@@ -1120,12 +1120,126 @@ impl CatalogService {
             return Ok(None);
         };
         let wanted = usize::try_from(limit).unwrap_or(usize::MAX);
-        Vec::<CatalogTrack>::from(tracks)
+        let tracks: Vec<CatalogTrack> = Vec::<CatalogTrack>::from(tracks)
             .into_iter()
             .take(wanted)
+            .collect();
+        // A track row of a chart is what a song's cover is requested by, so the
+        // chart leaves each track behind under its own key: a cover then costs no
+        // provider call. The listing is already cached, so this is a write of what
+        // the caller was just told.
+        self.promote_tracks(instance.id(), &tracks).await;
+        tracks
+            .into_iter()
             .map(|track| track_result(id.slug(), track))
             .collect::<Result<Vec<_>, _>>()
             .map(Some)
+    }
+
+    /// Reads the chart of the catalog artist a stored artist pairs with.
+    ///
+    /// The enrichment run of a stored artist caches its catalog counterpart's top
+    /// tracks; this is how its page reads them back without a provider call. The
+    /// pairing is the recorded `p:<slug>` alias, resolved through the catalog
+    /// layer in the administrator's order.
+    ///
+    /// # Parameters
+    ///
+    /// - `artist`: the stored artist.
+    /// - `limit`: the maximum number of tracks to return.
+    ///
+    /// # Returns
+    ///
+    /// The cached chart, empty when the artist has no catalog counterpart or the
+    /// counterpart's chart was never fetched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when the alias or the cached answer cannot be read.
+    pub async fn cached_top_tracks_of_stored(
+        &self,
+        artist: EntityId,
+        limit: u32,
+    ) -> Result<Vec<CatalogTrackResult>, CatalogError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let layer = self.catalog_layer();
+        if layer.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(alias) = self
+            .provider_aliases(artist)
+            .await?
+            .into_iter()
+            .find(|alias| layer.contains(&alias.slug))
+        else {
+            return Ok(Vec::new());
+        };
+        let id = catalog_id(&alias.slug, EntityKind::Artist, &alias.provider_id)?;
+        Ok(self
+            .cached_artist_top_tracks(&id, limit)
+            .await?
+            .unwrap_or_default())
+    }
+
+    /// Leaves every track of a listing in the cache under its own key.
+    ///
+    /// A track's cover is requested by track id, and the track's own record names
+    /// the album whose image is the cover. Without this a chart row's cover is a
+    /// provider lookup per row.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance`: the instance that issued the tracks.
+    /// - `tracks`: the tracks the listing named.
+    async fn promote_tracks(&self, instance: uuid::Uuid, tracks: &[CatalogTrack]) {
+        let entries: Vec<(crate::cache::RequestKey, crate::wire::WireTrack)> = tracks
+            .iter()
+            .map(|track| {
+                (
+                    crate::cache::RequestKey::track(&track.id),
+                    crate::wire::WireTrack::from(track),
+                )
+            })
+            .collect();
+        self.inner
+            .cache
+            .fill_many(instance, &entries, crate::cache::ENTITY_CACHE_TTL)
+            .await;
+    }
+
+    /// Reads a cached catalog track.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the catalog id of a track.
+    ///
+    /// # Returns
+    ///
+    /// The cached track, or `None` when the instance has not answered for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::NotFound`] when the id does not name a track and
+    /// [`CatalogError::InvalidEntity`] when a cached provider id cannot be named.
+    pub async fn cached_track(
+        &self,
+        id: &CatalogId,
+    ) -> Result<Option<CatalogTrackResult>, CatalogError> {
+        require_kind(id, EntityKind::Track)?;
+        let Some(instance) = self.inner.registry.instance(id.slug().as_str()) else {
+            return Ok(None);
+        };
+        let Some(track) = self
+            .inner
+            .cache
+            .read::<WireTrack>(instance.id(), &RequestKey::track(id.provider_id()))
+            .await
+        else {
+            return Ok(None);
+        };
+        Ok(Some(track_result(id.slug(), CatalogTrack::from(track))?))
     }
 
     /// Reads a cached catalog search.

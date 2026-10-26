@@ -319,13 +319,58 @@ pub async fn get_top_songs(call: Call) -> Encoded {
     let songs = match requested {
         RequestedArtist::Stored(id) => {
             let database = call.state().database();
-            match browse::top_tracks_for_artist(database, scope, id, count).await {
-                Ok(views) => match songs(&call, scope, views).await {
-                    Ok(songs) => songs,
-                    Err(error) => return call.encode(Response::failed(error)),
-                },
+            let views = match browse::top_tracks_for_artist(database, scope, id, count).await {
+                Ok(views) => views,
                 Err(error) => {
                     return call.encode(Response::failed(browse::failure("getTopSongs", &error)));
+                }
+            };
+            let listed_titles: std::collections::HashSet<String> = views
+                .iter()
+                .map(|view| hearthsound_catalog::dedupe::normalize(&view.track.title))
+                .collect();
+            let local = match songs(&call, scope, views).await {
+                Ok(songs) => songs,
+                Err(error) => return call.encode(Response::failed(error)),
+            };
+            if !vendor {
+                local
+            } else {
+                // The chart of the artist's catalog counterpart is what makes the
+                // panel the artist's most popular songs rather than the stored
+                // ones' most played: the enrichment run caches it, and this read
+                // only collects. A chart track the library already holds as one of
+                // the local rows is not listed twice.
+                let limit = u32::try_from(count.max(0)).unwrap_or(u32::MAX);
+                let chart = match call
+                    .state()
+                    .catalog()
+                    .cached_top_tracks_of_stored(id, limit)
+                    .await
+                {
+                    Ok(tracks) => tracks,
+                    Err(error) => {
+                        tracing::debug!(%error, artist = %id, "a stored artist's chart could not be read");
+                        Vec::new()
+                    }
+                };
+                if chart.is_empty() {
+                    local
+                } else {
+                    let suffix = match catalog::title_suffix(&call.state().settings_snapshot()) {
+                        Ok(suffix) => suffix,
+                        Err(error) => return call.encode(Response::failed(error)),
+                    };
+                    let mut listed = local;
+                    for track in chart {
+                        if listed_titles
+                            .contains(&hearthsound_catalog::dedupe::normalize(&track.track.title))
+                        {
+                            continue;
+                        }
+                        listed.push(projection::catalog_child(&track.id, &track.track, &suffix));
+                    }
+                    listed
                 }
             }
         }

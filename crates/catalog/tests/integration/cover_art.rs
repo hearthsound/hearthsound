@@ -887,3 +887,58 @@ async fn a_cover_of_a_promoted_album_costs_no_provider_call() {
         "only the image itself is fetched"
     );
 }
+
+/// A charted track's cover is served from the record the cached chart promoted,
+/// without reading the track from its instance.
+///
+/// A song row asks for its cover by track id, and the track's record names the
+/// album whose image is the cover. A provider lookup per row is what left chart
+/// rows blank on a rate-limited instance, so the cached chart leaves each track
+/// behind and the cover read finds it there.
+#[tokio::test]
+async fn a_cover_of_a_charted_track_costs_no_provider_call() {
+    let (env, server) = caching_env().await;
+    let service = env.service();
+    let artist = catalog_id("hello", EntityKind::Artist, "hello-artist-1");
+    let chart = format!(
+        r#"[{{"id":"hello-track-1","title":"Hello Song","album":{{"id":"hello-album-1","title":"Hello Album","images":[{},{}]}}}}]"#,
+        json!({"url": format!("{}/cover-250.png", server.uri()), "width": 250}),
+        json!({"url": format!("{}/cover-500.png", server.uri()), "width": 500}),
+    );
+    crate::common::write_cache_row(
+        &env.database,
+        env.instance_id("hello"),
+        hearthsound_catalog::RequestKey::artist_top_tracks("hello-artist-1", 5).as_str(),
+        &chart,
+        Some(crate::common::now_millis() + 60_000),
+    )
+    .await;
+
+    let listed = service
+        .cached_artist_top_tracks(&artist, 5)
+        .await
+        .unwrap()
+        .expect("the chart was cached");
+    assert_eq!(listed.len(), 1, "the chart names one track");
+    let rows = crate::common::count_cache_rows(&env.database).await;
+
+    let cover = service
+        .cover_art(&CoverArtRequest {
+            id: ClientId::Catalog(listed[0].id.clone()),
+            size: Some(300),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(cover.bytes, IMAGE);
+    assert_eq!(
+        crate::common::count_cache_rows(&env.database).await,
+        rows,
+        "the track must not be read from its instance"
+    );
+    assert_eq!(
+        requested_paths(&server).await,
+        vec!["/cover-500.png"],
+        "only the image itself is fetched"
+    );
+}

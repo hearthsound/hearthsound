@@ -163,9 +163,10 @@ impl CatalogService {
     /// Returns the images the catalog layers already cached for an entity.
     ///
     /// Nothing is asked of a provider. A catalog entity is read from its own
-    /// record, and an album from the reference a listing promoted when its record
-    /// was never read; a stored entity is read through the alias that names its
-    /// catalog counterpart.
+    /// record, an album from the reference a listing promoted when its record was
+    /// never read, and a track from the record a chart promoted, whose album names
+    /// the image; a stored entity is read through the alias that names its catalog
+    /// counterpart.
     ///
     /// # Parameters
     ///
@@ -196,7 +197,19 @@ impl CatalogService {
                 let found = self.cached_artist(&catalog).await.ok().flatten()?;
                 Some(found.artist.images)
             }
-            _ => None,
+            // A track has no picture of its own: the picture a client wants for it
+            // is its album's, which the cached track carries.
+            EntityKind::Track => {
+                let found = self.cached_track(&catalog).await.ok().flatten()?;
+                Some(
+                    found
+                        .track
+                        .album
+                        .map(|album| album.images)
+                        .unwrap_or_default(),
+                )
+            }
+            EntityKind::Playlist => None,
         }
     }
 
