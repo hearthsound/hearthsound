@@ -178,6 +178,12 @@ impl Default for RetryPolicy {
     }
 }
 
+/// The `last_error` a job gets when its attempts ran out while it was running.
+///
+/// The row is failed by [`JobQueue::claim`], which has no handler error to
+/// store, so the message names what is known: the job was abandoned.
+const ABANDONED: &str = "the job was abandoned and has used up its retries";
+
 /// The state literals stored in `jobs.state`.
 ///
 /// A job is `ready` while it waits for a worker, `running` while a worker holds
@@ -633,6 +639,35 @@ impl JobQueue {
     pub async fn claim(&self) -> Result<Option<Job>, JobsError> {
         let now = now_millis();
         let locked_until = add(now, self.options.lock_duration);
+        let mut transaction = self.writer.begin().await?;
+        // A job whose worker keeps dying is reclaimed over and over; once its
+        // attempts are used up it is failed here instead, so a handler that
+        // never finishes cannot run for the life of the process.
+        let retired = sqlx::query!(
+            "UPDATE jobs
+             SET state = 'failed', locked_until = NULL,
+                 last_error = COALESCE(last_error, ?),
+                 updated_at = ?
+             WHERE state = 'running' AND locked_until IS NOT NULL AND locked_until <= ?
+               AND attempts >= ?
+             RETURNING id, kind, attempts",
+            ABANDONED,
+            now,
+            now,
+            self.options.retry.max_attempts(),
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        for row in &retired {
+            let id =
+                Uuid::from_slice(&row.id).map_err(|_| JobsError::InvalidId { table: "jobs" })?;
+            tracing::warn!(
+                job = %id,
+                kind = %row.kind,
+                attempts = row.attempts,
+                "a job that lost its worker has used up its retries; it is failed",
+            );
+        }
         let row = sqlx::query_as!(
             JobRow,
             "UPDATE jobs
@@ -651,8 +686,9 @@ impl JobQueue {
             now,
             now,
         )
-        .fetch_optional(&self.writer)
+        .fetch_optional(&mut *transaction)
         .await?;
+        transaction.commit().await?;
         row.map(JobRow::into_job).transpose()
     }
 

@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs\n             SET state = 'failed', locked_until = NULL,\n                 last_error = COALESCE(last_error, ?),\n                 updated_at = ?\n             WHERE state = 'running' AND locked_until IS NOT NULL AND locked_until <= ?\n               AND attempts >= ?\n             RETURNING id, kind, attempts",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "kind",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "attempts",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "attempts"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "937305faf834a9b39cc3a47257551cecc8916cbf1e7d1f09cd30fade67d42e55"
+}

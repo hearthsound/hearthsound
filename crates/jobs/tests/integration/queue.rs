@@ -337,6 +337,52 @@ async fn cancel_removes_a_job() {
     assert_eq!(listed[0].id, second.id);
 }
 
+/// A job whose worker keeps dying is failed once its attempts are used up,
+/// instead of being reclaimed for ever.
+#[tokio::test]
+async fn a_reclaimed_job_is_failed_once_its_attempts_are_used_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let queue = JobQueue::new(
+        &database,
+        QueueOptions {
+            lock_duration: Duration::from_millis(200),
+            retry: RetryPolicy::new(vec![Duration::from_millis(80), Duration::from_millis(200)]),
+        },
+    );
+
+    let enqueued = queue.enqueue(NewJob::new("library.scan")).await.unwrap();
+    for expected_attempt in 1..=3 {
+        let claimed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(job) = queue.claim().await.unwrap() {
+                    break job;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("attempt {expected_attempt} was never claimed"));
+        assert_eq!(claimed.attempts, expected_attempt);
+        // The worker dies: the claim expires and nothing writes its outcome.
+        tokio::time::sleep(Duration::from_millis(320)).await;
+    }
+
+    assert!(
+        queue.claim().await.unwrap().is_none(),
+        "a job that used up its attempts is not claimed again"
+    );
+    let failed = queue.get(enqueued.id).await.unwrap().unwrap();
+    assert_eq!(failed.state, JobState::Failed);
+    assert_eq!(failed.attempts, 3);
+    assert!(
+        failed.last_error.is_some(),
+        "the retired job keeps a reason for an operator"
+    );
+    assert_eq!(failed.locked_until, None);
+    assert_eq!(queue.count(JobState::Running).await.unwrap(), 0);
+}
+
 /// A worker whose lock expired cannot write the outcome of the attempt it
 /// lost: the claim token is the attempt count, and the reclaimed attempt is the
 /// one that owns the row.

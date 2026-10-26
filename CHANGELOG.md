@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A job whose worker keeps dying is failed once its attempts are used up, instead of being reclaimed for the life of the process.
 - A job's attempt count is its claim token: a worker whose lock expired can no longer complete, fail or permanently fail the attempt another worker has since reclaimed.
 - Shutdown ends the event stream, cuts a response still in flight after ten seconds and reports a worker that panicked, so a client cannot hold the process open and `hearthsound serve` exits non-zero when a worker failed.
 - A scrobble row a service rejected permanently is shown for a week and then swept away, so a queue nobody reads stops growing.
