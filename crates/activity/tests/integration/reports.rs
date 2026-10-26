@@ -1459,3 +1459,71 @@ async fn a_stopped_report_removes_the_session_row() {
         .unwrap();
     assert_eq!(rows, 0);
 }
+
+/// A stopped report that asks to be ignored closes the session and records no
+/// play, even after the session already reached the threshold: this is what a
+/// client's stop report is for, clearing now playing without a second play.
+#[tokio::test]
+async fn an_ignored_stop_after_the_threshold_records_no_play() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let reports = activity.reports();
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let one = track_id(tracks[0]);
+    let start = session_start();
+
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Starting,
+            start,
+        ))
+        .await
+        .unwrap();
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Playing,
+            start + 130_000,
+        ))
+        .await
+        .unwrap();
+    let mut stopped = report(
+        user,
+        "dsub",
+        one,
+        240_000,
+        PlaybackState::Stopped,
+        start + 140_000,
+    );
+    stopped.ignore_scrobble = true;
+    assert_eq!(
+        reports.report(&stopped).await.unwrap(),
+        PlaybackOutcome::Updated
+    );
+
+    assert_eq!(
+        activity.plays().play_count(user, one.uuid()).await.unwrap(),
+        0,
+        "the client asked for no play"
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM now_playing")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(rows, 0, "the stop cleared the now-playing row");
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM listen_sessions")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert_eq!(rows, 0, "the stop removed the stored session");
+}
