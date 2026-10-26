@@ -39,6 +39,11 @@
 //! - `fail` answers `503` with `Retry-After` at once and lets the acquisition
 //!   continue in the background.
 //!
+//! An acquisition that is parked for want of an acquisition source - no plugin
+//! instance can serve it - is answered `503` with `Retry-After` in either mode,
+//! because waiting for an administrator to add one is not something a client's
+//! connection should cover.
+//!
 //! Neither mode writes a byte before the outcome is known, so a failure, a
 //! cooldown, or an elapsed wait is still answered as a status code: `hold`
 //! answers `404` when the acquisition fails and `503` when its wait elapses.
@@ -651,6 +656,11 @@ impl StreamService {
     /// the file and serves it as a stored track would be, and `fail` answers
     /// `503` at once while the acquisition continues in the background.
     ///
+    /// An acquisition parked for a source is answered `503` with `Retry-After`
+    /// whatever the mode says: it waits for a plugin instance to be added, which
+    /// `stream.pending.max_wait_secs` has no reason to cover, and holding the
+    /// client's connection open for that would look like a stalled server.
+    ///
     /// # Parameters
     ///
     /// - `request`: the request being answered.
@@ -659,7 +669,7 @@ impl StreamService {
     ///
     /// # Errors
     ///
-    /// Returns the error of the mode's path: [`StreamError::Unavailable`] for a
+    /// Returns [`StreamError::Unavailable`] for a parked acquisition and for a
     /// `fail` mode answer, and whatever [`StreamService::serve_held`] returns.
     async fn serve_pending(
         &self,
@@ -667,6 +677,16 @@ impl StreamService {
         track: EntityId,
         handle: AcquisitionHandle,
     ) -> Result<Response, StreamError> {
+        if handle.snapshot().awaiting_source {
+            tracing::debug!(
+                track = %track,
+                "answered a pending stream with 503 while its acquisition waits for a source"
+            );
+            return Err(StreamError::Unavailable {
+                retry_after_secs: RETRY_AFTER_SECS,
+            });
+        }
+
         let settings = self.settings.current();
         let mode = PendingMode::of(&setting_or(
             &settings,

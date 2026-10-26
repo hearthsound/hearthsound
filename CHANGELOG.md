@@ -225,6 +225,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   next fetch.
 - The reserved import-root id `staging` is refused, so a root the guest can never
   reach is not accepted.
+- A stream for a track no acquisition source can serve is answered `503` with
+  `Retry-After` at once, instead of holding the client's request until
+  `stream.pending.max_wait_secs` runs out.
 - A tool's stdout file is created without following a symlink, and no directory
   is created outside the staging directory.
 - A plugin archive may only resolve to addresses as public as the index that

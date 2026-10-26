@@ -785,6 +785,49 @@ async fn the_pending_mode_switches_between_hold_and_fail() {
     assert_eq!(header(&response, RETRY_AFTER), Some("10"));
 }
 
+/// A stream whose acquisition waits for a source answers at once.
+///
+/// The catalog layer is installed and the acquisition layer is empty, so there
+/// is no instance that could serve the track: admission parks the acquisition
+/// instead of starting it, and the stream answers `503` with `Retry-After`
+/// rather than holding the client's connection for
+/// `stream.pending.max_wait_secs`.
+#[tokio::test]
+async fn a_stream_no_source_can_serve_answers_at_once() {
+    let fixture = Fixture::new().await;
+    let services = Arc::clone(&fixture.services);
+    install_catalog(&services).await;
+    services.registry().rebuild().await.unwrap();
+
+    let id = catalog_id(1);
+    let response = tokio::time::timeout(
+        Duration::from_secs(2),
+        fixture.get(&stream_path(&fixture, &id)),
+    )
+    .await
+    .expect("a stream waiting for a source is answered without holding the connection");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        header(&response, RETRY_AFTER),
+        Some("10"),
+        "a client is told when to ask again"
+    );
+    assert!(
+        response.bytes().await.unwrap().is_empty(),
+        "a parked stream sends no bytes"
+    );
+
+    let track = materialize(services.catalog(), 1).await;
+    let rows = ledger_rows(services.orchestrator(), track).await;
+    assert_eq!(rows.len(), 1, "the request started one acquisition");
+    assert_eq!(rows[0].state, AcquisitionState::Queued);
+    assert_eq!(
+        rows[0].park_reason,
+        Some(hearthsound_core::ParkReason::NoSource),
+        "the acquisition waits for an acquisition source"
+    );
+}
+
 /// A restart in the middle of a download finishes the acquisition.
 #[tokio::test]
 async fn a_restart_mid_download_finishes_the_acquisition() {
