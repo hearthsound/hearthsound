@@ -15,7 +15,8 @@
 //!   immediately, so latency does not come from polling.
 //!
 //! Delivery is at-least-once: a job whose worker died is reclaimed, so a handler
-//! must tolerate running for a job it already ran. The attempt count a claim
+//! must tolerate running for a job it already ran. A panicking handler fails its
+//! job and never takes the worker down. The attempt count a claim
 //! returns is the claim token the outcome is written against, so a worker whose
 //! claim expired must not overwrite the outcome of the attempt it lost.
 //!
@@ -23,11 +24,14 @@
 //! claiming new work, and [`JobRunner::run`] then waits for the handlers that
 //! are already running, up to the configured timeout.
 
+use std::any::Any;
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use tokio::task::JoinSet;
 
 use crate::error::JobsError;
@@ -344,15 +348,73 @@ async fn worker(
         if shutdown.is_triggered() {
             return;
         }
-        match queue.claim().await {
-            Ok(Some(job)) => run_job(&queue, &handlers, &options, job).await,
-            Ok(None) => idle(&queue, &options, &shutdown).await,
-            Err(error) => {
-                tracing::warn!(worker = index, %error, "claiming a job failed");
-                idle(&queue, &options, &shutdown).await;
-            }
+        // A panic outside a handler - in the claim, in an idle wait, in the
+        // outcome write - must not take the worker out of the pool: the slot
+        // would never be replaced and the job it claimed would wait for its
+        // lock to expire.
+        let step = AssertUnwindSafe(worker_step(&queue, &handlers, &options, index, &shutdown))
+            .catch_unwind();
+        if let Err(payload) = step.await {
+            tracing::error!(
+                worker = index,
+                panic = %panic_message(payload),
+                "a job worker panicked; it keeps claiming",
+            );
         }
     }
+}
+
+/// Claims and runs one job, or waits for work.
+///
+/// # Parameters
+///
+/// - `queue`: the queue to claim from.
+/// - `handlers`: the handlers, keyed by kind.
+/// - `options`: the poll interval and heartbeat.
+/// - `index`: the worker's number, used in log records only.
+/// - `shutdown`: the signal that stops the loop.
+async fn worker_step(
+    queue: &Arc<JobQueue>,
+    handlers: &HashMap<JobKind, Arc<dyn JobHandler>>,
+    options: &JobRunnerOptions,
+    index: usize,
+    shutdown: &Shutdown,
+) {
+    match queue.claim().await {
+        Ok(Some(job)) => run_job(queue, handlers, options, job).await,
+        Ok(None) => idle(queue, options, shutdown).await,
+        Err(error) => {
+            tracing::warn!(worker = index, %error, "claiming a job failed");
+            idle(queue, options, shutdown).await;
+        }
+    }
+}
+
+/// Describes a panic payload for a log record or a job's `last_error`.
+///
+/// # Parameters
+///
+/// - `payload`: what the panic was called with.
+///
+/// # Returns
+///
+/// The message, or a fixed phrase when the payload is not a string.
+fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "a non-string panic payload".to_owned()
+    }
+}
+
+/// What one handler call produced.
+enum HandlerOutcome {
+    /// The handler returned, successfully or not.
+    Done(Result<(), JobError>),
+    /// The handler panicked, with the message it panicked with.
+    Panicked(String),
 }
 
 /// Waits until there may be work, the poll interval elapses, or shutdown.
@@ -395,7 +457,7 @@ async fn run_job(
 
     let started = Instant::now();
     match handle_with_heartbeat(queue, handler.as_ref(), &job, options.heartbeat_interval).await {
-        Ok(()) => {
+        HandlerOutcome::Done(Ok(())) => {
             tracing::debug!(
                 job = %job.id,
                 kind = %job.kind,
@@ -416,7 +478,7 @@ async fn run_job(
                 }
             }
         }
-        Err(error) => {
+        HandlerOutcome::Done(Err(error)) => {
             tracing::warn!(
                 job = %job.id,
                 kind = %job.kind,
@@ -442,6 +504,24 @@ async fn run_job(
                 Err(fail_error) => {
                     tracing::error!(job = %job.id, %fail_error, "failing a job failed");
                 }
+            }
+        }
+        HandlerOutcome::Panicked(message) => {
+            tracing::error!(
+                job = %job.id,
+                kind = %job.kind,
+                attempts = job.attempts,
+                panic = %message,
+                "the job handler panicked",
+            );
+            // Permanent: a retry of a panicking handler panics again.
+            let error = format!("the handler panicked: {message}");
+            if let Err(fail_error) = queue.fail_permanently(job.id, job.attempts, &error).await {
+                tracing::error!(
+                    job = %job.id,
+                    %fail_error,
+                    "failing a job whose handler panicked failed",
+                );
             }
         }
     }
@@ -471,15 +551,19 @@ async fn run_job(
 /// - `heartbeat_interval`: how often to extend the claim; zero means every
 ///   millisecond.
 ///
+/// A panic inside the handler is caught here, so it fails that job and nothing
+/// else: the worker keeps claiming, and the job is failed permanently because a
+/// retry of a panicking handler panics again.
+///
 /// # Returns
 ///
-/// Whatever the handler returned.
+/// What the handler returned, or the message it panicked with.
 async fn handle_with_heartbeat(
     queue: &Arc<JobQueue>,
     handler: &dyn JobHandler,
     job: &Job,
     heartbeat_interval: Duration,
-) -> Result<(), JobError> {
+) -> HandlerOutcome {
     let period = heartbeat_interval.max(Duration::from_millis(1));
     let (extended, mut extensions) = tokio::sync::mpsc::unbounded_channel();
     let extending = {
@@ -495,12 +579,17 @@ async fn handle_with_heartbeat(
         })
     };
 
-    let handling = handler.handle(job.clone());
+    let handling = AssertUnwindSafe(handler.handle(job.clone())).catch_unwind();
     tokio::pin!(handling);
     let mut heartbeat_alive = true;
     let result = loop {
         tokio::select! {
-            result = &mut handling => break result,
+            result = &mut handling => {
+                break match result {
+                    Ok(result) => HandlerOutcome::Done(result),
+                    Err(payload) => HandlerOutcome::Panicked(panic_message(payload)),
+                };
+            }
             result = extensions.recv(), if heartbeat_alive => match result {
                 Some(Ok(true)) => {}
                 Some(Ok(false)) => {

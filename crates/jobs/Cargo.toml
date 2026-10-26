@@ -14,6 +14,7 @@ workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 croner.workspace = true
+futures-util.workspace = true
 hearthsound-core = { path = "../core" }
 hearthsound-db = { path = "../db" }
 serde.workspace = true

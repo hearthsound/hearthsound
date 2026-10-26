@@ -125,6 +125,23 @@ impl JobHandler for Stuck {
     }
 }
 
+/// Panics on the payload named `boom` and succeeds on everything else.
+struct Panicker {
+    /// Signals the job it was handed, so the test knows both ran.
+    handled: UnboundedSender<Job>,
+}
+
+#[async_trait]
+impl JobHandler for Panicker {
+    async fn handle(&self, job: Job) -> Result<(), JobError> {
+        let _ = self.handled.send(job.clone());
+        if job.payload_text().is_some_and(|text| text.contains("boom")) {
+            panic!("the handler gave up");
+        }
+        Ok(())
+    }
+}
+
 /// Starts a runner on its own task.
 fn start(runner: Arc<JobRunner>, shutdown: &Shutdown) -> tokio::task::JoinHandle<()> {
     let shutdown = shutdown.clone();
@@ -228,6 +245,61 @@ async fn wakes_immediately_on_a_local_enqueue() {
 
     shutdown.trigger();
     running.await.unwrap();
+}
+
+/// A handler that panics fails its own job permanently and leaves the worker
+/// running: the next job on the same worker still completes.
+#[tokio::test]
+async fn a_panicking_handler_fails_its_job_and_keeps_the_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let queue = Arc::new(JobQueue::new(&database, QueueOptions::default()));
+
+    let (handled, mut handled_rx) = mpsc::unbounded_channel();
+    let mut runner = JobRunner::new(
+        Arc::clone(&queue),
+        JobRunnerOptions {
+            workers: 1,
+            poll_interval: Duration::from_millis(20),
+            ..JobRunnerOptions::default()
+        },
+    );
+    runner.register("library.scan", Arc::new(Panicker { handled }));
+
+    let shutdown = Shutdown::new();
+    let running = start(Arc::new(runner), &shutdown);
+
+    let broken = queue
+        .enqueue(NewJob::new("library.scan").payload(&"boom").unwrap())
+        .await
+        .unwrap();
+    let healthy = queue.enqueue(NewJob::new("library.scan")).await.unwrap();
+
+    // Both jobs are handed to the one worker, so the panic cannot have ended
+    // it.
+    let mut seen = Vec::new();
+    for _ in 0..2 {
+        seen.push(receive(&mut handled_rx, "a handled job").await.id);
+    }
+    assert!(seen.contains(&broken.id) && seen.contains(&healthy.id));
+
+    wait_for_count(&queue, JobState::Failed, 1).await;
+    shutdown.trigger();
+    running.await.unwrap();
+
+    let failed = queue.get(broken.id).await.unwrap().unwrap();
+    assert_eq!(failed.state, JobState::Failed);
+    assert_eq!(failed.attempts, 1, "a panicking handler is not retried");
+    let error = failed.last_error.clone().unwrap();
+    assert!(
+        error.contains("panicked") && error.contains("the handler gave up"),
+        "the stored error says the handler panicked: {error}"
+    );
+    assert_eq!(
+        queue.get(healthy.id).await.unwrap(),
+        None,
+        "the next job on the same worker completed"
+    );
 }
 
 #[tokio::test]
