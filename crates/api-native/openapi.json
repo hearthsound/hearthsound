@@ -1250,7 +1250,7 @@
           "admin"
         ],
         "summary": "Removes a plugin with its rows, assignments and files.",
-        "description": "# Errors\n\nAnswers `not-found` for an unknown plugin and `internal` when its files\ncannot be removed.",
+        "description": "The instances the plugin provided go with it by cascade, so the generated\nplaylists they produced and that are still temporary are deleted first, and\neach owner is told with a `playlist.changed` of `deleted`. A playlist the\nlistener made permanent or edited is kept.\n\n# Errors\n\nAnswers `not-found` for an unknown plugin and `internal` when its files or\nits instances' playlists cannot be removed.",
         "operationId": "delete_plugin",
         "parameters": [
           {
@@ -1665,7 +1665,7 @@
           "admin"
         ],
         "summary": "Removes a provider instance.",
-        "description": "The instance's key-value rows and its layer assignments go with it, and the\nregistry is rebuilt so it stops serving.\n\n# Errors\n\nAnswers `not-found` for an unknown instance and `internal` when the row\ncannot be removed.",
+        "description": "The instance's key-value rows and its layer assignments go with it, and the\nregistry is rebuilt so it stops serving. The generated playlists it produced\nthat are still temporary are deleted in the same operation, and each owner is\ntold with a `playlist.changed` of `deleted`; a playlist the listener made\npermanent or edited is kept, because it is theirs.\n\n# Errors\n\nAnswers `not-found` for an unknown instance and `internal` when the row\ncannot be removed or its playlists cannot be deleted.",
         "operationId": "delete_provider",
         "parameters": [
           {
