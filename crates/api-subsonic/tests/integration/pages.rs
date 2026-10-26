@@ -632,3 +632,62 @@ async fn a_member_carries_the_readable_path() {
         "a stored song's album path is built from the album's own title"
     );
 }
+
+/// Counts the queued `catalog.enrich` jobs.
+async fn enrich_jobs(fixture: &Fixture) -> i64 {
+    let queued = fixture
+        .state
+        .jobs()
+        .expect("the fixture queues jobs")
+        .list_by_state(hearthsound_jobs::JobState::Ready, 100)
+        .await
+        .unwrap();
+    queued
+        .iter()
+        .filter(|job| job.kind.as_str() == "catalog.enrich")
+        .count()
+        .try_into()
+        .unwrap()
+}
+
+/// A cold first-party page answers from the library, and its burst of reads asks
+/// for one enrichment while a second read asks for none.
+#[tokio::test]
+async fn a_cold_artist_page_answers_at_once_and_asks_for_one_enrichment() {
+    let seed = seeded().await;
+    let artist = seed.artist.to_string();
+    let key = seed.fixture.api_key.clone();
+    let app = seed.fixture.app();
+
+    let page = artist_page(&seed.fixture, &artist, true).await;
+    assert_eq!(
+        album_ids(&page),
+        vec![seed.basement.to_string(), seed.second_wind.to_string()],
+        "a cold page is the library's, without waiting for the catalog"
+    );
+
+    let info = get(
+        &app,
+        &format!("/rest/getArtistInfo2?id={artist}&apiKey={key}&f=json&hearthsound=1"),
+    )
+    .await;
+    assert_ok(&info);
+    let songs = get(
+        &app,
+        &format!("/rest/getTopSongs?artist=Discography%20Artist&apiKey={key}&f=json&hearthsound=1"),
+    )
+    .await;
+    assert_ok(&songs);
+    assert_eq!(
+        enrich_jobs(&seed.fixture).await,
+        1,
+        "the burst of reads asks for one enrichment"
+    );
+
+    let _ = artist_page(&seed.fixture, &artist, true).await;
+    assert_eq!(
+        enrich_jobs(&seed.fixture).await,
+        1,
+        "a second read adds no job"
+    );
+}
