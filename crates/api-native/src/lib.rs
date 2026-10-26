@@ -29,6 +29,7 @@
 //! | `GET`/`POST /api/v1/me/api-keys`, `DELETE /api/v1/me/api-keys/{id}` | any user, own keys |
 //! | `GET`/`POST /api/v1/me/app-passwords`, `DELETE /api/v1/me/app-passwords/{id}` | any user, own app passwords |
 //! | `GET`/`PATCH /api/v1/me/settings` | any user, own overrides |
+//! | `GET /api/v1/me/folders` | any user, the scanned folders they own |
 //! | `GET /api/v1/me/providers`, `PUT /api/v1/me/providers/{slug}/config`, `POST`/`DELETE /api/v1/me/providers/{slug}/link`, `GET /api/v1/me/providers/{slug}/link/callback` | any user, own links |
 //! | `PUT /api/v1/playlists/{id}/order` | any user, own playlist |
 //! | `POST /api/v1/playlists/{id}/tracks` | any user, own playlist |
@@ -146,6 +147,7 @@ fn api_router() -> OpenApiRouter<NativeState> {
             routes::me::get_settings,
             routes::me::patch_settings
         ))
+        .routes(routes!(routes::me::list_my_folders))
         .routes(routes!(routes::me_providers::list_provider_links))
         .routes(routes!(routes::me_providers::put_provider_config))
         .routes(routes!(

@@ -10,7 +10,10 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use hearthsound_auth::{AuthError, validate_password, verify_password};
-use hearthsound_core::IdPrefix;
+use hearthsound_config::SettingValue;
+use hearthsound_config::keys;
+use hearthsound_core::{ClientId, IdPrefix};
+use hearthsound_library::LibraryRepository;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -510,12 +513,16 @@ pub async fn get_settings(
 /// Changes the caller's overrides; `null` removes one.
 ///
 /// Every change is checked before any is written, so a batch with one bad
-/// entry changes nothing.
+/// entry changes nothing. `library.save_folder` has to name a scanned folder
+/// the caller owns; a folder owned by someone else, a generic folder, and a
+/// value that names no folder are all refused, because a save location is per
+/// account and only an owned folder may receive a save.
 ///
 /// # Errors
 ///
 /// Answers `invalid-request` for an unknown key, a key users may not
-/// override, or a value that does not fit the setting.
+/// override, a value that does not fit the setting, or a save folder the
+/// caller does not own, and `internal` when a folder cannot be read.
 #[utoipa::path(
     patch,
     path = "/api/v1/me/settings",
@@ -532,6 +539,7 @@ pub async fn patch_settings(
     State(state): State<NativeState>,
     JsonBody(patch): JsonBody<PersonalSettingsPatch>,
 ) -> Result<Json<PersonalSettings>, Problem> {
+    let user = authed.user_id();
     let registry = state.settings().registry();
     let mut changes = Vec::with_capacity(patch.settings.len());
     for (key, value) in &patch.settings {
@@ -548,9 +556,21 @@ pub async fn patch_settings(
         } else {
             Some(crate::views::setting_value(def, value)?)
         };
+        if key == keys::LIBRARY_SAVE_FOLDER.name()
+            && let Some(SettingValue::String(folder)) = &value
+            && !folder.is_empty()
+        {
+            let folder_id = save_folder_id(folder)?;
+            let owned = LibraryRepository::new(state.database())
+                .owned_folder(user, folder_id)
+                .await
+                .map_err(|error| problem::internal("reading a folder", &error))?;
+            if owned.is_none() {
+                return Err(save_folder_problem());
+            }
+        }
         changes.push((key.clone(), value));
     }
-    let user = authed.user_id();
     for (key, value) in changes {
         let written = match value {
             Some(value) => state.user_settings().set(user, &key, value).await,
@@ -559,6 +579,101 @@ pub async fn patch_settings(
         written.map_err(|error| problem::internal("writing a personal setting", &error))?;
     }
     personal_settings(&state, user).await.map(Json)
+}
+
+/// A scanned folder the caller owns.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MyFolderView {
+    /// The folder's client id (`lf_...`), which is what `library.save_folder`
+    /// stores.
+    pub id: String,
+    /// The folder's display name.
+    pub name: String,
+    /// The folder's absolute path on the server.
+    pub path: String,
+}
+
+/// The scanned folders one caller owns.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct MyFolderList {
+    /// The folders, ordered by name.
+    pub folders: Vec<MyFolderView>,
+}
+
+/// Lists the scanned folders the caller owns.
+///
+/// These are the only folders a save location may name, so the account page's
+/// picker is built from this list. A generic folder and a folder owned by
+/// another account are never in it.
+///
+/// # Errors
+///
+/// Answers `unauthenticated` without credentials and `internal` when the
+/// folders cannot be read.
+#[utoipa::path(
+    get,
+    path = "/api/v1/me/folders",
+    tag = "me",
+    responses(
+        (status = 200, description = "The folders the caller owns", body = MyFolderList),
+        (status = 401, description = "No valid credential", body = Problem, content_type = "application/problem+json"),
+    ),
+    security(("bearer" = []), ("session" = []))
+)]
+pub async fn list_my_folders(
+    authed: Authed,
+    State(state): State<NativeState>,
+) -> Result<Json<MyFolderList>, Problem> {
+    let user = authed.user_id();
+    let mut folders = LibraryRepository::new(state.database())
+        .list_library_folders()
+        .await
+        .map_err(|error| problem::internal("listing folders", &error))?;
+    folders.retain(|folder| folder.owner_user_id == Some(user));
+    folders.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
+    let folders = folders
+        .iter()
+        .map(|folder| MyFolderView {
+            id: client_id(IdPrefix::LibraryFolder, folder.id),
+            name: folder.name.clone(),
+            path: folder.path.to_string_lossy().into_owned(),
+        })
+        .collect();
+    Ok(Json(MyFolderList { folders }))
+}
+
+/// Parses a `library.save_folder` value into the folder id it names.
+///
+/// # Parameters
+///
+/// - `value`: the stored client id of a scanned folder.
+///
+/// # Returns
+///
+/// The folder's row id.
+///
+/// # Errors
+///
+/// Answers `invalid-request` when the value is not the client id of a scanned
+/// folder.
+fn save_folder_id(value: &str) -> Result<uuid::Uuid, Problem> {
+    match ClientId::parse(value) {
+        Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::LibraryFolder => Ok(id.uuid()),
+        _ => Err(save_folder_problem()),
+    }
+}
+
+/// The problem a save folder the caller does not own is refused with.
+///
+/// # Returns
+///
+/// The problem document.
+fn save_folder_problem() -> Problem {
+    Problem::invalid_request(format!(
+        "`{}` must name a scanned folder you own.",
+        keys::LIBRARY_SAVE_FOLDER.name()
+    ))
 }
 
 /// Reads the overridable settings with one user's values.

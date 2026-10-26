@@ -582,6 +582,44 @@ pub async fn set_library_folder_owner(
     Ok(affected > 0)
 }
 
+/// Reads a folder when it exists and belongs to `owner`.
+///
+/// A save location is per account, so the only folder it may name is one that
+/// account owns: a folder owned by someone else, or a generic folder, never
+/// receives a save.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `owner`: the account the folder has to belong to.
+/// - `folder_id`: the folder to read.
+///
+/// # Returns
+///
+/// The folder, or `None` when no row has that id or its owner is someone else.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when the query fails and
+/// [`LibraryError::CorruptId`] when a stored id is not 16 bytes.
+pub async fn owned_folder(
+    conn: &mut SqliteConnection,
+    owner: Uuid,
+    folder_id: Uuid,
+) -> Result<Option<LibraryFolder>, LibraryError> {
+    let row = sqlx::query_as!(
+        FolderRow,
+        "SELECT id, path, name, owner_user_id, watch, created_at, last_scan_at, \
+                last_scan_error \
+         FROM library_folders WHERE id = ? AND owner_user_id = ?",
+        folder_id.as_bytes().as_slice(),
+        owner.as_bytes().as_slice(),
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    row.map(FolderRow::into_folder).transpose()
+}
+
 /// Records whether a folder is watched for changes.
 ///
 /// # Parameters

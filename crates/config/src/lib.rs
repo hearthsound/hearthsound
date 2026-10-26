@@ -430,6 +430,13 @@ pub mod keys {
     /// Whether removing a music folder asks for confirmation first.
     pub const LIBRARY_CONFIRM_FOLDER_REMOVAL: SettingKey<bool> =
         SettingKey::new("library.confirm_folder_removal");
+    /// The scanned folder a user's saves are written into; empty keeps them in
+    /// the managed library.
+    ///
+    /// The value is the client id of a `library_folders` row the user owns, so
+    /// a folder that was removed, unmounted or reassigned falls back to the
+    /// managed library instead of failing a save.
+    pub const LIBRARY_SAVE_FOLDER: SettingKey<String> = SettingKey::new("library.save_folder");
 
     /// Upper bound on the total size of the cache directory, in bytes.
     pub const STORAGE_CACHE_MAX_BYTES: SettingKey<i64> = SettingKey::new("storage.cache.max_bytes");
@@ -784,6 +791,13 @@ impl SettingsRegistry {
                     SettingValue::Bool(true),
                     "Whether removing a music folder asks first and names the likes and playlist \
                      entries it takes with it",
+                ),
+                user_def(
+                    keys::LIBRARY_SAVE_FOLDER,
+                    SettingKind::String { allowed: &[] },
+                    SettingValue::String(String::new()),
+                    "Scanned folder saved music is written into; empty keeps it in the managed \
+                     library",
                 ),
                 unit_def(
                     keys::STORAGE_CACHE_MAX_BYTES,
@@ -2148,5 +2162,26 @@ mod tests {
             }
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn the_save_folder_is_a_user_setting() {
+        let registry = SettingsRegistry::builtin();
+        let def = registry
+            .def(keys::LIBRARY_SAVE_FOLDER.name())
+            .expect("the save folder is registered");
+        assert!(
+            def.user_overridable,
+            "each account chooses its own save folder"
+        );
+        assert_eq!(def.kind, SettingKind::String { allowed: &[] });
+        assert_eq!(def.default, SettingValue::String(String::new()));
+
+        let store = SettingsStore::resolve(&registry, &SettingSources::default()).unwrap();
+        assert_eq!(
+            store.get(keys::LIBRARY_SAVE_FOLDER).unwrap(),
+            "",
+            "the managed library is the default"
+        );
     }
 }

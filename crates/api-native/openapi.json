@@ -2947,6 +2947,46 @@
         ]
       }
     },
+    "/api/v1/me/folders": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Lists the scanned folders the caller owns.",
+        "description": "These are the only folders a save location may name, so the account page's\npicker is built from this list. A generic folder and a folder owned by\nanother account are never in it.\n\n# Errors\n\nAnswers `unauthenticated` without credentials and `internal` when the\nfolders cannot be read.",
+        "operationId": "list_my_folders",
+        "responses": {
+          "200": {
+            "description": "The folders the caller owns",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MyFolderList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/me/password": {
       "post": {
         "tags": [
@@ -3354,7 +3394,7 @@
           "me"
         ],
         "summary": "Changes the caller's overrides; `null` removes one.",
-        "description": "Every change is checked before any is written, so a batch with one bad\nentry changes nothing.\n\n# Errors\n\nAnswers `invalid-request` for an unknown key, a key users may not\noverride, or a value that does not fit the setting.",
+        "description": "Every change is checked before any is written, so a batch with one bad\nentry changes nothing. `library.save_folder` has to name a scanned folder\nthe caller owns; a folder owned by someone else, a generic folder, and a\nvalue that names no folder are all refused, because a save location is per\naccount and only an owned folder may receive a save.\n\n# Errors\n\nAnswers `invalid-request` for an unknown key, a key users may not\noverride, a value that does not fit the setting, or a save folder the\ncaller does not own, and `internal` when a folder cannot be read.",
         "operationId": "patch_settings",
         "requestBody": {
           "content": {
@@ -4731,6 +4771,45 @@
           "relocation": {
             "$ref": "#/components/schemas/RelocationView",
             "description": "The files that moved between the roots or were deleted."
+          }
+        }
+      },
+      "MyFolderList": {
+        "type": "object",
+        "description": "The scanned folders one caller owns.",
+        "required": [
+          "folders"
+        ],
+        "properties": {
+          "folders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MyFolderView"
+            },
+            "description": "The folders, ordered by name."
+          }
+        }
+      },
+      "MyFolderView": {
+        "type": "object",
+        "description": "A scanned folder the caller owns.",
+        "required": [
+          "id",
+          "name",
+          "path"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The folder's client id (`lf_...`), which is what `library.save_folder`\nstores."
+          },
+          "name": {
+            "type": "string",
+            "description": "The folder's display name."
+          },
+          "path": {
+            "type": "string",
+            "description": "The folder's absolute path on the server."
           }
         }
       },

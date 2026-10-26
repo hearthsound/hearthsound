@@ -648,4 +648,18 @@ impl LibraryRepository {
         let mut conn = self.readers.acquire().await?;
         folders::list_library_folders(&mut conn).await
     }
+
+    /// Reads a folder when it exists and belongs to `owner`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when the read fails.
+    pub async fn owned_folder(
+        &self,
+        owner: Uuid,
+        folder_id: Uuid,
+    ) -> Result<Option<LibraryFolder>, LibraryError> {
+        let mut conn = self.readers.acquire().await?;
+        folders::owned_folder(&mut conn, owner, folder_id).await
+    }
 }
