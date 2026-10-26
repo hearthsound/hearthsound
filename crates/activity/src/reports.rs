@@ -228,9 +228,7 @@ pub struct Recovery {
 ///
 /// `true` when the stored row should be rewritten.
 fn persist_now(session: &ListenSession, changed: bool, now: i64) -> bool {
-    session.persisted_at == 0
-        || changed
-        || now - session.persisted_at >= LISTEN_SESSION_PERSIST_MS
+    session.persisted_at == 0 || changed || now - session.persisted_at >= LISTEN_SESSION_PERSIST_MS
 }
 
 /// The state every clone of the reports shares.
@@ -511,7 +509,14 @@ impl InMemoryReports {
     ) -> Result<Uuid, ActivityError> {
         let id = self
             .plays
-            .record_play(user_id, track_id.uuid(), Some(client), started_at, listened_ms, true)
+            .record_play(
+                user_id,
+                track_id.uuid(),
+                Some(client),
+                started_at,
+                listened_ms,
+                true,
+            )
             .await?;
         if let Some(outbox) = &self.scrobble_outbox
             && let Err(error) = outbox
@@ -523,7 +528,9 @@ impl InMemoryReports {
         let mut inner = self.lock();
         inner.recorded.insert((user_id, track_id.uuid()), now);
         // A play older than the window can never suppress a scrobble again.
-        inner.recorded.retain(|_, at| now - *at <= SCROBBLE_DEDUPE_MS);
+        inner
+            .recorded
+            .retain(|_, at| now - *at <= SCROBBLE_DEDUPE_MS);
         Ok(id)
     }
 
@@ -572,8 +579,7 @@ impl InMemoryReports {
         // decision the startup recovery makes.
         let previous = match previous {
             Some(session)
-                if session.last_at + session.duration_ms.max(0) + SESSION_GRACE_MS
-                    > report.now =>
+                if session.last_at + session.duration_ms.max(0) + SESSION_GRACE_MS > report.now =>
             {
                 Some(session)
             }
@@ -597,54 +603,42 @@ impl InMemoryReports {
                 // play per continuous session.
                 let (started_at, listened_ms, ignore_scrobble, duration_ms, persisted_at) =
                     match previous {
-                    Some(mut session) => {
-                        session.accumulate(report.now, report.rate);
-                        session.ignore_scrobble |= report.ignore_scrobble;
-                        // A repeat often arrives without the duration, so the
-                        // session's own is carried into the new one.
-                        let duration_ms = if report.duration_ms > 0 {
-                            report.duration_ms
-                        } else {
-                            session.duration_ms
-                        };
-                        let persisted_at = session.persisted_at;
-                        if session.track_id == report.track_id && !session.reached_threshold() {
-                            (
-                                session.started_at,
-                                session.listened_ms,
-                                session.ignore_scrobble,
-                                duration_ms,
-                                persisted_at,
-                            )
-                        } else {
-                            // `reached_threshold` decides the split and
-                            // `earned` decides the record, so a session the
-                            // client asked to ignore restarts cleanly and
-                            // records nothing.
-                            if session.earned() {
-                                plan.record = Some((
-                                    session.track_id,
+                        Some(mut session) => {
+                            session.accumulate(report.now, report.rate);
+                            session.ignore_scrobble |= report.ignore_scrobble;
+                            // A repeat often arrives without the duration, so the
+                            // session's own is carried into the new one.
+                            let duration_ms = if report.duration_ms > 0 {
+                                report.duration_ms
+                            } else {
+                                session.duration_ms
+                            };
+                            let persisted_at = session.persisted_at;
+                            if session.track_id == report.track_id && !session.reached_threshold() {
+                                (
                                     session.started_at,
                                     session.listened_ms,
-                                ));
+                                    session.ignore_scrobble,
+                                    duration_ms,
+                                    persisted_at,
+                                )
+                            } else {
+                                // `reached_threshold` decides the split and
+                                // `earned` decides the record, so a session the
+                                // client asked to ignore restarts cleanly and
+                                // records nothing.
+                                if session.earned() {
+                                    plan.record = Some((
+                                        session.track_id,
+                                        session.started_at,
+                                        session.listened_ms,
+                                    ));
+                                }
+                                (report.now, 0, report.ignore_scrobble, duration_ms, 0)
                             }
-                            (
-                                report.now,
-                                0,
-                                report.ignore_scrobble,
-                                duration_ms,
-                                0,
-                            )
                         }
-                    }
-                    None => (
-                        report.now,
-                        0,
-                        report.ignore_scrobble,
-                        report.duration_ms,
-                        0,
-                    ),
-                };
+                        None => (report.now, 0, report.ignore_scrobble, report.duration_ms, 0),
+                    };
                 let mut session = ListenSession {
                     track_id: report.track_id,
                     duration_ms,

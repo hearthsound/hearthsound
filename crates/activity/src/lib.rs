@@ -99,9 +99,7 @@ pub use discovery_sync::{
 };
 pub use error::ActivityError;
 pub use feedback::{clear, dislike, like, refresh_user_library_pin, unlike};
-pub use listen_session::{
-    LISTEN_SESSION_PERSIST_MS, ListenSession, ListenSessions, StoredSession,
-};
+pub use listen_session::{LISTEN_SESSION_PERSIST_MS, ListenSession, ListenSessions, StoredSession};
 pub use now_playing::{
     DEFAULT_CLIENT, NowPlaying, NowPlayingEntry, PLAYING_GRACE_MS, PLAYING_GRACE_UNKNOWN_MS,
 };

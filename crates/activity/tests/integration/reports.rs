@@ -740,7 +740,10 @@ async fn a_reported_play_suppresses_one_scrobble_only() {
         ),
         "a second submission is a play of its own"
     );
-    assert_eq!(activity.plays().play_count(user, one.uuid()).await.unwrap(), 2);
+    assert_eq!(
+        activity.plays().play_count(user, one.uuid()).await.unwrap(),
+        2
+    );
 }
 
 /// Repeat-one: each listen of a track that already counted is a play of its own.
@@ -963,7 +966,8 @@ async fn a_repeat_of_a_track_too_short_to_count_records_nothing() {
                 .await
                 .unwrap(),
             PlaybackOutcome::Updated,
-            "listen {} of a twenty-second track", listen + 1
+            "listen {} of a twenty-second track",
+            listen + 1
         );
     }
     assert_eq!(
@@ -1267,7 +1271,10 @@ async fn a_restart_restores_an_in_progress_session() {
         ))
         .await
         .unwrap();
-    assert!(matches!(outcome, PlaybackOutcome::Recorded(_)), "{outcome:?}");
+    assert!(
+        matches!(outcome, PlaybackOutcome::Recorded(_)),
+        "{outcome:?}"
+    );
     assert_eq!(
         second.plays().play_count(user, one.uuid()).await.unwrap(),
         1
@@ -1325,7 +1332,11 @@ async fn a_restart_after_the_grace_window_records_the_earned_play() {
     let second = ActivityService::new(&database);
     // Five minutes ago: long after the session's grace window, and recent
     // enough that the dedupe it seeds still suppresses the client's scrobble.
-    let recovery = second.reports().recover(recent(5 * 60 * 1000)).await.unwrap();
+    let recovery = second
+        .reports()
+        .recover(recent(5 * 60 * 1000))
+        .await
+        .unwrap();
     assert_eq!(recovery.recorded, 1);
     assert_eq!(recovery.dropped, 1);
     assert_eq!(recovery.restored, 0);

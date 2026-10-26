@@ -1528,9 +1528,7 @@ impl Outcome {
             ProviderError::Unavailable => Outcome::Failed("unavailable".to_owned()),
             ProviderError::NotFound => Outcome::Permanent("not found".to_owned()),
             ProviderError::Unauthorized => Outcome::Permanent("unauthorized".to_owned()),
-            ProviderError::InvalidConfig => {
-                Outcome::Permanent("invalid configuration".to_owned())
-            }
+            ProviderError::InvalidConfig => Outcome::Permanent("invalid configuration".to_owned()),
             ProviderError::Internal => Outcome::Permanent("internal provider error".to_owned()),
         }
     }

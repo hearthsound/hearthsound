@@ -191,7 +191,11 @@ impl ScrobbleProvider for FakeProvider {
     ) -> Result<(), ProviderError> {
         let titles: Vec<String> = listens.iter().map(|listen| listen.title.clone()).collect();
         let rejection = self.rejects.lock().unwrap().clone();
-        self.recorded.lock().unwrap().submissions.push(titles.clone());
+        self.recorded
+            .lock()
+            .unwrap()
+            .submissions
+            .push(titles.clone());
         if let Some(error) = self.begin() {
             return Err(error);
         }
@@ -1022,10 +1026,7 @@ async fn a_revoked_token_parks_a_listen() {
         .deliver_due(start + OUTBOX_MAX_AGE_MS)
         .await
         .unwrap();
-    assert_eq!(
-        (later.delivered, later.failed, later.gave_up),
-        (0, 0, 0)
-    );
+    assert_eq!((later.delivered, later.failed, later.gave_up), (0, 0, 0));
     assert_eq!(harness.row_count().await, 1);
 }
 
@@ -1049,18 +1050,21 @@ async fn a_lastfm_rejection_parks_the_listen_and_shows_in_the_counters() {
         .await
         .unwrap();
 
-    harness
-        .deliverer
-        .deliver_due(current_time())
-        .await
-        .unwrap();
+    harness.deliverer.deliver_due(current_time()).await.unwrap();
 
     let rows = harness.rows().await;
     assert_eq!(rows[0].state, "failed");
     assert_eq!(rows[0].last_error.as_deref(), Some("not found"));
-    let counters = harness.outbox.counters(harness.user, instance).await.unwrap();
+    let counters = harness
+        .outbox
+        .counters(harness.user, instance)
+        .await
+        .unwrap();
     assert_eq!(counters.pending, 0);
-    assert_eq!(counters.failed, 1, "the rejection is visible to the listener");
+    assert_eq!(
+        counters.failed, 1,
+        "the rejection is visible to the listener"
+    );
     assert_eq!(counters.last_error.as_deref(), Some("not found"));
 }
 
@@ -1068,10 +1072,7 @@ async fn a_lastfm_rejection_parks_the_listen_and_shows_in_the_counters() {
 async fn an_unavailable_service_keeps_the_backoff() {
     let harness = Harness::new(&[limits(10, false)]).await;
     harness.link_all().await;
-    harness
-        .instance()
-        .provider
-        .fail(ProviderError::Unavailable);
+    harness.instance().provider.fail(ProviderError::Unavailable);
     harness
         .outbox
         .listen(
@@ -1157,11 +1158,7 @@ async fn one_malformed_row_does_not_block_the_rest() {
             .unwrap();
     }
 
-    let report = harness
-        .deliverer
-        .deliver_due(current_time())
-        .await
-        .unwrap();
+    let report = harness.deliverer.deliver_due(current_time()).await.unwrap();
 
     assert_eq!(report.delivered, 2);
     assert_eq!(report.gave_up, 1);
@@ -1207,7 +1204,10 @@ async fn insert_listen_row(harness: &Harness, created: i64, due: i64, payload: &
 async fn a_stalled_plugin_does_not_delay_a_like() {
     let harness = Harness::new(&[limits(10, true)]).await;
     harness.link_all().await;
-    harness.instance().provider.stall_limits(Duration::from_secs(3));
+    harness
+        .instance()
+        .provider
+        .stall_limits(Duration::from_secs(3));
     let activity = ActivityService::new(&harness.database)
         .with_scrobble_outbox(Arc::new(harness.outbox.clone()));
 

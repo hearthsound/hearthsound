@@ -1211,13 +1211,7 @@ async fn a_playlist_change_reaches_its_owner_and_admins_only() {
         .services
         .activity()
         .playlists()
-        .create(
-            owner_id,
-            "Owner Mix",
-            None,
-            false,
-            &tracks,
-        )
+        .create(owner_id, "Owner Mix", None, false, &tracks)
         .await
         .unwrap();
 
