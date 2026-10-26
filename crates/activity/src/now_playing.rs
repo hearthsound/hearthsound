@@ -136,6 +136,9 @@ impl NowPlaying {
         position_ms: i64,
         state: &str,
     ) -> Result<(), ActivityError> {
+        // A row that starts in the future would stay visible for as long as it
+        // claimed, so no caller can write one: the instant is clamped to now.
+        let started_at = started_at.min(crate::now_millis());
         let mut conn = self.writer.acquire().await?;
         sqlx::query!(
             "INSERT INTO now_playing (user_id, client, track_id, started_at, position_ms, state) \

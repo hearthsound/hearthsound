@@ -24,6 +24,18 @@ use crate::response::{Encoded, Response, SubsonicError};
 
 use super::browse::number;
 
+/// How far a client's clock may be ahead of the server's, in milliseconds.
+///
+/// Five minutes: enough for a client whose clock drifted, small enough that a
+/// report from the future cannot keep a now-playing row alive.
+const CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
+
+/// How old a scrobble may be, in milliseconds.
+///
+/// Thirty days: no scrobble service accepts a listen older than that, and a
+/// timestamp from years ago is a broken client rather than a play.
+const MAX_SCROBBLE_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
 /// Answers `scrobble`: one play record per stored track id.
 ///
 /// # Parameters
@@ -40,16 +52,38 @@ use super::browse::number;
 /// # Errors
 ///
 /// Answers Subsonic error 10 when no `id` is given, a generic error when `time`
-/// is not a number, and a generic error when a play cannot be recorded, which
-/// means the track the id names is not a row the server can reference.
+/// is not a number or is more than thirty days old, and a generic error when a
+/// play cannot be recorded, which means the track the id names is not a row the
+/// server can reference.
+///
+/// A `time` a few minutes in the future is clamped to now, because a client
+/// clock may be fast; one far in the future would otherwise keep a now-playing
+/// row visible for as long as it claimed.
 pub async fn scrobble(call: Call) -> Encoded {
     let ids: Vec<String> = call.get_all("id").map(str::to_owned).collect();
     if ids.is_empty() {
         return call.encode(Response::failed(SubsonicError::missing_parameter("id")));
     }
-    let started_at = match number(&call, "time", crate::params::now_millis()) {
+    let now = crate::params::now_millis();
+    let reported = match number(&call, "time", now) {
         Ok(started_at) => started_at,
         Err(error) => return call.encode(Response::failed(error)),
+    };
+    if reported < now - MAX_SCROBBLE_AGE_MS {
+        return call.encode(Response::failed(SubsonicError::new(
+            crate::response::codes::GENERIC,
+            "A scrobble time is milliseconds since the epoch, at most 30 days ago.",
+        )));
+    }
+    let started_at = if reported > now + CLOCK_SKEW_MS {
+        tracing::debug!(
+            reported,
+            now,
+            "a scrobble named a time in the future; it was clamped to now"
+        );
+        now
+    } else {
+        reported
     };
     let submission = submission(&call);
     let user_id = call.principal().user_id.uuid();

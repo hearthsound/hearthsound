@@ -206,3 +206,61 @@ async fn scrobble_requires_an_id() {
     .await;
     assert_error(&probe, 10);
 }
+
+/// A scrobble time from the future is clamped to now, and one from too far in
+/// the past is refused.
+#[tokio::test]
+async fn a_scrobble_time_is_bounded() {
+    let (fixture, seeded) = fixture().await;
+    let app = fixture.app();
+    let track = seeded.alpha_tracks[0];
+    let now = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()) as i64;
+
+    // The year 2100: accepted, and stored as now, so the row expires with the
+    // track instead of outliving it by decades.
+    let future = get(
+        &app,
+        &format!(
+            "/rest/scrobble?id={track}&submission=false&time={}&apiKey={}&f=json",
+            4_102_444_800_000i64, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&future);
+    let listed = fixture
+        .state
+        .activity()
+        .now_playing()
+        .visible(&[fixture.user_id.uuid()], now)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1, "the reported track is now playing");
+    assert!(
+        (now - listed[0].started_at).abs() < 60_000,
+        "the row starts now, not in the future: {}",
+        listed[0].started_at
+    );
+
+    // Forty days ago is older than any scrobble service accepts.
+    let ancient = get(
+        &app,
+        &format!(
+            "/rest/scrobble?id={track}&time={}&apiKey={}&f=json",
+            now - 40 * 24 * 60 * 60 * 1000,
+            fixture.api_key
+        ),
+    )
+    .await;
+    assert_error(&ancient, 0);
+    let plays = fixture
+        .state
+        .activity()
+        .plays()
+        .play_count(fixture.user_id.uuid(), track.uuid())
+        .await
+        .unwrap();
+    assert_eq!(plays, 0, "the refused scrobble recorded nothing");
+}
