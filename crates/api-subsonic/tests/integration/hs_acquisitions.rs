@@ -455,6 +455,64 @@ async fn a_cooling_down_track_answers_its_latest_acquisition() {
     );
 }
 
+/// A retry ignores a track that is cooling down and starts a fresh attempt.
+///
+/// The answer to a cooling-down track is its last, failed acquisition, which is
+/// what a client shows as Failed with a retry; the retry flag is what makes that
+/// retry do something.
+#[tokio::test]
+async fn a_retry_ignores_a_track_that_is_cooling_down() {
+    let (fixture, _seeded, _album, tracks) = fixture().await;
+    let app = fixture.app();
+    let cooled = acquire(&fixture, tracks[0]).await;
+    fixture
+        .state
+        .acquisitions()
+        .unwrap()
+        .repository()
+        .fail(cooled, FailureReason::NoCandidates, None)
+        .await
+        .unwrap();
+    {
+        let mut tx = fixture.database.writer().begin().await.unwrap();
+        let until = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            + 3_600_000;
+        tracks::set_track_availability(&mut tx, tracks[0], Availability::Unavailable, Some(until))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    let probe = get(
+        &app,
+        &format!(
+            "/rest/hsAcquire?apiKey={}&hearthsound=1&f=json&id={}&retry=true",
+            fixture.api_key, tracks[0]
+        ),
+    )
+    .await;
+    assert_ok(&probe);
+    assert!(
+        probe.body.contains("\"state\":\"queued\""),
+        "a retry starts a new attempt instead of answering the cooled row: {}",
+        probe.body
+    );
+    assert!(
+        !probe.body.contains(&format!(
+            "\"acquisitionId\":\"{}\"",
+            EntityId::from_uuid(IdPrefix::Acquisition, cooled)
+        )),
+        "the retry is a new acquisition, not the cooled one: {}",
+        probe.body
+    );
+}
+
 #[tokio::test]
 async fn acquire_answers_error_50_without_can_acquire() {
     let (fixture, _seeded, _album, tracks) = fixture().await;

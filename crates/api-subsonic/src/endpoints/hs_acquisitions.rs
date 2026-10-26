@@ -223,8 +223,9 @@ async fn availabilities(call: &Call, ids: &[String]) -> Result<Vec<Object>, Subs
 ///
 /// - `call`: the authenticated call. `id` may be repeated and names tracks and
 ///   albums, stored or catalog ids; `priority` is `play`, `next`, `queue` or
-///   `background` and defaults to `queue`. The request must carry
-///   `hearthsound=1`, and the account must hold `can_acquire`.
+///   `background` and defaults to `queue`; `retry` (`1`, `true` or `yes`) makes
+///   the request ignore a track's cooldown and start a fresh attempt. The request
+///   must carry `hearthsound=1`, and the account must hold `can_acquire`.
 ///
 /// # Returns
 ///
@@ -257,6 +258,7 @@ pub async fn hs_acquire(call: Call) -> Encoded {
         Ok(priority) => priority,
         Err(error) => return call.encode(Response::failed(error)),
     };
+    let retry = retry(&call);
     let state = call.state();
     let Some(orchestrator) = state.acquisitions() else {
         tracing::error!("the /rest surface has no acquisition layer to admit an acquisition");
@@ -267,10 +269,11 @@ pub async fn hs_acquire(call: Call) -> Encoded {
     let can_acquire = call.principal().can_acquire;
     let mut rows = Vec::new();
     for id in &ids {
-        let outcomes = match acquire(state, orchestrator, user, can_acquire, id, priority).await {
-            Ok(outcomes) => outcomes,
-            Err(error) => return call.encode(Response::failed(error)),
-        };
+        let outcomes =
+            match acquire(state, orchestrator, user, can_acquire, id, priority, retry).await {
+                Ok(outcomes) => outcomes,
+                Err(error) => return call.encode(Response::failed(error)),
+            };
         for outcome in outcomes {
             if let Err(error) = record(state, orchestrator, outcome, &instances, &mut rows).await {
                 return call.encode(Response::failed(error));
@@ -316,6 +319,25 @@ fn priority(call: &Call) -> Result<Priority, SubsonicError> {
     })
 }
 
+/// Reads the `retry` parameter.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+///
+/// # Returns
+///
+/// Whether the request asks the acquisition layer to ignore the track's cooldown.
+/// `1`, `true` and `yes` ask for it, in any case; a missing or other value does
+/// not.
+fn retry(call: &Call) -> bool {
+    call.get("retry").map(str::trim).is_some_and(|value| {
+        value.eq_ignore_ascii_case("1")
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("yes")
+    })
+}
+
 /// Requests one id and reports what admission decided.
 ///
 /// # Parameters
@@ -326,6 +348,7 @@ fn priority(call: &Call) -> Result<Priority, SubsonicError> {
 /// - `can_acquire`: whether that account may acquire.
 /// - `raw`: the id the client wrote.
 /// - `priority`: the priority every track request carries.
+/// - `retry`: whether the request ignores a track's cooldown.
 ///
 /// # Returns
 ///
@@ -343,17 +366,20 @@ async fn acquire(
     can_acquire: bool,
     raw: &str,
     priority: Priority,
+    retry: bool,
 ) -> Result<Vec<AcquireOutcome>, SubsonicError> {
     let Ok(client) = ClientId::parse(raw) else {
         return Err(SubsonicError::not_found());
     };
     match client {
         ClientId::Entity(id) => match id.kind().entity_kind() {
-            Some(EntityKind::Track) => request_track(orchestrator, user, can_acquire, id, priority)
-                .await
-                .map(|outcome| vec![outcome]),
+            Some(EntityKind::Track) => {
+                request_track(orchestrator, user, can_acquire, id, priority, retry)
+                    .await
+                    .map(|outcome| vec![outcome])
+            }
             Some(EntityKind::Album) => {
-                request_album(orchestrator, user, can_acquire, id, priority).await
+                request_album(orchestrator, user, can_acquire, id, priority, retry).await
             }
             _ => Err(SubsonicError::not_found()),
         },
@@ -364,7 +390,7 @@ async fn acquire(
                     .materialize_track(&id)
                     .await
                     .map_err(|error| catalog::failure(&error))?;
-                request_track(orchestrator, user, can_acquire, track, priority)
+                request_track(orchestrator, user, can_acquire, track, priority, retry)
                     .await
                     .map(|outcome| vec![outcome])
             }
@@ -374,7 +400,15 @@ async fn acquire(
                     .materialize_album(&id)
                     .await
                     .map_err(|error| catalog::failure(&error))?;
-                request_album(orchestrator, user, can_acquire, album.album, priority).await
+                request_album(
+                    orchestrator,
+                    user,
+                    can_acquire,
+                    album.album,
+                    priority,
+                    retry,
+                )
+                .await
             }
             _ => Err(SubsonicError::not_found()),
         },
@@ -393,10 +427,12 @@ async fn request_track(
     can_acquire: bool,
     track: EntityId,
     priority: Priority,
+    retry: bool,
 ) -> Result<AcquireOutcome, SubsonicError> {
     let request = AcquireRequest::new(track, priority, ACQUIRE_REASON)
         .with_requested_by(Some(user))
-        .with_can_acquire(can_acquire);
+        .with_can_acquire(can_acquire)
+        .forced_if(retry);
     orchestrator
         .request(request)
         .await
@@ -415,6 +451,7 @@ async fn request_album(
     can_acquire: bool,
     album: EntityId,
     priority: Priority,
+    retry: bool,
 ) -> Result<Vec<AcquireOutcome>, SubsonicError> {
     let request = AlbumAcquireRequest {
         album_id: album,
@@ -422,7 +459,7 @@ async fn request_album(
         reason: ACQUIRE_REASON.to_owned(),
         requested_by: Some(user),
         can_acquire,
-        force: false,
+        force: retry,
     };
     orchestrator
         .request_album(request)
