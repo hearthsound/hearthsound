@@ -24,7 +24,8 @@
 //!    already materialized and keeps resolving to its row;
 //! 3. the same normalized title and artist with a duration within
 //!    [`DURATION_TOLERANCE_MS`] of the local track's, and an album both sides
-//!    agree on when either side states no duration.
+//!    agree on when either side states no duration (a bare title match is never
+//!    evidence that two rows are one recording).
 //!
 //! The third rule exists because the same recording is routinely listed with
 //! slightly different titles and durations by different providers; three seconds
@@ -687,6 +688,11 @@ struct StoredAlbum {
 /// [`DURATION_TOLERANCE_MS`]. The last rule is what lets a scanned file without
 /// an ISRC or a recording id be reused instead of duplicated.
 ///
+/// The last rule needs a strong discriminator as well as the title: when either
+/// side states no duration, the album both sides name has to agree, because a
+/// provider that lists a title without a length must not claim the first stored
+/// track that happens to share its name.
+///
 /// # Parameters
 ///
 /// - `conn`: the connection or transaction to read on.
@@ -807,7 +813,10 @@ async fn matching_stored_track(
         }
         let close = match (duration, candidate.track.duration_ms) {
             (Some(catalog), Some(stored)) => (catalog - stored).abs() <= DURATION_TOLERANCE_MS,
-            _ => true,
+            // Without a duration on both sides only an album that already agreed
+            // may carry the identity; a bare title match is not evidence of one
+            // recording.
+            _ => album.is_some(),
         };
         if close {
             return Ok(Some(candidate.track.id));

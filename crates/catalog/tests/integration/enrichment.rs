@@ -211,3 +211,90 @@ async fn a_stored_and_a_catalog_album_are_paired_by_their_years() {
             .unwrap();
     }
 }
+
+/// A catalog album one stored album claimed is never paired with a second stored
+/// album of the same title, and a page read writes nothing new.
+#[tokio::test]
+async fn a_claimed_catalog_album_is_not_paired_again() {
+    use hearthsound_core::{CatalogId, ClientId, EntityKind, Slug};
+
+    let env = discography_env().await;
+    let service = env.service();
+    let (first, _, artist) = env
+        .stored_album_with_track("Third Single", "Discography Artist", 2012)
+        .await;
+    // The trailing space keeps the file path distinct while the folded title
+    // still names the same release.
+    let (second, _, _) = env
+        .stored_album_with_track("Third Single ", "Discography Artist", 2013)
+        .await;
+    let catalog = CatalogId::new(
+        Slug::new("disco").unwrap(),
+        EntityKind::Album,
+        "disco-album-3",
+    )
+    .unwrap();
+
+    // The first stored album claims the catalog album.
+    let page = service
+        .artist_page(
+            &ClientId::Entity(artist),
+            &scopes(),
+            hearthsound_catalog::PageDepth::Full,
+        )
+        .await
+        .unwrap()
+        .expect("the artist answers");
+    let claimed = service
+        .entity_by_alias("p:disco", EntityKind::Album, "disco-album-3")
+        .await
+        .unwrap();
+    assert!(claimed == Some(first) || claimed == Some(second));
+    let other = if claimed == Some(first) {
+        second
+    } else {
+        first
+    };
+
+    // A second read must not re-point the claim the store holds.
+    let rows_before = alias_rows(&env, "disco-album-3").await;
+    let again = service
+        .artist_page(
+            &ClientId::Entity(artist),
+            &scopes(),
+            hearthsound_catalog::PageDepth::Full,
+        )
+        .await
+        .unwrap()
+        .expect("the artist answers");
+    assert_eq!(page.albums.len(), again.albums.len());
+    assert_eq!(
+        service
+            .entity_by_alias("p:disco", EntityKind::Album, "disco-album-3")
+            .await
+            .unwrap(),
+        claimed,
+        "the existing claim stays"
+    );
+    assert_eq!(
+        alias_rows(&env, "disco-album-3").await,
+        rows_before,
+        "a page read writes no second alias"
+    );
+    let _ = other;
+    let _ = catalog;
+}
+
+/// Counts the alias rows of one provider id.
+///
+/// # Parameters
+///
+/// - `env`: the environment to read.
+/// - `value`: the provider id.
+async fn alias_rows(env: &Env, value: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM external_ids WHERE value = ?")
+        .bind(value)
+        .fetch_one(env.database.readers())
+        .await
+        .unwrap()
+}

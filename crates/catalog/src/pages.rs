@@ -780,6 +780,10 @@ impl CatalogService {
     /// lookup leaves a stored artist's page as the library holds it: a browse
     /// page degrades to the content the server has rather than to an error.
     ///
+    /// One catalog album resolves to one stored album: a reference that a stored
+    /// album already claimed is not paired with another, so a page never re-points
+    /// a claim the store holds.
+    ///
     /// # Parameters
     ///
     /// - `id`: the artist id, stored or catalog.
@@ -890,9 +894,15 @@ impl CatalogService {
                             &ids,
                         )
                         .await?;
+                        // A reference another stored album already claimed is not a
+                        // candidate: one catalog album resolves to one stored album,
+                        // and a page read never re-points an existing claim.
                         let candidates: Vec<Candidate<'_>> = references
                             .iter()
                             .enumerate()
+                            .filter(|(_, reference)| {
+                                !by_provider_id.contains_key(&reference.album.id)
+                            })
                             .map(|(index, reference)| Candidate {
                                 index,
                                 title: &reference.album.title,
@@ -1144,6 +1154,9 @@ impl CatalogService {
 /// - `stored`: the stored albums, in listing order.
 /// - `aliased`: the stored albums that already carry an alias for the instance.
 /// - `candidates`: the catalog albums to pair with, in provider order.
+///
+/// A catalog album one stored album already claimed is never paired again: the
+/// claim the store holds is the one the page shows.
 ///
 /// # Returns
 ///

@@ -418,3 +418,70 @@ async fn an_unrelated_local_hit_keeps_every_catalog_result() {
     assert!(deduped.materialized.is_empty());
     assert!(!deduped.is_empty());
 }
+
+/// A catalog track with no duration matches a stored row only when the album both
+/// sides name agrees; a bare title match is not evidence of one recording.
+#[tokio::test]
+async fn a_track_without_a_duration_needs_an_album_to_match() {
+    use hearthsound_core::Slug;
+    use hearthsound_core::providers::{ArtistCredit, CatalogAlbumRef, CatalogTrack};
+
+    let env = Env::new().await;
+    let service = env.service();
+    let (_, stored, _) = env
+        .stored_album_with_track("Same Album", "Same Artist", 2001)
+        .await;
+    sqlx::query(
+        "UPDATE tracks SET title = 'Same Title', sort_title = 'same title', \
+         display_artist = 'Same Artist', duration_ms = NULL WHERE id = ?",
+    )
+    .bind(stored.uuid().as_bytes().as_slice())
+    .execute(env.database.writer())
+    .await
+    .unwrap();
+
+    let track = |album: Option<&str>| CatalogTrack {
+        id: "remote-1".to_owned(),
+        title: "Same Title".to_owned(),
+        artists: vec![ArtistCredit {
+            name: "Same Artist".to_owned(),
+            ids: Vec::new(),
+        }],
+        album: album.map(|title| CatalogAlbumRef {
+            id: "remote-album-1".to_owned(),
+            title: title.to_owned(),
+            artists: Vec::new(),
+            year: None,
+            images: Vec::new(),
+        }),
+        duration_ms: None,
+        disc_number: None,
+        track_number: None,
+        isrc: None,
+        explicit: None,
+        ids: Vec::new(),
+    };
+    let slug = Slug::new("httpcat").unwrap();
+
+    // No album on the catalog side and no duration anywhere: the title alone does
+    // not name a recording.
+    let without_album = service
+        .stored_recordings(&slug, &[track(None)])
+        .await
+        .unwrap();
+    assert_eq!(without_album, vec![None]);
+
+    // An album both sides name is the discriminator that carries the match.
+    let with_album = service
+        .stored_recordings(&slug, &[track(Some("Same Album"))])
+        .await
+        .unwrap();
+    assert_eq!(with_album, vec![Some(stored)]);
+
+    // A different album is not the same recording, whatever the title says.
+    let other_album = service
+        .stored_recordings(&slug, &[track(Some("Another Album"))])
+        .await
+        .unwrap();
+    assert_eq!(other_album, vec![None]);
+}

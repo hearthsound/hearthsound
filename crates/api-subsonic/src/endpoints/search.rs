@@ -1031,6 +1031,11 @@ fn hit(view: &TrackView) -> LocalTrackHit {
 /// nobody saved) is appended, so the play does not remove the hit it started
 /// from.
 ///
+/// One policy covers every failure here: a catalog fault never removes catalog
+/// results. A dedupe that fails appends the provider's answer unfiltered, and a
+/// twin comparison that fails keeps the empty set, so the same fault cannot empty
+/// the list and duplicate it at once.
+///
 /// # Parameters
 ///
 /// - `call`: the authenticated call, whose state holds the catalog layer.
@@ -1083,10 +1088,12 @@ async fn append_catalog(
         artists: matches.local_artist_ids(),
     };
     let deduped = match catalog.deduplicate(&local_matches, &found).await {
-        Ok(deduped) => deduped,
+        Ok(deduped) => Some(deduped),
         Err(error) => {
+            // A catalog failure must never remove catalog results: the lists are
+            // appended unfiltered, so a database fault costs a duplicate at worst.
             tracing::warn!(error = %error, "could not deduplicate catalog results");
-            return;
+            None
         }
     };
 
@@ -1108,37 +1115,36 @@ async fn append_catalog(
     {
         Ok(twins) => twins,
         Err(error) => {
-            tracing::debug!(error = %error, "could not compare catalog results with stored names");
+            tracing::warn!(error = %error, "could not compare catalog results with stored names");
             HashSet::new()
         }
     };
 
     // Deduplication already left out every catalog entity the local results
     // show, so the lists are appended as they are; the twin fold is display
-    // only and never removes a hit the caller can open.
+    // only and never removes a hit the caller can open. A dedupe that failed
+    // appends the provider's answer instead of nothing.
+    let (artists, albums, tracks) = match deduped {
+        Some(deduped) => (deduped.artists, deduped.albums, deduped.tracks),
+        None => (found.artists, found.albums, found.tracks),
+    };
     matches.catalog_artists.extend(
-        deduped
-            .artists
+        artists
             .iter()
             .filter(|artist| !twins.contains(&artist.id))
             .take(window_limit(artist_window))
             .cloned(),
     );
     matches.catalog_albums.extend(
-        deduped
-            .albums
+        albums
             .iter()
             .filter(|album| !twins.contains(&album.id))
             .take(window_limit(album_window))
             .cloned(),
     );
-    matches.catalog_tracks.extend(
-        deduped
-            .tracks
-            .iter()
-            .take(window_limit(song_window))
-            .cloned(),
-    );
+    matches
+        .catalog_tracks
+        .extend(tracks.iter().take(window_limit(song_window)).cloned());
 }
 
 /// Returns how many catalog results of one kind are worth appending.

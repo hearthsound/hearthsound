@@ -248,9 +248,16 @@ impl CatalogService {
                 self.store_images(instance.id(), key, &images, ttl).await;
                 Ok(images)
             }
-            Ok(Err(error)) => Err(self
-                .finish(instance.slug(), operation, Ok(Err(error)))
-                .unwrap_err()),
+            Ok(Err(error)) => {
+                let mapped = CatalogError::from_provider(instance.slug().as_str(), error);
+                tracing::debug!(
+                    instance = instance.slug().as_str(),
+                    operation,
+                    error = %mapped,
+                    "an artwork instance could not answer"
+                );
+                Err(mapped)
+            }
             Err(_) => Err(CatalogError::Unavailable {
                 instance: instance.slug().as_str().to_owned(),
             }),
