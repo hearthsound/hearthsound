@@ -111,6 +111,22 @@ fn fetch(text: &str) -> Result<RemoteAnswer, ProviderError> {
     hearthsound_plugin::http::send_json(&request)
 }
 
+/// One album as the endpoint reports it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteAlbum {
+    /// The endpoint's album identifier.
+    id: String,
+    /// The album title.
+    title: String,
+    /// The album's artists, in credit order.
+    #[serde(default)]
+    artists: Vec<String>,
+    /// The release year, when the endpoint states one.
+    #[serde(default)]
+    year: Option<u16>,
+}
+
 /// One artist as the endpoint reports it.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,6 +178,32 @@ struct RemoteKinds {
     /// The matching artists.
     #[serde(default)]
     artists: Vec<RemoteArtist>,
+    /// The matching albums.
+    #[serde(default)]
+    albums: Vec<RemoteAlbum>,
+}
+
+/// Maps one remote album into a catalog album reference.
+///
+/// # Parameters
+///
+/// - `remote`: the album the endpoint reported.
+///
+/// # Returns
+///
+/// The reference, which is what a search carries.
+fn to_album_ref(remote: RemoteAlbum) -> AlbumRef {
+    AlbumRef {
+        id: remote.id,
+        title: remote.title,
+        artists: remote
+            .artists
+            .into_iter()
+            .map(|name| ArtistCredit { name, ids: vec![] })
+            .collect(),
+        year: remote.year,
+        images: Vec::new(),
+    }
 }
 
 /// The tracks of a search answer, whichever shape it used.
@@ -278,9 +320,9 @@ impl catalog::Guest for HttpCatalog {
         let config = config()?;
         let cover_url = config.cover_url.clone();
 
-        let (tracks, artists) = match fetch(&query.text)? {
-            RemoteAnswer::Tracks(tracks) => (tracks, Vec::new()),
-            RemoteAnswer::Kinds(kinds) => (kinds.tracks, kinds.artists),
+        let (tracks, artists, albums) = match fetch(&query.text)? {
+            RemoteAnswer::Tracks(tracks) => (tracks, Vec::new(), Vec::new()),
+            RemoteAnswer::Kinds(kinds) => (kinds.tracks, kinds.artists, kinds.albums),
         };
         let tracks: Vec<Track> = tracks
             .into_iter()
@@ -293,7 +335,11 @@ impl catalog::Guest for HttpCatalog {
             } else {
                 vec![]
             },
-            albums: vec![],
+            albums: if wants(&query.kinds, EntityKind::Album) {
+                albums.into_iter().map(to_album_ref).collect()
+            } else {
+                vec![]
+            },
             artists: if wants(&query.kinds, EntityKind::Artist) {
                 artists.into_iter().map(to_artist).collect()
             } else {

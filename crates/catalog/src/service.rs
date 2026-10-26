@@ -178,6 +178,14 @@ struct Inner {
     /// asked again until its entry expires. A tile grid of a hundred covers
     /// therefore costs one refusal per image, not one per visit.
     refused_images: MemoryCache<String, ()>,
+    /// The catalog album a stored album's artist and title resolved to.
+    ///
+    /// Pairing an album by name is one provider search instead of a discography
+    /// walk, and the same album is asked for on every visit, so a found answer is
+    /// remembered for a day. Only a found answer is stored: a miss is worth asking
+    /// again, because a search that failed may have failed for a transient
+    /// reason.
+    album_resolutions: MemoryCache<(String, String), CatalogId>,
     /// The `(kind, id, listener)` pairs an enrichment run already holds.
     ///
     /// A page's burst of reads asks for the same enrichment three times; the map
@@ -207,11 +215,22 @@ const REFUSED_IMAGE_CAPACITY: u64 = 4_096;
 /// match that the provider ranks fourth or lower is still seen.
 const ARTIST_RESOLUTION_LIMIT: u32 = 25;
 
+/// How many catalog albums an album title resolution reads.
+///
+/// The page size of one provider request, like [`ARTIST_RESOLUTION_LIMIT`].
+const ALBUM_RESOLUTION_LIMIT: u32 = 10;
+
 /// How many artist name resolutions the service remembers.
 ///
 /// A bound, not a target: the cache exists to answer the visits a browse page
 /// repeats rather than to be a store.
 const ARTIST_RESOLUTION_CAPACITY: u64 = 1_024;
+
+/// How many album title resolutions the service remembers.
+const ALBUM_RESOLUTION_CAPACITY: u64 = 1_024;
+
+/// How long one album title resolution stays fresh.
+const ALBUM_RESOLUTION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How long one artist name resolution stays fresh.
 ///
@@ -252,6 +271,10 @@ impl CatalogService {
             .max_capacity(ARTIST_RESOLUTION_CAPACITY)
             .time_to_live(ARTIST_RESOLUTION_TTL)
             .build();
+        let album_resolutions = MemoryCache::builder()
+            .max_capacity(ALBUM_RESOLUTION_CAPACITY)
+            .time_to_live(ALBUM_RESOLUTION_TTL)
+            .build();
         CatalogService {
             inner: Arc::new(Inner {
                 registry,
@@ -262,6 +285,7 @@ impl CatalogService {
                 missing_images,
                 refused_images,
                 artist_resolutions,
+                album_resolutions,
                 enriching: std::sync::Mutex::new(std::collections::HashMap::new()),
             }),
         }
@@ -547,6 +571,85 @@ impl CatalogService {
                 .await;
         }
         Ok(resolved)
+    }
+
+    /// Finds the catalog album one artist and title name.
+    ///
+    /// Pairing a stored album asks the catalog for one album by name; the
+    /// discography walk a browse page used costs three calls more. The search is
+    /// one request, and the found answer is remembered for a day.
+    ///
+    /// # Parameters
+    ///
+    /// - `artist`: the name of the album's primary artist.
+    /// - `title`: the album's title.
+    /// - `year`: the stored release year, when the row carries one.
+    ///
+    /// # Returns
+    ///
+    /// The catalog album whose folded title and primary credit agree and whose
+    /// year does not contradict the stored one, or `None` when nothing matches.
+    ///
+    /// # Errors
+    ///
+    /// Returns the mapped failure of the search.
+    pub async fn album_by_title(
+        &self,
+        artist: &str,
+        title: &str,
+        year: Option<i32>,
+    ) -> Result<Option<CatalogAlbumRefResult>, CatalogError> {
+        let wanted_artist = normalize(artist);
+        let wanted_title = crate::dedupe::base_title(title);
+        if wanted_artist.is_empty() || wanted_title.is_empty() {
+            return Ok(None);
+        }
+        let key = (wanted_artist.clone(), wanted_title.clone());
+        let year = year.map(|year| i64::from(year));
+        if let Some(known) = self.inner.album_resolutions.get(&key).await {
+            // The remembered answer is re-checked against the year: the same
+            // artist and title at a release two years away is a different album,
+            // and the memo does not know which years its caller will ask for.
+            let remembered = match self.cached_album_ref(&known).await? {
+                Some(reference) => Some(reference),
+                None => match self.album(&known).await {
+                    Ok(album) => Some(CatalogAlbumRefResult {
+                        id: album.id,
+                        album: crate::service::album_ref_of(&album.album),
+                    }),
+                    Err(_) => None,
+                },
+            };
+            if let Some(reference) = remembered
+                && crate::pages::years_fold(year, reference.album.year)
+            {
+                return Ok(Some(reference));
+            }
+        }
+
+        let query = CatalogQuery {
+            text: format!("{artist} {title}"),
+            kinds: vec![EntityKind::Album],
+            limit: ALBUM_RESOLUTION_LIMIT,
+            offset: 0,
+        };
+        let found = self.search(&query).await?;
+        let matched = found.albums.into_iter().find(|hit| {
+            crate::dedupe::base_title(&hit.album.title) == wanted_title
+                && hit
+                    .album
+                    .artists
+                    .first()
+                    .is_some_and(|credit| normalize(&credit.name) == wanted_artist)
+                && crate::pages::years_fold(year, hit.album.year)
+        });
+        if let Some(reference) = &matched {
+            self.inner
+                .album_resolutions
+                .insert(key, reference.id.clone())
+                .await;
+        }
+        Ok(matched)
     }
 
     /// Lists an artist's albums.
@@ -1179,6 +1282,7 @@ impl CatalogService {
     pub async fn invalidate_instance(&self, instance: Uuid) -> Result<u64, CatalogError> {
         let deleted = self.inner.cache.forget_instance(instance).await?;
         self.inner.artist_resolutions.invalidate_all();
+        self.inner.album_resolutions.invalidate_all();
         lock_enriching(&self.inner.enriching).clear();
         tracing::debug!(
             instance = %instance,

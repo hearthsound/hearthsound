@@ -478,3 +478,64 @@ async fn lookup_isrc_reports_the_failure_of_the_last_instance() {
 
     assert!(matches!(error, CatalogError::NotFound), "{error}");
 }
+
+#[tokio::test]
+async fn album_by_title_costs_one_search_and_is_remembered() {
+    let body = json!({
+        "albums": [
+            { "id": "al-1", "title": "Second Wind (Remastered 2009)", "artists": ["Discography Artist"], "year": 2009 },
+            { "id": "al-2", "title": "Second Wind", "artists": ["Someone Else"], "year": 2009 },
+        ]
+    })
+    .to_string();
+    let (server, url) = catalog_endpoint(200, &body, None).await;
+    let env = Env::new().await;
+    env.instance(
+        "httpcat",
+        HTTP_CATALOG,
+        HTTP_CATALOG_ID,
+        json!({"url": url}),
+    )
+    .await;
+    env.assign(Layer::Catalog, &["httpcat"]).await;
+    let service = env.service();
+
+    let found = service
+        .album_by_title("Discography Artist", "Second Wind", Some(2008))
+        .await
+        .unwrap()
+        .expect("the provider's album is the same release");
+    assert_eq!(found.id.provider_id(), "al-1");
+    assert_eq!(requests(&server).await, 1, "one search pairs the album");
+
+    let again = service
+        .album_by_title("Discography Artist", "Second Wind", Some(2008))
+        .await
+        .unwrap()
+        .expect("the remembered answer answers");
+    assert_eq!(again.id.provider_id(), "al-1");
+    assert_eq!(
+        requests(&server).await,
+        1,
+        "the remembered answer costs no provider call"
+    );
+
+    // A year the provider contradicts is not the same release.
+    assert!(
+        service
+            .album_by_title("Discography Artist", "Second Wind", Some(1990))
+            .await
+            .unwrap()
+            .is_none(),
+        "two years apart is a different release"
+    );
+}
+
+/// The number of requests the endpoint has received.
+///
+/// # Parameters
+///
+/// - `server`: the wiremock endpoint.
+async fn requests(server: &MockServer) -> usize {
+    server.received_requests().await.unwrap().len()
+}

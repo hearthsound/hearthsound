@@ -717,53 +717,50 @@ impl CatalogService {
                 album: crate::service::album_ref_of(&found.album),
             }));
         }
-        let Some(artist) = detail.artists.first().map(|artist| artist.id).or_else(|| {
-            detail
-                .tracks
-                .iter()
-                .find_map(|track| track.artists.first().map(|artist| artist.id))
+        // A recorded alias is one lookup; without one the album is resolved by
+        // its artist and title, which is one search instead of the discography
+        // walk a page used to pay for.
+        if let Some(alias) = self.catalog_alias(album, layer).await?
+            && let Ok(id) = catalog_id(&alias.slug, EntityKind::Album, &alias.provider_id)
+            && let Ok(found) = self.album(&id).await
+        {
+            return Ok(Some(CatalogAlbumRefResult {
+                id: found.id,
+                album: crate::service::album_ref_of(&found.album),
+            }));
+        }
+        let Some(stored) = ({
+            let mut conn = self.database().readers().acquire().await?;
+            albums::get_album(&mut conn, album).await?
         }) else {
             return Ok(None);
         };
-        let Some(catalog_artist) = self.catalog_artist_of_stored(artist, layer, depth).await?
+        let credit = detail
+            .artists
+            .first()
+            .map(|artist| artist.name.clone())
+            .or_else(|| {
+                detail
+                    .tracks
+                    .iter()
+                    .find_map(|track| track.artists.first().map(|artist| artist.name.clone()))
+            })
+            .or_else(|| stored.display_artist.clone());
+        let Some(credit) = credit else {
+            return Ok(None);
+        };
+        let Some(reference) = self
+            .album_by_title(
+                &credit,
+                &stored.title,
+                stored
+                    .year
+                    .map(|year| i32::try_from(year).unwrap_or(i32::MAX)),
+            )
+            .await?
         else {
             return Ok(None);
         };
-        let references = match self
-            .artist_albums(&catalog_artist.id, MAX_PAGE_ALBUMS, 0)
-            .await
-        {
-            Ok(found) => found,
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    artist = %catalog_artist.id,
-                    "an artist discography could not be listed for one album"
-                );
-                return Ok(None);
-            }
-        };
-        let stored = {
-            let mut conn = self.database().readers().acquire().await?;
-            albums::get_album(&mut conn, album).await?
-        };
-        let Some(stored) = stored else {
-            return Ok(None);
-        };
-        let candidates: Vec<Candidate<'_>> = references
-            .iter()
-            .enumerate()
-            .map(|(index, reference)| Candidate {
-                index,
-                title: &reference.album.title,
-                year: reference.album.year,
-            })
-            .collect();
-        let pairs = match_albums(&[stored], &HashMap::new(), &candidates);
-        let Some((index, _)) = pairs.first() else {
-            return Ok(None);
-        };
-        let reference = references[*index].clone();
         if depth == PageDepth::Full {
             let slug = reference.id.slug().clone();
             self.record_album_aliases(&slug, &[(album, reference.album.id.clone())])
