@@ -200,7 +200,7 @@ impl ScrobbleProvider for FakeProvider {
             return Err(error);
         }
         if let Some(rejected) = rejection
-            && (listens.len() > 1 || titles.iter().any(|title| *title == rejected))
+            && (listens.len() > 1 || titles.contains(&rejected))
         {
             return Err(ProviderError::NotFound);
         }
