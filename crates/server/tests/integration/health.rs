@@ -20,6 +20,52 @@ async fn healthz_reports_the_process_is_up() {
     assert_eq!(response.text().await.unwrap(), "ok");
 }
 
+/// A host name that resolves to more than one address is served on every one of
+/// them, so a client that reaches it over either protocol is answered.
+#[tokio::test]
+async fn a_host_name_that_resolves_twice_is_served_on_both() {
+    use std::net::ToSocketAddrs;
+
+    // One free port, so every resolved address can be bound to the same one.
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+
+    let fixture = crate::common::Fixture::on_configured_address(|config| {
+        config.server.bind = "localhost".to_owned();
+        config.server.port = port;
+    })
+    .await;
+
+    let mut resolved: Vec<std::net::SocketAddr> =
+        ("localhost", port).to_socket_addrs().unwrap().collect();
+    resolved.sort();
+    resolved.dedup();
+    let mut bound = fixture.server.local_addrs().to_vec();
+    bound.sort();
+    assert_eq!(
+        bound, resolved,
+        "every address the name resolves to is served"
+    );
+    assert!(
+        resolved.len() > 1,
+        "the test needs a name with more than one address"
+    );
+
+    for address in fixture.server.local_addrs() {
+        let response = fixture
+            .client
+            .get(format!("http://{address}/healthz"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{address} did not answer");
+        assert_eq!(response.text().await.unwrap(), "ok");
+    }
+
+    fixture.stop().await;
+}
+
 /// The readiness probe answers positively for a migrated database.
 #[tokio::test]
 async fn readyz_reports_ready_for_a_migrated_database() {

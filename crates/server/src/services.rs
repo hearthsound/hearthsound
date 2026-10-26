@@ -927,28 +927,63 @@ impl Services {
         &self.web
     }
 
-    /// Resolves `server.bind` and `server.port` into a socket address.
+    /// Resolves `server.bind` and `server.port` into every socket address the
+    /// pair names.
+    ///
+    /// A host name may resolve to several addresses - `localhost` is
+    /// `::1` and `127.0.0.1` on most systems - and the server binds all of them,
+    /// so a client that reaches the name over either protocol is served.
     ///
     /// # Returns
     ///
-    /// The first address the configured host and port resolve to.
+    /// The resolved addresses, in resolution order, without duplicates.
     ///
     /// # Errors
     ///
     /// Returns [`ServerError::Listen`] when the pair does not resolve to any
     /// address, for example when `server.bind` is neither an address nor a
     /// resolvable host name.
-    pub fn listen_address(&self) -> Result<SocketAddr, ServerError> {
+    pub fn listen_addresses(&self) -> Result<Vec<SocketAddr>, ServerError> {
         let addr = format!("{}:{}", self.config.server.bind, self.config.server.port);
-        (self.config.server.bind.as_str(), self.config.server.port)
+        let resolved = (self.config.server.bind.as_str(), self.config.server.port)
             .to_socket_addrs()
             .map_err(|source| ServerError::Listen {
                 addr: addr.clone(),
                 source,
-            })?
+            })?;
+        let mut addresses: Vec<SocketAddr> = Vec::new();
+        for address in resolved {
+            if !addresses.contains(&address) {
+                addresses.push(address);
+            }
+        }
+        if addresses.is_empty() {
+            return Err(ServerError::Listen {
+                addr,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::AddrNotAvailable,
+                    "the host and port resolved to no address",
+                ),
+            });
+        }
+        Ok(addresses)
+    }
+
+    /// Resolves `server.bind` and `server.port` into one socket address.
+    ///
+    /// This is the first of [`Services::listen_addresses`]; it is used where one
+    /// address is enough, such as the setup URL and a test that binds a loopback
+    /// port.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of [`Services::listen_addresses`].
+    pub fn listen_address(&self) -> Result<SocketAddr, ServerError> {
+        self.listen_addresses()?
+            .into_iter()
             .next()
             .ok_or_else(|| ServerError::Listen {
-                addr,
+                addr: format!("{}:{}", self.config.server.bind, self.config.server.port),
                 source: std::io::Error::new(
                     std::io::ErrorKind::AddrNotAvailable,
                     "the host and port resolved to no address",

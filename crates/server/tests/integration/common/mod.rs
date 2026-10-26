@@ -92,8 +92,31 @@ impl Fixture {
         Fixture::build(adjust, false).await
     }
 
+    /// Builds a server that binds the address its configuration names.
+    ///
+    /// The default fixture binds `127.0.0.1:0` and reads the port back; this one
+    /// goes through `Server::start`, which binds every address `server.bind`
+    /// resolves to.
+    ///
+    /// # Parameters
+    ///
+    /// - `adjust`: changes the configuration the default config file loads to.
+    pub async fn on_configured_address(adjust: impl FnOnce(&mut BootstrapConfig)) -> Fixture {
+        Fixture::build_with(adjust, true, true).await
+    }
+
     /// Builds a server, creating the test account unless `account` is false.
     async fn build(adjust: impl FnOnce(&mut BootstrapConfig), account: bool) -> Fixture {
+        Fixture::build_with(adjust, account, false).await
+    }
+
+    /// Builds a server, over either an ephemeral loopback port or the
+    /// configured address.
+    async fn build_with(
+        adjust: impl FnOnce(&mut BootstrapConfig),
+        account: bool,
+        configured_address: bool,
+    ) -> Fixture {
         install_crypto_provider();
         let dir = tempfile::tempdir().unwrap();
         let mut config = write_config(dir.path());
@@ -125,9 +148,13 @@ impl Fixture {
             (Uuid::nil(), String::new(), String::new())
         };
 
-        let server = Server::start_on(Arc::clone(&services), "127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
+        let server = if configured_address {
+            Server::start(Arc::clone(&services)).await.unwrap()
+        } else {
+            Server::start_on(Arc::clone(&services), "127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap()
+        };
 
         Fixture {
             _dir: dir,

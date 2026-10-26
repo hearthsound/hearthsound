@@ -1,8 +1,8 @@
-//! The serving process: the HTTP listener, the background workers, shutdown.
+//! The serving process: the HTTP listeners, the background workers, shutdown.
 //!
-//! [`Server::start`] binds the configured address, spawns the job runner, the
-//! scheduler, the folder watcher, and the worker that reacts to writes made by
-//! other connections, and serves the axum application. [`Server::run`] adds the
+//! [`Server::start`] binds every address `server.bind` resolves to, spawns the
+//! job runner, the scheduler, the folder watcher, and the worker that reacts to
+//! writes made by other connections, and serves the axum application. [`Server::run`] adds the
 //! signal handling a deployment needs: it starts, waits for `SIGINT` or
 //! `SIGTERM`, and then stops the listener and every worker.
 //!
@@ -49,23 +49,33 @@ const STARTUP_SCAN_DELAYS: [Duration; 4] = [Duration::from_secs(2); 4];
 /// operator's decision, and a client must not be able to hold the process open.
 const HTTP_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A running server: the HTTP listener plus the background workers.
+/// A running server: the HTTP listeners plus the background workers.
 pub struct Server {
     /// The services the listener and the workers share.
     services: Arc<Services>,
     /// The signal every worker and the HTTP server stop on.
     shutdown_signal: Shutdown,
-    /// The address the listener is bound to.
-    local_addr: std::net::SocketAddr,
-    /// The task serving HTTP.
-    http: JoinHandle<Result<(), std::io::Error>>,
+    /// The addresses the listeners are bound to.
+    ///
+    /// A host name may resolve to several addresses - `localhost` is both
+    /// loopback addresses - and every one of them is served.
+    listeners: Vec<std::net::SocketAddr>,
+    /// The tasks serving HTTP, one per listener.
+    http: Vec<JoinHandle<Result<(), std::io::Error>>>,
     /// The tasks running the job runner, the scheduler, and the watcher, each
     /// with the name it is reported under.
     workers: Vec<(&'static str, JoinHandle<()>)>,
 }
 
 impl Server {
-    /// Binds the configured address and starts serving.
+    /// Binds every address `server.bind` resolves to and starts serving.
+    ///
+    /// A host name that resolves to several addresses - `localhost` is both
+    /// loopback addresses - is served on all of them, so a client that reaches
+    /// the name over either protocol is answered. An address that cannot be
+    /// bound is skipped with a warning, because one protocol being unavailable -
+    /// a host without IPv6, or a port already taken on one loopback address -
+    /// must not stop the server from serving the others.
     ///
     /// # Parameters
     ///
@@ -73,17 +83,46 @@ impl Server {
     ///
     /// # Returns
     ///
-    /// The running server, whose [`Server::local_addr`] reports the bound
-    /// address.
+    /// The running server, whose [`Server::local_addrs`] reports the bound
+    /// addresses.
     ///
     /// # Errors
     ///
     /// Returns [`ServerError::Listen`] when the configured bind address and port
-    /// do not resolve, and [`ServerError::Bind`] when the socket cannot be bound
-    /// or inspected.
+    /// do not resolve, and the last [`ServerError::Bind`] when no resolved
+    /// address can be bound at all.
     pub async fn start(services: Arc<Services>) -> Result<Server, ServerError> {
-        let addr = services.listen_address()?;
-        Server::start_on(services, addr).await
+        let addresses = services.listen_addresses()?;
+        let mut listeners = Vec::new();
+        let mut http = Vec::new();
+        let mut failure = None;
+        for address in addresses {
+            match bind(address).await {
+                Ok((listener, bound)) => {
+                    listeners.push(bound);
+                    http.push(serve(
+                        listener,
+                        crate::http::router(&services),
+                        services.shutdown(),
+                    ));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        address = %address,
+                        %error,
+                        "could not bind a resolved address; continuing with the others",
+                    );
+                    failure = Some(error);
+                }
+            }
+        }
+        // Nothing could be bound: the last failure is what the operator has to
+        // act on. A partial success keeps serving, because one protocol being
+        // unavailable must not take the process down.
+        if let Some(error) = failure.filter(|_| http.is_empty()) {
+            return Err(error);
+        }
+        Server::finish(services, listeners, http).await
     }
 
     /// Binds `addr` and starts serving.
@@ -108,60 +147,65 @@ impl Server {
         services: Arc<Services>,
         addr: std::net::SocketAddr,
     ) -> Result<Server, ServerError> {
-        let listener = TcpListener::bind(addr)
-            .await
-            .map_err(|source| ServerError::Bind { addr, source })?;
-        let local_addr = listener
-            .local_addr()
-            .map_err(|source| ServerError::Bind { addr, source })?;
+        let (listener, bound) = bind(addr).await?;
+        let http = vec![serve(
+            listener,
+            crate::http::router(&services),
+            services.shutdown(),
+        )];
+        Server::finish(services, vec![bound], http).await
+    }
 
+    /// Starts the workers and reports the bound addresses.
+    ///
+    /// # Parameters
+    ///
+    /// - `services`: the composed services.
+    /// - `listeners`: the addresses the listeners are bound to.
+    /// - `http`: the tasks serving them.
+    ///
+    /// # Returns
+    ///
+    /// The running server.
+    async fn finish(
+        services: Arc<Services>,
+        listeners: Vec<std::net::SocketAddr>,
+        http: Vec<JoinHandle<Result<(), std::io::Error>>>,
+    ) -> Result<Server, ServerError> {
         let shutdown_signal = services.shutdown();
-        let app = crate::http::router(&services);
-
-        let http_shutdown = shutdown_signal.clone();
-        let http = tokio::spawn(async move {
-            // The connect information is what lets a handler read the peer
-            // address: the login rate limit is keyed on the client address, and
-            // `server.trusted_proxies` decides whether a forwarding header
-            // names the client.
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .with_graceful_shutdown(async move { http_shutdown.wait().await })
-            .await
-        });
-
         let workers = spawn_workers(&services, shutdown_signal.clone());
 
         // The one bootstrap credential of the whole server: a fresh database
         // has no account, and the only way to create one is this link. It is
         // logged exactly once per process and stops working as soon as it is
         // used.
+        let first = listeners[0];
         if let Some(token) = services.setup().token().await {
-            let url = setup_url(&services.config().server.base_url, local_addr, &token);
+            let url = setup_url(&services.config().server.base_url, first, &token);
             tracing::warn!(url = %url, "No administrator exists yet; open the setup URL to create one");
         }
 
-        tracing::info!(address = %local_addr, "serving");
+        tracing::info!(addresses = ?listeners, "serving");
 
         Ok(Server {
             services,
             shutdown_signal,
-            local_addr,
+            listeners,
             http,
             workers,
         })
     }
 
-    /// Returns the address the listener is bound to.
+    /// Returns the first address the server is bound to.
     ///
-    /// # Returns
-    ///
-    /// The bound address, with the port the operating system chose when the
-    /// requested port was zero.
+    /// A test that bound an ephemeral port reads it back here.
     pub fn local_addr(&self) -> std::net::SocketAddr {
-        self.local_addr
+        self.listeners[0]
+    }
+
+    /// Returns every address the server is bound to.
+    pub fn local_addrs(&self) -> &[std::net::SocketAddr] {
+        &self.listeners
     }
 
     /// Returns the services the server is running.
@@ -371,61 +415,134 @@ where
     None
 }
 
-/// Waits for the HTTP task, cutting the connections after [`HTTP_DRAIN_TIMEOUT`].
+/// Binds one address.
 ///
 /// # Parameters
 ///
-/// - `http`: the task serving the listener.
+/// - `addr`: the address to bind.
 ///
 /// # Returns
 ///
-/// `Ok(())` when the listener stopped without an error, including when the drain
-/// deadline cut the connections still open.
+/// The listener and the address it is bound to, which carries the port the
+/// operating system chose when the requested port was zero.
 ///
 /// # Errors
 ///
-/// Returns [`ServerError::Serve`] when the listener stopped with an I/O error
-/// and [`ServerError::HttpTask`] when its task panicked or was cancelled.
-async fn drain_http(http: JoinHandle<Result<(), std::io::Error>>) -> Result<(), ServerError> {
+/// Returns [`ServerError::Bind`] when the socket cannot be bound or its local
+/// address cannot be read.
+async fn bind(
+    addr: std::net::SocketAddr,
+) -> Result<(TcpListener, std::net::SocketAddr), ServerError> {
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|source| ServerError::Bind { addr, source })?;
+    let bound = listener
+        .local_addr()
+        .map_err(|source| ServerError::Bind { addr, source })?;
+    Ok((listener, bound))
+}
+
+/// Spawns the task that serves one listener.
+///
+/// # Parameters
+///
+/// - `listener`: the bound listener.
+/// - `app`: the router every request is answered with.
+/// - `shutdown`: the signal that stops accepting and drains the responses.
+///
+/// # Returns
+///
+/// The serving task.
+fn serve(
+    listener: TcpListener,
+    app: axum::Router,
+    shutdown: Shutdown,
+) -> JoinHandle<Result<(), std::io::Error>> {
+    tokio::spawn(async move {
+        // The connect information is what lets a handler read the peer
+        // address: the login rate limit is keyed on the client address, and
+        // `server.trusted_proxies` decides whether a forwarding header
+        // names the client.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move { shutdown.wait().await })
+        .await
+    })
+}
+
+/// Waits for the HTTP tasks, cutting the connections after [`HTTP_DRAIN_TIMEOUT`].
+///
+/// # Parameters
+///
+/// - `http`: the tasks serving the listeners.
+///
+/// # Returns
+///
+/// `Ok(())` when every listener stopped without an error, including when the
+/// drain deadline cut the connections still open.
+///
+/// # Errors
+///
+/// Returns [`ServerError::Serve`] when a listener stopped with an I/O error and
+/// [`ServerError::HttpTask`] when its task panicked or was cancelled. Each
+/// failure is logged as it happens and the first one is returned.
+async fn drain_http(http: Vec<JoinHandle<Result<(), std::io::Error>>>) -> Result<(), ServerError> {
     drain_http_within(http, HTTP_DRAIN_TIMEOUT).await
 }
 
-/// Waits for the HTTP task, bounded by `deadline`.
+/// Waits for the HTTP tasks, bounded by one `deadline` for all of them.
 ///
 /// # Parameters
 ///
-/// - `http`: the task serving the listener.
-/// - `deadline`: how long it gets to finish the responses in flight.
+/// - `http`: the tasks serving the listeners.
+/// - `deadline`: how long they get to finish the responses in flight.
 ///
 /// # Returns
 ///
-/// `Ok(())` when the listener stopped within the deadline, and when the deadline
-/// cut it.
+/// `Ok(())` when every listener stopped within the deadline, and when the
+/// deadline cut the rest.
 ///
 /// # Errors
 ///
-/// Returns [`ServerError::Serve`] when the listener stopped with an I/O error
-/// and [`ServerError::HttpTask`] when its task panicked or was cancelled.
+/// Returns [`ServerError::Serve`] when a listener stopped with an I/O error and
+/// [`ServerError::HttpTask`] when its task panicked or was cancelled.
 async fn drain_http_within(
-    mut http: JoinHandle<Result<(), std::io::Error>>,
+    http: Vec<JoinHandle<Result<(), std::io::Error>>>,
     deadline: Duration,
 ) -> Result<(), ServerError> {
-    let expiry = tokio::time::sleep(deadline);
-    tokio::pin!(expiry);
-    tokio::select! {
-        finished = &mut http => match finished {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(source)) => Err(ServerError::Serve(source)),
-            Err(error) => Err(ServerError::HttpTask(error)),
-        },
-        () = &mut expiry => {
-            tracing::warn!(
-                deadline_ms = deadline.as_millis() as u64,
-                "the listener did not finish its responses within the shutdown deadline;                  the connections were cut",
-            );
-            http.abort();
-            Ok(())
+    let expiry = tokio::time::Instant::now() + deadline;
+    let mut failure = None;
+    for mut listener in http {
+        let left = expiry.saturating_duration_since(tokio::time::Instant::now());
+        let expiry = tokio::time::sleep(left);
+        tokio::pin!(expiry);
+        let finished = tokio::select! {
+            finished = &mut listener => Some(finished),
+            () = &mut expiry => None,
+        };
+        let error = match finished {
+            None => {
+                tracing::warn!(
+                    deadline_ms = deadline.as_millis() as u64,
+                    "the listener did not finish its responses within the shutdown deadline; the connections were cut",
+                );
+                listener.abort();
+                None
+            }
+            Some(Ok(Ok(()))) => None,
+            Some(Ok(Err(source))) => Some(ServerError::Serve(source)),
+            Some(Err(error)) => Some(ServerError::HttpTask(error)),
+        };
+        if let Some(error) = error {
+            tracing::error!(%error, "a listener stopped with an error");
+            failure.get_or_insert(error);
         }
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -618,7 +735,7 @@ mod tests {
     #[tokio::test]
     async fn a_listener_that_stopped_with_an_io_error_is_reported() {
         let http = tokio::spawn(async { Err(std::io::Error::other("listener")) });
-        let drained = drain_http(http).await;
+        let drained = drain_http(vec![http]).await;
         assert!(
             matches!(drained, Err(ServerError::Serve(_))),
             "an I/O error must be reported as a serve failure"
@@ -631,7 +748,7 @@ mod tests {
             std::future::pending::<()>().await;
             Ok(())
         });
-        let drained = drain_http_within(http, Duration::from_millis(50)).await;
+        let drained = drain_http_within(vec![http], Duration::from_millis(50)).await;
         assert!(
             drained.is_ok(),
             "cutting the connections is the deadline doing its job"
