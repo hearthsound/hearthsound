@@ -15,93 +15,15 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, SET_COOKIE};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 
-use crate::common::{ACCOUNT_PASSWORD, Fixture, USERNAME};
+use crate::common::{
+    ACCOUNT_PASSWORD, FRAME_WAIT, Fixture, Frame, USERNAME, bearer_value, next_frames, parse_frame,
+    stream_url, ticket,
+};
 use crate::multi_user::create_user;
 use crate::native::{bearer, json as read_json};
 
-/// How long a test waits for the next frame before failing.
-const FRAME_WAIT: Duration = Duration::from_secs(5);
-
 /// How many events overflow the replay window in the eviction tests.
 const FLOOD: usize = 1_100;
-
-/// One parsed Server-Sent Events frame.
-#[derive(Debug)]
-struct Frame {
-    /// The `id:` line, absent on the refetch notice.
-    id: Option<String>,
-    /// The `event:` line, the wire event name.
-    event: String,
-    /// The `data:` payload, parsed as JSON.
-    data: Value,
-}
-
-/// The URL of the event stream.
-fn stream_url(fixture: &Fixture) -> String {
-    format!("{}/api/v1/events", fixture.base_url())
-}
-
-/// The bearer header value of the fixture's API key.
-fn bearer_value(fixture: &Fixture) -> String {
-    format!("Bearer {}", fixture.api_key)
-}
-
-/// Parses one SSE block; `None` for a block without an event line, such as a
-/// keep-alive comment.
-fn parse_frame(block: &str) -> Option<Frame> {
-    let mut id = None;
-    let mut event = None;
-    let mut data = Vec::new();
-    for line in block.lines() {
-        if let Some(value) = line.strip_prefix("id: ") {
-            id = Some(value.to_owned());
-        } else if let Some(value) = line.strip_prefix("event: ") {
-            event = Some(value.to_owned());
-        } else if let Some(value) = line.strip_prefix("data: ") {
-            data.push(value);
-        }
-    }
-    let event = event?;
-    Some(Frame {
-        id,
-        event,
-        data: serde_json::from_str(&data.join("\n")).unwrap(),
-    })
-}
-
-/// Reads the next `count` frames from an open stream.
-///
-/// # Parameters
-///
-/// - `response`: the open stream.
-/// - `count`: how many frames to read.
-///
-/// # Returns
-///
-/// The frames in the order they arrived.
-///
-/// # Panics
-///
-/// When a frame does not arrive within [`FRAME_WAIT`] or the stream ends.
-async fn next_frames(response: &mut reqwest::Response, count: usize) -> Vec<Frame> {
-    let mut buffer = String::new();
-    let mut frames = Vec::new();
-    while frames.len() < count {
-        let chunk = tokio::time::timeout(FRAME_WAIT, response.chunk())
-            .await
-            .expect("no frame arrived in time")
-            .unwrap()
-            .expect("the stream ended early");
-        buffer.push_str(std::str::from_utf8(&chunk).unwrap());
-        while let Some(end) = buffer.find("\n\n") {
-            let block: String = buffer.drain(..end + 2).collect();
-            if let Some(frame) = parse_frame(&block) {
-                frames.push(frame);
-            }
-        }
-    }
-    frames
-}
 
 /// Reads frames until one carries the given playlist id, returning every frame
 /// read up to and including it.
@@ -126,16 +48,6 @@ fn publish_playlist(fixture: &Fixture, playlist_id: &str) -> u64 {
             playlist_id: playlist_id.to_owned(),
             change: "updated".to_owned(),
         }))
-}
-
-/// Issues a stream ticket for the fixture's account.
-async fn ticket(fixture: &Fixture) -> String {
-    let response = bearer(fixture, Method::POST, "/api/v1/events/ticket", None).await;
-    assert_eq!(response.status(), StatusCode::CREATED);
-    read_json(response).await["ticket"]
-        .as_str()
-        .unwrap()
-        .to_owned()
 }
 
 /// Asserts a response is a problem document with the given code.

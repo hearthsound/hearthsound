@@ -13,6 +13,7 @@ use hearthsound_library::{
 };
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
 use reqwest::Method;
+use reqwest::header::AUTHORIZATION;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -579,5 +580,160 @@ async fn a_second_account_gets_a_copy_of_a_file_in_someone_elses_folder() {
         !stream.bytes().await.unwrap().is_empty(),
         "the track still streams for the second account"
     );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn saving_a_catalog_track_downloads_it_into_the_owners_folder() {
+    let fixture = Fixture::new().await;
+    let services = std::sync::Arc::clone(&fixture.services);
+    let downloads = crate::on_demand::downloads_dir(&fixture);
+    crate::on_demand::install_catalog(&services).await;
+    crate::on_demand::install_acquisition(&services, &downloads, "normal", 1).await;
+    services.registry().rebuild().await.unwrap();
+    crate::on_demand::place_audio(&downloads).await;
+    let folder = folder(&fixture, "music", Some(fixture.user_id)).await;
+    point_at(&fixture, fixture.user_id, &folder).await;
+
+    let id = crate::on_demand::catalog_id(1);
+    let response = fixture
+        .get(&format!(
+            "/rest/star?id={id}&apiKey={}&f=json",
+            fixture.api_key
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.text().await.unwrap().contains("\"status\":\"ok\""));
+
+    let mut saved = Vec::new();
+    for _ in 0..200 {
+        saved = audio_files(&folder.path);
+        if !saved.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        saved.len(),
+        1,
+        "the download is imported straight into the owner's folder"
+    );
+    let cache = fixture
+        .services
+        .storage_roots()
+        .root_for(StorageClass::Cache);
+    assert!(
+        audio_files(cache).is_empty(),
+        "no managed copy is kept beside it"
+    );
+    let stored: String = sqlx::query_scalar(
+        "SELECT storage FROM media_files WHERE storage = 'folder' AND folder_id = ?",
+    )
+    .bind(folder.id.as_bytes().as_slice())
+    .fetch_one(fixture.services.database().readers())
+    .await
+    .unwrap();
+    assert_eq!(stored, "folder");
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn a_read_only_save_folder_keeps_the_file_and_notifies_the_user() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = Fixture::new().await;
+    let folder = folder(&fixture, "music", Some(fixture.user_id)).await;
+    point_at(&fixture, fixture.user_id, &folder).await;
+    let rel_path = "Hello Artist/Hello Song album/01 - Hello Song.flac";
+    let track = saved_track(&fixture, rel_path).await;
+    // The stream is open before the like, so the notice cannot be missed.
+    let ticket = crate::common::ticket(&fixture).await;
+    let mut stream = fixture
+        .client
+        .get(crate::common::stream_url(&fixture))
+        .header(AUTHORIZATION, crate::common::bearer_value(&fixture))
+        .header("x-hearthsound-ticket", ticket)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream.status(), StatusCode::OK);
+
+    let original = std::fs::metadata(&folder.path).unwrap().permissions();
+    std::fs::set_permissions(&folder.path, std::fs::Permissions::from_mode(0o555)).unwrap();
+    star(&fixture, track).await;
+    std::fs::set_permissions(&folder.path, original).unwrap();
+
+    // The managed file stayed where it was.
+    let rows = rows(&fixture, track).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "cache", "the file is kept in managed storage");
+    assert_eq!(rows[0].2, rel_path);
+
+    // The like publishes its own change events first, so the notice is looked
+    // for among the frames that follow it.
+    let mut notice = None;
+    for _ in 0..10 {
+        let mut frames = crate::common::next_frames(&mut stream, 1).await;
+        let frame = frames.remove(0);
+        if frame.event == "system.notice" {
+            notice = Some(frame);
+            break;
+        }
+    }
+    let notice = notice.expect("the user is told the folder could not be written");
+    assert_eq!(notice.data["data"]["code"], "save-folder-unavailable");
+    assert!(
+        notice.data["data"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("music"),
+        "the notice names the folder: {notice:?}"
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn a_saved_file_in_a_nested_owned_folder_is_indexed_once() {
+    let fixture = Fixture::new().await;
+    let outer = folder(&fixture, "music", Some(fixture.user_id)).await;
+    let inner = folder(&fixture, "music/Album", Some(fixture.user_id)).await;
+    point_at(&fixture, fixture.user_id, &inner).await;
+    let track = saved_track(
+        &fixture,
+        "Hello Artist/Hello Song album/01 - Hello Song.flac",
+    )
+    .await;
+    star(&fixture, track).await;
+
+    let stored = rows(&fixture, track).await;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].1.as_deref(),
+        Some(inner.id.as_bytes().as_slice()),
+        "the innermost folder owns the file"
+    );
+
+    fixture
+        .services
+        .scanner()
+        .scan_folder(outer.id)
+        .await
+        .unwrap();
+    fixture
+        .services
+        .scanner()
+        .scan_folder(inner.id)
+        .await
+        .unwrap();
+
+    let titles: Vec<String> = sqlx::query_scalar("SELECT title FROM tracks WHERE title = ?")
+        .bind("Hello Song")
+        .fetch_all(fixture.services.database().readers())
+        .await
+        .unwrap();
+    assert_eq!(titles.len(), 1, "the outer scan skips the inner folder");
+    let stored = rows(&fixture, track).await;
+    assert_eq!(stored.len(), 1, "the file is indexed once");
+    assert_eq!(stored[0].1.as_deref(), Some(inner.id.as_bytes().as_slice()));
     fixture.stop().await;
 }

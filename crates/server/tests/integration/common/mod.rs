@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use hearthsound_auth::{ApiKeys, AppPasswords, NewUser, Users};
 use hearthsound_config::bootstrap::BootstrapConfig;
@@ -21,6 +22,8 @@ use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, Origin, T
 use hearthsound_plugin_host::{InstanceSpec, PluginRepository, PluginSource};
 use hearthsound_server::{Server, Services};
 use hearthsound_test_support::{ACQUISITION_FIXTURE, fixture_plugin};
+use reqwest::Method;
+use serde_json::Value;
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -456,4 +459,96 @@ pub async fn insert_remote_track(library: &LibraryRepository) -> EntityId {
         .insert_track(&input, &[ArtistCredit::new("Reload Artist", "main")], &[])
         .await
         .unwrap()
+}
+
+/// How long a test waits for the next frame before failing.
+pub(crate) const FRAME_WAIT: Duration = Duration::from_secs(5);
+
+/// One parsed Server-Sent Events frame.
+#[derive(Debug)]
+pub(crate) struct Frame {
+    /// The `id:` line, absent on the refetch notice.
+    pub(crate) id: Option<String>,
+    /// The `event:` line, the wire event name.
+    pub(crate) event: String,
+    /// The `data:` payload, parsed as JSON.
+    pub(crate) data: Value,
+}
+
+/// The URL of the event stream.
+pub(crate) fn stream_url(fixture: &Fixture) -> String {
+    format!("{}/api/v1/events", fixture.base_url())
+}
+
+/// The bearer header value of the fixture's API key.
+pub(crate) fn bearer_value(fixture: &Fixture) -> String {
+    format!("Bearer {}", fixture.api_key)
+}
+
+/// Parses one SSE block; `None` for a block without an event line, such as a
+/// keep-alive comment.
+pub(crate) fn parse_frame(block: &str) -> Option<Frame> {
+    let mut id = None;
+    let mut event = None;
+    let mut data = Vec::new();
+    for line in block.lines() {
+        if let Some(value) = line.strip_prefix("id: ") {
+            id = Some(value.to_owned());
+        } else if let Some(value) = line.strip_prefix("event: ") {
+            event = Some(value.to_owned());
+        } else if let Some(value) = line.strip_prefix("data: ") {
+            data.push(value);
+        }
+    }
+    let event = event?;
+    Some(Frame {
+        id,
+        event,
+        data: serde_json::from_str(&data.join("\n")).unwrap(),
+    })
+}
+
+/// Reads the next `count` frames from an open stream.
+///
+/// # Parameters
+///
+/// - `response`: the open stream.
+/// - `count`: how many frames to read.
+///
+/// # Returns
+///
+/// The frames in the order they arrived.
+///
+/// # Panics
+///
+/// When a frame does not arrive within [`FRAME_WAIT`] or the stream ends.
+pub(crate) async fn next_frames(response: &mut reqwest::Response, count: usize) -> Vec<Frame> {
+    let mut buffer = String::new();
+    let mut frames = Vec::new();
+    while frames.len() < count {
+        let chunk = tokio::time::timeout(FRAME_WAIT, response.chunk())
+            .await
+            .expect("no frame arrived in time")
+            .unwrap()
+            .expect("the stream ended early");
+        buffer.push_str(std::str::from_utf8(&chunk).unwrap());
+        while let Some(end) = buffer.find("\n\n") {
+            let block: String = buffer.drain(..end + 2).collect();
+            if let Some(frame) = parse_frame(&block) {
+                frames.push(frame);
+            }
+        }
+    }
+    frames
+}
+
+/// Issues a stream ticket for the fixture's account.
+pub(crate) async fn ticket(fixture: &Fixture) -> String {
+    let response =
+        crate::native::bearer(fixture, Method::POST, "/api/v1/events/ticket", None).await;
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    crate::native::json(response).await["ticket"]
+        .as_str()
+        .unwrap()
+        .to_owned()
 }
