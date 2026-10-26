@@ -146,6 +146,11 @@ async fn list_users(context: &Context) -> anyhow::Result<()> {
 /// left as it is. Quotas are read, changed, and written back as a whole, so
 /// clearing one dimension leaves the other alone.
 ///
+/// Every value is validated before the first write, so a rejected value changes
+/// nothing - an account is not left disabled by a command whose password was
+/// refused. A write that fails after another succeeded is the only remaining
+/// partial state, and the error names the step that failed.
+///
 /// # Parameters
 ///
 /// - `context`: the open database.
@@ -163,6 +168,8 @@ async fn update_user(context: &Context, args: UpdateUserArgs) -> anyhow::Result<
     let quotas = Quotas::new(context.database());
     let user = find_user(context, &args.user).await?;
 
+    // Reading and validating comes first: a refused password or limit must not
+    // leave the account disabled, renamed or demoted by a command that failed.
     let mut update = UserUpdate::default();
     if let Some(display_name) = args.display_name {
         update = update.with_display_name(display_name);
@@ -173,6 +180,23 @@ async fn update_user(context: &Context, args: UpdateUserArgs) -> anyhow::Result<
     if let Some(list) = &args.permissions {
         update = update.with_permissions(parse_permissions(list)?);
     }
+    let password = if args.password_stdin {
+        Some(read_password(true)?)
+    } else {
+        None
+    };
+    let mut quota = quotas
+        .get(user.id)
+        .await
+        .context("could not read the stored quota")?;
+    if let Some(limit) = &args.acquisitions_per_day {
+        quota.acquisitions_per_day = parse_limit(limit)?;
+    }
+    if let Some(limit) = &args.acquisition_bytes_per_day {
+        quota.acquisition_bytes_per_day = parse_limit(limit)?;
+    }
+
+    // The first write is below this line.
     let user = users
         .update(user.id, &update)
         .await
@@ -190,8 +214,7 @@ async fn update_user(context: &Context, args: UpdateUserArgs) -> anyhow::Result<
             .await
             .context("could not enable the account")?;
     }
-    if args.password_stdin {
-        let password = read_password(true)?;
+    if let Some(password) = password {
         let revoked = users
             .set_password(user.id, &password, None)
             .await
@@ -205,16 +228,6 @@ async fn update_user(context: &Context, args: UpdateUserArgs) -> anyhow::Result<
         );
     }
 
-    let mut quota = quotas
-        .get(user.id)
-        .await
-        .context("could not read the stored quota")?;
-    if let Some(limit) = &args.acquisitions_per_day {
-        quota.acquisitions_per_day = parse_limit(limit)?;
-    }
-    if let Some(limit) = &args.acquisition_bytes_per_day {
-        quota.acquisition_bytes_per_day = parse_limit(limit)?;
-    }
     quotas
         .set(user.id, &quota)
         .await

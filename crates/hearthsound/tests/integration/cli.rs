@@ -529,6 +529,90 @@ fn add_folder_generic_is_scanable() {
     assert!(scanned.contains("0 seen"), "{scanned}");
 }
 
+/// A password the command refuses leaves the rest of the account alone: the
+/// validation runs before the first write.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_password_leaves_the_account_enabled() {
+    let sandbox = Sandbox::new("");
+    succeeded(&sandbox.run_with_stdin(
+        &[
+            "admin",
+            "create-user",
+            "--username",
+            "echo",
+            "--password-stdin",
+        ],
+        "hunter22\n",
+    ));
+
+    let refused = sandbox.run_with_stdin(
+        &[
+            "admin",
+            "update-user",
+            "--user",
+            "echo",
+            "--disable",
+            "--password-stdin",
+        ],
+        "",
+    );
+    assert!(
+        !refused.status.success(),
+        "an empty password is refused: {}",
+        succeeded(&refused)
+    );
+
+    let listed = succeeded(&sandbox.run(&["admin", "list-users"]));
+    assert!(
+        listed.contains("state=enabled"),
+        "the account was disabled by a command that failed: {listed}"
+    );
+}
+
+/// A password shorter than the server's minimum is refused before anything is
+/// written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_short_password_is_rejected() {
+    let sandbox = Sandbox::new("");
+    succeeded(&sandbox.run_with_stdin(
+        &[
+            "admin",
+            "create-user",
+            "--username",
+            "echo",
+            "--password-stdin",
+        ],
+        "hunter22\n",
+    ));
+
+    let refused = sandbox.run_with_stdin(
+        &[
+            "admin",
+            "update-user",
+            "--user",
+            "echo",
+            "--disable",
+            "--password-stdin",
+        ],
+        "short22\n",
+    );
+    assert!(
+        !refused.status.success(),
+        "a seven character password is refused"
+    );
+    let message = stderr(&refused);
+    assert!(
+        message.contains("at least 8 characters"),
+        "the refusal names the rule: {message}"
+    );
+
+    let listed = succeeded(&sandbox.run(&["admin", "list-users"]));
+    assert!(
+        listed.contains("state=enabled"),
+        "the account was disabled by a command that failed: {listed}"
+    );
+}
+
 /// `add-folder` queues the folder's first scan, so a folder full of files is
 /// indexed without a second command.
 #[tokio::test(flavor = "multi_thread")]
