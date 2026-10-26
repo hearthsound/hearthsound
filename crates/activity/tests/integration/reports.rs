@@ -679,3 +679,66 @@ async fn stale_now_playing_rows_are_left_out() {
         "an account that may not be listed is left out"
     );
 }
+
+/// A report suppresses exactly one scrobble of the play it recorded; a second
+/// submission of the same track is a play of its own.
+#[tokio::test]
+async fn a_reported_play_suppresses_one_scrobble_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let reports = activity.reports();
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let one = track_id(tracks[0]);
+
+    let start = recent(300_000);
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            200_000,
+            PlaybackState::Starting,
+            start,
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        reports
+            .report(&report(
+                user,
+                "dsub",
+                one,
+                200_000,
+                PlaybackState::Stopped,
+                start + 200_000,
+            ))
+            .await
+            .unwrap(),
+        PlaybackOutcome::Recorded(_)
+    ));
+
+    let scrobble = Scrobble {
+        user_id: user,
+        track_id: one.uuid(),
+        client: Some("dsub"),
+        submission: true,
+        started_at: start,
+        listened_ms: 200_000,
+    };
+    assert_eq!(
+        activity.scrobble(&scrobble).await.unwrap(),
+        ScrobbleOutcome::AlreadyRecorded,
+        "the scrobble of the reported play is dropped"
+    );
+    assert!(
+        matches!(
+            activity.scrobble(&scrobble).await.unwrap(),
+            ScrobbleOutcome::Recorded(_)
+        ),
+        "a second submission is a play of its own"
+    );
+    assert_eq!(activity.plays().play_count(user, one.uuid()).await.unwrap(), 2);
+}

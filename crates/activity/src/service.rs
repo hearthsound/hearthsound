@@ -318,10 +318,13 @@ impl ActivityService {
     ///
     /// A submission is recorded as a play unless the latest stream session for
     /// the same user and track reported that it delivered no song audio, or a
-    /// playback report recorded the same play recently. A submission with no
-    /// known session is recorded: the client heard the song through a stream the
-    /// server did not serve, or the session has since expired, and neither is
-    /// evidence against the play.
+    /// playback report recorded the same play recently. The report's memory is
+    /// consumed by the first scrobble it suppresses, so a second submission of
+    /// the same track is recorded: a Subsonic submission is an explicit
+    /// statement that a play happened, and only a report's own play is deduped
+    /// against it. A submission with no known session is recorded: the client
+    /// heard the song through a stream the server did not serve, or the session
+    /// has since expired, and neither is evidence against the play.
     ///
     /// A now-playing call (`submission=false`) stores what the client is playing
     /// so `getNowPlaying` can list it; the association ends when the client
@@ -372,7 +375,7 @@ impl ActivityService {
         }
         if self
             .reports
-            .recently_recorded(scrobble.user_id, scrobble.track_id, now_millis())
+            .take_recorded(scrobble.user_id, scrobble.track_id, now_millis())
         {
             return Ok(ScrobbleOutcome::AlreadyRecorded);
         }

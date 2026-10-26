@@ -21,8 +21,9 @@
 //!
 //! Because the same play often arrives twice - once as a report and once as a
 //! scrobble - a play recorded from a report is remembered for a while, and
-//! [`InMemoryReports::recently_recorded`] answers whether the scrobble that
-//! follows should be dropped.
+//! [`InMemoryReports::take_recorded`] consumes that memory: the one scrobble of
+//! the same play is dropped, and a later submission of the same track is
+//! recorded like any other play.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -41,8 +42,12 @@ pub const LISTENED_HALF_MS: i64 = 240_000;
 /// The shortest track a play is recorded for, in milliseconds.
 pub const MIN_TRACK_MS: i64 = 30_000;
 
-/// How long a play recorded from a report suppresses a scrobble, in
+/// How long after a report the one scrobble of the same play is suppressed, in
 /// milliseconds.
+///
+/// The window only bounds how late the matching scrobble may arrive; the entry
+/// is consumed by the first scrobble it suppresses, so a second submission of
+/// the same track is a play of its own.
 pub const SCROBBLE_DEDUPE_MS: i64 = 30 * 60 * 1000;
 
 /// How long after a track's end a session is dropped, in milliseconds.
@@ -312,10 +317,13 @@ impl InMemoryReports {
         self
     }
 
-    /// Reports whether a report recorded a play for a track recently.
+    /// Takes the remembered report of a play, so its scrobble is dropped once.
     ///
     /// A client often reports playback and then scrobbles the same play; the
-    /// scrobble is dropped while this answers `true`.
+    /// scrobble is dropped while this answers `true`, and the entry is consumed
+    /// by that answer. A later submission of the same track - repeat-one, a
+    /// second device, two explicit submissions - is therefore a play of its
+    /// own, which is what the client stated.
     ///
     /// # Parameters
     ///
@@ -326,13 +334,12 @@ impl InMemoryReports {
     /// # Returns
     ///
     /// `true` when a report recorded a play for that account and track within
-    /// [`SCROBBLE_DEDUPE_MS`].
-    pub fn recently_recorded(&self, user_id: Uuid, track_id: Uuid, now: i64) -> bool {
-        let inner = self.lock();
-        inner
+    /// [`SCROBBLE_DEDUPE_MS`], and that entry was removed.
+    pub fn take_recorded(&self, user_id: Uuid, track_id: Uuid, now: i64) -> bool {
+        self.lock()
             .recorded
-            .get(&(user_id, track_id))
-            .is_some_and(|at| now - *at <= SCROBBLE_DEDUPE_MS)
+            .remove(&(user_id, track_id))
+            .is_some_and(|at| now - at <= SCROBBLE_DEDUPE_MS)
     }
 
     /// Applies one report.
