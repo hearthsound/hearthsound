@@ -1612,3 +1612,111 @@ async fn a_playing_report_for_another_track_starts_a_new_session() {
             .unwrap();
     assert_eq!(started, START + 60_000);
 }
+
+/// A session that goes quiet after reaching the threshold records the play it
+/// earned instead of losing it.
+#[tokio::test]
+async fn a_paused_session_records_its_earned_play() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let activity = ActivityService::new(&database);
+    let reports = activity.reports();
+    let user = insert_user(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let one = track_id(tracks[0]);
+    let start = session_start();
+
+    // Three minutes of a four-minute track, then forty-five minutes of silence.
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Starting,
+            start,
+        ))
+        .await
+        .unwrap();
+    reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Playing,
+            start + 180_000,
+        ))
+        .await
+        .unwrap();
+    let outcome = reports
+        .report(&report(
+            user,
+            "dsub",
+            one,
+            240_000,
+            PlaybackState::Playing,
+            start + 45 * 60 * 1000,
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, PlaybackOutcome::Recorded(_)),
+        "the earned play was recorded: {outcome:?}"
+    );
+
+    assert_eq!(
+        activity.plays().play_count(user, one.uuid()).await.unwrap(),
+        1
+    );
+    let stored = sqlx::query!("SELECT listened_ms FROM plays")
+        .fetch_one(database.readers())
+        .await
+        .unwrap();
+    assert!(stored.listened_ms >= 120_000, "{stored:?}");
+
+    // The report opened a fresh session for the part after the pause.
+    let started: i64 =
+        sqlx::query_scalar("SELECT started_at FROM listen_sessions WHERE client = 'dsub'")
+            .fetch_one(database.readers())
+            .await
+            .unwrap();
+    assert_eq!(started, start + 45 * 60 * 1000);
+
+    // A session that earned nothing is still dropped silently.
+    let other = track_id(tracks[1]);
+    reports
+        .report(&report(
+            user,
+            "other",
+            other,
+            240_000,
+            PlaybackState::Starting,
+            start,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        reports
+            .report(&report(
+                user,
+                "other",
+                other,
+                240_000,
+                PlaybackState::Playing,
+                start + 45 * 60 * 1000,
+            ))
+            .await
+            .unwrap(),
+        PlaybackOutcome::Updated
+    );
+    assert_eq!(
+        activity
+            .plays()
+            .play_count(user, other.uuid())
+            .await
+            .unwrap(),
+        0
+    );
+}

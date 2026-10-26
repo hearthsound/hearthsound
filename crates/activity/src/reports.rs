@@ -574,16 +574,21 @@ impl InMemoryReports {
         let mut plan = Plan::default();
 
         // A session whose client went quiet for longer than its own track is
-        // closed rather than continued, and its stored row goes with it. It
-        // records its earned play only under the rules below, which is the same
-        // decision the startup recovery makes.
+        // closed rather than continued, and its stored row goes with it. The
+        // play it earned is recorded rather than lost, which is the same rule
+        // the startup recovery applies to a stored session: a listener who got
+        // three minutes into a four-minute track and paused for forty-five is
+        // not treated as if they had never played it.
         let previous = match previous {
             Some(session)
                 if session.last_at + session.duration_ms.max(0) + SESSION_GRACE_MS > report.now =>
             {
                 Some(session)
             }
-            Some(_) => {
+            Some(session) => {
+                if session.earned() {
+                    plan.record = Some((session.track_id, session.started_at, session.listened_ms));
+                }
                 plan.persist = Some(Persist::Delete);
                 None
             }
