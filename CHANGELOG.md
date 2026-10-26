@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Catalog artist results carry the provider's album count and a `coverArt` id for the artist picture; a library album and an online album are kept apart when their release years differ by more than one; editing a provider instance drops its cached answers; an empty chart is remembered for an hour.
+- Pairing a stored album costs one title search, and the metadata and artwork layers are asked in parallel under one deadline.
 - Browse pages answer from the library and the cached catalog data only; a `catalog.enrich` job fetches the missing extras, publishes `catalog.enriched` to the listener whose page asked, and the open page refreshes without a reload.
 - Search results promote their artists and album references into the cache, so opening a result costs no catalog call.
 
