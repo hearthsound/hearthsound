@@ -6,9 +6,10 @@
 //! the entries, and adding a whole album, playlist or artist appends their
 //! tracks in the collection's own order.
 //!
-//! Every edit answers a problem document, publishes `playlist.changed`, and
-//! leaves the playlist pin of each affected track to the activity layer, which
-//! refreshes it in the same transaction as the write.
+//! Every edit answers a problem document, publishes `playlist.changed` to the
+//! playlist's owner and to administrators, and leaves the playlist pin of each
+//! affected track to the activity layer, which refreshes it in the same
+//! transaction as the write.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -18,7 +19,7 @@ use hearthsound_activity::{ActivityError, PlaylistUpdate};
 use hearthsound_catalog::{CatalogError, PageDepth};
 use hearthsound_core::EntityId;
 use hearthsound_core::IdPrefix;
-use hearthsound_core::events::{PlaylistChanged, ServerEvent};
+use hearthsound_core::events::{Audience, PlaylistChanged, ServerEvent};
 use hearthsound_core::{ClientId, EntityKind};
 use hearthsound_library::query::{self, QueueCollection, Scope};
 use serde::{Deserialize, Serialize};
@@ -107,13 +108,13 @@ pub async fn reorder_playlist(
         .reorder(id, user, &order)
         .await
         .map_err(|error| edit_problem(&error, "reordering a playlist"))?;
-    state
-        .services()
-        .events
-        .publish(ServerEvent::PlaylistChanged(PlaylistChanged {
+    state.services().events.publish_for(
+        Audience::User(user),
+        ServerEvent::PlaylistChanged(PlaylistChanged {
             playlist_id: id.to_string(),
             change: "reordered".to_owned(),
-        }));
+        }),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -217,13 +218,13 @@ pub async fn add_playlist_tracks(
         &tracks,
     )
     .await;
-    state
-        .services()
-        .events
-        .publish(ServerEvent::PlaylistChanged(PlaylistChanged {
+    state.services().events.publish_for(
+        Audience::User(user),
+        ServerEvent::PlaylistChanged(PlaylistChanged {
             playlist_id: id.to_string(),
             change: "tracks-added".to_owned(),
-        }));
+        }),
+    );
     Ok(Json(AddTracksView {
         added: tracks.len(),
         track_count: playlist.entries.len(),

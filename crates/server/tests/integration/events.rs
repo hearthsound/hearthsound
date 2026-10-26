@@ -1199,3 +1199,67 @@ async fn a_like_reaches_its_own_account_and_admins_only() {
     drop(other);
     fixture.stop().await;
 }
+/// A playlist edit publishes `playlist.changed` to the playlist's owner and to
+/// administrators only.
+#[tokio::test]
+async fn a_playlist_change_reaches_its_owner_and_admins_only() {
+    let fixture = Fixture::new().await;
+    let tracks = [seed_track(&fixture).await, seed_track(&fixture).await];
+    let (owner_id, owner_key) = create_user(&fixture, "playlistowner", false).await;
+    let (_other_id, other_key) = create_user(&fixture, "playlistbystander", false).await;
+    let playlist = fixture
+        .services
+        .activity()
+        .playlists()
+        .create(
+            owner_id,
+            "Owner Mix",
+            None,
+            false,
+            &tracks,
+        )
+        .await
+        .unwrap();
+
+    let mut owner = open_stream(&fixture, &owner_key).await;
+    let mut admin = open_stream(&fixture, &fixture.api_key).await;
+    let mut other = open_stream(&fixture, &other_key).await;
+
+    let reordered = fixture
+        .client
+        .put(format!(
+            "{}/api/v1/playlists/{}/order",
+            fixture.base_url(),
+            playlist.id
+        ))
+        .header(AUTHORIZATION, format!("Bearer {owner_key}"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(json!({ "order": [1, 0] }).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reordered.status(), StatusCode::NO_CONTENT);
+
+    for stream in [&mut owner, &mut admin] {
+        let frame = next_frames(stream, 1).await.remove(0);
+        assert_eq!(frame.event, "playlist.changed");
+        assert_eq!(
+            frame.data["data"]["playlistId"],
+            playlist.id.to_string().as_str()
+        );
+        assert_eq!(frame.data["data"]["change"], "reordered");
+    }
+
+    // The bystander's next frame is the marker, not the playlist change.
+    publish_playlist(&fixture, "pl_marker");
+    let frames = next_frames(&mut other, 1).await;
+    assert_eq!(
+        frames[0].data["data"]["playlistId"], "pl_marker",
+        "another account received a playlist change"
+    );
+
+    drop(owner);
+    drop(admin);
+    drop(other);
+    fixture.stop().await;
+}
