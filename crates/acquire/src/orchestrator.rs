@@ -374,6 +374,41 @@ impl AcquisitionHandle {
                 .map_err(|_| AcquireError::UnknownAcquisition(self.id))?;
         }
     }
+
+    /// Waits until the acquisition ends or parks for want of a source.
+    ///
+    /// A parked acquisition is not terminal: it returns to `queued` with
+    /// [`AcquisitionProgress::awaiting_source`] set and waits for an instance
+    /// to answer, so [`AcquisitionHandle::wait`] would not return until a
+    /// source appeared. A caller that can only keep waiting while the
+    /// acquisition is actually making progress - a held stream, which must
+    /// answer as soon as the track cannot be fetched - uses this instead and
+    /// reads the snapshot it gets: [`AcquisitionProgress::is_terminal`] tells
+    /// an end from [`AcquisitionProgress::awaiting_source`], a wait for a
+    /// source. A park is reported even when the acquisition parked before this
+    /// was called, because the snapshot is examined before the first wait.
+    ///
+    /// # Returns
+    ///
+    /// The terminal snapshot, or the first parked one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::UnknownAcquisition`] when the channel is closed
+    /// before the acquisition ends or parks, which happens when the server
+    /// stops while the acquisition is still in flight.
+    pub async fn wait_until_settled(mut self) -> Result<AcquisitionProgress, AcquireError> {
+        loop {
+            let snapshot = self.progress.borrow_and_update().clone();
+            if snapshot.is_terminal() || snapshot.awaiting_source {
+                return Ok(snapshot);
+            }
+            self.progress
+                .changed()
+                .await
+                .map_err(|_| AcquireError::UnknownAcquisition(self.id))?;
+        }
+    }
 }
 
 /// One acquisition's progress, as a waiter sees it.

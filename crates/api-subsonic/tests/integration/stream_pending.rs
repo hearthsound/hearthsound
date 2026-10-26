@@ -24,7 +24,8 @@ use hearthsound_acquire::orchestrator::{AcquisitionHandle, AcquisitionProgress};
 use hearthsound_api_subsonic::{PendingOutcome, PendingSource};
 use hearthsound_config::{SettingValue, keys};
 use hearthsound_core::{
-    AcquisitionState, Availability, CatalogId, EntityId, EntityKind, FailureReason, Priority, Slug,
+    AcquisitionState, Availability, CatalogId, EntityId, EntityKind, FailureReason, ParkReason,
+    Priority, Slug,
 };
 use hearthsound_db::Database;
 use hearthsound_library::{
@@ -67,6 +68,11 @@ enum Script {
     },
     /// An acquisition that never ends within the test.
     Waiting,
+    /// An acquisition that runs, then parks for want of a source, and waits.
+    Parked {
+        /// How long the acquisition runs before it parks.
+        delay: Duration,
+    },
     /// The track is cooling down after a failed acquisition.
     CoolingDown,
     /// The acquisition layer refuses the request for `reason`.
@@ -230,6 +236,21 @@ impl PendingSource for FakeSource {
                 tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
                     let _ = sender.send(progress(track, AcquisitionState::Failed, None));
+                });
+                PendingOutcome::Pending(handle)
+            }
+            Script::Parked { delay } => {
+                let (handle, sender) = channel(track, AcquisitionState::Downloading);
+                let delay = *delay;
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let mut parked = progress(track, AcquisitionState::Queued, None);
+                    parked.awaiting_source = true;
+                    parked.park_reason = Some(ParkReason::SourceUnavailable);
+                    let _ = sender.send(parked);
+                    // The acquisition stays parked: a dropped sender ends the
+                    // channel, which a waiter reads as a lost acquisition.
+                    std::future::pending::<()>().await;
                 });
                 PendingOutcome::Pending(handle)
             }
@@ -456,6 +477,38 @@ async fn fail_answers_503_immediately() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(header_of(&response, header::RETRY_AFTER), "10");
     assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(collect(response).await.is_empty());
+}
+
+#[tokio::test]
+async fn hold_answers_a_park_that_begins_while_it_holds_with_503() {
+    let source = FakeSource::new(Script::Parked {
+        delay: Duration::from_millis(300),
+    });
+    let fixture = Fixture::with_pending(source).await;
+    let track = pending_track(&fixture).await;
+    let app = fixture.app();
+    // Long enough that the hold is the only thing that could still be running
+    // when the answer arrives: the park, not the bound, ends it.
+    set_max_wait(&fixture, 60).await;
+
+    let started = Instant::now();
+    let response = start(
+        &app,
+        &format!("/rest/stream?id={track}&apiKey={}", fixture.api_key),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(header_of(&response, header::RETRY_AFTER), "10");
+    assert!(
+        elapsed >= Duration::from_millis(250),
+        "the acquisition had not parked when the request was answered: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the hold noticed the park instead of waiting out `stream.pending.max_wait_secs`: {elapsed:?}"
+    );
     assert!(collect(response).await.is_empty());
 }
 

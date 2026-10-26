@@ -43,7 +43,8 @@
 //! An acquisition that is parked for want of an acquisition source - no plugin
 //! instance can serve it - is answered `503` with `Retry-After` in either mode,
 //! because waiting for an administrator to add one is not something a client's
-//! connection should cover.
+//! connection should cover. That holds for an acquisition that parks while the
+//! request is already held as well: the hold ends the moment it parks.
 //!
 //! Neither mode writes a byte before the outcome is known, so a failure, a
 //! cooldown, or an elapsed wait is still answered as a status code: `hold`
@@ -717,6 +718,12 @@ impl StreamService {
     /// `stream.pending.max_wait_secs`, after which the request is answered `503`
     /// with `Retry-After` because the acquisition continues.
     ///
+    /// An acquisition that parks for a source while the request is held ends
+    /// the hold the same way a park before it began does:
+    /// [`AcquisitionHandle::wait_until_settled`] returns the parked snapshot, so
+    /// a backend that stops answering is answered `503` at once instead of
+    /// leaving the client's connection open for the rest of the wait.
+    ///
     /// # Parameters
     ///
     /// - `request`: the request being answered; a completed acquisition is
@@ -727,7 +734,8 @@ impl StreamService {
     /// # Errors
     ///
     /// Returns [`StreamError::NotFound`] when the acquisition ended without a
-    /// file, and [`StreamError::Unavailable`] when the wait elapsed first.
+    /// file, and [`StreamError::Unavailable`] when it parked for a source or the
+    /// wait elapsed first.
     async fn serve_held(
         &self,
         request: &StreamRequest,
@@ -735,7 +743,18 @@ impl StreamService {
         handle: AcquisitionHandle,
     ) -> Result<Response, StreamError> {
         let max_wait = pending_max_wait(&self.settings.current());
-        match tokio::time::timeout(max_wait, handle.wait()).await {
+        match tokio::time::timeout(max_wait, handle.wait_until_settled()).await {
+            Ok(Ok(progress)) if progress.awaiting_source => {
+                tracing::debug!(
+                    track = %track,
+                    acquisition = %progress.acquisition_id,
+                    park_reason = progress.park_reason.map(|reason| reason.as_str()),
+                    "a held stream's acquisition parked for a source"
+                );
+                Err(StreamError::Unavailable {
+                    retry_after_secs: RETRY_AFTER_SECS,
+                })
+            }
             Ok(outcome) => self.serve_held_outcome(request, track, outcome).await,
             Err(_) => {
                 tracing::debug!(

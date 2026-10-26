@@ -116,7 +116,9 @@ pub(crate) async fn install_catalog(services: &Arc<Services>) {
 /// - `services`: the running services.
 /// - `downloads`: the directory granted as the instance's `downloads` import
 ///   root, in `move` mode, which is where a completed download leaves its file.
-/// - `scenario`: what the simulated backend does, `normal` or `no-candidates`.
+/// - `scenario`: what the simulated backend does, `normal`, `no-candidates`, or
+///   `unavailable` (every call answers that the backend is not answering, so
+///   an admitted acquisition parks as `source-unavailable`).
 /// - `running_polls`: how many polls the download reports progress before it
 ///   completes; the polls are two seconds apart.
 pub(crate) async fn install_acquisition(
@@ -825,6 +827,76 @@ async fn a_stream_no_source_can_serve_answers_at_once() {
         rows[0].park_reason,
         Some(hearthsound_core::ParkReason::NoSource),
         "the acquisition waits for an acquisition source"
+    );
+}
+
+/// A stream whose acquisition parks after the hold began answers at once.
+///
+/// The acquisition source is installed but does not answer, so the acquisition
+/// parks as `source-unavailable` a moment after the request was admitted - that
+/// is, while `/rest/stream` is already holding the client. A held stream must
+/// answer `503` with `Retry-After` as soon as the park happens, not when
+/// `stream.pending.max_wait_secs` runs out.
+#[tokio::test]
+async fn a_stream_whose_acquisition_parks_during_the_hold_answers_at_once() {
+    let fixture = Fixture::new().await;
+    let services = Arc::clone(&fixture.services);
+    let downloads = downloads_dir(&fixture);
+    install_catalog(&services).await;
+    install_acquisition(&services, &downloads, "unavailable", 0).await;
+    services.registry().rebuild().await.unwrap();
+    // The full wait is the value a server answers this defect with: a park the
+    // hold misses leaves the client waiting this long.
+    services
+        .settings()
+        .set(
+            keys::STREAM_PENDING_MAX_WAIT_SECS.name(),
+            SettingValue::Integer(180),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let id = catalog_id(1);
+    let started = std::time::Instant::now();
+    let response = tokio::time::timeout(
+        Duration::from_secs(15),
+        fixture.get(&stream_path(&fixture, &id)),
+    )
+    .await
+    .expect("a stream whose acquisition parked is answered without waiting out its bound");
+    let elapsed = started.elapsed();
+    assert_eq!(
+        response.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a parked acquisition is not a failed stream"
+    );
+    assert_eq!(
+        header(&response, RETRY_AFTER),
+        Some("10"),
+        "a client is told when to ask again"
+    );
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "the hold noticed the park instead of waiting out `stream.pending.max_wait_secs`: {elapsed:?}"
+    );
+    assert!(
+        response.bytes().await.unwrap().is_empty(),
+        "a parked stream sends no bytes"
+    );
+
+    let track = materialize(services.catalog(), 1).await;
+    let rows = ledger_rows(services.orchestrator(), track).await;
+    assert_eq!(rows.len(), 1, "the request started one acquisition");
+    assert_eq!(
+        rows[0].state,
+        AcquisitionState::Queued,
+        "a park leaves the acquisition queued for a source"
+    );
+    assert_eq!(
+        rows[0].park_reason,
+        Some(hearthsound_core::ParkReason::SourceUnavailable),
+        "the acquisition waits because its only source does not answer"
     );
 }
 
