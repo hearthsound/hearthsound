@@ -6,6 +6,9 @@
 //! protocol's shape, where an object is one element, its scalar members are
 //! attributes, and its nested members are child elements. See the crate
 //! documentation for the rules in full.
+//!
+//! An empty list is `"name": []` in JSON and no element at all in XML, as in the
+//! reference XML encoding; a client treats a missing element as an empty list.
 
 use std::fmt::Write as _;
 
@@ -80,7 +83,9 @@ pub(crate) fn write_json_string(out: &mut String, text: &str) {
 /// Writes one member of an object as XML.
 ///
 /// An array member becomes one element per item, named after the member itself
-/// unless the array carries an explicit item name.
+/// unless the array carries an explicit item name. An empty array writes no
+/// element at all, which is how the reference XML encoding spells an empty list
+/// and what a client reads as an empty list.
 ///
 /// # Parameters
 ///
