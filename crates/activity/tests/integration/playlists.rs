@@ -575,3 +575,286 @@ async fn expiring_a_playlist_releases_its_playlist_pins() {
         "a track another permanent playlist holds lost its pin: {retained:?}"
     );
 }
+
+/// Inserts a plugin and one enabled instance of it, returning the instance id.
+///
+/// A generated playlist references the discovery instance that produced it, so
+/// the tests need a real `provider_instances` row for the foreign key.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+async fn insert_discovery_instance(database: &hearthsound_db::Database) -> Uuid {
+    let plugin_id = "com.example.playlist-detach-test";
+    sqlx::query(
+        "INSERT INTO plugins (id, version, api, manifest, sha256, source, enabled, installed_at) \
+         VALUES (?, '0.1.0', 'hearthsound:plugin@0.3.0', '{}', x'00', 'sideload', 1, 0)",
+    )
+    .bind(plugin_id)
+    .execute(database.writer())
+    .await
+    .unwrap();
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO provider_instances \
+             (id, plugin_id, slug, display_name, enabled, created_at, updated_at) \
+         VALUES (?, ?, ?, 'Weekly Jams Service', 1, 0, 0)",
+    )
+    .bind(id.as_bytes().as_slice())
+    .bind(plugin_id)
+    .bind(format!("detach{}", id.simple()))
+    .execute(database.writer())
+    .await
+    .unwrap();
+    id
+}
+
+/// The instant a generated playlist's sync names as its expiry.
+const GENERATED_EXPIRY: i64 = 4_000;
+
+/// Writes one generated playlist and returns it.
+///
+/// # Parameters
+///
+/// - `playlists`: the repository to write through.
+/// - `user`: the listener the playlist belongs to.
+/// - `instance`: the discovery instance that generated it.
+/// - `tracks`: the tracks it holds.
+async fn generated(
+    playlists: &Playlists,
+    user: Uuid,
+    instance: Uuid,
+    tracks: &[EntityId],
+) -> hearthsound_activity::Playlist {
+    playlists
+        .upsert_generated(
+            &hearthsound_activity::SyncedPlaylist {
+                owner_user_id: user,
+                source_instance_id: instance,
+                source_ref: "weekly-jams",
+                name: "Weekly Jams",
+                comment: None,
+                expires_at: GENERATED_EXPIRY,
+                tracks,
+            },
+            1_000,
+        )
+        .await
+        .unwrap()
+        .expect("a new slot is written")
+}
+
+/// The first rename of a generated playlist makes it the listener's own.
+#[tokio::test]
+async fn the_first_rename_detaches_a_generated_playlist() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let playlist = Playlists::new(&database);
+    let user = insert_user(&database).await;
+    let instance = insert_discovery_instance(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let ids = entities(&tracks);
+    let created = generated(&playlist, user, instance, &ids).await;
+    assert!(created.is_temporary);
+
+    let renamed = playlist
+        .update(
+            created.id,
+            user,
+            &PlaylistUpdate {
+                name: Some("My Mix".to_owned()),
+                ..PlaylistUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(renamed.name, "My Mix");
+    assert!(!renamed.is_temporary, "the edit made it permanent");
+    assert_eq!(renamed.expires_at, None, "an edited playlist never expires");
+    assert_eq!(renamed.source_instance_id, None);
+    assert_eq!(renamed.source_ref, None);
+    assert_eq!(renamed.source_instance_name, None);
+
+    // The expiry sweep keeps it, and so does a far later one.
+    assert_eq!(playlist.delete_expired(GENERATED_EXPIRY).await.unwrap(), 0);
+    assert_eq!(
+        playlist
+            .delete_expired(GENERATED_EXPIRY + 30 * 24 * 60 * 60 * 1000)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(playlist.get(created.id, user).await.unwrap().is_some());
+
+    // The row keeps its slot identity, so the next sync recognises it.
+    let detachment: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM playlists \
+         WHERE id = ? AND source_instance_id IS NOT NULL AND detached_at IS NOT NULL",
+    )
+    .bind(created.id.uuid().as_bytes().as_slice())
+    .fetch_one(database.readers())
+    .await
+    .unwrap();
+    assert_eq!(detachment, 1, "the slot is remembered");
+}
+
+/// A reorder and a track replacement detach a generated playlist too.
+#[tokio::test]
+async fn a_reorder_and_a_track_removal_detach_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let playlist = Playlists::new(&database);
+    let user = insert_user(&database).await;
+    let instance = insert_discovery_instance(&database).await;
+    let (album, tracks) = insert_album(&library).await;
+    let third = insert_track(&library, album, "Third", 3).await;
+    let ids = entities(&tracks);
+
+    let reordered = generated(&playlist, user, instance, &ids).await;
+    let after = playlist.reorder(reordered.id, user, &[1, 0]).await.unwrap();
+    assert!(!after.is_temporary);
+    assert_eq!(after.expires_at, None);
+    assert_eq!(after.source_instance_name, None);
+
+    let replaced = playlist
+        .upsert_generated(
+            &hearthsound_activity::SyncedPlaylist {
+                owner_user_id: user,
+                source_instance_id: instance,
+                source_ref: "daily-mix",
+                name: "Daily Mix",
+                comment: None,
+                expires_at: GENERATED_EXPIRY,
+                tracks: &ids,
+            },
+            1_000,
+        )
+        .await
+        .unwrap()
+        .expect("a new slot is written");
+    let after = playlist
+        .replace_tracks(replaced.id, user, &[track_id(third)])
+        .await
+        .unwrap();
+    assert!(!after.is_temporary);
+    assert_eq!(after.expires_at, None);
+    assert_eq!(after.source_instance_id, None);
+    assert_eq!(after.source_ref, None);
+
+    // Both survive the sweep.
+    assert_eq!(playlist.delete_expired(GENERATED_EXPIRY).await.unwrap(), 0);
+}
+
+/// A detached slot is skipped by the next sync and never duplicated.
+#[tokio::test]
+async fn a_detached_slot_is_not_refreshed_or_duplicated() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let playlist = Playlists::new(&database);
+    let user = insert_user(&database).await;
+    let instance = insert_discovery_instance(&database).await;
+    let (album, tracks) = insert_album(&library).await;
+    let third = insert_track(&library, album, "Third", 3).await;
+    let ids = entities(&tracks);
+    let created = generated(&playlist, user, instance, &ids).await;
+    let edited = playlist
+        .update(
+            created.id,
+            user,
+            &PlaylistUpdate {
+                name: Some("Mine".to_owned()),
+                ..PlaylistUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let written = playlist
+        .upsert_generated(
+            &hearthsound_activity::SyncedPlaylist {
+                owner_user_id: user,
+                source_instance_id: instance,
+                source_ref: "weekly-jams",
+                name: "Weekly Jams",
+                comment: Some("A week of listening"),
+                expires_at: GENERATED_EXPIRY,
+                tracks: &[track_id(third)],
+            },
+            2_000,
+        )
+        .await
+        .unwrap();
+
+    assert!(written.is_none(), "a detached playlist is never refreshed");
+    let stored = playlist
+        .get(created.id, user)
+        .await
+        .unwrap()
+        .expect("the playlist is still there");
+    assert_eq!(stored.name, "Mine", "the edit stands");
+    assert_eq!(
+        stored
+            .entries
+            .iter()
+            .map(|entry| entry.track_id)
+            .collect::<Vec<_>>(),
+        edited
+            .entries
+            .iter()
+            .map(|entry| entry.track_id)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        playlist.list(user, Some(user)).await.unwrap().len(),
+        1,
+        "the sync created no copy"
+    );
+}
+
+/// Detaching pins every track the playlist holds, because a permanent playlist
+/// pins what it holds and an edited one is permanent.
+#[tokio::test]
+async fn detaching_pins_the_playlist_tracks() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let playlist = Playlists::new(&database);
+    let user = insert_user(&database).await;
+    let instance = insert_discovery_instance(&database).await;
+    let (_, tracks) = insert_album(&library).await;
+    let ids = entities(&tracks);
+    let created = generated(&playlist, user, instance, &ids).await;
+    for track in &tracks {
+        assert!(
+            !is_pinned(&library, *track).await,
+            "a generated playlist pins nothing"
+        );
+    }
+
+    playlist
+        .update(
+            created.id,
+            user,
+            &PlaylistUpdate {
+                name: Some("Mine".to_owned()),
+                ..PlaylistUpdate::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut conn = database.readers().acquire().await.unwrap();
+    for track in &ids {
+        let reasons = hearthsound_library::retention::pin_reasons(&mut conn, *track)
+            .await
+            .unwrap();
+        assert!(
+            reasons.contains(&hearthsound_core::PinReason::Playlist),
+            "the edit did not pin {track}: {reasons:?}"
+        );
+    }
+}

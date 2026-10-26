@@ -290,7 +290,12 @@ impl DiscoverySyncJobHandler {
                 expires_at,
                 tracks: &tracks,
             };
-            let playlist = self.playlists.upsert_generated(&write, now).await?;
+            // A playlist the listener has edited is no longer the service's:
+            // the slot is recognised and skipped, with nothing written and
+            // nothing published.
+            let Some(playlist) = self.playlists.upsert_generated(&write, now).await? else {
+                continue;
+            };
             self.events.publish_for(
                 Audience::User(user),
                 ServerEvent::PlaylistChanged(PlaylistChanged {

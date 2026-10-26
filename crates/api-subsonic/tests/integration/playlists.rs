@@ -744,7 +744,8 @@ async fn a_generated_playlist_names_its_service() {
             1_000,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the slot is written");
     let app = fixture.app();
     let key = fixture.api_key.clone();
 

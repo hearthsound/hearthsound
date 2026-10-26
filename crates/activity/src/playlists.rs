@@ -212,6 +212,8 @@ struct PlaylistRow {
     source_instance_id: Option<Vec<u8>>,
     /// The service's reference for the generated playlist.
     source_ref: Option<String>,
+    /// When the listener first edited the generated playlist.
+    detached_at: Option<i64>,
     /// The display name of the generating instance.
     source_instance_name: Option<String>,
     /// The creation instant.
@@ -347,6 +349,12 @@ impl Playlists {
     /// sync: its expiry stays cleared, so the expiry sweep never deletes a
     /// playlist the listener chose to keep.
     ///
+    /// A slot the listener has edited is never refreshed again. Its row keeps
+    /// the owner, instance and reference that identify the slot, so the sync
+    /// recognises it instead of creating a copy, and answers `None`: nothing is
+    /// written, nothing is published, and the playlist stays exactly as the
+    /// listener left it.
+    ///
     /// The name, the expiry and every entry are written in one transaction, so
     /// a reader never sees a playlist that is half refreshed.
     ///
@@ -357,7 +365,8 @@ impl Playlists {
     ///
     /// # Returns
     ///
-    /// The playlist as it was written, with its entries.
+    /// The playlist as it was written, with its entries, or `None` when the
+    /// slot belongs to a playlist the listener edited.
     ///
     /// # Errors
     ///
@@ -368,11 +377,11 @@ impl Playlists {
         &self,
         write: &SyncedPlaylist<'_>,
         now: i64,
-    ) -> Result<Playlist, ActivityError> {
+    ) -> Result<Option<Playlist>, ActivityError> {
         let name = checked_name(write.name)?;
         let mut tx = self.writer.begin_with(crate::READ_THEN_WRITE).await?;
-        let existing = sqlx::query_scalar!(
-            "SELECT id FROM playlists \
+        let found = sqlx::query!(
+            "SELECT id, detached_at FROM playlists \
              WHERE owner_user_id = ? AND source_instance_id = ? AND source_ref = ?",
             write.owner_user_id.as_bytes().as_slice(),
             write.source_instance_id.as_bytes().as_slice(),
@@ -380,6 +389,12 @@ impl Playlists {
         )
         .fetch_optional(&mut *tx)
         .await?;
+        if found.as_ref().is_some_and(|row| row.detached_at.is_some()) {
+            // The listener made this playlist their own; the slot is remembered
+            // only so a second copy is never created.
+            return Ok(None);
+        }
+        let existing = found.as_ref().map(|row| row.id.clone());
         let id = match &existing {
             Some(id) => EntityId::from_uuid(IdPrefix::Playlist, Uuid::from_slice(id)?),
             None => EntityId::new(IdPrefix::Playlist),
@@ -440,7 +455,7 @@ impl Playlists {
         }
         tx.commit().await?;
         self.signal.notify();
-        Ok(Playlist {
+        Ok(Some(Playlist {
             id,
             owner_user_id: write.owner_user_id,
             name: name.to_owned(),
@@ -456,7 +471,7 @@ impl Playlists {
             created_at: before.as_ref().map_or(now, |playlist| playlist.created_at),
             updated_at: now,
             entries,
-        })
+        }))
     }
 
     /// Replaces every entry of a playlist.
@@ -489,9 +504,11 @@ impl Playlists {
         let mut tx = self.writer.begin_with(crate::READ_THEN_WRITE).await?;
         let stored = load_or_unknown(&mut tx, id).await?;
         check_owner(&stored, editor)?;
-        let affected = affected_tracks(&stored.entries, tracks);
+        let newly_detached = detachable(&stored);
+        let mut affected = affected_tracks(&stored.entries, tracks);
         let now = now_millis();
         let entries = replace_entries(&mut tx, id, tracks, now).await?;
+        detach(&mut tx, id, now, newly_detached).await?;
         sqlx::query!(
             "UPDATE playlists SET updated_at = ? WHERE id = ?",
             now,
@@ -499,6 +516,14 @@ impl Playlists {
         )
         .execute(&mut *tx)
         .await?;
+        // A playlist that just became permanent pins every track it holds,
+        // including the ones it already held.
+        if newly_detached {
+            affected.extend(stored.track_ids());
+            affected.extend(tracks.iter().copied());
+            affected.sort_unstable_by_key(|track| *track.uuid().as_bytes());
+            affected.dedup();
+        }
         for track in affected {
             refresh_playlist_pin(&mut tx, track).await?;
         }
@@ -507,6 +532,13 @@ impl Playlists {
         let mut playlist = stored;
         playlist.updated_at = now;
         playlist.entries = entries;
+        if newly_detached {
+            playlist.is_temporary = false;
+            playlist.expires_at = None;
+            playlist.source_instance_id = None;
+            playlist.source_ref = None;
+            playlist.source_instance_name = None;
+        }
         Ok(playlist)
     }
 
@@ -549,6 +581,8 @@ impl Playlists {
         if order.len() != len || !is_permutation(order, len) {
             return Err(ActivityError::InvalidOrder { len });
         }
+        let newly_detached = detachable(&playlist);
+        let detached_tracks = playlist.track_ids();
         let now = now_millis();
         // Every position moves out of the range the final positions occupy
         // before any of them is set, so the first primary key is never taken
@@ -570,6 +604,7 @@ impl Playlists {
             .execute(&mut *tx)
             .await?;
         }
+        detach(&mut tx, id, now, newly_detached).await?;
         sqlx::query!(
             "UPDATE playlists SET updated_at = ? WHERE id = ?",
             now,
@@ -577,9 +612,21 @@ impl Playlists {
         )
         .execute(&mut *tx)
         .await?;
+        if newly_detached {
+            for track in detached_tracks {
+                refresh_playlist_pin(&mut tx, track).await?;
+            }
+        }
         tx.commit().await?;
         self.signal.notify();
         playlist.updated_at = now;
+        if newly_detached {
+            playlist.is_temporary = false;
+            playlist.expires_at = None;
+            playlist.source_instance_id = None;
+            playlist.source_ref = None;
+            playlist.source_instance_name = None;
+        }
         playlist.entries = order
             .iter()
             .enumerate()
@@ -622,8 +669,10 @@ impl Playlists {
         let mut tx = self.writer.begin_with(crate::READ_THEN_WRITE).await?;
         let mut playlist = load_or_unknown(&mut tx, id).await?;
         check_owner(&playlist, editor)?;
+        let newly_detached = detachable(&playlist);
 
         let mut tracks = playlist.track_ids();
+        let stored_tracks = tracks.clone();
         let mut affected: Vec<EntityId> = Vec::new();
         let mut indexes = update.remove_indexes.clone();
         indexes.sort_unstable();
@@ -660,9 +709,18 @@ impl Playlists {
         )
         .execute(&mut *tx)
         .await?;
+        detach(&mut tx, id, now, newly_detached).await?;
         let entries = replace_entries(&mut tx, id, &tracks, now).await?;
         affected.sort_unstable_by_key(|track| *track.uuid().as_bytes());
         affected.dedup();
+        if newly_detached {
+            // Every track of the playlist is pinned from now on, not only the
+            // ones whose membership changed.
+            affected.extend(stored_tracks);
+            affected.extend(tracks.iter().copied());
+            affected.sort_unstable_by_key(|track| *track.uuid().as_bytes());
+            affected.dedup();
+        }
         for track in affected {
             refresh_playlist_pin(&mut tx, track).await?;
         }
@@ -673,6 +731,13 @@ impl Playlists {
         playlist.is_public = public;
         playlist.updated_at = now;
         playlist.entries = entries;
+        if newly_detached {
+            playlist.is_temporary = false;
+            playlist.expires_at = None;
+            playlist.source_instance_id = None;
+            playlist.source_ref = None;
+            playlist.source_instance_name = None;
+        }
         Ok(playlist)
     }
 
@@ -875,8 +940,8 @@ impl Playlists {
         let rows = sqlx::query_as!(
             PlaylistRow,
             "SELECT p.id, p.owner_user_id, p.name, p.comment, p.is_public, p.is_temporary, \
-                    p.expires_at, p.source_instance_id, p.source_ref, p.created_at, \
-                    p.updated_at, pi.display_name AS source_instance_name \
+                    p.expires_at, p.source_instance_id, p.source_ref, p.detached_at, \
+                    p.created_at, p.updated_at, pi.display_name AS source_instance_name \
              FROM playlists p \
              LEFT JOIN provider_instances pi ON pi.id = p.source_instance_id \
              WHERE (p.owner_user_id = ?1 OR p.is_public = 1) \
@@ -913,6 +978,11 @@ fn entity_key(id: EntityId) -> Vec<u8> {
 
 /// Converts a stored playlist row into a playlist without its entries.
 ///
+/// A generated playlist the listener has edited keeps the columns that identify
+/// its service slot, so the next sync recognises it, but it is the listener's
+/// playlist: it reads back with no source at all, which is what makes
+/// [`Playlist::source_instance_name`] mean "generated and not yet detached".
+///
 /// # Parameters
 ///
 /// - `row`: the stored row.
@@ -921,6 +991,7 @@ fn entity_key(id: EntityId) -> Vec<u8> {
 ///
 /// Returns [`ActivityError::CorruptId`] when a stored id is not 16 bytes.
 async fn decode_row(row: PlaylistRow) -> Result<Playlist, ActivityError> {
+    let detached = row.detached_at.is_some();
     Ok(Playlist {
         id: EntityId::from_uuid(IdPrefix::Playlist, Uuid::from_slice(&row.id)?),
         owner_user_id: Uuid::from_slice(&row.owner_user_id)?,
@@ -931,10 +1002,11 @@ async fn decode_row(row: PlaylistRow) -> Result<Playlist, ActivityError> {
         expires_at: row.expires_at,
         source_instance_id: row
             .source_instance_id
+            .filter(|_| !detached)
             .map(|id| Uuid::from_slice(&id))
             .transpose()?,
-        source_ref: row.source_ref,
-        source_instance_name: row.source_instance_name,
+        source_ref: row.source_ref.filter(|_| !detached),
+        source_instance_name: row.source_instance_name.filter(|_| !detached),
         created_at: row.created_at,
         updated_at: row.updated_at,
         entries: Vec::new(),
@@ -981,8 +1053,8 @@ async fn load(
     let row = sqlx::query_as!(
         PlaylistRow,
         "SELECT p.id, p.owner_user_id, p.name, p.comment, p.is_public, p.is_temporary, \
-                p.expires_at, p.source_instance_id, p.source_ref, p.created_at, \
-                p.updated_at, pi.display_name AS source_instance_name \
+                p.expires_at, p.source_instance_id, p.source_ref, p.detached_at, \
+                p.created_at, p.updated_at, pi.display_name AS source_instance_name \
          FROM playlists p \
          LEFT JOIN provider_instances pi ON pi.id = p.source_instance_id \
          WHERE p.id = ?",
@@ -1086,6 +1158,61 @@ fn check_owner(playlist: &Playlist, editor: Uuid) -> Result<(), ActivityError> {
     Err(ActivityError::UnknownPlaylist {
         id: playlist.id.to_string(),
     })
+}
+
+/// Reports whether an edit takes a generated playlist away from its service.
+///
+/// A playlist is still generated while it names the instance that produced it:
+/// [`decode_row`] clears that for a playlist the listener already edited, so the
+/// first edit is the one that sees a source.
+///
+/// # Parameters
+///
+/// - `playlist`: the playlist as it was loaded.
+///
+/// # Returns
+///
+/// `true` when this edit is the one that makes the playlist permanent and the
+/// listener's own.
+fn detachable(playlist: &Playlist) -> bool {
+    playlist.source_instance_name.is_some()
+}
+
+/// Makes a generated playlist the listener's own.
+///
+/// The slot columns stay, so the next sync recognises the playlist and leaves it
+/// alone instead of creating a copy, but it stops being temporary, loses its
+/// expiry, and records when the edit happened.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `id`: the playlist being edited.
+/// - `now`: when the edit happened, in unix milliseconds.
+/// - `detach`: whether the playlist has to be detached at all.
+///
+/// # Errors
+///
+/// Returns [`ActivityError::Database`] when the row cannot be written.
+async fn detach(
+    conn: &mut SqliteConnection,
+    id: EntityId,
+    now: i64,
+    detach: bool,
+) -> Result<(), ActivityError> {
+    if !detach {
+        return Ok(());
+    }
+    sqlx::query!(
+        "UPDATE playlists \
+         SET is_temporary = 0, expires_at = NULL, detached_at = COALESCE(detached_at, ?) \
+         WHERE id = ?",
+        now,
+        entity_key(id),
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 /// Reports whether a reorder lists every position of a playlist exactly once.

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT p.id, p.owner_user_id, p.name, p.comment, p.is_public, p.is_temporary, p.expires_at, p.source_instance_id, p.source_ref, p.created_at, p.updated_at, pi.display_name AS source_instance_name FROM playlists p LEFT JOIN provider_instances pi ON pi.id = p.source_instance_id WHERE p.id = ?",
+  "query": "SELECT p.id, p.owner_user_id, p.name, p.comment, p.is_public, p.is_temporary, p.expires_at, p.source_instance_id, p.source_ref, p.detached_at, p.created_at, p.updated_at, pi.display_name AS source_instance_name FROM playlists p LEFT JOIN provider_instances pi ON pi.id = p.source_instance_id WHERE p.id = ?",
   "describe": {
     "columns": [
       {
@@ -103,8 +103,19 @@
         }
       },
       {
-        "name": "created_at",
+        "name": "detached_at",
         "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "playlists",
+            "name": "detached_at"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 10,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -115,7 +126,7 @@
       },
       {
         "name": "updated_at",
-        "ordinal": 10,
+        "ordinal": 11,
         "type_info": "Integer",
         "origin": {
           "Table": {
@@ -126,7 +137,7 @@
       },
       {
         "name": "source_instance_name",
-        "ordinal": 11,
+        "ordinal": 12,
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -149,10 +160,11 @@
       true,
       true,
       true,
+      true,
       false,
       false,
       true
     ]
   },
-  "hash": "c1efc898e6f990b86d3a897c437d8d2adb3fb99ec7a0257e2c714dd8ed9db3ad"
+  "hash": "33edf8b5e4808d32fe831a1a0651d686f068ce983ad864f4c6155661124a07cf"
 }

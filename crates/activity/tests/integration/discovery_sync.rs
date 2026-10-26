@@ -75,7 +75,8 @@ async fn a_generated_playlist_is_written_into_its_slot() {
     let written = Playlists::new(&database)
         .upsert_generated(&write, 1_000)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("a new slot is written");
 
     assert_eq!(written.id.kind(), hearthsound_core::IdPrefix::Playlist);
     assert_eq!(written.owner_user_id, user);
@@ -145,7 +146,8 @@ async fn a_second_sync_replaces_the_tracks_in_place() {
             1_000,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the slot is written");
 
     let second = vec![track_id(tracks[1]), track_id(third)];
     let refreshed = playlists
@@ -162,7 +164,8 @@ async fn a_second_sync_replaces_the_tracks_in_place() {
             2_000,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the slot is written");
 
     assert_eq!(refreshed.id, created.id, "the slot keeps its playlist");
     assert_eq!(refreshed.name, "Weekly Jams 2");
@@ -221,7 +224,8 @@ async fn a_new_reference_is_a_new_playlist() {
             1_000,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the slot is written");
     let second = playlists
         .upsert_generated(
             &SyncedPlaylist {
@@ -236,7 +240,8 @@ async fn a_new_reference_is_a_new_playlist() {
             1_000,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the slot is written");
 
     assert_ne!(first.id, second.id);
     assert_eq!(playlists.list(user, Some(user)).await.unwrap().len(), 2);
@@ -264,14 +269,22 @@ async fn a_permanent_generated_playlist_survives_a_sync() {
         expires_at: 4_000,
         tracks: &ids,
     };
-    let created = playlists.upsert_generated(&write, 1_000).await.unwrap();
+    let created = playlists
+        .upsert_generated(&write, 1_000)
+        .await
+        .unwrap()
+        .expect("the slot is written");
     let permanent = playlists
         .set_lifetime(created.id, user, false, Some(4_000))
         .await
         .unwrap();
     assert!(!permanent.is_temporary);
 
-    let refreshed = playlists.upsert_generated(&write, 2_000).await.unwrap();
+    let refreshed = playlists
+        .upsert_generated(&write, 2_000)
+        .await
+        .unwrap()
+        .expect("the slot is written");
 
     assert_eq!(refreshed.id, created.id, "the sync kept the slot");
     assert!(
@@ -314,7 +327,8 @@ async fn a_permanent_generated_playlist_survives_a_sync() {
             2_000,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the slot is written");
     assert!(fresh.is_temporary);
     assert_eq!(fresh.expires_at, Some(4_000));
 }

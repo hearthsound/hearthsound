@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE playlists SET is_temporary = 0, expires_at = NULL, detached_at = COALESCE(detached_at, ?) WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "3cd825dce2939ff3041d66b7c45217627e3db53320c547c2a6d36587ca01c5bf"
+}

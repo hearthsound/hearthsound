@@ -273,7 +273,8 @@ async fn an_expired_generated_playlist_is_not_stored() {
             i64::MAX / 2,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the slot is written");
 
     link(&fixture).await;
     let written = fixture
@@ -456,7 +457,8 @@ async fn a_catalog_error_keeps_the_previous_entries() {
             i64::MAX / 2,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("the slot is written");
     let events_before = fixture.services.events().latest_id();
 
     link(&fixture).await;
