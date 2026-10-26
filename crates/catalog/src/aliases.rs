@@ -275,9 +275,76 @@ pub(crate) async fn entity_by_alias_conn(
         kind_literal(kind),
         value,
     )
-    .fetch_optional(conn)
+    .fetch_optional(&mut *conn)
     .await?;
-    row.map(|row| entity_id(kind, &row.entity_id)).transpose()
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let Some(entity) = entity_id(kind, &row.entity_id).ok() else {
+        return Ok(None);
+    };
+    // An alias whose row is gone is not an answer: a track row can be deleted
+    // while its provider alias stays behind, and reading the alias as a hit would
+    // make a lookup name a row that does not exist. The row is not deleted here
+    // because a lookup runs on a read-only connection; `repair_aliases` removes
+    // what this ignores.
+    if !entity_exists(&mut *conn, kind, entity).await? {
+        tracing::warn!(
+            namespace,
+            kind = kind_literal(kind),
+            value,
+            entity = %entity,
+            "ignoring an alias whose row no longer exists"
+        );
+        return Ok(None);
+    }
+    Ok(Some(entity))
+}
+
+/// Reports whether a stored row a namespace-agnostic kind names still exists.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `kind`: the entity kind.
+/// - `entity`: the stored id.
+///
+/// # Returns
+///
+/// `true` when the row is there.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::Database`] when the read fails.
+async fn entity_exists(
+    conn: &mut SqliteConnection,
+    kind: EntityKind,
+    entity: EntityId,
+) -> Result<bool, CatalogError> {
+    let key = entity.uuid().as_bytes().to_vec();
+    let found: i64 = match kind {
+        EntityKind::Track => {
+            sqlx::query_scalar!("SELECT EXISTS (SELECT 1 FROM tracks WHERE id = ?)", key)
+                .fetch_one(&mut *conn)
+                .await?
+        }
+        EntityKind::Album => {
+            sqlx::query_scalar!("SELECT EXISTS (SELECT 1 FROM albums WHERE id = ?)", key)
+                .fetch_one(&mut *conn)
+                .await?
+        }
+        EntityKind::Artist => {
+            sqlx::query_scalar!("SELECT EXISTS (SELECT 1 FROM artists WHERE id = ?)", key)
+                .fetch_one(&mut *conn)
+                .await?
+        }
+        EntityKind::Playlist => {
+            sqlx::query_scalar!("SELECT EXISTS (SELECT 1 FROM playlists WHERE id = ?)", key)
+                .fetch_one(&mut *conn)
+                .await?
+        }
+    };
+    Ok(found != 0)
 }
 
 /// Reads every alias of one stored row.

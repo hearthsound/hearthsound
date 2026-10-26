@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS (SELECT 1 FROM artists WHERE id = ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "EXISTS (SELECT 1 FROM artists WHERE id = ?)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "42dca96a02f60dc78084d95e32398a3b5e1210b1dea23ac4253731f5b5a7f81c"
+}

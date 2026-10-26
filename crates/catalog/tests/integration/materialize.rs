@@ -790,3 +790,111 @@ async fn a_track_with_a_bare_album_reference_credits_its_album_artist() {
     );
     assert_eq!(album_credit[0].artist_id, track_credit[0].artist_id);
 }
+
+/// A deleted track's alias is gone with it, and materializing again recreates
+/// both the row and the alias.
+#[tokio::test]
+async fn a_deleted_row_leaves_no_alias_behind() {
+    let env = Env::new().await;
+    env.instance(
+        "hello",
+        HELLO_CATALOG,
+        HELLO_CATALOG_ID,
+        serde_json::json!({}),
+    )
+    .await;
+    env.assign(Layer::Catalog, &["hello"]).await;
+    let service = env.service();
+    let track = crate::common::catalog_id("hello", EntityKind::Track, "hello-track-1");
+
+    let first = service.materialize_track(&track).await.unwrap();
+    assert_eq!(
+        service
+            .entity_by_alias("p:hello", EntityKind::Track, "hello-track-1")
+            .await
+            .unwrap(),
+        Some(first)
+    );
+
+    // The delete trigger is what removes the polymorphic rows, so the alias goes
+    // with the row in the same statement.
+    let mut conn = env.database.writer().acquire().await.unwrap();
+    assert!(
+        hearthsound_library::tracks::delete_track(&mut conn, first)
+            .await
+            .unwrap()
+    );
+    drop(conn);
+    let dangling: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM external_ids WHERE entity_kind = 'track' AND entity_id = ?",
+    )
+    .bind(first.uuid().as_bytes().as_slice())
+    .fetch_one(env.database.readers())
+    .await
+    .unwrap();
+    assert_eq!(dangling, 0, "the alias is gone with the row");
+
+    let second = service.materialize_track(&track).await.unwrap();
+    assert_ne!(second, first, "a new row is stored");
+    assert_eq!(
+        service
+            .entity_by_alias("p:hello", EntityKind::Track, "hello-track-1")
+            .await
+            .unwrap(),
+        Some(second),
+        "the alias names the new row"
+    );
+    let stale: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM external_ids WHERE entity_kind = 'track' AND entity_id = ?",
+    )
+    .bind(first.uuid().as_bytes().as_slice())
+    .fetch_one(env.database.readers())
+    .await
+    .unwrap();
+    assert_eq!(stale, 0, "nothing points at the deleted row");
+}
+
+/// A dangling alias is dropped when it is read, and the repair removes the ones
+/// nothing read.
+#[tokio::test]
+async fn a_dangling_alias_is_dropped_and_repaired() {
+    let env = Env::new().await;
+    let service = env.service();
+    let missing = env.stored_artist("Nobody").await;
+    sqlx::query("DELETE FROM artists WHERE id = ?")
+        .bind(missing.uuid().as_bytes().as_slice())
+        .execute(env.database.writer())
+        .await
+        .unwrap();
+    crate::common::write_alias(
+        &env.database,
+        "p:hello",
+        EntityKind::Artist,
+        "hello-artist-1",
+        missing,
+    )
+    .await;
+
+    assert_eq!(
+        service
+            .entity_by_alias("p:hello", EntityKind::Artist, "hello-artist-1")
+            .await
+            .unwrap(),
+        None,
+        "an alias whose row is gone is not a hit"
+    );
+    // The repair is what removes the row: a lookup reads on a connection that
+    // cannot write.
+    assert_eq!(service.repair_aliases().await.unwrap(), 1);
+    let left: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM external_ids WHERE value = 'hello-artist-1'")
+            .fetch_one(env.database.readers())
+            .await
+            .unwrap();
+    assert_eq!(left, 0, "the dangling alias is gone after the repair");
+    assert_eq!(
+        service.repair_aliases().await.unwrap(),
+        0,
+        "the repair is idempotent"
+    );
+}

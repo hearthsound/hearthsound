@@ -329,6 +329,16 @@ impl Services {
             config.paths.artwork.clone(),
         ));
 
+        // An alias whose row is gone would name a row a lookup cannot read, so the
+        // table is repaired once before anything serves the catalog.
+        match catalog.repair_aliases().await {
+            Ok(deleted) if deleted > 0 => {
+                tracing::warn!(deleted, "repaired dangling provider aliases")
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "the provider aliases could not be repaired"),
+        }
+
         // The listener's per-instance configuration comes from the stored
         // provider links; an instance the listener has not linked is asked
         // without a context, as a public lookup is.

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM external_ids WHERE entity_kind = 'album' AND entity_id NOT IN (SELECT id FROM albums)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "6257ed10373bee69b30506e439d73d885b1a760ed02d65500e7dcd81374d9d5b"
+}

@@ -186,9 +186,14 @@ impl CatalogService {
                 self.layer_images(instance, &subject, &key, deadline, "a portrait")
             }))
             .await;
-        for images in answers.into_iter().flatten() {
-            if !images.is_empty() {
-                return Ok(images);
+        for answer in answers {
+            match answer {
+                Ok(images) if !images.is_empty() => return Ok(images),
+                Ok(_) => {}
+                Err(CatalogError::NotFound) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "an artwork instance could not describe a portrait");
+                }
             }
         }
         Ok(Vec::new())
@@ -210,7 +215,15 @@ impl CatalogService {
     ///
     /// # Returns
     ///
-    /// The images, or `None` when the instance failed or was too slow.
+    /// The images, or the provider's failure. An instance that provides no
+    /// artwork layer is [`CatalogError::NotFound`], and one that ran out of its
+    /// rate allowance is [`CatalogError::RateLimited`] with the delay it stated,
+    /// which is what lets a caller answer `503` with `Retry-After`.
+    ///
+    /// # Errors
+    ///
+    /// Returns what the instance's lookup returned, and
+    /// [`CatalogError::Unavailable`] when it did not answer before the deadline.
     async fn layer_images(
         &self,
         instance: &RegistryInstance,
@@ -218,10 +231,12 @@ impl CatalogService {
         key: &RequestKey,
         deadline: tokio::time::Instant,
         operation: &'static str,
-    ) -> Option<Vec<Image>> {
-        let provider = instance.artwork()?;
+    ) -> Result<Vec<Image>, CatalogError> {
+        let Some(provider) = instance.artwork() else {
+            return Err(CatalogError::NotFound);
+        };
         if let Some(images) = self.cached_images(instance.id(), key).await {
-            return Some(images);
+            return Ok(images);
         }
         match tokio::time::timeout_at(deadline, provider.find_artwork(subject)).await {
             Ok(Ok(images)) => {
@@ -231,25 +246,14 @@ impl CatalogService {
                     ARTWORK_TTL
                 };
                 self.store_images(instance.id(), key, &images, ttl).await;
-                Some(images)
+                Ok(images)
             }
-            Ok(Err(error)) => {
-                tracing::debug!(
-                    instance = instance.slug().as_str(),
-                    %error,
-                    operation,
-                    "an artwork instance could not answer"
-                );
-                None
-            }
-            Err(_) => {
-                tracing::warn!(
-                    instance = instance.slug().as_str(),
-                    operation,
-                    "an artwork instance did not answer in time"
-                );
-                None
-            }
+            Ok(Err(error)) => Err(self
+                .finish(instance.slug(), operation, Ok(Err(error)))
+                .unwrap_err()),
+            Err(_) => Err(CatalogError::Unavailable {
+                instance: instance.slug().as_str().to_owned(),
+            }),
         }
     }
 
@@ -341,6 +345,7 @@ impl CatalogService {
         let key = RequestKey::artwork(subject.kind, &subject);
         let deadline = tokio::time::Instant::now() + timeout;
         let mut transient = None;
+        let mut rate_limited: Option<CatalogError> = None;
 
         // The lookup is a provider call per instance, so every instance is asked
         // at once; the bytes are fetched from the first instance in the
@@ -353,11 +358,26 @@ impl CatalogService {
         )
         .await;
         for (instance, answer) in instances.iter().zip(answers) {
-            let Some(images) = answer else {
-                // The failure was logged where it happened; a retry may get past
-                // an unavailable instance, a missing image may not.
-                transient = Some(instance.slug().as_str().to_owned());
-                continue;
+            let images = match answer {
+                Ok(images) => images,
+                Err(CatalogError::RateLimited {
+                    instance: limited,
+                    retry_after_ms,
+                }) => {
+                    // A cover request that found no image anywhere has to tell a
+                    // client when to come back, so the delay survives the layer.
+                    rate_limited = Some(CatalogError::RateLimited {
+                        instance: limited,
+                        retry_after_ms,
+                    });
+                    transient = Some(instance.slug().as_str().to_owned());
+                    continue;
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "an artwork instance could not answer a cover request");
+                    transient = Some(instance.slug().as_str().to_owned());
+                    continue;
+                }
             };
             let Some(image) = pick_image(&images, request.size) else {
                 continue;
@@ -380,7 +400,10 @@ impl CatalogService {
             }
         }
 
-        Ok(LayerCover::Missing { transient })
+        match rate_limited {
+            Some(error) => Err(error),
+            None => Ok(LayerCover::Missing { transient }),
+        }
     }
 
     /// Serves the cover art of a catalog entity through its issuing instance.

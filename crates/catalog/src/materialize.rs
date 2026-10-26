@@ -149,6 +149,56 @@ pub async fn materialize_entity(
 }
 
 impl CatalogService {
+    /// Drops the aliases whose row no longer exists.
+    ///
+    /// A track row can be deleted without its provider alias going with it: the
+    /// delete trigger removes the alias of a deleted track, but a row removed by
+    /// an import, a folder removal or a cancelled acquisition in an older release
+    /// may have left one behind. The repair runs once at startup, in one
+    /// transaction, and is idempotent.
+    ///
+    /// # Returns
+    ///
+    /// The number of dangling rows deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::Database`] when the delete fails.
+    pub async fn repair_aliases(&self) -> Result<u64, CatalogError> {
+        let mut tx = self.database().writer().begin().await?;
+        let mut deleted = 0u64;
+        for affected in [
+            sqlx::query!(
+                "DELETE FROM external_ids WHERE entity_kind = 'track' \
+                 AND entity_id NOT IN (SELECT id FROM tracks)"
+            )
+            .execute(&mut *tx)
+            .await?
+            .rows_affected(),
+            sqlx::query!(
+                "DELETE FROM external_ids WHERE entity_kind = 'album' \
+                 AND entity_id NOT IN (SELECT id FROM albums)"
+            )
+            .execute(&mut *tx)
+            .await?
+            .rows_affected(),
+            sqlx::query!(
+                "DELETE FROM external_ids WHERE entity_kind = 'artist' \
+                 AND entity_id NOT IN (SELECT id FROM artists)"
+            )
+            .execute(&mut *tx)
+            .await?
+            .rows_affected(),
+        ] {
+            deleted += affected;
+        }
+        tx.commit().await?;
+        if deleted > 0 {
+            tracing::warn!(deleted, "repaired provider aliases whose row was gone");
+        }
+        Ok(deleted)
+    }
+
     /// Materializes one catalog track.
     ///
     /// An entity whose `p:<slug>` alias already exists is returned as it is and
