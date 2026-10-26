@@ -61,6 +61,10 @@ impl SettingValue {
     ///
     /// The parsed value.
     ///
+    /// This is a guess from the text alone, which is why a setting's environment
+    /// value is read with the setting's declared type instead of with this:
+    /// `2` for a string setting is the string `2`, not the integer.
+    ///
     /// # Examples
     ///
     /// ```
@@ -1504,10 +1508,13 @@ fn value_from_toml(key: &str, value: &toml::Value) -> Result<SettingValue, Confi
 
 /// Converts an environment value into a [`SettingValue`] for a given setting.
 ///
-/// [`SettingValue::parse_env`] does not know the target type, so `1` becomes an
-/// integer even for a float setting and `a,b` stays one string. Both are widened
-/// here: an integer is accepted as a float, and a string split on commas becomes
-/// a list.
+/// The conversion follows the setting's declared type, which
+/// [`SettingValue::parse_env`] cannot know: `HEARTHSOUND__SUBSONIC__CATALOG_TITLE_SUFFIX=2`
+/// is the string `2`, `HEARTHSOUND__LIBRARY__COVER_FILENAME=true` is the string
+/// `true`, and a list setting splits on commas. A value that does not fit the
+/// declared type stays a string, so [`validate`] reports it in the setting's own
+/// words ("expected an integer", "expected a boolean") instead of as a type
+/// mismatch.
 ///
 /// # Parameters
 ///
@@ -1518,14 +1525,26 @@ fn value_from_toml(key: &str, value: &toml::Value) -> Result<SettingValue, Confi
 ///
 /// The parsed value, which still has to pass [`validate`].
 fn value_from_env(def: &SettingDef, raw: &str) -> SettingValue {
-    match (def.kind, SettingValue::parse_env(raw)) {
-        (SettingKind::Float { .. }, SettingValue::Integer(number)) => {
-            SettingValue::Float(number as f64)
-        }
-        (SettingKind::StringList { .. }, SettingValue::String(text)) => {
-            SettingValue::StringList(split_list(&text))
-        }
-        (_, parsed) => parsed,
+    match def.kind {
+        SettingKind::Bool => match raw.trim() {
+            "true" => SettingValue::Bool(true),
+            "false" => SettingValue::Bool(false),
+            _ => SettingValue::String(raw.to_owned()),
+        },
+        SettingKind::Integer { .. } => raw
+            .trim()
+            .parse::<i64>()
+            .map(SettingValue::Integer)
+            .unwrap_or_else(|_| SettingValue::String(raw.to_owned())),
+        SettingKind::Float { .. } => raw
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|number| number.is_finite())
+            .map(SettingValue::Float)
+            .unwrap_or_else(|| SettingValue::String(raw.to_owned())),
+        SettingKind::String { .. } => SettingValue::String(raw.to_owned()),
+        SettingKind::StringList { .. } => SettingValue::StringList(split_list(raw)),
     }
 }
 
@@ -1670,6 +1689,63 @@ mod tests {
             .file
             .insert(keys::PLUGINS_MAX_MEMORY_MB.name().to_owned(), value);
         sources
+    }
+
+    #[test]
+    fn an_environment_value_is_read_as_its_setting_type() {
+        let registry = SettingsRegistry::builtin();
+        let mut sources = SettingSources::default();
+        for (key, raw) in [
+            (keys::SUBSONIC_CATALOG_TITLE_SUFFIX.name(), "2"),
+            (keys::LIBRARY_COVER_FILENAME.name(), "true"),
+            (keys::ACQUISITION_MIN_MATCH_SCORE.name(), "1"),
+        ] {
+            sources.env.insert(env_name_for(key), raw.to_owned());
+        }
+        let store = SettingsStore::resolve(&registry, &sources).unwrap();
+
+        assert_eq!(
+            store.get(keys::SUBSONIC_CATALOG_TITLE_SUFFIX).unwrap(),
+            "2",
+            "a string setting reads the digit as text"
+        );
+        assert_eq!(
+            store.get(keys::LIBRARY_COVER_FILENAME).unwrap(),
+            "true",
+            "a string setting reads the word as text"
+        );
+        assert_eq!(
+            store.get(keys::ACQUISITION_MIN_MATCH_SCORE).unwrap(),
+            1.0,
+            "a whole number is a float for a float setting"
+        );
+    }
+
+    #[test]
+    fn an_environment_value_that_does_not_fit_its_type_is_refused() {
+        let registry = SettingsRegistry::builtin();
+
+        let mut sources = SettingSources::default();
+        sources.env.insert(
+            env_name_for(keys::PLUGINS_MAX_MEMORY_MB.name()),
+            "abc".to_owned(),
+        );
+        let error = SettingsStore::resolve(&registry, &sources).unwrap_err();
+        assert!(
+            matches!(error, ConfigError::InvalidValue { ref key, .. } if key == keys::PLUGINS_MAX_MEMORY_MB.name()),
+            "{error}"
+        );
+
+        let mut sources = SettingSources::default();
+        sources.env.insert(
+            env_name_for(keys::PLUGINS_AUTO_UPDATE.name()),
+            "yes".to_owned(),
+        );
+        let error = SettingsStore::resolve(&registry, &sources).unwrap_err();
+        assert!(
+            matches!(error, ConfigError::InvalidValue { ref key, .. } if key == keys::PLUGINS_AUTO_UPDATE.name()),
+            "{error}"
+        );
     }
 
     #[test]
