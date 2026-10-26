@@ -24,7 +24,7 @@ use hearthsound_acquire::orchestrator::{
 use hearthsound_acquire::repo::{
     AcquisitionRow, LedgerQuery, LedgerWindow, active_for_tracks, latest_for_tracks,
 };
-use hearthsound_core::{ClientId, EntityId, EntityKind, IdPrefix, Layer, Priority};
+use hearthsound_core::{ClientId, EntityId, EntityKind, FailureReason, IdPrefix, Layer, Priority};
 use uuid::Uuid;
 
 use crate::auth::Call;
@@ -236,8 +236,10 @@ async fn availabilities(call: &Call, ids: &[String]) -> Result<Vec<Object>, Subs
 /// when an id names nothing this endpoint can acquire, error 10 when the request
 /// names no id, error 50 when the account may not acquire and when admission
 /// denies one of the requests, and a generic error when a request cannot be read
-/// or written. A request that is denied or fails mid-list leaves the acquisitions
-/// the earlier ids produced in the ledger.
+/// or written. The error carries the stored reason in `hearthsoundReason`
+/// (`quota-exceeded` or `permission-denied`) for a client that sent
+/// `hearthsound=1`. A request that is denied or fails mid-list leaves the
+/// acquisitions the earlier ids produced in the ledger.
 pub async fn hs_acquire(call: Call) -> Encoded {
     if !call.vendor_enabled() {
         return call.encode(Response::failed(SubsonicError::not_found()));
@@ -247,7 +249,9 @@ pub async fn hs_acquire(call: Call) -> Encoded {
         return call.encode(Response::failed(SubsonicError::missing_parameter("id")));
     }
     if !call.principal().can_acquire {
-        return call.encode(Response::failed(SubsonicError::not_authorized()));
+        return call.encode(Response::failed(
+            SubsonicError::not_authorized().with_reason(FailureReason::PermissionDenied.as_str()),
+        ));
     }
     let priority = match priority(&call) {
         Ok(priority) => priority,
@@ -465,8 +469,9 @@ fn acquire_failure(error: &AcquireError) -> SubsonicError {
 ///
 /// # Errors
 ///
-/// Answers Subsonic error 50 when admission denied the request, and a generic
-/// error when the ledger cannot be read.
+/// Answers Subsonic error 50 when admission denied the request - carrying the
+/// stored reason in `hearthsoundReason` (`quota-exceeded` or `permission-denied`)
+/// - and a generic error when the ledger cannot be read.
 async fn record(
     state: &SubsonicState,
     orchestrator: &AcquisitionOrchestrator,
@@ -509,7 +514,7 @@ async fn record(
                 reason = reason.as_str(),
                 "admission denied a vendor acquire request"
             );
-            Err(SubsonicError::not_authorized())
+            Err(SubsonicError::not_authorized().with_reason(reason.as_str()))
         }
     }
 }

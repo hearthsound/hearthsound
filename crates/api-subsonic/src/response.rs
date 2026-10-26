@@ -136,7 +136,10 @@ impl ResponseFormat {
 ///
 /// The code is the base protocol's; the message is the standard text for that
 /// code wherever the protocol defines one. `helpUrl`, an OpenSubsonic addition,
-/// is present only for the errors that have advice to give.
+/// is present only for the errors that have advice to give. `hearthsoundReason`,
+/// a Hearthsound-only member, is present only for a client that sent
+/// `hearthsound=1`: a refusal that has a stored reason - a denied acquisition,
+/// today - carries it there, and the base protocol's clients ignore it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubsonicError {
     /// The numeric code, one of [`codes`].
@@ -145,6 +148,8 @@ pub struct SubsonicError {
     message: String,
     /// The documentation link, when the error has one.
     help_url: Option<String>,
+    /// The vendor reason a denial carries, sent as `hearthsoundReason`.
+    reason: Option<&'static str>,
 }
 
 impl SubsonicError {
@@ -166,6 +171,7 @@ impl SubsonicError {
             code,
             message: message.into(),
             help_url: None,
+            reason: None,
         }
     }
 
@@ -183,6 +189,20 @@ impl SubsonicError {
         self
     }
 
+    /// Adds the Hearthsound-only reason member.
+    ///
+    /// # Parameters
+    ///
+    /// - `reason`: the stored token, for example `quota-exceeded`.
+    ///
+    /// # Returns
+    ///
+    /// The error, with the reason.
+    pub fn with_reason(mut self, reason: &'static str) -> SubsonicError {
+        self.reason = Some(reason);
+        self
+    }
+
     /// Returns the numeric code.
     pub fn code(&self) -> i32 {
         self.code
@@ -196,6 +216,11 @@ impl SubsonicError {
     /// Returns the documentation link, when the error has one.
     pub fn help_url(&self) -> Option<&str> {
         self.help_url.as_deref()
+    }
+
+    /// Returns the vendor reason, when the error has one.
+    pub fn reason(&self) -> Option<&'static str> {
+        self.reason
     }
 
     /// Builds the error for a check that could not be completed.
@@ -291,6 +316,9 @@ impl From<&SubsonicError> for Value {
             .set("message", error.message().to_owned());
         if let Some(help_url) = error.help_url() {
             object = object.set("helpUrl", help_url.to_owned());
+        }
+        if let Some(reason) = error.reason() {
+            object = object.set("hearthsoundReason", reason.to_owned());
         }
         Value::Object(object)
     }
@@ -397,6 +425,25 @@ impl Response {
         match self {
             Response::Payload(_) => None,
             Response::Error(error) => Some(error),
+        }
+    }
+
+    /// Returns the response with every member only Hearthsound knows removed.
+    ///
+    /// [`crate::Params::encode`] calls this for a request that did not send
+    /// `hearthsound=1`, so a standard response is byte-identical to one from a
+    /// server that has no vendor extension at all.
+    ///
+    /// # Returns
+    ///
+    /// The same response, carrying no vendor member.
+    pub fn without_vendor_members(self) -> Response {
+        match self {
+            Response::Error(error) => Response::Error(SubsonicError {
+                reason: None,
+                ..error
+            }),
+            payload => payload,
         }
     }
 

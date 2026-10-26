@@ -47,6 +47,10 @@ pub struct Params {
 impl Params {
     /// Collects parameter values and reads the requested encoding from them.
     ///
+    /// The extractor builds these from a request. A caller that renders a
+    /// response outside a handler - a test that pins the encoding, for example -
+    /// builds them with this.
+    ///
     /// # Parameters
     ///
     /// - `values`: the parameter values, query string first.
@@ -54,7 +58,7 @@ impl Params {
     /// # Returns
     ///
     /// The parameters, with the format the `f` parameter selected.
-    pub(crate) fn from_values(values: Vec<(String, String)>) -> Params {
+    pub fn from_values(values: Vec<(String, String)>) -> Params {
         let format = ResponseFormat::from_parameter(
             values
                 .iter()
@@ -191,6 +195,11 @@ impl Params {
 
     /// Renders a response in the encoding the client asked for.
     ///
+    /// Every handler answers through this, which is where a member only
+    /// Hearthsound knows is dropped for a client that did not send
+    /// `hearthsound=1`: without the opt-in the document is byte-identical to one
+    /// a server with no vendor extension would send.
+    ///
     /// # Parameters
     ///
     /// - `response`: the response to render.
@@ -199,6 +208,11 @@ impl Params {
     ///
     /// The encoded response, ready to be returned from a handler.
     pub fn encode(&self, response: Response) -> Encoded {
+        let response = if self.vendor_enabled() {
+            response
+        } else {
+            response.without_vendor_members()
+        };
         response.encode(self.format)
     }
 }
@@ -464,6 +478,8 @@ mod tests {
         Params::from_values(parse_encoded(query))
     }
 
+    use crate::response::SubsonicError;
+
     #[test]
     fn a_form_encoded_string_decodes_into_named_values() {
         assert_eq!(
@@ -523,6 +539,26 @@ mod tests {
         assert!(params("hearthsound=1").vendor_enabled());
         assert!(!params("hearthsound=0").vendor_enabled());
         assert!(!params("hearthsound=").vendor_enabled());
+    }
+
+    #[test]
+    fn a_vendor_member_is_kept_only_for_a_client_that_opted_in() {
+        let denied =
+            || Response::failed(SubsonicError::not_authorized().with_reason("quota-exceeded"));
+        let opted_in = params("hearthsound=1&f=json");
+        assert!(
+            opted_in
+                .encode(denied())
+                .body()
+                .contains("\"hearthsoundReason\":\"quota-exceeded\""),
+            "the vendor member is rendered for a client that asked for it"
+        );
+        let standard = Response::failed(SubsonicError::not_authorized());
+        assert_eq!(
+            params("").encode(denied()).body(),
+            standard.render(ResponseFormat::Xml),
+            "without the opt-in the refusal is the standard document, byte for byte"
+        );
     }
 
     #[test]

@@ -1,0 +1,5 @@
+---
+source: crates/api-subsonic/tests/integration/envelope.rs
+expression: "encoded(&[(\"f\", \"json\"), (\"hearthsound\", \"1\")], denied())"
+---
+{"subsonic-response":{"status":"failed","version":"1.16.1","type":"hearthsound","serverVersion":"0.1.6","openSubsonic":true,"error":{"code":50,"message":"User is not authorized for the given operation.","hearthsoundReason":"quota-exceeded"}}}

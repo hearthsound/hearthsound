@@ -470,6 +470,29 @@ async fn acquire_answers_error_50_without_can_acquire() {
     )
     .await;
     assert_error(&probe, 50);
+    assert!(
+        probe
+            .body
+            .contains("\"hearthsoundReason\":\"permission-denied\""),
+        "the vendor reason names the stored denial in: {}",
+        probe.body
+    );
+
+    // The XML encoding carries the same member as an attribute.
+    let xml = get(
+        &app,
+        &format!(
+            "/rest/hsAcquire?apiKey={key}&hearthsound=1&f=xml&id={}",
+            tracks[0]
+        ),
+    )
+    .await;
+    assert_error(&xml, 50);
+    assert!(
+        xml.body.contains("hearthsoundReason=\"permission-denied\""),
+        "the vendor reason is an attribute in: {}",
+        xml.body
+    );
 }
 
 #[tokio::test]
