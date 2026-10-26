@@ -488,7 +488,9 @@ impl EventBus {
     /// [`Audience::Everyone`].
     ///
     /// Publishing never blocks: a subscriber that is not reading is dropped
-    /// from the channel rather than waited for.
+    /// from the channel rather than waited for. The send happens under the same
+    /// lock that assigns the id, so a subscriber receives ids in the order they
+    /// were assigned and a `Last-Event-ID` it reports never skips an event.
     ///
     /// # Parameters
     ///
@@ -560,7 +562,7 @@ impl EventBus {
     /// assert_eq!(receiver.try_recv().unwrap().audience, Audience::User(owner));
     /// ```
     pub fn publish_for(&self, audience: Audience, event: ServerEvent) -> u64 {
-        let (id, envelope) = {
+        let id = {
             let mut state = self.lock();
             let id = state.next_id;
             state.next_id += 1;
@@ -574,11 +576,14 @@ impl EventBus {
             if state.events.len() > self.capacity {
                 state.events.pop_front();
             }
-            (id, envelope)
+            // The send is made under the same lock that assigned the id, so two
+            // publishers cannot deliver one envelope's id before another's: a
+            // live subscriber sees the ids in order, exactly as `replay_after`
+            // serves them. A send fails only when the bus has no live
+            // subscriber, and the event is in the replay buffer either way.
+            let _ = self.sender.send(envelope);
+            id
         };
-        // A send fails only when the bus has no live subscriber; the event is
-        // in the replay buffer either way.
-        let _ = self.sender.send(envelope);
         id
     }
 
@@ -680,7 +685,59 @@ fn now_millis() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+
+    #[test]
+    fn concurrent_publishers_deliver_ids_in_order() {
+        let bus = Arc::new(EventBus::new());
+        let mut receiver = bus.subscribe();
+        let publishers = 4;
+        let each = 250;
+        let total = publishers * each;
+
+        let threads: Vec<_> = (0..publishers)
+            .map(|_| {
+                let bus = Arc::clone(&bus);
+                std::thread::spawn(move || {
+                    for _ in 0..each {
+                        bus.publish(notice("concurrent publishing"));
+                    }
+                })
+            })
+            .collect();
+
+        // Drain while the publishers run, so a full channel is not what the
+        // test measures.
+        let mut received: Vec<u64> = Vec::with_capacity(total);
+        let mut skipped = 0;
+        while received.len() + skipped < total {
+            match receiver.blocking_recv() {
+                Ok(envelope) => received.push(envelope.id),
+                Err(broadcast::error::RecvError::Lagged(count)) => skipped += count as usize,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        assert_eq!(received.len() + skipped, total, "every event was published");
+        assert!(
+            received.windows(2).all(|pair| pair[0] < pair[1]),
+            "a live subscriber sees the ids in order"
+        );
+        let Replay::Events(buffered) = bus.replay_after(0) else {
+            panic!("the buffer holds the events of one run");
+        };
+        let replayed: Vec<u64> = buffered.iter().map(|event| event.id).collect();
+        assert_eq!(replayed.len(), total.min(REPLAY_CAPACITY));
+        assert!(
+            replayed.windows(2).all(|pair| pair[0] < pair[1]),
+            "the replay buffer serves the same events in order"
+        );
+    }
 
     /// One event of every type, in the order of the event table.
     fn sample_events() -> Vec<ServerEvent> {
