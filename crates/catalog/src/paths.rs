@@ -858,10 +858,31 @@ impl CatalogService {
         id: &CatalogId,
         mode: PathMode,
     ) -> Result<crate::service::CatalogAlbumResult, CatalogError> {
-        match mode {
-            PathMode::Cached => self.cached_album(id).await?.ok_or(CatalogError::NotFound),
-            PathMode::Live => self.album(id).await,
+        if mode == PathMode::Live {
+            return self.album(id).await;
         }
+        if let Some(album) = self.cached_album(id).await? {
+            return Ok(album);
+        }
+        // A path needs the title and the credits, which the reference a search or
+        // an artist listing promoted already carries; the tracklist is not part
+        // of a path.
+        let reference = self.cached_album_ref(id).await?.ok_or(CatalogError::NotFound)?;
+        Ok(crate::service::CatalogAlbumResult {
+            id: reference.id,
+            album: hearthsound_core::providers::CatalogAlbum {
+                id: reference.album.id,
+                title: reference.album.title,
+                artists: reference.album.artists,
+                release_date: None,
+                album_type: None,
+                upc: None,
+                genres: Vec::new(),
+                images: reference.album.images,
+                tracks: Vec::new(),
+                ids: Vec::new(),
+            },
+        })
     }
 
     /// Reads the ids an entity id names, from both directions.

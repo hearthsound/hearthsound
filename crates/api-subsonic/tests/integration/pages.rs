@@ -451,6 +451,7 @@ async fn an_artist_path_names_the_library_artist() {
 #[tokio::test]
 async fn an_album_path_names_the_album_the_artist_page_lists() {
     let seed = seeded().await;
+    prime(&seed.fixture, ClientId::Entity(seed.artist)).await;
     let stored = resolve_path(&seed.fixture, "artist=discography-artist&album=second-wind").await;
     assert_eq!(stored["type"].as_str(), Some("album"));
     assert_eq!(
@@ -485,6 +486,9 @@ async fn an_album_path_names_the_album_the_artist_page_lists() {
 #[tokio::test]
 async fn an_id_resolves_to_its_canonical_path() {
     let seed = seeded().await;
+    let artist = CatalogId::new(Slug::new(SLUG).unwrap(), EntityKind::Artist, ARTIST).unwrap();
+    prime(&seed.fixture, ClientId::Catalog(artist)).await;
+    prime(&seed.fixture, ClientId::Entity(seed.artist)).await;
     let artist_id = catalog_id(EntityKind::Artist, ARTIST);
     let artist = resolve_path(&seed.fixture, &format!("id={artist_id}")).await;
     assert_eq!(
@@ -495,6 +499,8 @@ async fn an_id_resolves_to_its_canonical_path() {
     assert_eq!(artist["path"].as_str(), Some("discography-artist"));
 
     let album_id = catalog_id(EntityKind::Album, THIRD_SINGLE);
+    let third = CatalogId::new(Slug::new(SLUG).unwrap(), EntityKind::Album, THIRD_SINGLE).unwrap();
+    prime(&seed.fixture, ClientId::Catalog(third)).await;
     let album = resolve_path(&seed.fixture, &format!("id={album_id}")).await;
     assert_eq!(album["id"].as_str(), Some(album_id.as_str()));
     assert_eq!(album["type"].as_str(), Some("album"));
