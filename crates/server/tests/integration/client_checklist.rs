@@ -38,15 +38,15 @@ const SECONDS: f64 = 3.0;
 const PATIENCE: Duration = Duration::from_secs(30);
 
 /// A library the checklist drives.
-struct Library {
+pub struct Library {
     /// The folder the files were written into.
-    folder: PathBuf,
+    pub folder: PathBuf,
     /// The stored tracks, in track order.
-    tracks: Vec<EntityId>,
+    pub tracks: Vec<EntityId>,
     /// The stored album.
-    album: EntityId,
+    pub album: EntityId,
     /// The stored artist.
-    artist: EntityId,
+    pub artist: EntityId,
 }
 
 /// Writes the audio into a library folder and scans it.
@@ -58,7 +58,7 @@ struct Library {
 /// # Returns
 ///
 /// The stored library.
-async fn seed_library(fixture: &Fixture) -> Library {
+pub async fn seed_library(fixture: &Fixture) -> Library {
     let root = fixture.services.config().paths.library.clone();
     let folder = root.join("checklist");
     let album_dir = folder.join(ARTIST).join(ALBUM);

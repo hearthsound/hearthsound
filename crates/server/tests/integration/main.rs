@@ -23,6 +23,7 @@ mod reload;
 mod scrobbles;
 mod setup;
 mod storage;
+mod stream_errors;
 mod stream_pending;
 mod vendor;
 mod watch;
