@@ -529,6 +529,93 @@ fn add_folder_generic_is_scanable() {
     assert!(scanned.contains("0 seen"), "{scanned}");
 }
 
+/// `add-folder` queues the folder's first scan, so a folder full of files is
+/// indexed without a second command.
+#[tokio::test(flavor = "multi_thread")]
+async fn add_folder_queues_a_first_scan() {
+    use hearthsound_jobs::{JobQueue, JobState, QueueOptions};
+    use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
+
+    let sandbox = Sandbox::new("");
+    succeeded(&sandbox.run_with_stdin(
+        &["admin", "create-user", "--admin", "--password-stdin"],
+        "hunter22\n",
+    ));
+    let created = succeeded(&sandbox.run(&[
+        "admin",
+        "create-api-key",
+        "--user",
+        "admin",
+        "--name",
+        "queued-scan",
+    ]));
+    let key = created
+        .lines()
+        .find(|line| line.starts_with("hs_"))
+        .unwrap_or_else(|| panic!("no API key in: {created}"))
+        .to_owned();
+    let music = sandbox.library_dir("music");
+    std::fs::create_dir_all(&music).unwrap();
+    AudioFixture::new(AudioFormat::Flac)
+        .seconds(0.3)
+        .file_name("queued.flac")
+        .tags(
+            TrackTags::new("Queued Song", "Queued Artist")
+                .album("Queued Album")
+                .album_artist("Queued Artist"),
+        )
+        .write_into(&music)
+        .await
+        .unwrap();
+
+    let added = succeeded(&sandbox.run(&[
+        "admin",
+        "add-folder",
+        "--path",
+        music.to_str().unwrap(),
+        "--owner",
+        "admin",
+    ]));
+    assert!(added.contains("its first scan is queued"), "{added}");
+
+    // The job is waiting for a worker: the command itself scanned nothing.
+    let config = bootstrap_config(&sandbox);
+    let database = hearthsound_db::Database::open(&config.database.path)
+        .await
+        .unwrap();
+    let queue = JobQueue::new(&database, QueueOptions::default());
+    let queued = queue.list_by_state(JobState::Ready, 10).await.unwrap();
+    assert!(
+        queued
+            .iter()
+            .any(|job| job.kind.as_str() == hearthsound_library::scan::SCAN_JOB_KIND),
+        "no scan job was queued: {queued:?}"
+    );
+    drop(queue);
+    drop(database);
+
+    // A server claims it, and the file appears in search without any other
+    // command.
+    let (server, port) = serve_in_process(&sandbox).await;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let response = http_get(
+            port,
+            &format!("/rest/search3?query=Queued&apiKey={key}&f=json"),
+        )
+        .unwrap_or_default();
+        if response.contains("Queued Song") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the queued scan never indexed the file: {response}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    server.shutdown().await.unwrap();
+}
+
 /// `scan --full` probes every file again instead of trusting the stored state.
 #[tokio::test(flavor = "multi_thread")]
 async fn scan_full_reindexes_an_unchanged_file() {

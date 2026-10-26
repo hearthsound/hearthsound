@@ -424,15 +424,14 @@ impl LibraryScanner {
         queue: &JobQueue,
         request: &ScanRequest,
     ) -> Result<Job, LibraryError> {
-        let job = NewJob::new(SCAN_JOB_KIND).payload(request)?;
         // Counted before the job is visible to the runner, so a handler that
         // claims it at once always finds its request to release.
         self.counters.queued.fetch_add(1, Ordering::SeqCst);
-        match queue.enqueue(job).await {
+        match enqueue_scan(queue, request).await {
             Ok(job) => Ok(job),
             Err(error) => {
                 self.request_started();
-                Err(error.into())
+                Err(error)
             }
         }
     }
@@ -1646,6 +1645,31 @@ fn modified_ms(metadata: &std::fs::Metadata) -> i64 {
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Enqueues a scan without this process's scan counters.
+///
+/// The command line adds a folder in a process of its own, so it has no scanner
+/// to count against. The server's workers claim the job - or, when no server is
+/// running, the next server does - and the running server's scan status counts it
+/// from the moment it is claimed.
+///
+/// # Parameters
+///
+/// - `queue`: the queue to enqueue on.
+/// - `request`: the folders, subtrees, and depth to scan.
+///
+/// # Returns
+///
+/// The enqueued job.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Queue`] when the request cannot be serialized or the
+/// job cannot be written.
+pub async fn enqueue_scan(queue: &JobQueue, request: &ScanRequest) -> Result<Job, LibraryError> {
+    let job = NewJob::new(SCAN_JOB_KIND).payload(request)?;
+    Ok(queue.enqueue(job).await?)
 }
 
 /// Runs a `library.scan` job.

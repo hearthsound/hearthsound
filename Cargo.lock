@@ -1561,6 +1561,7 @@ dependencies = [
  "hearthsound-config",
  "hearthsound-core",
  "hearthsound-db",
+ "hearthsound-jobs",
  "hearthsound-library",
  "hearthsound-plugin-host",
  "hearthsound-server",

@@ -14,8 +14,10 @@ use hearthsound_auth::{
     Users,
 };
 use hearthsound_config::bootstrap::BootstrapConfig;
+use hearthsound_jobs::{JobQueue, QueueOptions};
 use hearthsound_library::LibraryRepository;
 use hearthsound_library::folders::check_folder_path;
+use hearthsound_library::scan::{ScanRequest, enqueue_scan};
 
 use crate::cli::{
     AddFolderArgs, AdminArgs, AdminCommand, CreateCredentialArgs, CreateUserArgs,
@@ -391,6 +393,10 @@ async fn create_app_password(context: &Context, args: CreateCredentialArgs) -> a
 /// tracks to its owner (or leaves them unpinned for a generic folder) in the
 /// same transaction as the ownership column, so the two never disagree.
 ///
+/// The folder's first scan is queued rather than run here: a scan is a
+/// `library.scan` job, so the command reports at once and the server's workers
+/// index the files (the next server claims it when none is running).
+///
 /// # Parameters
 ///
 /// - `context`: the open database.
@@ -399,7 +405,7 @@ async fn create_app_password(context: &Context, args: CreateCredentialArgs) -> a
 /// # Errors
 ///
 /// Returns an error when the path is not a directory, the named owner does not
-/// exist, or the folder cannot be stored.
+/// exist, or the folder or its first scan cannot be stored.
 async fn add_folder(context: &Context, args: AddFolderArgs) -> anyhow::Result<()> {
     let owner = match &args.owner {
         Some(username) => Some(find_user(context, username).await?.id),
@@ -430,15 +436,20 @@ async fn add_folder(context: &Context, args: AddFolderArgs) -> anyhow::Result<()
             .context("could not stop watching the folder")?;
     }
 
+    let queue = JobQueue::new(context.database(), QueueOptions::default());
+    enqueue_scan(&queue, &ScanRequest::folder(folder.id))
+        .await
+        .context("could not queue the folder's first scan")?;
+
     let name = args.name.as_deref().unwrap_or(&folder.name);
     let watched = if watch { "watched" } else { "not watched" };
     match &args.owner {
         Some(owner) => println!(
-            "added library folder `{name}` ({}) owned by `{owner}`, {watched}",
+            "added library folder `{name}` ({}) owned by `{owner}`, {watched}; its first scan is queued",
             folder.path.display()
         ),
         None => println!(
-            "added library folder `{name}` ({}) as a generic folder, {watched}",
+            "added library folder `{name}` ({}) as a generic folder, {watched}; its first scan is queued",
             folder.path.display()
         ),
     }

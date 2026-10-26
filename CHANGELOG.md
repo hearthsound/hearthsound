@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `admin add-folder` queues the folder's first scan, so a folder full of files is indexed without running `hearthsound scan` afterwards; with no server running the job waits in the queue for the next one.
 - A refused write to a runtime setting names why: a file-pinned key says the configuration file pins it, and an environment-overridden one says the environment variable sets it.
 - An environment value for a runtime setting is read as that setting's declared type, so `HEARTHSOUND__SUBSONIC__CATALOG_TITLE_SUFFIX=2` is the string `2` and a decimal or boolean verbatim instead of failing startup with "expected a string".
 - A decode check during an import gives up after two minutes and fails the verification instead of holding the import (and a blocking thread) for ever.
