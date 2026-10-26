@@ -241,3 +241,80 @@ async fn a_new_reference_is_a_new_playlist() {
     assert_ne!(first.id, second.id);
     assert_eq!(playlists.list(user, Some(user)).await.unwrap().len(), 2);
 }
+
+/// A generated playlist the listener made permanent survives the next sync and
+/// its expiry stays cleared.
+#[tokio::test]
+async fn a_permanent_generated_playlist_survives_a_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = open_database(dir.path()).await;
+    let library = LibraryRepository::new(&database);
+    let playlists = Playlists::new(&database);
+    let user = insert_user(&database).await;
+    let (_album, tracks) = insert_album(&library).await;
+    let ids = vec![track_id(tracks[0])];
+    let instance = insert_instance(&database, "Weekly Jams Service").await;
+
+    let write = SyncedPlaylist {
+        owner_user_id: user,
+        source_instance_id: instance,
+        source_ref: "weekly-jams",
+        name: "Weekly Jams",
+        comment: None,
+        expires_at: 4_000,
+        tracks: &ids,
+    };
+    let created = playlists.upsert_generated(&write, 1_000).await.unwrap();
+    let permanent = playlists
+        .set_lifetime(created.id, user, false, Some(4_000))
+        .await
+        .unwrap();
+    assert!(!permanent.is_temporary);
+
+    let refreshed = playlists.upsert_generated(&write, 2_000).await.unwrap();
+
+    assert_eq!(refreshed.id, created.id, "the sync kept the slot");
+    assert!(
+        !refreshed.is_temporary,
+        "the sync did not revert the listener's decision"
+    );
+    assert_eq!(
+        refreshed.expires_at, None,
+        "a permanent playlist never expires, not even after a sync"
+    );
+
+    // The stored row says the same, so the expiry sweep keeps the playlist.
+    let stored = playlists
+        .get(created.id, user)
+        .await
+        .unwrap()
+        .expect("the playlist is stored");
+    assert!(!stored.is_temporary);
+    assert_eq!(stored.expires_at, None);
+    assert_eq!(
+        playlists.delete_expired(4_000).await.unwrap(),
+        0,
+        "the sweep deleted a playlist the listener kept"
+    );
+    assert_eq!(
+        playlists.delete_expired(1_000_000).await.unwrap(),
+        0,
+        "no later sweep deletes it either"
+    );
+    assert!(playlists.get(created.id, user).await.unwrap().is_some());
+
+    // A slot the listener never converted is still created temporary.
+    let fresh = playlists
+        .upsert_generated(
+            &SyncedPlaylist {
+                source_ref: "daily-mix",
+                name: "Daily Mix",
+                ..write
+            },
+            2_000,
+        )
+        .await
+        .unwrap();
+    assert!(fresh.is_temporary);
+    assert_eq!(fresh.expires_at, Some(4_000));
+}

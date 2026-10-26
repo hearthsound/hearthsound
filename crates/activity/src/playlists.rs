@@ -339,9 +339,13 @@ impl Playlists {
     /// The playlist is identified by its owner, the generating instance and the
     /// service's reference, so a second sync of the same slot keeps the
     /// playlist's id and rewrites its name, description, expiry and tracks.
-    /// The playlist is temporary, which is what a generated playlist is: it
-    /// pins none of its tracks, so they stay evictable until a listener makes
-    /// the playlist permanent.
+    /// A new slot is created temporary, which is what a generated playlist is:
+    /// it pins none of its tracks, so they stay evictable until a listener
+    /// makes the playlist permanent.
+    ///
+    /// A slot the listener has made permanent keeps that lifetime across a
+    /// sync: its expiry stays cleared, so the expiry sweep never deletes a
+    /// playlist the listener chose to keep.
     ///
     /// The name, the expiry and every entry are written in one transaction, so
     /// a reader never sees a playlist that is half refreshed.
@@ -388,15 +392,22 @@ impl Playlists {
             .as_ref()
             .map(|playlist| affected_tracks(&playlist.entries, write.tracks))
             .unwrap_or_default();
+        // A slot the listener made permanent stays permanent: the sync rewrites
+        // what the service generated, not whether the listener keeps it.
+        let (temporary, expires_at) = match &before {
+            Some(playlist) if !playlist.is_temporary => (false, None),
+            _ => (true, Some(write.expires_at)),
+        };
         match &before {
             Some(_) => {
                 sqlx::query!(
                     "UPDATE playlists \
-                     SET name = ?, comment = ?, is_temporary = 1, expires_at = ?, updated_at = ? \
+                     SET name = ?, comment = ?, is_temporary = ?, expires_at = ?, updated_at = ? \
                      WHERE id = ?",
                     name,
                     write.comment,
-                    write.expires_at,
+                    temporary,
+                    expires_at,
                     now,
                     entity_key(id),
                 )
@@ -435,8 +446,8 @@ impl Playlists {
             name: name.to_owned(),
             comment: write.comment.map(str::to_owned),
             is_public: before.as_ref().is_some_and(|playlist| playlist.is_public),
-            is_temporary: true,
-            expires_at: Some(write.expires_at),
+            is_temporary: temporary,
+            expires_at,
             source_instance_id: Some(write.source_instance_id),
             source_ref: Some(write.source_ref.to_owned()),
             source_instance_name: before
