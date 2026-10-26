@@ -53,6 +53,13 @@ const ARTWORK_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// picture of an album today may have one tomorrow.
 const EMPTY_ARTWORK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// How long a cached cover image is kept.
+///
+/// Thirty days. The cache exists to answer a page without a provider call, and a
+/// picture that a page has not asked for in a month is not worth the disk it
+/// occupies; the next request fetches it again.
+pub const ARTWORK_CACHE_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
 /// How long an image URL whose host refused it is not asked again.
 ///
 /// Ten minutes. An image host that answers a burst of requests with a refusal,
@@ -262,6 +269,49 @@ impl CatalogService {
                 instance: instance.slug().as_str().to_owned(),
             }),
         }
+    }
+
+    /// Deletes the cached cover images fetched longer ago than a window.
+    ///
+    /// The file goes with its row: a row without a file is a miss (the next
+    /// request fetches again), and a file without a row is never read. A file that
+    /// cannot be removed is logged and its row is deleted anyway, so the sweep is
+    /// never blocked by one stubborn file.
+    ///
+    /// # Parameters
+    ///
+    /// - `older_than`: how old a cached image must be to be deleted.
+    ///
+    /// # Returns
+    ///
+    /// The number of rows deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::Database`] when a read or the delete fails.
+    pub async fn sweep_artwork_cache(&self, older_than: Duration) -> Result<u64, CatalogError> {
+        let cutoff = crate::cache::now_millis()
+            .saturating_sub(i64::try_from(older_than.as_millis()).unwrap_or(i64::MAX));
+        let rows = sqlx::query!(
+            "SELECT path FROM artwork_cache WHERE fetched_at <= ?",
+            cutoff,
+        )
+        .fetch_all(self.database().readers())
+        .await?;
+        for row in &rows {
+            let path = self.artwork_dir().join(&row.path);
+            if let Err(error) = tokio::fs::remove_file(&path).await {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "a cached cover image could not be removed"
+                );
+            }
+        }
+        let deleted = sqlx::query!("DELETE FROM artwork_cache WHERE fetched_at <= ?", cutoff,)
+            .execute(self.database().writer())
+            .await?;
+        Ok(deleted.rows_affected())
     }
 
     /// Reads the portrait renditions the artwork layer already described.
@@ -1361,8 +1411,13 @@ fn album_ids(album: &hearthsound_library::Album) -> Vec<ExternalId> {
 
 /// Returns the cache key of one image an artwork instance described.
 ///
-/// The key names the instance, the subject, and the image, so two instances that
-/// describe the same URL keep their own copies under their own cache policies.
+/// The key names the instance, the subject and the image, URL included, so two
+/// instances that describe the same URL keep their own copies under their own
+/// cache policies and one subject whose provider changed the URL for a size is
+/// not served the picture it used to describe. The digest is SHA-256 rather than
+/// the standard library's hasher, whose algorithm is not guaranteed across
+/// releases: a key that changed with the toolchain would orphan the whole cache.
+/// The `v2` segment retires the keys the old format wrote.
 ///
 /// # Parameters
 ///
@@ -1380,21 +1435,33 @@ fn layer_cache_key(
     subject: &ArtworkSubject,
     image: &Image,
 ) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hash = std::collections::hash_map::DefaultHasher::new();
-    subject.title.hash(&mut hash);
-    subject.artists.hash(&mut hash);
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    digest.update(subject.title.as_bytes());
+    for artist in &subject.artists {
+        digest.update([0]);
+        digest.update(artist.as_bytes());
+    }
     for id in &subject.ids {
-        id.namespace.hash(&mut hash);
-        id.value.hash(&mut hash);
+        digest.update([0]);
+        digest.update(id.namespace.as_bytes());
+        digest.update([b'=']);
+        digest.update(id.value.as_bytes());
+    }
+    let hash = digest.finalize();
+    let mut hex = String::with_capacity(hash.len() * 2);
+    for byte in hash {
+        hex.push_str(&format!("{byte:02x}"));
     }
     format!(
-        "artwork|{}|{}|{:x}|{}x{}",
+        "artwork|v2|{}|{}|{}|{}x{}|{}",
         slug.as_str(),
         kind_literal(kind),
-        hash.finish(),
+        hex,
         image.width.unwrap_or(0),
         image.height.unwrap_or(0),
+        image.url,
     )
 }
 

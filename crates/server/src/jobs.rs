@@ -150,6 +150,8 @@ impl JobHandler for EnrichJobHandler {
 pub struct KvSweepJobHandler {
     /// The database the expired rows are deleted from.
     database: Arc<Database>,
+    /// The catalog layer, whose cached answers and images are swept here too.
+    catalog: Arc<CatalogService>,
 }
 
 impl KvSweepJobHandler {
@@ -158,8 +160,8 @@ impl KvSweepJobHandler {
     /// # Parameters
     ///
     /// - `database`: the open database whose `plugin_kv` rows are swept.
-    pub fn new(database: Arc<Database>) -> Self {
-        Self { database }
+    pub fn new(database: Arc<Database>, catalog: Arc<CatalogService>) -> Self {
+        Self { database, catalog }
     }
 }
 
@@ -179,10 +181,24 @@ impl JobHandler for KvSweepJobHandler {
         match kv::sweep_expired(self.database.writer()).await {
             Ok(swept) => {
                 tracing::debug!(kind = %job.kind, swept, "swept expired plugin key-value rows");
-                Ok(())
             }
-            Err(error) => Err(JobError::new(error.to_string())),
+            Err(error) => return Err(JobError::new(error.to_string())),
         }
+        // The same hourly tick is what keeps the two catalog caches from growing
+        // without bound: expired answers, and images older than the retention.
+        match self.catalog.sweep_expired_cache().await {
+            Ok(swept) => tracing::debug!(kind = %job.kind, swept, "swept expired catalog answers"),
+            Err(error) => tracing::warn!(%error, "the catalog cache could not be swept"),
+        }
+        match self
+            .catalog
+            .sweep_artwork_cache(hearthsound_catalog::artwork::ARTWORK_CACHE_RETENTION)
+            .await
+        {
+            Ok(swept) => tracing::debug!(kind = %job.kind, swept, "swept old cover images"),
+            Err(error) => tracing::warn!(%error, "the cover cache could not be swept"),
+        }
+        Ok(())
     }
 }
 

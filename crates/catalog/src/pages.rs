@@ -104,6 +104,14 @@ pub struct ArtistPage {
     /// The artist's albums: the catalog discography with stored albums in the
     /// places they belong, then the stored albums the catalog does not list.
     pub albums: Vec<PageAlbum>,
+    /// Whether the discography the page could list is the whole one.
+    ///
+    /// A provider error while listing leaves the page answerable but marks the
+    /// listing incomplete, so a client can offer a reload instead of presenting a
+    /// partial discography as the artist's work.
+    pub discography_complete: bool,
+    /// Whether the discography was cut at [`MAX_PAGE_ALBUMS`].
+    pub discography_truncated: bool,
 }
 
 /// The head of an album page.
@@ -852,6 +860,8 @@ impl CatalogService {
 
         let mut albums: Vec<PageAlbum> = Vec::new();
         let mut emitted: HashSet<EntityId> = HashSet::new();
+        let mut discography_complete = true;
+        let mut discography_truncated = false;
         if let Some(catalog) = &catalog {
             let references = match self
                 .page_artist_albums(&catalog.id, MAX_PAGE_ALBUMS, 0, depth)
@@ -860,14 +870,18 @@ impl CatalogService {
                 Ok(Some(found)) => found,
                 Ok(None) => Vec::new(),
                 Err(error) => {
-                    tracing::debug!(
+                    // An operator-visible event: the page answers the library it
+                    // holds, but the artist's work is not all there.
+                    tracing::warn!(
                         %error,
                         artist = %catalog.id,
                         "an artist discography could not be listed"
                     );
+                    discography_complete = false;
                     Vec::new()
                 }
             };
+            discography_truncated = u32::try_from(references.len()).unwrap_or(u32::MAX) >= MAX_PAGE_ALBUMS;
             if !references.is_empty() {
                 let slug = catalog.id.slug().clone();
                 let provider_ids: Vec<String> = references
@@ -940,7 +954,12 @@ impl CatalogService {
                 }
             }
         }
-        Ok(Some(ArtistPage { head, albums }))
+        Ok(Some(ArtistPage {
+            head,
+            albums,
+            discography_complete,
+            discography_truncated,
+        }))
     }
 
     /// Builds one album page.
@@ -1166,7 +1185,10 @@ fn match_albums(
     aliased: &HashMap<EntityId, String>,
     candidates: &[Candidate<'_>],
 ) -> Vec<(usize, EntityId)> {
-    let mut taken = vec![false; candidates.len()];
+    // The candidate's index is its position in the provider's listing, which is
+    // what the caller resolves the pair against; a filtered candidate list can
+    // therefore carry indices the list itself does not cover.
+    let mut taken: HashSet<usize> = HashSet::new();
     let mut pairs = Vec::new();
     for album in stored {
         if aliased.contains_key(&album.id) {
@@ -1174,7 +1196,7 @@ fn match_albums(
         }
         let chosen = candidates
             .iter()
-            .filter(|candidate| !taken[candidate.index])
+            .filter(|candidate| !taken.contains(&candidate.index))
             .filter(|candidate| years_fold(album.year, candidate.year))
             .filter_map(|candidate| {
                 title_match(album, candidate.title).map(|strength| (strength, candidate))
@@ -1187,7 +1209,7 @@ fn match_albums(
                 )
             });
         if let Some((_, candidate)) = chosen {
-            taken[candidate.index] = true;
+            taken.insert(candidate.index);
             pairs.push((candidate.index, album.id));
         }
     }

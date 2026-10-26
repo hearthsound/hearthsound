@@ -422,7 +422,10 @@ impl Services {
         );
         runner.register(
             PLUGIN_KV_SWEEP_JOB_KIND,
-            Arc::new(KvSweepJobHandler::new(Arc::clone(&database))),
+            Arc::new(KvSweepJobHandler::new(
+                Arc::clone(&database),
+                Arc::clone(&catalog),
+            )),
         );
         runner.register(
             MAINTENANCE_JOB_KIND,

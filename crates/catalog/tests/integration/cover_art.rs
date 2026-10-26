@@ -720,3 +720,111 @@ async fn the_earlier_artwork_instance_wins_a_portrait() {
         started.elapsed()
     );
 }
+
+/// The cover key names the format version, the subject and the image, URL
+/// included, and one URL is served from the cache the second time.
+#[tokio::test]
+async fn the_cover_key_names_the_image_url() {
+    let server = MockServer::start().await;
+    serve_image(&server, "/cover-a.png", 200).await;
+    serve_image(&server, "/cover-b.png", 200).await;
+    let env = Env::new().await;
+    env.instance(
+        "artwork",
+        ARTWORK_FIXTURE,
+        ARTWORK_FIXTURE_ID,
+        json!({
+            "imageUrl": server.uri(),
+            "albums": [{
+                "title": "Hello Album",
+                "images": [
+                    { "path": "/cover-a.png", "width": 250 },
+                    { "path": "/cover-b.png", "width": 500 },
+                ],
+            }],
+            "artists": [],
+        }),
+    )
+    .await;
+    env.assign(Layer::Artwork, &["artwork"]).await;
+    let album = env.stored_album("Hello Album", "Hello Artist").await;
+
+    // The two described images are two entries under one subject: the key names
+    // the image, URL included, so a provider that changes the picture for a size
+    // is not served the one it described before.
+    let request = |size: u32| CoverArtRequest {
+        id: ClientId::Entity(album),
+        size: Some(size),
+    };
+    env.service().cover_art(&request(250)).await.unwrap();
+    env.service().cover_art(&request(500)).await.unwrap();
+    let keys = cache_keys(&env).await;
+    assert_eq!(keys.len(), 2, "each image keeps its own entry: {keys:?}");
+    for key in &keys {
+        assert!(
+            key.starts_with("artwork|v2|artwork|album|"),
+            "the key carries the format version: {key}"
+        );
+    }
+    assert!(
+        keys.iter().any(|key| key.ends_with("/cover-a.png")),
+        "{keys:?}"
+    );
+    assert!(
+        keys.iter().any(|key| key.ends_with("/cover-b.png")),
+        "{keys:?}"
+    );
+
+    // A repeated request for one image is a cache hit.
+    let before = requested_paths(&server).await.len();
+    env.service().cover_art(&request(250)).await.unwrap();
+    assert_eq!(requested_paths(&server).await.len(), before);
+}
+
+/// Returns the keys of the artwork cache, sorted.
+async fn cache_keys(env: &Env) -> Vec<String> {
+    let mut keys: Vec<String> = sqlx::query_scalar("SELECT key FROM artwork_cache")
+        .fetch_all(env.database.readers())
+        .await
+        .unwrap();
+    keys.sort();
+    keys
+}
+
+/// A cached image older than the retention is deleted with its file; a fresh one
+/// survives.
+#[tokio::test]
+async fn the_artwork_sweep_deletes_old_rows_and_files() {
+    let (env, _server) = artwork_env(&["/cover-250.png"]).await;
+    let service = env.service();
+    let album = env.stored_album("Hello Album", "Hello Artist").await;
+    let fresh = env.stored_album("Hello Album", "Hello Artist").await;
+    service
+        .cover_art(&CoverArtRequest {
+            id: ClientId::Entity(album),
+            size: None,
+        })
+        .await
+        .unwrap();
+    let _ = fresh;
+    assert_eq!(cache_keys(&env).await.len(), 1);
+    assert_eq!(env.artwork_files().len(), 1);
+
+    // Age the row past the retention.
+    let retention = hearthsound_catalog::artwork::ARTWORK_CACHE_RETENTION;
+    let old = crate::common::now_millis() - i64::try_from(retention.as_millis()).unwrap() - 1_000;
+    sqlx::query("UPDATE artwork_cache SET fetched_at = ?")
+        .bind(old)
+        .execute(env.database.writer())
+        .await
+        .unwrap();
+
+    let deleted = service.sweep_artwork_cache(retention).await.unwrap();
+    assert_eq!(deleted, 1);
+    assert!(cache_keys(&env).await.is_empty());
+    assert!(
+        env.artwork_files().is_empty(),
+        "the file goes with its row: {:?}",
+        env.artwork_files()
+    );
+}
