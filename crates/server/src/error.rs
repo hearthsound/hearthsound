@@ -97,4 +97,10 @@ pub enum ServerError {
     /// The server stopped but its HTTP task panicked or was cancelled.
     #[error("the HTTP task did not finish: {0}")]
     HttpTask(#[source] tokio::task::JoinError),
+    /// One or more background workers panicked before the process stopped.
+    #[error("{failed} server worker(s) did not finish cleanly")]
+    Workers {
+        /// How many workers did not finish.
+        failed: usize,
+    },
 }

@@ -324,7 +324,7 @@ async fn a_key_created_by_the_cli_authenticates_against_a_server() {
 
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     assert!(response.contains("\"status\":\"ok\""), "{response}");
-    server.shutdown().await;
+    server.shutdown().await.unwrap();
 }
 
 /// An app password created by the CLI authenticates the legacy `u`/`p` call.
@@ -361,7 +361,7 @@ async fn an_app_password_created_by_the_cli_authenticates_a_rest_call() {
 
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     assert!(response.contains("\"status\":\"ok\""), "{response}");
-    server.shutdown().await;
+    server.shutdown().await.unwrap();
 }
 
 /// `add-folder` requires exactly one of `--owner` and `--generic`.
@@ -2050,5 +2050,5 @@ async fn update_user_revokes_the_accounts_credentials() {
     );
     assert!(after.contains("\"code\":44") || after.contains("\"status\":\"failed\""));
 
-    server.shutdown().await;
+    server.shutdown().await.unwrap();
 }

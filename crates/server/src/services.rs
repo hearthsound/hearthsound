@@ -70,7 +70,7 @@ use hearthsound_core::events::EventBus;
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_jobs::{
     JobHandler, JobQueue, JobRunner, JobRunnerOptions, QueueOptions, ScheduleSpec, Scheduler,
-    SchedulerOptions,
+    SchedulerOptions, Shutdown,
 };
 use hearthsound_library::StorageRoots;
 use hearthsound_library::identity::{REIDENTITY_JOB_KIND, ReidentityJobHandler};
@@ -112,6 +112,11 @@ pub struct Services {
     settings: Settings,
     /// The server event bus.
     events: Arc<EventBus>,
+    /// The process-wide stop signal.
+    ///
+    /// Every background worker and every long-lived response ends on it, so one
+    /// signal stops the whole process and no client can hold it open.
+    shutdown: Shutdown,
     /// The credential resolver shared by every surface.
     authenticator: Arc<Authenticator>,
     /// The web session table, shared by the native API and `/rest`.
@@ -260,6 +265,10 @@ impl Services {
         );
         let secrets = secret_key.secret_box();
         let events = Arc::new(EventBus::new());
+        // One signal for the whole process: the workers, the listener and the
+        // long-lived responses all watch this value, so triggering it once stops
+        // everything.
+        let shutdown = Shutdown::new();
         let sessions = Sessions::new(&database);
         // The setup link only exists while no account does; the check is the
         // same query the API's own `required` answer reads.
@@ -557,6 +566,7 @@ impl Services {
             database,
             settings,
             events,
+            shutdown,
             authenticator,
             sessions: sessions.clone(),
             setup: Arc::clone(&setup),
@@ -614,6 +624,15 @@ impl Services {
     /// Returns the server event bus.
     pub fn events(&self) -> &Arc<EventBus> {
         &self.events
+    }
+
+    /// Returns a handle on the process-wide stop signal.
+    ///
+    /// The serving process takes one handle per worker and one for the
+    /// listener; a long-lived response held by a handler ends on it, which is
+    /// what keeps a client from holding shutdown open.
+    pub fn shutdown(&self) -> Shutdown {
+        self.shutdown.clone()
     }
 
     /// Returns the credential resolver.
@@ -852,6 +871,7 @@ impl Services {
             jobs: Arc::clone(&self.queue),
             watcher: Arc::clone(&self.watcher),
             events: Arc::clone(&self.events),
+            shutdown: self.shutdown.clone(),
             plugins: Arc::clone(&self.plugins),
             instances: self.instances.clone(),
             admin: Arc::clone(&self.admin),

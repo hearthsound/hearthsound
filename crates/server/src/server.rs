@@ -6,13 +6,16 @@
 //! signal handling a deployment needs: it starts, waits for `SIGINT` or
 //! `SIGTERM`, and then stops the listener and every worker.
 //!
-//! Shutdown is orderly in one direction: the HTTP server stops accepting new
+//! Shutdown is orderly in one direction: the stop signal ends the long-lived
+//! responses (the event stream ends, and a stream or download still open after
+//! [`HTTP_DRAIN_TIMEOUT`] is cut), the HTTP server stops accepting new
 //! connections and finishes the responses in flight, the job runner finishes the
 //! jobs it holds (up to its shutdown grace period), the scheduler stops between
 //! ticks, the folder watcher drops its watchers, and the data-version watcher
-//! stops polling. A handler abandoned by the runner's grace period keeps its
-//! claim and runs again after its lock expires, which is why handlers must
-//! tolerate running twice.
+//! stops polling. A client therefore cannot hold shutdown open, and a worker
+//! that panicked is reported so the process exits non-zero. A handler abandoned
+//! by the runner's grace period keeps its claim and runs again after its lock
+//! expires, which is why handlers must tolerate running twice.
 
 use std::sync::Arc;
 
@@ -23,6 +26,8 @@ use hearthsound_core::events::{
 use hearthsound_jobs::Shutdown;
 use hearthsound_library::maintenance::MaintenanceSignal;
 use hearthsound_library::scan::ScanRequest;
+use std::time::Duration;
+
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -30,18 +35,25 @@ use tokio::task::JoinHandle;
 use crate::error::ServerError;
 use crate::services::Services;
 
+/// How long the listener gets to finish the responses in flight.
+///
+/// An audio stream or a download still open after this is cut: shutdown is the
+/// operator's decision, and a client must not be able to hold the process open.
+const HTTP_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A running server: the HTTP listener plus the background workers.
 pub struct Server {
     /// The services the listener and the workers share.
     services: Arc<Services>,
     /// The signal every worker and the HTTP server stop on.
-    shutdown: Shutdown,
+    shutdown_signal: Shutdown,
     /// The address the listener is bound to.
     local_addr: std::net::SocketAddr,
     /// The task serving HTTP.
     http: JoinHandle<Result<(), std::io::Error>>,
-    /// The tasks running the job runner, the scheduler, and the watcher.
-    workers: Vec<JoinHandle<()>>,
+    /// The tasks running the job runner, the scheduler, and the watcher, each
+    /// with the name it is reported under.
+    workers: Vec<(&'static str, JoinHandle<()>)>,
 }
 
 impl Server {
@@ -95,10 +107,10 @@ impl Server {
             .local_addr()
             .map_err(|source| ServerError::Bind { addr, source })?;
 
-        let shutdown = Shutdown::new();
+        let shutdown_signal = services.shutdown();
         let app = crate::http::router(&services);
 
-        let http_shutdown = shutdown.clone();
+        let http_shutdown = shutdown_signal.clone();
         let http = tokio::spawn(async move {
             // The connect information is what lets a handler read the peer
             // address: the login rate limit is keyed on the client address, and
@@ -112,7 +124,7 @@ impl Server {
             .await
         });
 
-        let workers = spawn_workers(&services, shutdown.clone());
+        let workers = spawn_workers(&services, shutdown_signal.clone());
 
         // The one bootstrap credential of the whole server: a fresh database
         // has no account, and the only way to create one is this link. It is
@@ -127,7 +139,7 @@ impl Server {
 
         Ok(Server {
             services,
-            shutdown,
+            shutdown_signal,
             local_addr,
             http,
             workers,
@@ -151,9 +163,23 @@ impl Server {
 
     /// Stops serving and waits for every worker to finish.
     ///
-    /// The HTTP server drains the requests in flight; the job runner finishes or
-    /// abandons the jobs it holds according to its grace period; the scheduler
-    /// and the watcher stop between ticks.
+    /// The stop signal ends the event streams, so no client can hold the
+    /// listener open; the listener then drains the responses in flight up to
+    /// [`HTTP_DRAIN_TIMEOUT`]; the job runner finishes or abandons the jobs it
+    /// holds according to its grace period; the scheduler and the watcher stop
+    /// between ticks.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the listener stopped without an error and every worker
+    /// finished cleanly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::Serve`] when the HTTP server stopped with an I/O
+    /// error, [`ServerError::HttpTask`] when its task panicked or was cancelled,
+    /// and [`ServerError::Workers`] when a worker panicked. Every failure is
+    /// logged as it happens, and the first one is returned.
     ///
     /// # Examples
     ///
@@ -161,38 +187,42 @@ impl Server {
     /// # use std::sync::Arc;
     /// # async fn example(services: Arc<hearthsound_server::Services>) -> Result<(), Box<dyn std::error::Error>> {
     /// let server = hearthsound_server::Server::start_on(services, "127.0.0.1:0".parse()?).await?;
-    /// server.shutdown().await;
+    /// server.shutdown().await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn shutdown(self) {
-        self.shutdown.trigger();
-        if let Err(error) = self.http.await {
-            tracing::error!(%error, "the HTTP task did not finish cleanly");
-        }
-        for worker in self.workers {
-            let _ = worker.await;
-        }
+    pub async fn shutdown(self) -> Result<(), ServerError> {
+        let Server {
+            shutdown_signal,
+            http,
+            workers,
+            ..
+        } = self;
+        shutdown_signal.trigger();
+        let drained = drain_http(http).await;
+        let stopped = stop_workers(workers).await;
+        drained?;
+        stopped
     }
 
     /// Waits until the HTTP server stops, then for every worker.
     ///
     /// # Returns
     ///
-    /// `Ok(())` when the listener stopped without an error.
+    /// `Ok(())` when the listener stopped without an error and every worker
+    /// finished cleanly.
     ///
     /// # Errors
     ///
     /// Returns [`ServerError::Serve`] when the HTTP server stopped with an I/O
-    /// error and [`ServerError::HttpTask`] when its task panicked or was
-    /// cancelled.
+    /// error, [`ServerError::HttpTask`] when its task panicked or was
+    /// cancelled, and [`ServerError::Workers`] when a worker panicked.
     pub async fn wait(self) -> Result<(), ServerError> {
         let Server { http, workers, .. } = self;
-        let served = http.await.map_err(ServerError::HttpTask)?;
-        for worker in workers {
-            let _ = worker.await;
-        }
-        served.map_err(ServerError::Serve)
+        let drained = drain_http(http).await;
+        let stopped = stop_workers(workers).await;
+        drained?;
+        stopped
     }
 
     /// Starts the server, waits for a termination signal, and shuts down.
@@ -209,13 +239,13 @@ impl Server {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Server::start`] and [`Server::wait`].
+    /// Returns the errors of [`Server::start`] and [`Server::shutdown`], which
+    /// `hearthsound serve` turns into a non-zero exit.
     pub async fn run(services: Arc<Services>) -> Result<(), ServerError> {
         let server = Server::start(services).await?;
         wait_for_signal().await;
         tracing::info!("a termination signal arrived; shutting down");
-        server.shutdown().await;
-        Ok(())
+        server.shutdown().await
     }
 }
 
@@ -235,7 +265,10 @@ impl Server {
 /// # Returns
 ///
 /// The tasks, in spawn order.
-fn spawn_workers(services: &Arc<Services>, shutdown: Shutdown) -> Vec<JoinHandle<()>> {
+fn spawn_workers(
+    services: &Arc<Services>,
+    shutdown: Shutdown,
+) -> Vec<(&'static str, JoinHandle<()>)> {
     let runner = Arc::clone(services.runner());
     let runner_shutdown = shutdown.clone();
     let runner_task = tokio::spawn(async move { runner.run(runner_shutdown).await });
@@ -270,14 +303,101 @@ fn spawn_workers(services: &Arc<Services>, shutdown: Shutdown) -> Vec<JoinHandle
         tokio::spawn(async move { external.watch_external_changes(shutdown).await });
 
     vec![
-        runner_task,
-        scheduler_task,
-        watchers_task,
-        maintainer_task,
-        deliverer_task,
-        events_task,
-        external_task,
+        ("job runner", runner_task),
+        ("scheduler", scheduler_task),
+        ("folder watcher", watchers_task),
+        ("storage maintainer", maintainer_task),
+        ("scrobble deliverer", deliverer_task),
+        ("event wake-up", events_task),
+        ("data-version watcher", external_task),
     ]
+}
+
+/// Waits for the HTTP task, cutting the connections after [`HTTP_DRAIN_TIMEOUT`].
+///
+/// # Parameters
+///
+/// - `http`: the task serving the listener.
+///
+/// # Returns
+///
+/// `Ok(())` when the listener stopped without an error, including when the drain
+/// deadline cut the connections still open.
+///
+/// # Errors
+///
+/// Returns [`ServerError::Serve`] when the listener stopped with an I/O error
+/// and [`ServerError::HttpTask`] when its task panicked or was cancelled.
+async fn drain_http(http: JoinHandle<Result<(), std::io::Error>>) -> Result<(), ServerError> {
+    drain_http_within(http, HTTP_DRAIN_TIMEOUT).await
+}
+
+/// Waits for the HTTP task, bounded by `deadline`.
+///
+/// # Parameters
+///
+/// - `http`: the task serving the listener.
+/// - `deadline`: how long it gets to finish the responses in flight.
+///
+/// # Returns
+///
+/// `Ok(())` when the listener stopped within the deadline, and when the deadline
+/// cut it.
+///
+/// # Errors
+///
+/// Returns [`ServerError::Serve`] when the listener stopped with an I/O error
+/// and [`ServerError::HttpTask`] when its task panicked or was cancelled.
+async fn drain_http_within(
+    mut http: JoinHandle<Result<(), std::io::Error>>,
+    deadline: Duration,
+) -> Result<(), ServerError> {
+    let expiry = tokio::time::sleep(deadline);
+    tokio::pin!(expiry);
+    tokio::select! {
+        finished = &mut http => match finished {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(source)) => Err(ServerError::Serve(source)),
+            Err(error) => Err(ServerError::HttpTask(error)),
+        },
+        () = &mut expiry => {
+            tracing::warn!(
+                deadline_ms = deadline.as_millis() as u64,
+                "the listener did not finish its responses within the shutdown deadline;                  the connections were cut",
+            );
+            http.abort();
+            Ok(())
+        }
+    }
+}
+
+/// Joins every worker, reporting the ones that did not finish cleanly.
+///
+/// # Parameters
+///
+/// - `workers`: the worker tasks with the names they are reported under.
+///
+/// # Returns
+///
+/// `Ok(())` when every worker finished on its own.
+///
+/// # Errors
+///
+/// Returns [`ServerError::Workers`] with how many workers failed; each failure
+/// is logged first, so the log names the worker that panicked.
+async fn stop_workers(workers: Vec<(&'static str, JoinHandle<()>)>) -> Result<(), ServerError> {
+    let mut failed = 0_usize;
+    for (name, worker) in workers {
+        if let Err(error) = worker.await {
+            tracing::error!(worker = name, %error, "a server worker did not finish");
+            failed += 1;
+        }
+    }
+    if failed == 0 {
+        Ok(())
+    } else {
+        Err(ServerError::Workers { failed })
+    }
 }
 
 /// Wakes the storage maintenance worker whenever a file arrives.
@@ -421,6 +541,42 @@ fn setup_url(base_url: &str, local_addr: std::net::SocketAddr, token: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_listener_that_stopped_with_an_io_error_is_reported() {
+        let http = tokio::spawn(async { Err(std::io::Error::other("listener")) });
+        let drained = drain_http(http).await;
+        assert!(
+            matches!(drained, Err(ServerError::Serve(_))),
+            "an I/O error must be reported as a serve failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_listener_that_never_finishes_is_cut_after_the_deadline() {
+        let http = tokio::spawn(async {
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        let drained = drain_http_within(http, Duration::from_millis(50)).await;
+        assert!(
+            drained.is_ok(),
+            "cutting the connections is the deadline doing its job"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panicked_worker_is_reported() {
+        let workers: Vec<(&'static str, JoinHandle<()>)> = vec![
+            ("panicking", tokio::spawn(async { panic!("worker") })),
+            ("finishing", tokio::spawn(async {})),
+        ];
+        let stopped = stop_workers(workers).await;
+        assert!(
+            matches!(stopped, Err(ServerError::Workers { failed: 1 })),
+            "one panicked worker must be reported"
+        );
+    }
 
     #[test]
     fn the_setup_url_follows_the_configured_base_url() {

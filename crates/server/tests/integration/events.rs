@@ -398,6 +398,41 @@ async fn a_last_event_id_from_a_previous_run_sends_the_refetch_notice() {
     fixture.stop().await;
 }
 
+/// An open event stream does not hold shutdown open: the stop signal ends the
+/// feed, so a client that walked away cannot keep the process alive.
+#[tokio::test]
+async fn an_open_stream_does_not_hold_up_shutdown() {
+    let fixture = Fixture::new().await;
+    let mut response = fixture
+        .client
+        .get(stream_url(&fixture))
+        .header(AUTHORIZATION, bearer_value(&fixture))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // One live frame proves the stream is open and serving.
+    publish_playlist(&fixture, "pl_open");
+    let frames = next_frames(&mut response, 1).await;
+    assert_eq!(frames[0].event, "playlist.changed");
+
+    let (server, dir) = fixture.into_parts();
+    let stopped = tokio::time::timeout(Duration::from_secs(5), server.shutdown()).await;
+    assert!(
+        matches!(stopped, Ok(Ok(()))),
+        "an open stream must not delay shutdown: {stopped:?}"
+    );
+
+    // The body ended with the stream, so the next read reports the end.
+    let ended = tokio::time::timeout(Duration::from_secs(5), response.chunk()).await;
+    assert!(
+        matches!(ended, Ok(Ok(None)) | Ok(Err(_))),
+        "the stream must end when the server stops: {ended:?}"
+    );
+    drop(dir);
+}
+
 /// A connection that falls behind a burst of events keeps receiving the live
 /// feed: the events it can still reach arrive, and any gap is reported with
 /// the refetch notice rather than ending the stream.

@@ -84,6 +84,8 @@ pub struct NativeServices {
     pub watcher: Arc<LibraryWatcher>,
     /// The server event bus.
     pub events: Arc<EventBus>,
+    /// The process-wide stop signal; a long-lived response ends on it.
+    pub shutdown: hearthsound_jobs::Shutdown,
     /// The wasmtime plugin host, which owns the plugins directory and the
     /// files of every installed plugin.
     pub plugins: Arc<PluginHost>,

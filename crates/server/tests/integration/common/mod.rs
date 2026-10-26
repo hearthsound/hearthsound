@@ -193,8 +193,21 @@ impl Fixture {
     /// process left behind, and the caller starts a new process over them with
     /// [`Fixture::reopen`].
     pub async fn stop(self) -> TempDir {
-        self.server.shutdown().await;
-        self._dir
+        let (server, dir) = self.into_parts();
+        server.shutdown().await.unwrap();
+        dir
+    }
+
+    /// Takes the running server and the data directory apart.
+    ///
+    /// A test that drives shutdown itself needs both: the server to stop and the
+    /// data directory to keep alive for as long as the process runs.
+    ///
+    /// # Returns
+    ///
+    /// The server and the data directory.
+    pub fn into_parts(self) -> (Server, TempDir) {
+        (self.server, self._dir)
     }
 
     /// Starts a process over the data directory a stopped fixture left.

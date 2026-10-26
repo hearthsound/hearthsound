@@ -25,6 +25,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::stream::{self, Stream, StreamExt};
 use hearthsound_auth::Principal;
 use hearthsound_core::events::{EventBus, EventEnvelope, Replay};
+use hearthsound_jobs::Shutdown;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::error::RecvError;
 use utoipa::{IntoParams, ToSchema};
@@ -210,6 +211,7 @@ pub async fn stream(
     let (opening, replayed_through) = opening_frames(&bus, last_event_id, &principal);
     let live = Live {
         receiver,
+        shutdown: state.services().shutdown.clone(),
         principal,
         replayed_through,
         state,
@@ -295,6 +297,12 @@ fn opening_frames(
 struct Live {
     /// The subscription to the event bus.
     receiver: tokio::sync::broadcast::Receiver<EventEnvelope>,
+    /// The process-wide stop signal; the stream ends when it is triggered.
+    ///
+    /// A shutdown must not wait for every open event connection to close on its
+    /// own, so the feed ends here and the client reconnects with its
+    /// `Last-Event-ID` once a server is serving again.
+    shutdown: Shutdown,
     /// The caller the frames are filtered for.
     ///
     /// This is refreshed from the account every [`REAUTHORIZE_INTERVAL`], so a
@@ -340,7 +348,9 @@ impl Live {
 /// notice and then continues with whatever the bus still holds. Every
 /// [`REAUTHORIZE_INTERVAL`] - on a frame or on an idle wait - the credential is
 /// checked again, so a logout, a revocation, a disable, a deletion or a role
-/// change closes an open stream within that window.
+/// change closes an open stream within that window. The process stop signal
+/// ends the stream at once, so an open feed never holds shutdown open: the
+/// client reconnects with its `Last-Event-ID` and receives what it missed.
 ///
 /// # Parameters
 ///
@@ -351,7 +361,11 @@ impl Live {
 /// The next frame and the updated state, or `None` when the stream ends.
 async fn next_live_frame(mut live: Live) -> Option<(Result<Event, Infallible>, Live)> {
     loop {
-        match tokio::time::timeout(REAUTHORIZE_INTERVAL, live.receiver.recv()).await {
+        let received = tokio::select! {
+            () = live.shutdown.wait() => return None,
+            received = tokio::time::timeout(REAUTHORIZE_INTERVAL, live.receiver.recv()) => received,
+        };
+        match received {
             Ok(Ok(envelope)) => {
                 if live.checked_at.elapsed() >= REAUTHORIZE_INTERVAL && !live.revalidate().await {
                     return None;

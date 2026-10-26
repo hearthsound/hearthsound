@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Shutdown ends the event stream, cuts a response still in flight after ten seconds and reports a worker that panicked, so a client cannot hold the process open and `hearthsound serve` exits non-zero when a worker failed.
 - A scrobble row a service rejected permanently is shown for a week and then swept away, so a queue nobody reads stops growing.
 - A play that nothing scrobbled yet - one whose enqueue failed, or one recorded before the listener linked a service - is offered to the linked services by the next delivery pass, as long as it is less than an hour old.
 - A queue whose service limits cannot be read waits five minutes instead of spending one attempt per row on a call that never happened.
