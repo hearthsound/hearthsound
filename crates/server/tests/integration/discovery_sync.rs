@@ -12,12 +12,15 @@
 use std::time::Duration;
 
 use hearthsound_core::Layer;
+use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, Origin, TrackInput};
 use hearthsound_plugin_host::{InstanceSpec, PluginRepository, PluginSource};
-use hearthsound_test_support::{ALBUM_CATALOG, SCROBBLE_FIXTURE, fixture_plugin};
+use hearthsound_test_support::{ALBUM_CATALOG, HTTP_CATALOG, SCROBBLE_FIXTURE, fixture_plugin};
 use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{Value, json};
 use uuid::Uuid;
+use wiremock::matchers::method;
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::common::Fixture;
 
@@ -338,4 +341,145 @@ async fn the_discovery_sync_schedule_is_registered() {
     .unwrap();
 
     assert_eq!(cron, "0 4 * * *");
+}
+
+/// Inserts one stored track and returns its client id.
+///
+/// # Parameters
+///
+/// - `fixture`: the running server.
+async fn seed_track(fixture: &Fixture) -> hearthsound_core::EntityId {
+    let library = LibraryRepository::new(fixture.services.database());
+    let album = library
+        .upsert_album(
+            &AlbumInput::new("Sync Album", Origin::Local),
+            &[ArtistCredit::new("Sync Artist", "main")],
+        )
+        .await
+        .unwrap();
+    let mut input = TrackInput::new(
+        "Sync Song",
+        Origin::Local,
+        hearthsound_core::Availability::Local,
+    );
+    input.album_id = Some(album);
+    input.display_artist = Some("Sync Artist".to_owned());
+    input.duration_ms = Some(180_000);
+    library
+        .insert_track(&input, &[ArtistCredit::new("Sync Artist", "main")], &[])
+        .await
+        .unwrap()
+}
+
+/// A catalog that cannot answer leaves a generated playlist as it was.
+///
+/// The sync replaces every entry of the slot it writes, so a search that fails
+/// must skip the write: writing the shorter list would delete the tracks the
+/// failure merely hid until the next pass.
+#[tokio::test]
+async fn a_catalog_error_keeps_the_previous_entries() {
+    let fixture = Fixture::new().await;
+    // A catalog whose every search fails, the way a throttled or unreachable
+    // provider answers.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let catalog_plugin = install_plugin(&fixture, HTTP_CATALOG).await;
+    fixture
+        .services
+        .instances()
+        .create(&InstanceSpec {
+            slug: "broken".to_owned(),
+            plugin_id: catalog_plugin,
+            display_name: "Broken catalog".to_owned(),
+            server_config: json!({ "url": format!("{}/search", server.uri()) }),
+            host_config: Value::Null,
+        })
+        .await
+        .unwrap();
+    let discovery_plugin = install_plugin(&fixture, SCROBBLE_FIXTURE).await;
+    fixture
+        .services
+        .instances()
+        .create(&InstanceSpec {
+            slug: "discovery".to_owned(),
+            plugin_id: discovery_plugin,
+            display_name: "Weekly Jams Service".to_owned(),
+            server_config: json!({
+                "endpoint": "http://127.0.0.1:9",
+                "playlists": [{
+                    "reference": "weekly-jams",
+                    "name": "Weekly Jams",
+                    "description": "A week of listening",
+                    "tracks": [
+                        { "title": "Sync Song", "artists": ["Sync Artist"] }
+                    ]
+                }]
+            }),
+            host_config: Value::Null,
+        })
+        .await
+        .unwrap();
+    fixture
+        .services
+        .instances()
+        .set_layer(Layer::Catalog, &["broken".to_owned()])
+        .await
+        .unwrap();
+    fixture
+        .services
+        .instances()
+        .set_layer(Layer::Discovery, &["discovery".to_owned()])
+        .await
+        .unwrap();
+    fixture.services.registry().rebuild().await.unwrap();
+
+    // The playlist an earlier, successful sync stored.
+    let instance = fixture.services.instances().get("discovery").await.unwrap();
+    let track = seed_track(&fixture).await;
+    let earlier = fixture
+        .services
+        .activity()
+        .playlists()
+        .upsert_generated(
+            &hearthsound_activity::SyncedPlaylist {
+                owner_user_id: fixture.user_id,
+                source_instance_id: instance.id,
+                source_ref: "weekly-jams",
+                name: "Earlier Sync",
+                comment: None,
+                expires_at: i64::MAX,
+                tracks: &[track],
+            },
+            i64::MAX / 2,
+        )
+        .await
+        .unwrap();
+    let events_before = fixture.services.events().latest_id();
+
+    link(&fixture).await;
+    let written = fixture
+        .services
+        .discovery_sync()
+        .sync_user(fixture.user_id)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        written, 0,
+        "a playlist that cannot be resolved is not written"
+    );
+    let after = generated_playlist(&fixture, fixture.user_id)
+        .await
+        .expect("the playlist an earlier sync stored is still there");
+    assert_eq!(after.id, earlier.id.uuid().as_bytes().to_vec());
+    assert_eq!(after.name, "Earlier Sync", "the name was left alone");
+    assert_eq!(after.tracks, 1, "the entries the failure hid were kept");
+    assert_eq!(
+        fixture.services.events().latest_id(),
+        events_before,
+        "a skipped playlist publishes nothing"
+    );
 }
