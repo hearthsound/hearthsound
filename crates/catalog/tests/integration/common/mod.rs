@@ -34,6 +34,9 @@ pub const HELLO_CATALOG_ID: &str = "com.example.hello-catalog";
 /// The plugin id of the HTTP catalog fixture.
 pub const HTTP_CATALOG_ID: &str = "com.example.http-catalog";
 
+/// The plugin id of the album catalog fixture.
+pub const ALBUM_CATALOG_ID: &str = "com.example.album-catalog";
+
 /// The plugin id of the spin catalog fixture.
 pub const SPIN_CATALOG_ID: &str = "com.example.spin-catalog";
 
@@ -235,6 +238,7 @@ impl Env {
                         name: artist.to_owned(),
                         sort_name: None,
                         mb_artist_id: Some("44444444-4444-4444-8444-444444444444".to_owned()),
+                        row: None,
                         origin: Origin::Catalog,
                     },
                     role: "main".to_owned(),
@@ -260,6 +264,7 @@ impl Env {
                 name: name.to_owned(),
                 sort_name: None,
                 mb_artist_id: Some("44444444-4444-4444-8444-444444444444".to_owned()),
+                row: None,
                 origin: Origin::Catalog,
             })
             .await

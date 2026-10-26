@@ -675,6 +675,21 @@ impl Env {
     ///
     /// The instance id.
     pub async fn add_catalog_instance(&self) -> Uuid {
+        self.add_catalog_instance_with(json!({})).await
+    }
+
+    /// Installs the album catalog fixture and makes it the catalog layer, with
+    /// the given server-scoped configuration.
+    ///
+    /// # Parameters
+    ///
+    /// - `server_config`: the fixture configuration; `canonicalIds: false` makes
+    ///   it report only its own ids, the way a service such as Deezer does.
+    ///
+    /// # Returns
+    ///
+    /// The instance id.
+    pub async fn add_catalog_instance_with(&self, server_config: Value) -> Uuid {
         let installed = self
             .host
             .install(&fixture_plugin(ALBUM_CATALOG))
@@ -694,7 +709,7 @@ impl Env {
                 slug: CATALOG_INSTANCE.to_owned(),
                 plugin_id: CATALOG_PLUGIN_ID.to_owned(),
                 display_name: "Album catalog".to_owned(),
-                server_config: json!({}),
+                server_config,
                 host_config: host_config(&self.downloads, InstanceLimits::default()),
             })
             .await

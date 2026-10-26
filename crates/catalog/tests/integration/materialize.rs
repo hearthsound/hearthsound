@@ -10,13 +10,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use crate::common::{
-    Env, HELLO_CATALOG_ID, album_artist_ids, alias_target, catalog_id, count_rows,
-    insert_local_track, stored_album, stored_album_fields, stored_artist, stored_track,
-    track_artist_ids, write_alias,
+    ALBUM_CATALOG_ID, Env, HELLO_CATALOG_ID, METADATA_ID, album_artist_ids, alias_target,
+    catalog_id, count_rows, insert_local_track, metadata_config, stored_album, stored_album_fields,
+    stored_artist, stored_track, track_artist_ids, write_alias,
 };
+use hearthsound_catalog::IdentityRequest;
+use hearthsound_core::providers::RecordingHint;
 use hearthsound_core::{EntityKind, IdPrefix, Layer};
 use hearthsound_library::naming::{NamingContext, NamingTemplate};
-use hearthsound_test_support::{ALBUM_CATALOG, HELLO_CATALOG};
+use hearthsound_test_support::{ALBUM_CATALOG, HELLO_CATALOG, METADATA_FIXTURE};
 use serde_json::{Value, json};
 
 /// Builds the environment a materialization test starts from.
@@ -896,5 +898,155 @@ async fn a_dangling_alias_is_dropped_and_repaired() {
         service.repair_aliases().await.unwrap(),
         0,
         "the repair is idempotent"
+    );
+}
+
+/// The recording the metadata instance knows for the album fixture.
+///
+/// The name is the fixture track's title and the artist name is the one its
+/// credits carry, so the resolution matches the track's stored credits.
+const FIXTURE_RECORDING: &str = r#"[
+  {
+    "title": "Fixture Song 1",
+    "artists": ["Fixture Artist"],
+    "artistMbid": "fixture-artist-mb",
+    "mbid": "fixture-recording-1",
+    "score": 0.98,
+    "releases": [{"mbid": "fixture-release-1", "title": "Fixture Album", "date": "2026-02-01"}]
+  }
+]"#;
+
+/// Returns the catalog id of one track of the album fixture.
+///
+/// # Parameters
+///
+/// - `number`: the track number within the album, one-based.
+fn album_fixture_track(number: u8) -> hearthsound_core::CatalogId {
+    catalog_id(
+        "albums",
+        EntityKind::Track,
+        &format!("album-catalog-track-{number}"),
+    )
+}
+
+/// A second materialization credits the row identity resolution identified.
+///
+/// The provider reports only its own ids, the way Deezer does, so the artist and
+/// the album start out unidentified. Resolution names the act and the release;
+/// from then on the provider id, the MusicBrainz id and the name all have to
+/// resolve to the same rows: a name-keyed write would instead store a second row
+/// for the act, and every later materialization would then land on a third one.
+#[tokio::test]
+async fn a_second_materialization_credits_the_rows_identity_resolution_identified() {
+    let env = Env::new().await;
+    env.instance(
+        "albums",
+        ALBUM_CATALOG,
+        ALBUM_CATALOG_ID,
+        json!({ "canonicalIds": false }),
+    )
+    .await;
+    env.instance(
+        "meta",
+        METADATA_FIXTURE,
+        METADATA_ID,
+        metadata_config(serde_json::from_str(FIXTURE_RECORDING).unwrap()),
+    )
+    .await;
+    env.assign(Layer::Catalog, &["albums"]).await;
+    env.assign(Layer::Metadata, &["meta"]).await;
+    let service = env.service();
+
+    let first = service
+        .materialize_track(&album_fixture_track(1))
+        .await
+        .unwrap();
+    service
+        .resolve_track_identity(
+            first,
+            &IdentityRequest::Hint(RecordingHint {
+                title: "Fixture Song 1".to_owned(),
+                artists: vec!["Fixture Artist".to_owned()],
+                album: Some("Fixture Album".to_owned()),
+                duration_ms: Some(180_000),
+                isrc: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .expect("the fixture knows the recording");
+
+    let second = service
+        .materialize_track(&album_fixture_track(2))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        count_rows(&env.database, "artists").await,
+        1,
+        "one act has one row"
+    );
+    let credited = track_artist_ids(&env.database, first.uuid()).await;
+    assert_eq!(credited.len(), 1, "the track credits one artist");
+    assert_eq!(
+        track_artist_ids(&env.database, second.uuid()).await,
+        credited,
+        "the second track credits the same row"
+    );
+    assert_eq!(
+        stored_artist(&env.database, uuid::Uuid::from_slice(&credited[0]).unwrap()).await,
+        Some(("catalog".to_owned(), Some("fixture-artist-mb".to_owned()))),
+        "the row the provider alias names carries the resolved MusicBrainz id"
+    );
+    assert_eq!(
+        alias_target(
+            &env.database,
+            "p:albums",
+            EntityKind::Artist,
+            "album-catalog-artist-1"
+        )
+        .await,
+        Some(credited[0].clone()),
+        "the provider id still names that row"
+    );
+    assert_eq!(
+        alias_target(
+            &env.database,
+            "mb-artist",
+            EntityKind::Artist,
+            "fixture-artist-mb"
+        )
+        .await,
+        Some(credited[0].clone()),
+        "and so does the MusicBrainz id the resolution learned"
+    );
+
+    assert_eq!(
+        count_rows(&env.database, "albums").await,
+        1,
+        "one album has one row"
+    );
+    let album = stored_track(&env.database, first.uuid())
+        .await
+        .unwrap()
+        .album_id
+        .expect("the track belongs to an album");
+    assert_eq!(
+        stored_track(&env.database, second.uuid())
+            .await
+            .unwrap()
+            .album_id,
+        Some(album.clone()),
+        "both tracks belong to the same album row"
+    );
+    assert_eq!(
+        stored_album(&env.database, uuid::Uuid::from_slice(&album).unwrap()).await,
+        Some((
+            "catalog".to_owned(),
+            Some("fixture-release-1".to_owned()),
+            None,
+            None
+        )),
+        "the album row carries the resolved release id"
     );
 }

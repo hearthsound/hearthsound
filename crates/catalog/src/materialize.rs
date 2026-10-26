@@ -300,8 +300,13 @@ impl CatalogService {
 
     /// Materializes one catalog artist.
     ///
-    /// An artist is deduped by MusicBrainz artist id and otherwise by name, so
-    /// an artist a scan already stored is enriched rather than duplicated.
+    /// The provider id decides which row the artist is: the row its `p:<slug>`
+    /// alias names is refreshed with the provider's name and attached to the
+    /// MusicBrainz artist id the provider reports, so an artist the instance has
+    /// already materialized never gains a second row. Only an artist the
+    /// instance has no alias for yet is deduped by MusicBrainz artist id and
+    /// otherwise by name, so an artist a scan already stored is enriched rather
+    /// than duplicated.
     ///
     /// # Parameters
     ///
@@ -545,7 +550,7 @@ async fn store_album(
         return Ok((stored, tracks_stored));
     }
 
-    let credits = credits(&album.artists);
+    let resolved = stored_credits(conn, slug, &album.artists).await?;
     let mut input = AlbumInput::new(album.title.as_str(), Origin::Catalog);
     input.display_artist = display_artist(&album.artists);
     input.year = release_year(album.release_date.as_deref());
@@ -555,7 +560,7 @@ async fn store_album(
     input.mb_release_group_id = canonical_id(&album.ids, MB_RELEASE_GROUP).map(str::to_owned);
     input.upc = album.upc.clone();
 
-    let stored = albums::upsert_album(conn, &input, &credits).await?;
+    let stored = albums::upsert_album(conn, &input, &resolved).await?;
     let stored = claim_alias(conn, &namespace, EntityKind::Album, &album.id, stored).await?;
     record_aliases(
         conn,
@@ -631,10 +636,11 @@ async fn ensure_album_credits(
     if source.is_empty() {
         return Ok(());
     }
+    let resolved = stored_credits(conn, slug, source).await?;
     let written = albums::add_album_credits_if_missing(
         conn,
         album,
-        &credits(source),
+        &resolved,
         display_artist(source).as_deref(),
     )
     .await?;
@@ -693,12 +699,12 @@ async fn store_album_ref(
         return Ok(stored);
     }
 
-    let credits = credits(&album.artists);
+    let resolved = stored_credits(conn, slug, &album.artists).await?;
     let mut input = AlbumInput::new(album.title.as_str(), Origin::Catalog);
     input.display_artist = display_artist(&album.artists);
     input.year = album.year.map(i64::from);
 
-    let stored = albums::upsert_album(conn, &input, &credits).await?;
+    let stored = albums::upsert_album(conn, &input, &resolved).await?;
     let stored = claim_alias(conn, &namespace, EntityKind::Album, &album.id, stored).await?;
     record_credit_aliases(conn, slug, &album.artists).await?;
     ensure_album_credits(conn, slug, stored, &album.artists, &track.artists).await?;
@@ -762,7 +768,7 @@ async fn store_track(
         None => None,
     };
 
-    let credits = credits(&track.artists);
+    let resolved = stored_credits(conn, slug, &track.artists).await?;
     let mut input = TrackInput::new(track.title.as_str(), Origin::Catalog, Availability::Remote);
     input.album_id = album_id;
     input.display_artist = display_artist(&track.artists);
@@ -773,7 +779,7 @@ async fn store_track(
     input.mb_recording_id = canonical_id(&track.ids, MB_RECORDING).map(str::to_owned);
     input.explicit = track.explicit;
 
-    let created = tracks::insert_track(conn, &input, &credits, &[]).await?;
+    let created = tracks::insert_track(conn, &input, &resolved, &[]).await?;
     let stored = claim_alias(conn, &namespace, EntityKind::Track, &track.id, created).await?;
     if stored != created {
         // Another writer materialized the same provider id first. That cannot
@@ -823,14 +829,13 @@ async fn store_artist(
     artist: &CatalogArtist,
 ) -> Result<EntityId, CatalogError> {
     let namespace = aliases::provider_namespace(slug);
+    let mut input = ArtistInput::new(artist.name.as_str()).origin(Origin::Catalog);
+    input.mb_artist_id = canonical_id(&artist.ids, MB_ARTIST).map(str::to_owned);
     if let Some(stored) =
         aliases::entity_by_alias_conn(conn, &namespace, EntityKind::Artist, &artist.id).await?
     {
-        return Ok(stored);
+        input.row = Some(stored);
     }
-
-    let mut input = ArtistInput::new(artist.name.as_str()).origin(Origin::Catalog);
-    input.mb_artist_id = canonical_id(&artist.ids, MB_ARTIST).map(str::to_owned);
 
     let created = artists::upsert_artist(conn, &input).await?;
     let stored = claim_alias(conn, &namespace, EntityKind::Artist, &artist.id, created).await?;
@@ -905,7 +910,7 @@ async fn record_credit_aliases(
         if mbid.is_none() && provider_id.is_none() {
             continue;
         }
-        let Some(artist) = stored_credited_artist(conn, credit, mbid).await? else {
+        let Some(artist) = stored_credited_artist(conn, slug, credit, mbid).await? else {
             continue;
         };
         if let Some(mbid) = mbid {
@@ -927,13 +932,16 @@ async fn record_credit_aliases(
 
 /// Reads the stored artist one credit names.
 ///
-/// The artist was upserted by the same transaction, and [`artists::upsert_artist`]
-/// deduplicates by MusicBrainz artist id when there is one and otherwise by
-/// case-insensitive name, so the same rule finds the row here.
+/// The artist was upserted by the same transaction, so the same order finds the
+/// row here: the `p:<slug>` alias the provider id names, which is the row
+/// [`stored_credits`] pinned the credit to and the same rule a later
+/// materialization resolves by; otherwise the MusicBrainz artist id; otherwise
+/// the case-insensitive name [`artists::upsert_artist`] deduplicated on.
 ///
 /// # Parameters
 ///
 /// - `conn`: the transaction to read on.
+/// - `slug`: the instance that issued the credit.
 /// - `credit`: the credit the provider returned.
 /// - `mbid`: the credit's MusicBrainz artist id, when it carries one.
 ///
@@ -944,17 +952,80 @@ async fn record_credit_aliases(
 ///
 /// # Errors
 ///
-/// Returns [`CatalogError::Database`] when the query fails.
+/// Returns [`CatalogError::Database`] when the query fails and
+/// [`CatalogError::CorruptAlias`] when a stored id does not decode.
 async fn stored_credited_artist(
     conn: &mut SqliteConnection,
+    slug: &Slug,
     credit: &ProviderCredit,
     mbid: Option<&str>,
 ) -> Result<Option<EntityId>, CatalogError> {
+    if let Some(provider_id) = credit_provider_id(credit)
+        && let Some(stored) = aliases::entity_by_alias_conn(
+            conn,
+            &aliases::provider_namespace(slug),
+            EntityKind::Artist,
+            &provider_id.value,
+        )
+        .await?
+    {
+        return Ok(Some(stored));
+    }
     let found = match mbid {
         Some(mbid) => artists::find_artist_by_mb_id(conn, mbid).await?,
         None => artists::find_artist_by_name(conn, &credit.name).await?,
     };
     Ok(found.map(|artist| artist.id))
+}
+
+/// Maps a provider's credits to the library's, resolving each to its stored row.
+///
+/// A provider names the artist of a credit by its own id, and the alias table
+/// holds that id as `p:<slug>` for the row the artist is. A credit the alias
+/// table already names is therefore pinned to that row, which is what keeps a
+/// second materialization of one artist from writing a second row for it: the
+/// name rule cannot tell which of two identified artists of a name the credit is
+/// by, and the provider id can.
+///
+/// The name and the canonical id the credit carries are fallbacks, applied by
+/// [`artists::upsert_artist`] itself when the credit is pinned to nothing: an
+/// artist the instance has no alias for yet is resolved by the MusicBrainz
+/// artist id and otherwise by its name, which is what stores the first
+/// materialization of an artist.
+///
+/// # Parameters
+///
+/// - `conn`: the transaction to read on.
+/// - `slug`: the instance that issued the credits.
+/// - `credits`: the credits the provider returned.
+///
+/// # Returns
+///
+/// The credits, ready for the library writers.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::Database`] when the query fails and
+/// [`CatalogError::CorruptAlias`] when a stored id does not decode.
+async fn stored_credits(
+    conn: &mut SqliteConnection,
+    slug: &Slug,
+    issued: &[ProviderCredit],
+) -> Result<Vec<ArtistCredit>, CatalogError> {
+    let namespace = aliases::provider_namespace(slug);
+    let mut resolved = credits(issued);
+    for (credit, provider) in resolved.iter_mut().zip(issued) {
+        let Some(provider_id) = credit_provider_id(provider) else {
+            continue;
+        };
+        let stored =
+            aliases::entity_by_alias_conn(conn, &namespace, EntityKind::Artist, &provider_id.value)
+                .await?;
+        if let Some(stored) = stored {
+            credit.artist.row = Some(stored);
+        }
+    }
+    Ok(resolved)
 }
 
 /// Maps a provider's credits to the library's input for them.

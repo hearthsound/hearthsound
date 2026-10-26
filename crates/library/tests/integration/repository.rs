@@ -773,3 +773,105 @@ async fn removal_impact_counts_the_likes_and_playlist_entries_a_removal_would_lo
         "a removed folder has nothing left to lose"
     );
 }
+
+#[tokio::test]
+async fn identifying_an_artist_moves_it_into_the_row_that_holds_the_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+
+    // The act the library stores under the provider's own id: one row, credited
+    // by the file that was scanned, with no MusicBrainz id of its own.
+    let track = library
+        .insert_track(
+            &track_input("Cherry-coloured Funk"),
+            &[ArtistCredit::new("Cocteau Twins", "main")],
+            &[],
+        )
+        .await
+        .unwrap();
+    let credited = library.list_track_artists(track).await.unwrap()[0].id;
+    sqlx::query(
+        "INSERT INTO external_ids (namespace, value, entity_kind, entity_id) \
+         VALUES ('p:deezer', '1041', 'artist', ?)",
+    )
+    .bind(credited.uuid().as_bytes().to_vec())
+    .execute(db.writer())
+    .await
+    .unwrap();
+
+    // Resolution went by name and stored a second row for the same act.
+    let twin = library
+        .upsert_artist(&ArtistInput::new("Cocteau Twins").mb_artist_id("mbid-ct"))
+        .await
+        .unwrap();
+    assert_ne!(twin, credited, "the name alone did not resolve it");
+
+    let mut tx = db.writer().begin().await.unwrap();
+    let survivor = hearthsound_library::artists::identify_artist(&mut tx, credited, "mbid-ct")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(survivor, twin, "the row that holds the id survives");
+    assert_eq!(
+        library.list_track_artists(track).await.unwrap()[0].id,
+        twin,
+        "the track's credit moved to the surviving row"
+    );
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artists WHERE name = ?")
+        .bind("Cocteau Twins")
+        .fetch_one(db.readers())
+        .await
+        .unwrap();
+    assert_eq!(remaining, 1, "one act, one row");
+}
+
+#[tokio::test]
+async fn identifying_an_album_moves_it_into_the_row_that_holds_the_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+
+    let credits = [ArtistCredit::new("Cocteau Twins", "main")];
+    let mut first = AlbumInput::new("Heaven or Las Vegas", Origin::Local);
+    first.year = Some(1990);
+    let album = library.upsert_album(&first, &credits).await.unwrap();
+    let track = library
+        .insert_track(
+            &TrackInput {
+                album_id: Some(album),
+                ..track_input("Cherry-coloured Funk")
+            },
+            &credits,
+            &[],
+        )
+        .await
+        .unwrap();
+
+    // A re-tagged file named the album differently and carried the release, so
+    // it stored a second row for the release.
+    let mut released = AlbumInput::new("Heaven or Las Vegas (Deluxe)", Origin::Local);
+    released.year = Some(1990);
+    released.mb_release_id = Some("rel-heaven".to_owned());
+    let holder = library.upsert_album(&released, &credits).await.unwrap();
+    assert_ne!(holder, album);
+
+    let mut tx = db.writer().begin().await.unwrap();
+    let survivor = hearthsound_library::albums::identify_album(&mut tx, album, "rel-heaven", None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(survivor, holder, "the row that holds the release survives");
+    assert_eq!(
+        library.get_track(track).await.unwrap().unwrap().album_id,
+        Some(holder),
+        "the track moved to the surviving album"
+    );
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM albums")
+        .fetch_one(db.readers())
+        .await
+        .unwrap();
+    assert_eq!(remaining, 1, "one release, one row");
+}

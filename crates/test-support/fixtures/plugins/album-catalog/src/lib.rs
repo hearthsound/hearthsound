@@ -8,8 +8,10 @@
 //! A search answers the first track by default. The optional `searchResults`
 //! table makes a query answer another track of the album: an entry matches when
 //! the query text contains its `text` ignoring case, so a test can resolve two
-//! different suggestions through one instance. The plugin asks for no host
-//! permissions and reports no images.
+//! different suggestions through one instance. `canonicalIds` turns off the
+//! MusicBrainz ids the fixture reports beside its own, which is the shape of a
+//! service such as Deezer that identifies nothing canonically. The plugin asks
+//! for no host permissions and reports no images.
 
 use hearthsound_plugin::catalog_provider::exports::hearthsound::plugin::catalog::{
     SearchQuery, SearchResults,
@@ -34,6 +36,19 @@ struct Config {
     /// images, the way a service that names only the album does.
     #[serde(default)]
     bare_album_refs: bool,
+    /// Whether the fixture reports MusicBrainz ids beside its own.
+    ///
+    /// A service such as Deezer reports only its own ids, and neither the
+    /// canonical recording nor the release nor the artist is identified until
+    /// the metadata layer resolves it. A test that starts from that state turns
+    /// this off; the default is the fixture's own canonical ids.
+    #[serde(default = "default_canonical_ids")]
+    canonical_ids: bool,
+}
+
+/// Returns whether the fixture reports MusicBrainz ids unless configured not to.
+fn default_canonical_ids() -> bool {
+    true
 }
 
 /// One query text and the track it answers with.
@@ -122,16 +137,17 @@ const ALBUM_TITLE: &str = "Fixture Album";
 /// plugin's own id for the same artist, which is what a credit carries so the
 /// server resolves the credited artist against this instance.
 fn artist_ids() -> Vec<IdPair> {
-    vec![
-        IdPair {
-            namespace: "album-catalog".to_string(),
-            value: ARTIST.to_string(),
-        },
-        IdPair {
+    let mut ids = vec![IdPair {
+        namespace: "album-catalog".to_string(),
+        value: ARTIST.to_string(),
+    }];
+    if config().canonical_ids {
+        ids.push(IdPair {
             namespace: "mb-artist".to_string(),
             value: "album-catalog-mb-artist-1".to_string(),
-        },
-    ]
+        });
+    }
+    ids
 }
 
 /// Builds the album reference every entity of this plugin points at.
@@ -178,16 +194,19 @@ fn track(number: u8) -> Track {
         track_number: Some(number.into()),
         isrc: None,
         explicit: Some(false),
-        ids: vec![
-            IdPair {
+        ids: {
+            let mut ids = vec![IdPair {
                 namespace: "album-catalog".to_string(),
                 value: format!("{TRACK_PREFIX}{number}"),
-            },
-            IdPair {
-                namespace: "mb-recording".to_string(),
-                value: format!("album-catalog-recording-{number}"),
-            },
-        ],
+            }];
+            if config().canonical_ids {
+                ids.push(IdPair {
+                    namespace: "mb-recording".to_string(),
+                    value: format!("album-catalog-recording-{number}"),
+                });
+            }
+            ids
+        },
     }
 }
 
@@ -206,10 +225,14 @@ fn album() -> Album {
         genres: vec![],
         images: vec![],
         tracks: (1..=TRACKS).map(track).collect(),
-        ids: vec![IdPair {
-            namespace: "mb-release".to_string(),
-            value: "album-catalog-release-1".to_string(),
-        }],
+        ids: if config().canonical_ids {
+            vec![IdPair {
+                namespace: "mb-release".to_string(),
+                value: "album-catalog-release-1".to_string(),
+            }]
+        } else {
+            Vec::new()
+        },
     }
 }
 

@@ -534,6 +534,14 @@ pub struct ArtistInput {
     pub sort_name: Option<String>,
     /// The MusicBrainz artist id, when known.
     pub mb_artist_id: Option<String>,
+    /// The stored row the caller already resolved this input to, if it has.
+    ///
+    /// A caller that knows which row an artist is (the catalog layer, which
+    /// resolves a credited artist through the provider id its alias table
+    /// holds) sets it, and [`crate::artists::upsert_artist`] credits that row
+    /// instead of applying the name rule to a name that two identified artists
+    /// may share.
+    pub row: Option<EntityId>,
     /// Where the row comes from.
     pub origin: Origin,
 }
@@ -553,8 +561,23 @@ impl ArtistInput {
             name: name.into(),
             sort_name: None,
             mb_artist_id: None,
+            row: None,
             origin: Origin::Local,
         }
+    }
+
+    /// Sets the stored row this input names.
+    ///
+    /// The row wins over the identity rule: the caller resolved the artist
+    /// itself, so the write refreshes that row's name and credits it, and the
+    /// MusicBrainz artist id is attached to it rather than to a namesake.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the artist row the caller resolved the input to.
+    pub fn row(mut self, row: EntityId) -> ArtistInput {
+        self.row = Some(row);
+        self
     }
 
     /// Sets the MusicBrainz artist id.

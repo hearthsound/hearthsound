@@ -6,14 +6,19 @@
 use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::common::{Env, InstanceLimits, config, has_availability_event, one_candidate};
 use hearthsound_acquire::orchestrator::{AcquireRequest, AcquisitionHandle};
+use hearthsound_catalog::IdentityRequest;
 use hearthsound_core::events::{LibraryChange, ServerEvent};
+use hearthsound_core::providers::RecordingHint;
 use hearthsound_core::{
     AcquisitionState, Availability, CatalogId, EntityId, EntityKind, FailureReason, PinReason,
     Priority, Slug, StorageClass,
 };
+use hearthsound_library::locks::FolderLocks;
+use hearthsound_library::scan::LibraryScanner;
 use hearthsound_media::{Container, probe};
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
 use uuid::Uuid;
@@ -812,6 +817,242 @@ async fn a_link_mode_import_copies_when_the_target_is_a_folder() {
         "the folder file must not share the backend's inode"
     );
     assert_eq!(std::fs::metadata(&destination).unwrap().nlink(), 1);
+}
+
+#[tokio::test]
+async fn a_saved_import_writes_the_musicbrainz_ids_of_its_rows() {
+    let env = catalog_env().await;
+    place_catalog_download(&env).await;
+    let user = env.add_user().await;
+    let folder = env.save_folder(user, "music").await;
+    let track = materialized_catalog_track(&env).await;
+
+    let id = request_save(&env, track, user).await.id;
+    env.start();
+    let row = env.wait_for_terminal(id).await;
+    assert_eq!(
+        row.state,
+        AcquisitionState::Completed,
+        "log: {:?}",
+        env.log(id).await
+    );
+
+    let destination = folder.path.join(CATALOG_RELATIVE);
+    assert!(
+        destination.is_file(),
+        "the file is written into the owner's folder"
+    );
+    let probed = probe(&destination).await.unwrap();
+    assert_eq!(
+        probed.tags.mb_artist_ids,
+        ["fixture-artist-mb"],
+        "the artist row's MusicBrainz id is written"
+    );
+    assert_eq!(
+        probed.tags.mb_album_artist_ids,
+        ["fixture-artist-mb"],
+        "and so is the album artist's"
+    );
+    assert_eq!(
+        probed.tags.mb_release_id.as_deref(),
+        Some("fixture-release-1"),
+        "the album row's release id is written"
+    );
+    assert_eq!(
+        probed.tags.mb_recording_id.as_deref(),
+        Some("fixture-recording-1")
+    );
+}
+
+#[tokio::test]
+async fn a_rescan_of_a_saved_file_keeps_one_artist_and_one_album_row() {
+    let env = catalog_env().await;
+    place_catalog_download(&env).await;
+    let user = env.add_user().await;
+    let folder = env.save_folder(user, "music").await;
+    let track = materialized_catalog_track(&env).await;
+
+    let id = request_save(&env, track, user).await.id;
+    env.start();
+    env.wait_for_state(id, AcquisitionState::Completed).await;
+
+    let destination = folder.path.join(CATALOG_RELATIVE);
+    let credited = credited_artists(&env, track).await;
+    assert_eq!(credited.len(), 1);
+    let album = env.track(track).await.album_id;
+
+    // A rescan only reads a file whose size or mtime changed, so the saved file
+    // is rewritten with its own bytes: the import wrote tags that agree with the
+    // rows, and the scan must keep the track on the artist and album it has.
+    let bytes = std::fs::read(&destination).unwrap();
+    std::fs::write(&destination, bytes).unwrap();
+
+    let scanner = LibraryScanner::new(
+        &env.database,
+        Arc::clone(&env.events),
+        env.settings.clone(),
+        Arc::new(FolderLocks::new()),
+    );
+    scanner.scan_folder(folder.id).await.unwrap();
+
+    assert_eq!(
+        naming_rows(&env, "artists", "Fixture Artist").await,
+        1,
+        "one act has one row after the rescan"
+    );
+    assert_eq!(
+        naming_rows(&env, "albums", "Fixture Album").await,
+        1,
+        "one album has one row after the rescan"
+    );
+    assert_eq!(
+        naming_rows(&env, "tracks", "Fixture Song 3").await,
+        1,
+        "the saved file is still one track"
+    );
+    assert_eq!(
+        credited_artists(&env, track).await,
+        credited,
+        "the track is credited to the artist row it had"
+    );
+    assert_eq!(
+        env.track(track).await.album_id,
+        album,
+        "the track still belongs to the album row it had"
+    );
+}
+
+/// The relative path the album fixture's third track renders to.
+const CATALOG_RELATIVE: &str = "Fixture Artist/Fixture Album (2026)/03 - Fixture Song 3.flac";
+
+/// The recording the metadata fixture knows for the album fixture's third track.
+///
+/// It is the fixture's whole server configuration, because the instance service
+/// stores a JSON object scoped to the server.
+const CATALOG_RECORDING: &str = r#"{
+  "recordings": [
+    {
+      "title": "Fixture Song 3",
+      "artists": ["Fixture Artist"],
+      "artistMbid": "fixture-artist-mb",
+      "mbid": "fixture-recording-1",
+      "score": 0.98,
+      "releases": [
+        {"mbid": "fixture-release-1", "title": "Fixture Album", "date": "2026-02-01"}
+      ]
+    }
+  ]
+}"#;
+
+/// Builds an environment whose catalog reports only its own ids, the way a
+/// service such as Deezer does, plus the metadata instance that resolves them.
+///
+/// # Returns
+///
+/// The environment, with the catalog and metadata layers assigned.
+async fn catalog_env() -> Env {
+    let env = Env::new(
+        config(catalog_candidate(), "normal", 0, "downloads", ".flac"),
+        InstanceLimits::default(),
+        &[],
+    )
+    .await;
+    env.add_catalog_instance_with(serde_json::json!({ "canonicalIds": false }))
+        .await;
+    env.add_metadata_instance(serde_json::from_str(CATALOG_RECORDING).unwrap())
+        .await;
+    env
+}
+
+/// Writes the file the acquisition fixture serves for the catalog candidate.
+///
+/// The fixture's tracks are three minutes long and the verification stage
+/// compares the file's duration with the track's, so the generated audio is as
+/// long as the row says.
+async fn place_catalog_download(env: &Env) {
+    AudioFixture::new(AudioFormat::Flac)
+        .seconds(180.0)
+        .file_name("03 - Fixture Song 3.flac".to_owned())
+        .write_into(&env.downloads)
+        .await
+        .unwrap();
+}
+
+/// Materializes the album fixture's third track and applies its identity.
+///
+/// The resolution is applied here rather than left to the pipeline, because a
+/// `play`-priority acquisition spawns it and a test that read the tags would
+/// race it; the pipeline then sees a track that carries its recording id, which
+/// is the state an import into a folder starts from.
+///
+/// # Parameters
+///
+/// - `env`: the test environment.
+///
+/// # Returns
+///
+/// The stored track.
+async fn materialized_catalog_track(env: &Env) -> EntityId {
+    let track = env
+        .catalog
+        .materialize_track(&catalog_track(3))
+        .await
+        .unwrap();
+    env.catalog
+        .resolve_track_identity(
+            track,
+            &IdentityRequest::Hint(RecordingHint {
+                title: "Fixture Song 3".to_owned(),
+                artists: vec!["Fixture Artist".to_owned()],
+                album: Some("Fixture Album".to_owned()),
+                duration_ms: Some(180_000),
+                isrc: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .expect("the metadata fixture knows the recording");
+    track
+}
+
+/// The artist ids a track credits, in credit order.
+///
+/// # Parameters
+///
+/// - `env`: the test environment.
+/// - `track`: the track to read.
+///
+/// # Returns
+///
+/// The credited artists' raw primary keys.
+async fn credited_artists(env: &Env, track: EntityId) -> Vec<Vec<u8>> {
+    sqlx::query_scalar("SELECT artist_id FROM track_artists WHERE track_id = ? ORDER BY position")
+        .bind(track.uuid().as_bytes().to_vec())
+        .fetch_all(env.database.readers())
+        .await
+        .unwrap()
+}
+
+/// Counts the rows of one table whose name or title is the given text.
+///
+/// # Parameters
+///
+/// - `env`: the test environment.
+/// - `table`: `artists`, `albums` or `tracks`; the statement per table is a
+///   literal, because a query string sqlx accepts has to be one.
+/// - `text`: the name or title to match.
+async fn naming_rows(env: &Env, table: &str, text: &str) -> i64 {
+    let statement = match table {
+        "artists" => "SELECT COUNT(*) FROM artists WHERE name = ?",
+        "albums" => "SELECT COUNT(*) FROM albums WHERE title = ?",
+        "tracks" => "SELECT COUNT(*) FROM tracks WHERE title = ?",
+        other => panic!("the harness knows no table {other}"),
+    };
+    sqlx::query_scalar(statement)
+        .bind(text)
+        .fetch_one(env.database.readers())
+        .await
+        .unwrap()
 }
 
 #[tokio::test]

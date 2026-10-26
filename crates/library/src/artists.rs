@@ -15,9 +15,13 @@
 //!   artist.
 //!
 //! A row that turns out to be a twin of another is merged into it, which moves
-//! its credits, aliases, likes, saves and ratings; see [`merge_artist`]. The
-//! one-time `library.reidentity` pass applies the same rule to rows that already
-//! exist (see [`crate::identity`]).
+//! its credits, aliases, likes, saves and ratings; see [`merge_artist`]. A caller
+//! that resolved the artist itself - the catalog layer, which resolves a
+//! credited artist through the provider id the alias table holds - names the row
+//! on the input, and a resolved MusicBrainz artist id is attached to the row the
+//! resolution named with [`identify_artist`] rather than creating a second row
+//! for the act. The one-time `library.reidentity` pass applies the same rule to
+//! rows that already exist (see [`crate::identity`]).
 //!
 //! Every function takes a [`sqlx::SqliteConnection`] so a caller can run it
 //! inside its own transaction; the pool-level convenience is on
@@ -94,6 +98,7 @@ impl NameGroupRow {
 ///
 /// | input | `by_identifier` | identified aside | target | absorbed |
 /// |---|---|---|---|---|
+/// | names a row | - | - | that row | none |
 /// | carries an id | a row | 0 | that row | every untagged row |
 /// | carries an id | a row | 1 or more | that row | none |
 /// | carries an id | none | 0 | the oldest untagged row (absent: insert) | the other untagged rows |
@@ -108,6 +113,14 @@ impl NameGroupRow {
 /// the table already holds, and the `origin` of an existing row is never
 /// rewritten: an artist a scan created stays local when the catalog layer later
 /// resolves it.
+///
+/// An input that names a row ([`ArtistInput::row`]) skips the rule entirely: the
+/// caller resolved the artist through an identifier of its own, which is what
+/// the catalog layer does with a provider id, so the name cannot be allowed to
+/// move the credit to a namesake. Such an input never absorbs a twin, and the
+/// MusicBrainz id it carries is attached to the named row with
+/// [`identify_artist`], which merges the row away when a twin already holds it.
+/// A named row that has since been deleted falls back to the rule.
 ///
 /// # Parameters
 ///
@@ -152,6 +165,31 @@ pub async fn upsert_artist(
         Some(mbid) => row_for_mbid(conn, mbid).await?,
         None => None,
     };
+    // A row the caller resolved itself is the artist, whatever the name rule
+    // would say about the name: the caller knows which provider id, and so which
+    // row, this credit is. It is not refreshed into a twin either, because the
+    // resolution is what identifies the row.
+    if let Some(resolved) = artist.row
+        && row_exists(conn, resolved.uuid()).await?
+    {
+        let id = resolved.uuid();
+        let id = match artist.mb_artist_id.as_deref() {
+            Some(mbid) => identify_artist(conn, resolved, mbid).await?.uuid(),
+            None => {
+                sqlx::query!(
+                    "UPDATE artists SET name = ?, sort_name = ?, updated_at = ? WHERE id = ?",
+                    artist.name,
+                    sort_name,
+                    now,
+                    id.as_bytes().as_slice(),
+                )
+                .execute(&mut *conn)
+                .await?;
+                id
+            }
+        };
+        return Ok(EntityId::from_uuid(IdPrefix::Artist, id));
+    }
     let group = name_group(conn, &artist.name).await?;
     let identified: Vec<Uuid> = group
         .iter()
@@ -425,6 +463,106 @@ pub(crate) async fn merge_artist(
         .execute(&mut *conn)
         .await?;
     Ok(())
+}
+
+/// Reports whether an artist row exists.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `id`: the row's raw primary key.
+///
+/// # Returns
+///
+/// `true` when a row has that key.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when the query fails.
+async fn row_exists(conn: &mut SqliteConnection, id: Uuid) -> Result<bool, LibraryError> {
+    let found: Option<i64> = sqlx::query_scalar!(
+        "SELECT 1 AS \"found: i64\" FROM artists WHERE id = ?",
+        id.as_bytes().as_slice(),
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(found.is_some())
+}
+
+/// Attaches a MusicBrainz artist id to the row an artist is, merging a twin.
+///
+/// A resolved identity names the act, not a name: the row a caller resolved is
+/// the artist the track or the album credits, and when that row carries no
+/// MusicBrainz id yet, the id is written to it. When another row already holds
+/// the id, the two are one artist and are merged with [`merge_artist`], the row
+/// that holds the id surviving because that is the row every other identifier of
+/// the act resolves to.
+///
+/// This is what identity resolution applies, and what keeps a resolution from
+/// creating a second row for an artist the library already stores under the
+/// provider's own id.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `artist`: the artist row the caller resolved.
+/// - `mbid`: the MusicBrainz artist id the resolution established.
+///
+/// # Returns
+///
+/// The surviving row: `artist` itself, or the row that already held the id and
+/// absorbed it.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when a statement fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use hearthsound_core::EntityId;
+/// use hearthsound_library::artists::identify_artist;
+///
+/// # async fn example(conn: &mut sqlx::SqliteConnection, artist: EntityId) -> Result<(), Box<dyn std::error::Error>> {
+/// let artist = identify_artist(conn, artist, "c2f4e6f0-8a5a-4b6c-9a54-7c4d8a0e1f21").await?;
+/// println!("{artist}");
+/// # Ok(())
+/// # }
+/// ```
+pub async fn identify_artist(
+    conn: &mut SqliteConnection,
+    artist: EntityId,
+    mbid: &str,
+) -> Result<EntityId, LibraryError> {
+    let now = now_millis();
+    let key = artist.uuid();
+    match row_for_mbid(conn, mbid).await? {
+        Some(holder) if holder == key => {
+            sqlx::query!(
+                "UPDATE artists SET updated_at = ? WHERE id = ?",
+                now,
+                key.as_bytes().as_slice(),
+            )
+            .execute(&mut *conn)
+            .await?;
+            Ok(artist)
+        }
+        Some(holder) => {
+            merge_artist(conn, key, holder).await?;
+            Ok(EntityId::from_uuid(IdPrefix::Artist, holder))
+        }
+        None => {
+            sqlx::query!(
+                "UPDATE artists SET mb_artist_id = ?, updated_at = ? WHERE id = ?",
+                mbid,
+                now,
+                key.as_bytes().as_slice(),
+            )
+            .execute(&mut *conn)
+            .await?;
+            Ok(artist)
+        }
+    }
 }
 
 /// Reads an artist by its client id.

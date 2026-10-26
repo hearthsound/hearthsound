@@ -21,16 +21,21 @@
 //! does not ask MusicBrainz again.
 //!
 //! What a resolution is applied to is the track it names: this module writes the
-//! recording's MusicBrainz recording id to the track and records the
-//! `mb-recording`, `mb-release`, `mb-release-group` and `mb-artist` aliases of
-//! the canonical identifiers it learned, in one short transaction. Two providers
-//! then name one row: the catalog provider's `p:<slug>` id from materialization
-//! and the MusicBrainz ids from resolution.
+//! recording's MusicBrainz recording id to the track, attaches the release to the
+//! album the track belongs to and the artist ids to the artists it credits, and
+//! records the `mb-recording`, `mb-release`, `mb-release-group` and `mb-artist`
+//! aliases of the canonical identifiers it learned, in one short transaction. The
+//! identity lands on the rows the resolution resolved - the credited artist and
+//! the album - never on a row a name happens to match, so a resolution cannot
+//! create a second row for an act the library already stores. Two providers then
+//! name one row: the catalog provider's `p:<slug>` id from materialization and the
+//! MusicBrainz ids from resolution.
 
 use hearthsound_core::providers::{RecordingHint, RecordingMatch};
 use hearthsound_core::{EntityId, EntityKind, Layer, Slug};
-use hearthsound_library::tracks;
-use hearthsound_library::{ArtistInput, Origin, artists};
+use hearthsound_library::{ArtistInput, Origin};
+use hearthsound_library::{albums, artists, sort_key, tracks};
+use sqlx::SqliteConnection;
 
 use crate::cache::{ENTITY_CACHE_TTL, RequestKey};
 use crate::dedupe::normalize_isrc;
@@ -244,6 +249,16 @@ impl CatalogService {
 
     /// Writes one resolved recording onto a stored track.
     ///
+    /// The identifiers are attached to the rows the resolution resolved, not to
+    /// rows the answer's names happen to match: the track's own credits are the
+    /// artists the recording names, and the album the track belongs to is the
+    /// release. An artist the track credits is identified with
+    /// [`artists::identify_artist`] and the album with
+    /// [`albums::identify_album`], so a row that already held the id absorbs its
+    /// twin instead of a second row being created for the same act or release.
+    /// A credit the track does not carry is stored as its own row, which is what
+    /// a scanned file whose tags named no artist gets.
+    ///
     /// # Parameters
     ///
     /// - `track_id`: the stored track.
@@ -272,43 +287,160 @@ impl CatalogService {
             insert_alias(&mut tx, MB_RECORDING, EntityKind::Track, mbid, track_id).await?;
         }
 
-        if let Some(album) = track.album_id {
-            for release in &recording.releases {
-                for id in &release.ids {
-                    if id.value.is_empty()
-                        || (id.namespace != MB_RELEASE && id.namespace != MB_RELEASE_GROUP)
-                    {
-                        continue;
-                    }
-                    insert_alias(&mut tx, &id.namespace, EntityKind::Album, &id.value, album)
-                        .await?;
+        match track.album_id {
+            Some(album) => {
+                identify_track_album(&mut tx, album, recording).await?;
+            }
+            None => {
+                if recording
+                    .releases
+                    .iter()
+                    .any(|release| !release.ids.is_empty())
+                {
+                    tracing::debug!(
+                        track = %track_id,
+                        "a resolved release cannot be aliased to a track that belongs to no album"
+                    );
                 }
             }
-        } else if recording
-            .releases
-            .iter()
-            .any(|release| !release.ids.is_empty())
-        {
-            tracing::debug!(
-                track = %track_id,
-                "a resolved release cannot be aliased to a track that belongs to no album"
-            );
         }
 
-        for credit in &recording.artists {
-            let Some(mbid) = canonical_id(&credit.ids, MB_ARTIST) else {
-                continue;
-            };
-            let input = ArtistInput::new(credit.name.as_str())
-                .mb_artist_id(mbid)
-                .origin(Origin::Catalog);
-            let artist = artists::upsert_artist(&mut tx, &input).await?;
-            insert_alias(&mut tx, MB_ARTIST, EntityKind::Artist, mbid, artist).await?;
-        }
+        identify_credited_artists(&mut tx, track_id, recording).await?;
 
         tx.commit().await?;
         Ok(())
     }
+}
+
+/// Attaches the release a recording names to the album row a track belongs to.
+///
+/// A recording appears on several releases - an album, its reissue, a
+/// compilation - and the row the track belongs to is one of them. The release to
+/// identify it with is the one the resolution offers when it offers a single
+/// one, and otherwise the release whose title is the album's, because that is
+/// the release the album row was built from. When no release matches, the album
+/// keeps the identity it has and only the aliases are recorded.
+///
+/// # Parameters
+///
+/// - `conn`: the transaction to read and write on.
+/// - `album`: the album row the track belongs to.
+/// - `recording`: the recording a metadata instance matched.
+///
+/// # Returns
+///
+/// The surviving album row: `album`, or the row that already held the release id
+/// and absorbed it.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::Database`] or [`CatalogError::Library`] when a row
+/// cannot be written and [`CatalogError::CorruptAlias`] when a stored id does not
+/// decode.
+async fn identify_track_album(
+    conn: &mut SqliteConnection,
+    album: EntityId,
+    recording: &RecordingMatch,
+) -> Result<EntityId, CatalogError> {
+    let mut releases: Vec<(&str, &str, Option<&str>)> = Vec::new();
+    for release in &recording.releases {
+        let Some(id) = canonical_id(&release.ids, MB_RELEASE) else {
+            continue;
+        };
+        if releases.iter().any(|(known, _, _)| *known == id) {
+            continue;
+        }
+        releases.push((
+            id,
+            release.title.as_str(),
+            canonical_id(&release.ids, MB_RELEASE_GROUP),
+        ));
+    }
+
+    let chosen = match releases.as_slice() {
+        [] => None,
+        [only] => Some(*only),
+        several => {
+            let title = albums::get_album(conn, album)
+                .await?
+                .map(|stored| sort_key(&stored.title));
+            let title = title.unwrap_or_default();
+            several
+                .iter()
+                .find(|(_, release_title, _)| sort_key(release_title) == title)
+                .copied()
+        }
+    };
+
+    let stored = match chosen {
+        Some((release, _, group)) => albums::identify_album(conn, album, release, group).await?,
+        None => album,
+    };
+
+    for release in &recording.releases {
+        for id in &release.ids {
+            if id.value.is_empty()
+                || (id.namespace != MB_RELEASE && id.namespace != MB_RELEASE_GROUP)
+            {
+                continue;
+            }
+            insert_alias(conn, &id.namespace, EntityKind::Album, &id.value, stored).await?;
+        }
+    }
+    Ok(stored)
+}
+
+/// Identifies the artists a track credits with the ones the recording names.
+///
+/// A resolution names the act by its MusicBrainz artist id and by its name, and
+/// the track names the same act by the row it credits. The two are matched by
+/// name, and the row the track credits is the one identified: a resolution
+/// therefore never creates a second row for an act the track already holds,
+/// which is what a name-keyed upsert does when two identified acts share the
+/// name.
+///
+/// A credit of the recording that no credit of the track names - a file whose
+/// tags left the artist out - is stored as its own row, so the track still gains
+/// the artist the recording names.
+///
+/// # Parameters
+///
+/// - `conn`: the transaction to read and write on.
+/// - `track_id`: the track the recording was applied to.
+/// - `recording`: the recording a metadata instance matched.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::Database`] or [`CatalogError::Library`] when a row
+/// cannot be written.
+async fn identify_credited_artists(
+    conn: &mut SqliteConnection,
+    track_id: EntityId,
+    recording: &RecordingMatch,
+) -> Result<(), CatalogError> {
+    let credited = artists::list_track_artists(conn, track_id).await?;
+    let mut taken: Vec<EntityId> = Vec::with_capacity(credited.len());
+    for credit in &recording.artists {
+        let Some(mbid) = canonical_id(&credit.ids, MB_ARTIST) else {
+            continue;
+        };
+        let name = sort_key(&credit.name);
+        let resolved = match credited
+            .iter()
+            .find(|artist| !taken.contains(&artist.id) && sort_key(&artist.name) == name)
+        {
+            Some(artist) => artists::identify_artist(conn, artist.id, mbid).await?,
+            None => {
+                let input = ArtistInput::new(credit.name.as_str())
+                    .mb_artist_id(mbid)
+                    .origin(Origin::Catalog);
+                artists::upsert_artist(conn, &input).await?
+            }
+        };
+        taken.push(resolved);
+        insert_alias(conn, MB_ARTIST, EntityKind::Artist, mbid, resolved).await?;
+    }
+    Ok(())
 }
 
 /// Returns the recording a metadata instance is most confident about.

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE albums SET mb_release_group_id = COALESCE(mb_release_group_id, ?), updated_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "5ec8ed52e6927afc007debb8d1aa3ecc6e74292949040779532a9605df365b92"
+}

@@ -572,6 +572,113 @@ async fn write_album_credits(
     Ok(())
 }
 
+/// Attaches a MusicBrainz release id to the album row an album is, merging a
+/// twin.
+///
+/// A resolved identity names the release, not the title: the row a caller
+/// resolved is the album a track belongs to, and when that row carries no
+/// release id yet, the id is written to it, and the release-group id is filled
+/// in the same way. When another row already holds the release id, the two are
+/// one album and are merged with [`merge_album`], the row that holds the id
+/// surviving because that is the row every other identifier of the release
+/// resolves to.
+///
+/// The release-group id is only written while the row has none, so two rows of
+/// one release group that a resolution reports separately are not merged: the
+/// release id is the identity.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `album`: the album row the caller resolved.
+/// - `release`: the MusicBrainz release id the resolution established.
+/// - `release_group`: the MusicBrainz release-group id, when the resolution
+///   reported one.
+///
+/// # Returns
+///
+/// The surviving row: `album` itself, or the row that already held the release
+/// id and absorbed it.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when a statement fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// use hearthsound_core::EntityId;
+/// use hearthsound_library::albums::identify_album;
+///
+/// # async fn example(conn: &mut sqlx::SqliteConnection, album: EntityId) -> Result<(), Box<dyn std::error::Error>> {
+/// let album = identify_album(conn, album, "b6c5dd0e-1c55-4b1f-8b7e-9d1c2f0a3b44", None).await?;
+/// println!("{album}");
+/// # Ok(())
+/// # }
+/// ```
+pub async fn identify_album(
+    conn: &mut SqliteConnection,
+    album: EntityId,
+    release: &str,
+    release_group: Option<&str>,
+) -> Result<EntityId, LibraryError> {
+    let now = now_millis();
+    let key = album.uuid();
+    let holder: Option<Vec<u8>> = sqlx::query_scalar!(
+        "SELECT id FROM albums WHERE mb_release_id = ? LIMIT 1",
+        release,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    let holder = match holder {
+        Some(id) => Some(decode_uuid(&id)?),
+        None => None,
+    };
+    match holder {
+        Some(holder) if holder == key => {
+            sqlx::query!(
+                "UPDATE albums SET mb_release_group_id = COALESCE(mb_release_group_id, ?), \
+                        updated_at = ? WHERE id = ?",
+                release_group,
+                now,
+                key.as_bytes().as_slice(),
+            )
+            .execute(&mut *conn)
+            .await?;
+            Ok(album)
+        }
+        Some(holder) => {
+            merge_album(conn, key, holder).await?;
+            if let Some(group) = release_group {
+                sqlx::query!(
+                    "UPDATE albums SET mb_release_group_id = COALESCE(mb_release_group_id, ?), \
+                            updated_at = ? WHERE id = ?",
+                    group,
+                    now,
+                    holder.as_bytes().as_slice(),
+                )
+                .execute(&mut *conn)
+                .await?;
+            }
+            Ok(EntityId::from_uuid(IdPrefix::Album, holder))
+        }
+        None => {
+            sqlx::query!(
+                "UPDATE albums SET mb_release_id = ?, \
+                        mb_release_group_id = COALESCE(mb_release_group_id, ?), \
+                        updated_at = ? WHERE id = ?",
+                release,
+                release_group,
+                now,
+                key.as_bytes().as_slice(),
+            )
+            .execute(&mut *conn)
+            .await?;
+            Ok(album)
+        }
+    }
+}
+
 /// Reads an album by its client id.
 ///
 /// # Parameters

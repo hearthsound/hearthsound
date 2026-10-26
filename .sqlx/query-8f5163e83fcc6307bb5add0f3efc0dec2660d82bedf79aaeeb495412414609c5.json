@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 AS \"found: i64\" FROM artists WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "found: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8f5163e83fcc6307bb5add0f3efc0dec2660d82bedf79aaeeb495412414609c5"
+}

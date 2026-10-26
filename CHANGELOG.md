@@ -276,6 +276,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An identity a metadata instance resolves is written to the row it resolved,
+  not to a row a name match creates: the artist a track credits, the album it
+  belongs to and the artists an album credits take the MusicBrainz ids, and a
+  row that already holds one absorbs its twin instead of a second row being
+  written for the act or the release. Materialization resolves a credited artist
+  through the provider's own id first, so a second materialization of one artist
+  credits the row the first one wrote instead of adding another, and an import
+  therefore carries `MUSICBRAINZ_ARTISTID`, `MUSICBRAINZ_ALBUMARTISTID` and
+  `MUSICBRAINZ_ALBUMID`, which is what a rescan of the saved file reads back to
+  keep its artist and album.
 - A file that two overlapping folders hold is indexed once, by the deepest
   folder that contains it: a folder added inside another one takes over the rows
   the outer folder indexed, so the track keeps its id, its likes, its ratings,

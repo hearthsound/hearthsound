@@ -158,6 +158,11 @@ pub async fn insert_track(
 /// [`set_track_availability`] so a rescan of a changed file does not undo a
 /// pin-driven transition.
 ///
+/// A credit that names no identifier keeps the artist row the track already
+/// credits when the names agree, so a rescan of a file whose tags did not change
+/// its artist never moves the track to a namesake of that artist; see
+/// [`kept_credits`].
+///
 /// # Parameters
 ///
 /// - `conn`: the connection or transaction to write on.
@@ -211,9 +216,87 @@ pub async fn update_track(
     if affected == 0 {
         return Ok(false);
     }
-    write_track_credits(conn, track_id.uuid(), credits).await?;
+    let credits = kept_credits(conn, track_id, credits).await?;
+    write_track_credits(conn, track_id.uuid(), &credits).await?;
     write_track_genres(conn, track_id.uuid(), genres).await?;
     Ok(true)
+}
+
+/// Keeps the credits a track already has on the rows it already credits.
+///
+/// A rewritten row (a rescan of a file whose tags changed, or the identity pass)
+/// reads the same artist names back, and the name rule cannot tell which of two
+/// identified artists of one name the file is by. The row the track already
+/// credits is the answer: when a new credit names no identifier of its own and
+/// its name is the name of a row the track credits, the credit is pinned to that
+/// row, so a file whose tags and stored identity agree never moves to a
+/// namesake.
+///
+/// A credit that carries an identifier is left alone, because that is where the
+/// tags and the stored row disagree and the identity rule decides.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `track_id`: the track whose credits are about to be replaced.
+/// - `credits`: the credits the caller wants to write.
+///
+/// # Returns
+///
+/// The credits to write, with the unnamed ones pinned where they match.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when the query fails.
+async fn kept_credits(
+    conn: &mut SqliteConnection,
+    track_id: EntityId,
+    credits: &[ArtistCredit],
+) -> Result<Vec<ArtistCredit>, LibraryError> {
+    if credits
+        .iter()
+        .all(|credit| credit.artist.row.is_some() || credit.artist.mb_artist_id.is_some())
+    {
+        return Ok(credits.to_vec());
+    }
+    let rows = sqlx::query!(
+        "SELECT ar.id AS id, ar.name AS name \
+           FROM track_artists ta JOIN artists ar ON ar.id = ta.artist_id \
+          WHERE ta.track_id = ? ORDER BY ta.position",
+        entity_key(track_id),
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let existing: Vec<(EntityId, String)> = rows
+        .into_iter()
+        .map(|row| Ok((decode_entity(IdPrefix::Artist, &row.id)?, row.name)))
+        .collect::<Result<Vec<_>, LibraryError>>()?;
+    if existing.is_empty() {
+        return Ok(credits.to_vec());
+    }
+    Ok(credits
+        .iter()
+        .enumerate()
+        .map(|(position, credit)| {
+            if credit.artist.row.is_some() || credit.artist.mb_artist_id.is_some() {
+                return credit.clone();
+            }
+            let folded = sort_key(&credit.artist.name);
+            // The credit at the same position is the strongest evidence: a
+            // featured artist who moved up the list keeps its row either way.
+            let pinned = existing
+                .get(position)
+                .filter(|entry| sort_key(&entry.1) == folded)
+                .or_else(|| existing.iter().find(|entry| sort_key(&entry.1) == folded));
+            match pinned {
+                Some((row, _)) => ArtistCredit {
+                    artist: credit.artist.clone().row(*row),
+                    role: credit.role.clone(),
+                },
+                None => credit.clone(),
+            }
+        })
+        .collect())
 }
 
 /// Replaces a track's artist credits.
