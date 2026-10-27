@@ -57,6 +57,7 @@ impl CatalogService {
             Arc::clone(&database),
             root.clone(),
             ffmpeg,
+            settings.clone(),
         ));
         let indexer = Arc::new(Indexer::new(
             Arc::clone(&database),
@@ -66,7 +67,7 @@ impl CatalogService {
             Arc::clone(&images),
             root,
         ));
-        images.attach_indexer(Arc::clone(&indexer));
+        images.attach_indexer(&indexer);
         let resolver = indexer.resolver().clone();
         let views = EntityViews::new(
             Arc::clone(&database),
@@ -223,11 +224,10 @@ impl CatalogService {
     ///
     /// Returns [`CatalogError`] when the write fails.
     pub async fn refresh(&self, kind: EntityKind, id: EntityId) -> Result<(), CatalogError> {
-        let depth = if self.is_library_entity(kind, id.uuid()).await? {
-            Depth::Deep
-        } else {
-            Depth::Page
-        };
+        let mut connection = self.database.readers().acquire().await?;
+        let held = crate::held::is_held(&mut connection, kind, id.uuid()).await?;
+        drop(connection);
+        let depth = if held { Depth::Deep } else { Depth::Page };
         let mut connection = self.database.writer().acquire().await?;
         hearthsound_library::index_queue::enqueue(&mut connection, kind, id.uuid(), depth, 0)
             .await
@@ -237,6 +237,12 @@ impl CatalogService {
 
     /// Walks an album's page inline, for an import that needs its tracklist.
     ///
+    /// An album whose page is already stored costs a read and nothing else. A
+    /// walk that ended without completing is reported as
+    /// [`CatalogError::Unavailable`], so the caller decides what to do with a
+    /// tracklist that is not all there is; a walk that ran past its deadline is
+    /// not: the rest keeps running and publishes `entity.updated`.
+    ///
     /// # Parameters
     ///
     /// - `album`: the album's id.
@@ -244,16 +250,33 @@ impl CatalogService {
     ///
     /// # Errors
     ///
-    /// Returns [`CatalogError`] when the walk fails.
+    /// Returns [`CatalogError::Unavailable`] when the walk ended without
+    /// completing, and [`CatalogError`] when a read fails.
     pub async fn ensure_album_page(
         &self,
         album: EntityId,
         deadline: std::time::Duration,
     ) -> Result<(), CatalogError> {
-        self.indexer
+        let mut connection = self.database.readers().acquire().await?;
+        let page: Option<Option<i64>> =
+            sqlx::query_scalar("SELECT page_fetched_at FROM albums WHERE id = ?")
+                .bind(album.uuid().as_bytes().as_slice())
+                .fetch_optional(&mut *connection)
+                .await?;
+        drop(connection);
+        if page.flatten().is_some() {
+            return Ok(());
+        }
+        match self
+            .indexer
             .ensure(EntityKind::Album, album.uuid(), Depth::Page, deadline)
-            .await?;
-        Ok(())
+            .await?
+        {
+            crate::index::Completeness::Failed => Err(CatalogError::Unavailable {
+                instance: "index".to_owned(),
+            }),
+            crate::index::Completeness::Complete | crate::index::Completeness::Partial => Ok(()),
+        }
     }
 
     /// Drops the answers an instance gave, after its configuration changed.
@@ -287,39 +310,6 @@ impl CatalogService {
     pub fn viewer(&self, viewer: Viewer) -> &EntityViews {
         let _ = viewer;
         &self.views
-    }
-
-    /// Reports whether an entity is one the library holds.
-    async fn is_library_entity(&self, kind: EntityKind, id: Uuid) -> Result<bool, CatalogError> {
-        let mut connection = self.database.writer().acquire().await?;
-        let found: Option<i64> = match kind {
-            EntityKind::Track => {
-                sqlx::query_scalar(
-                    "SELECT 1 AS \"found: i64\" FROM tracks t WHERE t.id = ? AND ( \
-                     EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id \
-                              AND mf.storage IN ('folder', 'library')) \
-                     OR EXISTS (SELECT 1 FROM user_library ul WHERE ul.entity_kind = 'track' \
-                                 AND ul.entity_id = t.id))",
-                )
-                .bind(id.as_bytes().as_slice())
-                .fetch_optional(&mut *connection)
-                .await?
-            }
-            EntityKind::Album => {
-                sqlx::query_scalar(
-                    "SELECT 1 AS \"found: i64\" FROM albums a WHERE a.id = ? AND ( \
-                     EXISTS (SELECT 1 FROM tracks t JOIN media_files mf ON mf.track_id = t.id \
-                              WHERE t.album_id = a.id AND mf.storage IN ('folder', 'library')) \
-                     OR EXISTS (SELECT 1 FROM user_library ul WHERE ul.entity_kind = 'album' \
-                                 AND ul.entity_id = a.id))",
-                )
-                .bind(id.as_bytes().as_slice())
-                .fetch_optional(&mut *connection)
-                .await?
-            }
-            _ => None,
-        };
-        Ok(found.is_some())
     }
 
     /// Returns the layers this service serves, which is the entity model's.

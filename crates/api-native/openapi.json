@@ -5560,7 +5560,7 @@
           "total": {
             "type": "integer",
             "format": "int64",
-            "description": "How many entities this process has claimed.",
+            "description": "How many entities this process has indexed or still has to index, which\nis what a progress bar is drawn against.",
             "minimum": 0
           }
         }

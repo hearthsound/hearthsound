@@ -12,16 +12,19 @@
 //! track order, and a viewer that is a third-party Subsonic client sees only what
 //! its own scopes hold.
 //!
-//! A view whose stored data is missing walks the entity inline under
-//! `index.view_timeout_ms` and answers with `complete: false` when the deadline
-//! passes; an entity whose data is older than `index.refresh_days` is queued for
-//! a refresh and answered from what is stored.
+//! A held entity's page is never fetched while it is being viewed: it is queued
+//! for the indexer and answered from what is stored, with `complete: false`, and
+//! the page re-reads when `entity.updated` arrives. Only a remote entity - one
+//! the library neither stores nor lists - is walked inline under
+//! `index.view_timeout_ms`, and `complete: false` says the deadline passed. An
+//! entity whose data is older than `index.refresh_days` is queued for a refresh
+//! and answered from what is stored.
 
 use std::sync::Arc;
 
 use hearthsound_config::keys;
 use hearthsound_core::providers::{ExternalId, MB_ARTIST, MB_RELEASE_GROUP};
-use hearthsound_core::{Availability, EntityId, EntityKind, IdPrefix, Layer};
+use hearthsound_core::{Availability, EntityId, EntityKind, IdPrefix};
 use hearthsound_db::Database;
 use hearthsound_library::index_queue::Depth;
 use hearthsound_library::query::{self, Scope};
@@ -179,15 +182,14 @@ impl EntityViews {
         else {
             return Ok(None);
         };
-        let timeout = crate::index::view_policy(self.settings.current().as_ref()).0;
-        let (artist, complete) = self.artist_row(row, timeout).await?;
+        let (artist, complete) = self.artist_row(row).await?;
         self.touch(EntityKind::Artist, row, "viewed_at", artist.viewed_at)
-            .await?;
-        let mut connection = self.database.writer().acquire().await?;
+            .await;
+        let mut connection = self.database.readers().acquire().await?;
         let links = links_of(&artist);
         let has_image = has_image(&mut connection, EntityKind::Artist, row).await?;
         let top_tracks = top_tracks(&mut connection, row, 5, viewer).await?;
-        let albums = discography(&mut connection, row, 12, viewer).await?;
+        let albums = discography(&mut connection, row, 500, viewer).await?;
         let similar = similar(&mut connection, row, 12, viewer).await?;
         Ok(Some(ArtistView {
             artist,
@@ -225,8 +227,8 @@ impl EntityViews {
         };
         let (album, complete) = self.album_row(row).await?;
         self.touch(EntityKind::Album, row, "viewed_at", album.viewed_at)
-            .await?;
-        let mut connection = self.database.writer().acquire().await?;
+            .await;
+        let mut connection = self.database.readers().acquire().await?;
         let has_image = has_image(&mut connection, EntityKind::Album, row).await?;
         let artists = album_artists(&mut connection, row).await?;
         let genres = album_genres(&mut connection, row).await?;
@@ -272,7 +274,7 @@ impl EntityViews {
             return Ok(None);
         };
         let track = self.track_row(row).await?;
-        let mut connection = self.database.writer().acquire().await?;
+        let mut connection = self.database.readers().acquire().await?;
         if viewer.vendor
             && !query::track_in_scope(
                 &mut connection,
@@ -308,7 +310,7 @@ impl EntityViews {
         else {
             return Ok(Vec::new());
         };
-        let mut connection = self.database.writer().acquire().await?;
+        let mut connection = self.database.readers().acquire().await?;
         top_tracks(&mut connection, row, limit, viewer).await
     }
 
@@ -341,25 +343,22 @@ impl EntityViews {
         else {
             return Ok(Vec::new());
         };
-        let mut connection = self.database.writer().acquire().await?;
+        let mut connection = self.database.readers().acquire().await?;
         stored_top_tracks(&mut connection, row, limit, viewer).await
     }
 
-    /// Reads an artist row, walking its page inline when the data is missing.
-    ///
-    /// No connection is held across the walk: the indexer needs the writer
-    /// itself, and the pool is small.
+    /// Reads an artist row, completing its page when the data is missing.
     ///
     /// # Parameters
     ///
     /// - `row`: the artist's raw primary key.
-    /// - `timeout`: the longest the inline walk may take.
-    async fn artist_row(
-        &self,
-        row: Uuid,
-        timeout: std::time::Duration,
-    ) -> Result<(Artist, bool), CatalogError> {
-        let mut connection = self.database.writer().acquire().await?;
+    ///
+    /// # Returns
+    ///
+    /// The row as stored after the attempt, and whether the page's data is
+    /// complete.
+    async fn artist_row(&self, row: Uuid) -> Result<(Artist, bool), CatalogError> {
+        let mut connection = self.database.readers().acquire().await?;
         let artist = hearthsound_library::artists::get_artist(
             &mut connection,
             EntityId::from_uuid(IdPrefix::Artist, row),
@@ -368,14 +367,23 @@ impl EntityViews {
         .map_err(CatalogError::Library)?
         .ok_or(CatalogError::NotFound)?;
         drop(connection);
-        if artist.page_fetched_at.is_some() && !self.similar_missing(row).await? {
+        if artist.page_fetched_at.is_some() {
+            // A page stored before a discovery instance was in service holds no
+            // similar artists, and the shelf that shows them stays empty until
+            // the staleness sweep. The page is queued again - the indexer is the
+            // one that asks a provider - and answered as incomplete, so the
+            // page reads itself again when the walk lands.
+            if self.similar_unanswered(row).await? {
+                self.queue_page(EntityKind::Artist, row, Depth::Page)
+                    .await?;
+                return Ok((artist, false));
+            }
             return Ok((artist, true));
         }
-        let outcome = self
-            .indexer
-            .ensure(EntityKind::Artist, row, Depth::Page, timeout)
-            .await;
-        let mut connection = self.database.writer().acquire().await?;
+        let complete = self
+            .complete_page(EntityKind::Artist, row, Depth::Page)
+            .await?;
+        let mut connection = self.database.readers().acquire().await?;
         let refreshed = hearthsound_library::artists::get_artist(
             &mut connection,
             EntityId::from_uuid(IdPrefix::Artist, row),
@@ -383,15 +391,17 @@ impl EntityViews {
         .await
         .map_err(CatalogError::Library)?
         .ok_or(CatalogError::NotFound)?;
-        Ok((refreshed, matches!(outcome, Ok(Completeness::Complete))))
+        Ok((refreshed, complete))
     }
 
-    /// Reports whether an artist still has no similar-artist answer stored
-    /// while a discovery instance is in service.
+    /// Reports whether an artist's stored page lacks the similar-artist answer a
+    /// discovery instance could give it.
     ///
-    /// A page walked before a discovery plugin was installed holds no similar
-    /// artists, and the shelf that lists them would stay empty until the
-    /// staleness sweep. The next read walks the page again instead.
+    /// The artist's page stores what a discovery instance named, including the
+    /// record that it named nobody. A page walked while no discovery instance
+    /// was in service holds neither, so the shelf that lists similar artists
+    /// stays empty until the staleness sweep - which is days, not minutes. The
+    /// next read queues the page again instead.
     ///
     /// # Parameters
     ///
@@ -405,14 +415,14 @@ impl EntityViews {
     /// # Errors
     ///
     /// Returns [`CatalogError`] when the read fails.
-    async fn similar_missing(&self, row: Uuid) -> Result<bool, CatalogError> {
+    async fn similar_unanswered(&self, row: Uuid) -> Result<bool, CatalogError> {
         let mut connection = self.database.readers().acquire().await?;
         let serving: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM layer_assignments la \
              JOIN provider_instances pi ON pi.id = la.instance_id \
              WHERE la.layer = ? AND pi.enabled = 1",
         )
-        .bind(Layer::Discovery.as_str())
+        .bind(hearthsound_core::Layer::Discovery.as_str())
         .fetch_one(&mut *connection)
         .await?;
         if serving == 0 {
@@ -428,13 +438,90 @@ impl EntityViews {
         Ok(answered == 0)
     }
 
-    /// Reads an album row, walking its page inline when the data is missing.
+    /// Queues one entity's page for the indexer at the front of the queue.
+    ///
+    /// # Parameters
+    ///
+    /// - `kind`: the entity kind.
+    /// - `row`: the entity's raw primary key.
+    /// - `depth`: how far to walk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when the write fails.
+    async fn queue_page(
+        &self,
+        kind: EntityKind,
+        row: Uuid,
+        depth: Depth,
+    ) -> Result<(), CatalogError> {
+        let mut connection = self.database.writer().acquire().await?;
+        hearthsound_library::index_queue::enqueue(&mut connection, kind, row, depth, 0)
+            .await
+            .map_err(CatalogError::Library)
+    }
+
+    /// Completes one entity's page the way the storage rule says.
+    ///
+    /// A held entity is queued and never walked while it is being viewed: the
+    /// page answers with what is stored and re-reads when the indexer lands. The
+    /// indexer is one worker, so a read that waited for it would take as long as
+    /// the queue in front of the entity. A row the indexer gave up on counts as
+    /// complete - there is nothing more the server can make of it until the
+    /// sweep retries - so the page stops waiting for a placeholder.
+    ///
+    /// A remote entity is walked inline under the view deadline.
+    ///
+    /// # Parameters
+    ///
+    /// - `kind`: the entity kind.
+    /// - `row`: the entity's raw primary key.
+    /// - `depth`: how far a walk goes.
+    ///
+    /// # Returns
+    ///
+    /// Whether the page's data is complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when a read or a write fails.
+    async fn complete_page(
+        &self,
+        kind: EntityKind,
+        row: Uuid,
+        depth: Depth,
+    ) -> Result<bool, CatalogError> {
+        let mut connection = self.database.readers().acquire().await?;
+        let held = crate::held::is_held(&mut connection, kind, row).await?;
+        drop(connection);
+        if held {
+            let mut connection = self.database.writer().acquire().await?;
+            hearthsound_library::index_queue::enqueue(&mut connection, kind, row, depth, 0)
+                .await
+                .map_err(CatalogError::Library)?;
+            let state = hearthsound_library::index_queue::state_of(&mut connection, kind, row)
+                .await
+                .map_err(CatalogError::Library)?;
+            drop(connection);
+            return Ok(state.as_deref() == Some("failed"));
+        }
+        let timeout = crate::index::view_policy(self.settings.current().as_ref()).0;
+        let outcome = self.indexer.ensure(kind, row, depth, timeout).await?;
+        Ok(!matches!(outcome, Completeness::Partial))
+    }
+
+    /// Reads an album row, completing its page when the data is missing.
     ///
     /// # Parameters
     ///
     /// - `row`: the album's raw primary key.
+    ///
+    /// # Returns
+    ///
+    /// The row as stored after the attempt, and whether the page's data is
+    /// complete.
     async fn album_row(&self, row: Uuid) -> Result<(Album, bool), CatalogError> {
-        let mut connection = self.database.writer().acquire().await?;
+        let mut connection = self.database.readers().acquire().await?;
         let album = hearthsound_library::albums::get_album(
             &mut connection,
             EntityId::from_uuid(IdPrefix::Album, row),
@@ -446,12 +533,10 @@ impl EntityViews {
         if album.page_fetched_at.is_some() {
             return Ok((album, true));
         }
-        let timeout = crate::index::view_policy(self.settings.current().as_ref()).0;
-        let outcome = self
-            .indexer
-            .ensure(EntityKind::Album, row, Depth::Page, timeout)
-            .await;
-        let mut connection = self.database.writer().acquire().await?;
+        let complete = self
+            .complete_page(EntityKind::Album, row, Depth::Page)
+            .await?;
+        let mut connection = self.database.readers().acquire().await?;
         let refreshed = hearthsound_library::albums::get_album(
             &mut connection,
             EntityId::from_uuid(IdPrefix::Album, row),
@@ -459,16 +544,16 @@ impl EntityViews {
         .await
         .map_err(CatalogError::Library)?
         .ok_or(CatalogError::NotFound)?;
-        Ok((refreshed, matches!(outcome, Ok(Completeness::Complete))))
+        Ok((refreshed, complete))
     }
 
-    /// Reads a track row, walking its head inline when the data is missing.
+    /// Reads a track row, completing its head when the data is missing.
     ///
     /// # Parameters
     ///
     /// - `row`: the track's raw primary key.
     async fn track_row(&self, row: Uuid) -> Result<Track, CatalogError> {
-        let mut connection = self.database.writer().acquire().await?;
+        let mut connection = self.database.readers().acquire().await?;
         let track = hearthsound_library::tracks::get_track(
             &mut connection,
             EntityId::from_uuid(IdPrefix::Track, row),
@@ -480,12 +565,10 @@ impl EntityViews {
         if track.fetched_at.is_some() {
             return Ok(track);
         }
-        let timeout = crate::index::view_policy(self.settings.current().as_ref()).0;
         let _ = self
-            .indexer
-            .ensure(EntityKind::Track, row, Depth::Head, timeout)
-            .await;
-        let mut connection = self.database.writer().acquire().await?;
+            .complete_page(EntityKind::Track, row, Depth::Head)
+            .await?;
+        let mut connection = self.database.readers().acquire().await?;
         hearthsound_library::tracks::get_track(
             &mut connection,
             EntityId::from_uuid(IdPrefix::Track, row),
@@ -496,36 +579,41 @@ impl EntityViews {
     }
 
     /// Records that an entity was viewed, when it was not viewed recently.
-    async fn touch(
-        &self,
-        kind: EntityKind,
-        id: Uuid,
-        column: &str,
-        stored: Option<i64>,
-    ) -> Result<(), CatalogError> {
+    ///
+    /// The write is spawned: a page never waits on the writer, which the indexer
+    /// is using, for a timestamp no client sees. A failure is logged and
+    /// dropped, because the next view tries again.
+    ///
+    /// # Parameters
+    ///
+    /// - `kind`: the entity kind.
+    /// - `id`: the entity's raw primary key.
+    /// - `column`: the timestamp column to write.
+    /// - `stored`: the stored timestamp, when the row had one.
+    async fn touch(&self, kind: EntityKind, id: Uuid, column: &'static str, stored: Option<i64>) {
         let now = unix_millis();
         if stored.is_some_and(|seen| now - seen < 3_600_000) {
-            return Ok(());
+            return;
         }
-        let mut connection = self.database.writer().acquire().await?;
-        match (kind, column) {
-            (EntityKind::Artist, "viewed_at") => {
-                sqlx::query("UPDATE artists SET viewed_at = ? WHERE id = ?")
-                    .bind(now)
-                    .bind(id.as_bytes().as_slice())
-                    .execute(&mut *connection)
-                    .await?;
+        let statement = match (kind, column) {
+            (EntityKind::Artist, "viewed_at") => "UPDATE artists SET viewed_at = ? WHERE id = ?",
+            (EntityKind::Album, "viewed_at") => "UPDATE albums SET viewed_at = ? WHERE id = ?",
+            _ => return,
+        };
+        let database = Arc::clone(&self.database);
+        tokio::spawn(async move {
+            let Ok(mut connection) = database.writer().acquire().await else {
+                return;
+            };
+            if let Err(error) = sqlx::query(statement)
+                .bind(now)
+                .bind(id.as_bytes().as_slice())
+                .execute(&mut *connection)
+                .await
+            {
+                tracing::debug!(%error, "could not record that an entity was viewed");
             }
-            (EntityKind::Album, "viewed_at") => {
-                sqlx::query("UPDATE albums SET viewed_at = ? WHERE id = ?")
-                    .bind(now)
-                    .bind(id.as_bytes().as_slice())
-                    .execute(&mut *connection)
-                    .await?;
-            }
-            _ => return Ok(()),
-        }
-        Ok(())
+        });
     }
 }
 
@@ -535,7 +623,7 @@ async fn entities_canonical(
     kind: EntityKind,
     id: Uuid,
 ) -> Result<Option<Uuid>, CatalogError> {
-    let mut connection = database.writer().acquire().await?;
+    let mut connection = database.readers().acquire().await?;
     hearthsound_library::entities::canonical(&mut connection, kind, id)
         .await
         .map_err(CatalogError::Library)
@@ -779,15 +867,25 @@ async fn discography(
     }
     // A discography holds the artist's albums, EPs and singles: a live
     // recording or a compilation a top track pointed at is a release of one of
-    // those, not a work of its own.
-    albums.retain(|album| crate::index::is_discography_release(album.album_type.as_deref()));
+    // those, not a work of its own. An album the library holds stays whatever
+    // its type says - the server can prove it belongs to the artist, and hiding
+    // a library album from its artist's page is worse than listing a compilation.
+    let mut kept = Vec::with_capacity(albums.len());
+    for album in albums {
+        if crate::index::is_discography_release(album.album_type.as_deref())
+            || crate::held::album(conn, album.id.uuid()).await?
+        {
+            kept.push(album);
+        }
+    }
+    let albums = kept;
     // One representative per release group: the edition the library holds when
     // it holds one, else the earliest release.
     let mut groups: std::collections::BTreeMap<String, (Album, bool)> =
         std::collections::BTreeMap::new();
     for album in albums {
         let key = group_key(conn, album.id.uuid(), &album.title).await?;
-        let owned = album_holds_library_track(conn, album.id.uuid()).await?;
+        let owned = crate::held::album(conn, album.id.uuid()).await?;
         match groups.get(&key) {
             Some((existing, existing_owned)) => {
                 if (*existing_owned && !owned) || (!*existing_owned && owned) {
@@ -979,32 +1077,6 @@ fn rank(value: Availability) -> u8 {
 /// - `settings`: the current snapshot.
 pub fn refresh_days(settings: &hearthsound_config::SettingsStore) -> i64 {
     settings.get(keys::INDEX_REFRESH_DAYS).unwrap_or(30)
-}
-
-/// Reports whether an album holds a library track.
-///
-/// # Parameters
-///
-/// - `conn`: the connection or transaction to read on.
-/// - `album`: the album row.
-///
-/// # Errors
-///
-/// Returns [`CatalogError`] when the read fails.
-async fn album_holds_library_track(
-    conn: &mut sqlx::SqliteConnection,
-    album: Uuid,
-) -> Result<bool, CatalogError> {
-    let found: Option<i64> = sqlx::query_scalar(
-        "SELECT 1 AS \"found: i64\" FROM tracks t \
-          WHERE t.album_id = ? AND EXISTS (SELECT 1 FROM media_files mf \
-                                            WHERE mf.track_id = t.id \
-                                              AND mf.storage IN ('folder', 'library')) LIMIT 1",
-    )
-    .bind(album.as_bytes().as_slice())
-    .fetch_optional(&mut *conn)
-    .await?;
-    Ok(found.is_some())
 }
 
 /// Reads only the artist's stored top tracks, in position order.

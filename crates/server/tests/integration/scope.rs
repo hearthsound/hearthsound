@@ -152,8 +152,12 @@ async fn artist_albums(fixture: &Fixture, artist: EntityId, vendor: bool) -> Vec
         .unwrap_or_default()
 }
 
-/// Reads the artist page as this server's own client does, which is what walks
-/// the page and stores the discography.
+/// Reads the artist page as this server's own client does, and runs the indexer
+/// until the work the page queued is stored.
+///
+/// A held artist's page is queued rather than fetched while it is being viewed,
+/// so the discography arrives one index pass later - which is what a running
+/// server does with its own worker.
 ///
 /// # Parameters
 ///
@@ -168,6 +172,28 @@ async fn load_page(fixture: &Fixture, artist: EntityId) {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+
+    let indexer = std::sync::Arc::clone(fixture.services.catalog().indexer());
+    let worker_indexer = std::sync::Arc::clone(&indexer);
+    let shutdown = hearthsound_jobs::Shutdown::new();
+    let worker = {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move { worker_indexer.run(shutdown).await })
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let (queued, failed) = indexer.queue_counts().await.unwrap();
+        if queued == 0 && failed == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the index queue did not drain: {queued} queued, {failed} failed"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    shutdown.trigger();
+    worker.await.unwrap();
 }
 
 /// A third-party client sees only the albums its own library holds, and this

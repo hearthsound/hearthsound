@@ -17,6 +17,12 @@
 //! is fetched through the instance that named it, stored, and then served. A
 //! provider that refuses the URL (403, 404, 410) costs that row its place, so the
 //! next candidate is tried and the refusal is not repeated forever.
+//!
+//! Indexing stores the bytes of the image it names, so a stored page draws its
+//! pictures with no network at all. A held entity with no stored image is queued
+//! for the indexer and answered with nothing - the client re-reads when the
+//! indexer lands - and only a remote entity is walked inline under the view
+//! deadline.
 
 use std::sync::OnceLock;
 
@@ -49,7 +55,8 @@ pub struct ImageService {
     thumbs: std::sync::Arc<ThumbnailCache>,
     registry: std::sync::Arc<ProviderRegistry>,
     database: std::sync::Arc<Database>,
-    indexer: OnceLock<std::sync::Arc<Indexer>>,
+    settings: hearthsound_config::settings::Settings,
+    indexer: OnceLock<std::sync::Weak<Indexer>>,
 }
 
 impl ImageService {
@@ -62,11 +69,13 @@ impl ImageService {
     /// - `database`: the open database.
     /// - `artwork_root`: the directory blobs are written under.
     /// - `ffmpeg`: the runner the thumbnail cache scales with.
+    /// - `settings`: the settings store, read for the view deadline.
     pub fn new(
         registry: std::sync::Arc<ProviderRegistry>,
         database: std::sync::Arc<Database>,
         artwork_root: impl Into<std::path::PathBuf>,
         ffmpeg: std::sync::Arc<hearthsound_media::FfmpegRunner>,
+        settings: hearthsound_config::settings::Settings,
     ) -> ImageService {
         let root = artwork_root.into();
         ImageService {
@@ -74,17 +83,21 @@ impl ImageService {
             thumbs: std::sync::Arc::new(ThumbnailCache::new(root.join("thumbs"), ffmpeg)),
             registry,
             database,
+            settings,
             indexer: OnceLock::new(),
         }
     }
 
     /// Gives the service the indexer it asks for a missing page.
     ///
+    /// The service holds the indexer weakly: the indexer holds the service, and
+    /// a strong reference back would keep both alive for the life of the process.
+    ///
     /// # Parameters
     ///
     /// - `indexer`: the indexer over the same store.
-    pub fn attach_indexer(&self, indexer: std::sync::Arc<Indexer>) {
-        let _ = self.indexer.set(indexer);
+    pub fn attach_indexer(&self, indexer: &std::sync::Arc<Indexer>) {
+        let _ = self.indexer.set(std::sync::Arc::downgrade(indexer));
     }
 
     /// Returns the store the service writes to.
@@ -115,7 +128,7 @@ impl ImageService {
         let Some((entity, role)) = self.subject(kind, id).await? else {
             return Ok(None);
         };
-        let mut connection = self.database.writer().acquire().await?;
+        let mut connection = self.database.readers().acquire().await?;
         let candidates = images::images_of(&mut connection, entity.0, entity.1, role)
             .await
             .map_err(CatalogError::Library)?;
@@ -130,6 +143,11 @@ impl ImageService {
 
     /// Serves an entity's image, scaled when a size is asked for.
     ///
+    /// A stored image is served as it is. When nothing is stored, the entity's
+    /// page decides what happens: a held entity is queued for the indexer and
+    /// answered with nothing, so the client re-reads when `entity.updated`
+    /// arrives, and a remote entity is walked inline under the view deadline.
+    ///
     /// # Parameters
     ///
     /// - `kind`: the entity kind.
@@ -138,7 +156,7 @@ impl ImageService {
     ///
     /// # Returns
     ///
-    /// The image, or `None` when the entity has none.
+    /// The image, or `None` when the entity has none yet.
     ///
     /// # Errors
     ///
@@ -149,25 +167,78 @@ impl ImageService {
         id: Uuid,
         size: Option<u32>,
     ) -> Result<Option<ServedImage>, CatalogError> {
-        let Some(original) = self.primary(kind, id).await? else {
-            // Nothing stored: a page the server never fetched may still name an
-            // image, so one fetch is attempted inline under the view deadline.
-            if let Some(indexer) = self.indexer.get() {
-                let _ = indexer
-                    .ensure(
-                        kind,
-                        id,
-                        hearthsound_library::index_queue::Depth::Head,
-                        self.view_timeout(),
-                    )
-                    .await;
-            }
-            let Some(original) = self.primary(kind, id).await? else {
-                return Ok(None);
-            };
+        if let Some(original) = self.primary(kind, id).await? {
             return self.scale(original, size).await;
+        }
+        let Some(indexer) = self.indexer.get().and_then(std::sync::Weak::upgrade) else {
+            return Ok(None);
+        };
+        let mut connection = self.database.readers().acquire().await?;
+        let held = crate::held::is_held(&mut connection, kind, id).await?;
+        drop(connection);
+        if held {
+            self.queue_page(kind, id).await?;
+            return Ok(None);
+        }
+        let timeout = crate::index::view_policy(self.settings.current().as_ref()).0;
+        let _ = indexer
+            .ensure(
+                kind,
+                id,
+                hearthsound_library::index_queue::Depth::Head,
+                timeout,
+            )
+            .await;
+        let Some(original) = self.primary(kind, id).await? else {
+            return Ok(None);
         };
         self.scale(original, size).await
+    }
+
+    /// Queues the page whose images a held entity's picture comes from.
+    ///
+    /// A track's picture is its album's cover, so the album's page is what the
+    /// indexer has to store.
+    ///
+    /// # Parameters
+    ///
+    /// - `kind`: the entity kind.
+    /// - `id`: the row's raw primary key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when a read or a write fails.
+    async fn queue_page(&self, kind: EntityKind, id: Uuid) -> Result<(), CatalogError> {
+        let (kind, id) = match kind {
+            EntityKind::Track => {
+                let mut connection = self.database.readers().acquire().await?;
+                let album: Option<Option<Vec<u8>>> =
+                    sqlx::query_scalar("SELECT album_id FROM tracks WHERE id = ?")
+                        .bind(id.as_bytes().as_slice())
+                        .fetch_optional(&mut *connection)
+                        .await?;
+                drop(connection);
+                match album.flatten() {
+                    Some(bytes) if bytes.len() == 16 => (
+                        EntityKind::Album,
+                        Uuid::from_slice(&bytes).map_err(|_| CatalogError::CorruptId)?,
+                    ),
+                    _ => (EntityKind::Track, id),
+                }
+            }
+            other => (other, id),
+        };
+        let mut connection = self.database.writer().acquire().await?;
+        hearthsound_library::index_queue::enqueue(
+            &mut connection,
+            kind,
+            id,
+            hearthsound_library::index_queue::Depth::Page,
+            0,
+        )
+        .await
+        .map_err(CatalogError::Library)?;
+        Ok(())
     }
 
     /// Reads the image of a playlist: the first entry that has one.
@@ -207,7 +278,7 @@ impl ImageService {
             EntityKind::Album => Ok(Some(((EntityKind::Album, id), "cover"))),
             EntityKind::Artist => Ok(Some(((EntityKind::Artist, id), "portrait"))),
             EntityKind::Track => {
-                let mut connection = self.database.writer().acquire().await?;
+                let mut connection = self.database.readers().acquire().await?;
                 let album: Option<Option<Vec<u8>>> =
                     sqlx::query_scalar("SELECT album_id FROM tracks WHERE id = ?")
                         .bind(id.as_bytes().as_slice())
@@ -329,11 +400,6 @@ impl ImageService {
             .into_iter()
             .find(|known| known.id() == instance)
             .map(|known| known.slug().clone())
-    }
-
-    /// Returns the view deadline for an inline fetch.
-    fn view_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(5)
     }
 }
 

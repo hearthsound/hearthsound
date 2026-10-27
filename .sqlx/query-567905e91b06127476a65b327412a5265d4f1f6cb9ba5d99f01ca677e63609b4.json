@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT a.id AS id, EXISTS (SELECT 1 FROM external_ids e WHERE e.entity_kind = 'artist' AND e.entity_id = a.id) AS \"aliased: bool\" FROM artists a WHERE a.name = ? COLLATE NOCASE ORDER BY a.id",
+  "query": "SELECT a.id AS id, EXISTS (SELECT 1 FROM external_ids e WHERE e.entity_kind = 'artist' AND e.entity_id = a.id AND e.namespace = 'mb-artist') AS \"aliased: bool\" FROM artists a WHERE a.match_key = ? ORDER BY a.id",
   "describe": {
     "columns": [
       {
@@ -29,5 +29,5 @@
       false
     ]
   },
-  "hash": "e8528d7bf8a9b6c754561f4440c6181b609790265b0455540a8cfa000a0135a0"
+  "hash": "567905e91b06127476a65b327412a5265d4f1f6cb9ba5d99f01ca677e63609b4"
 }

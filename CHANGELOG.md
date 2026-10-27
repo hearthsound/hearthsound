@@ -278,11 +278,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A live event subscriber receives ids in the order they were assigned, so the
   `Last-Event-ID` it reports never skips an event.
 
+- An artist row is identified by its MusicBrainz id, not by any identifier: a
+  provider's own id says which row that provider's answer belongs to, so a row
+  that holds only one is still adopted when the MusicBrainz id for its name
+  arrives. Names are compared through a new `artists.match_key`, which folds the
+  case, the whitespace and the hyphen and quote characters providers spell
+  differently, so `alt-J` and the same name with a non-breaking hyphen are one
+  name. One artist holds one MusicBrainz id, enforced by
+  `external_ids_one_mb_artist` and by the library, and two artists that each hold
+  a different one are never merged.
+- A held entity's page is served from stored data only: the row is queued for the
+  indexer at the front of the queue and answered with what is stored, and the
+  page re-reads when `entity.updated` arrives. Only a remote entity - one the
+  library neither stores nor lists - is walked while it is being viewed. Page
+  composition and image serving read on the reader connections, and the view
+  timestamp is written without the response waiting for the writer.
+- The indexer walks one entity once at a time whatever asked for it: the queue's
+  worker joins a viewer's walk and every caller is told how it ended. Every walk
+  publishes `entity.updated`, so a failed pass renders what is stored instead of
+  leaving a page on placeholders. A provider's rate limit is waited out inside
+  the pass instead of abandoning it, up to three times.
+- Indexing makes fewer requests: an album lookup is asked with one identifier, a
+  discography listing stops on its first short page, an album queues only the
+  artists that have never been indexed, an artist queues only the albums that
+  have, and an album's `head` is its artwork alone. A track's credited artists
+  are queued with it, because they are the artists a held page shows.
+- The remote cards a held page shows are prefetched after the held work, at a
+  priority below library changes: a similar artist, a remote album of a
+  discography and the album of a top track are walked to their head, and every
+  walk stores the bytes of the image it names. An image a provider named costs no
+  request to show, and the server keeps one HTTP client per provider instance
+  across reloads, so an instance's rate limiter is no longer rebuilt every time
+  the registry is.
+- The server's own commits no longer trigger a reload: a change seen while the
+  writer is busy is held and attributed on a later poll instead of being reported
+  as another connection's. A long import or index run no longer rebuilds the
+  provider registry every few seconds.
+- The metadata index card on the admin overview is a card like the others: the
+  number of items left, a bar only while indexing runs, `N of M indexed` (or `Up
+  to date`), and the failed count as a pill. Its `total` is the processed plus
+  the pending items, which is what the bar is drawn against.
+- The artist page lists the whole discography the server stored instead of the
+  first twelve by year, and a library album of any type is listed beside the
+  albums, EPs and singles rather than filtered out by its type.
+
 ### Removed
 
 - `catalog.imageCachePolicy`, and the Subsonic vendor `path`, `artistPath` and `albumPath` members.
 
 ### Fixed
+
+- A scan no longer fails with `UNIQUE constraint failed:
+  index_queue.entity_kind, index_queue.entity_id` when it merges two entities
+  that are both queued: the survivor's queue row keeps the deeper depth and the
+  higher urgency, and the merge itself is one transaction, so a statement that
+  fails leaves both rows as they were.
+- An artist row no longer holds two MusicBrainz ids. ListenBrainz reports a
+  collaboration as one entry crediting every artist, and attaching both gave one
+  row another artist's biography and portrait while the albums stayed split
+  between the two; a credit now names its first MusicBrainz artist only, an
+  artist-info answer that names another artist is stored as missing, and the
+  second id is refused with a warning.
+- The Similar Artists shelf no longer waits on placeholders forever: an
+  instance that failed no longer records "no similar artists" as the answer, a
+  failed pass publishes `entity.updated`, and the page reads itself again when
+  the stream lost events.
 
 - The Home discovery shelves work on stored rows: Recommended Albums is the
   distinct albums of the tracks the discovery service recommends, Because You

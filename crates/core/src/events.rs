@@ -350,9 +350,11 @@ pub struct IndexProgress {
     pub pending: u64,
     /// Items whose last attempt failed and wait for a retry.
     pub failed: u64,
-    /// Items processed since the queue was last empty.
+    /// Items processed since the process started.
     pub done: u64,
-    /// Items claimed since the queue was last empty, plus what is pending.
+    /// What a progress bar is drawn against: the items processed plus the items
+    /// still pending. A run that is still going moves this up as the queue
+    /// grows, so the bar never overstates how far it has come.
     pub total: u64,
 }
 

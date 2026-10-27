@@ -29,7 +29,8 @@ pub struct IndexStatus {
     pub failed: u64,
     /// How many entities this process has indexed.
     pub done: u64,
-    /// How many entities this process has claimed.
+    /// How many entities this process has indexed or still has to index, which
+    /// is what a progress bar is drawn against.
     pub total: u64,
 }
 
@@ -77,12 +78,13 @@ pub async fn index_status(
         .queue_counts()
         .await
         .map_err(|error| problem::internal("reading the index queue", &error))?;
-    let (done, total) = indexer.progress();
+    let done = indexer.progress();
+    let pending = pending.max(0) as u64;
     Ok(Json(IndexStatus {
-        pending: pending.max(0) as u64,
+        pending,
         failed: failed.max(0) as u64,
         done,
-        total,
+        total: done + pending,
     }))
 }
 
