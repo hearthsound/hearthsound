@@ -33,9 +33,9 @@ sha256 = "e546c2dfc5649fbf4bc6473f8782f5e32ec0c87dc5f1c70dd8024340c626d0bc"
 
 [[plugin]]
 id = "app.hearthsound.musicbrainz"
-version = "0.5.2"
-url = "https://github.com/hearthsound/plugin-musicbrainz/releases/download/v0.5.2/app.hearthsound.musicbrainz-0.5.2.hsplugin"
-sha256 = "6ba77352d91d931f869a4198a47498cac30a291f667076bec291f756d144be69"
+version = "0.5.3"
+url = "https://github.com/hearthsound/plugin-musicbrainz/releases/download/v0.5.3/app.hearthsound.musicbrainz-0.5.3.hsplugin"
+sha256 = "a8f571558a67f3ec545537cf004d20334dd9b31098526490a5c26a80718c0f36"
 mandatory = true
 
 [[plugin]]
