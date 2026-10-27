@@ -48,6 +48,7 @@
 pub mod discovery;
 mod error;
 pub mod fields;
+mod held;
 pub mod identity;
 pub mod images;
 pub mod index;
