@@ -9,7 +9,7 @@ use std::path::Path;
 use hearthsound_core::{EntityKind, IdPrefix};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_library::entities::{canonical, merge};
-use hearthsound_library::{LibraryRepository, sort_key};
+use hearthsound_library::{LibraryRepository, identity_key, sort_key};
 use uuid::Uuid;
 
 async fn migrated(dir: &Path) -> Database {
@@ -22,12 +22,13 @@ async fn migrated(dir: &Path) -> Database {
 async fn insert_artist(db: &Database, name: &str) -> Uuid {
     let id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO artists (id, name, sort_name, created_at, updated_at) \
-         VALUES (?, ?, ?, 0, 0)",
+        "INSERT INTO artists (id, name, sort_name, match_key, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, 0, 0)",
     )
     .bind(id.as_bytes().as_slice())
     .bind(name)
     .bind(sort_key(name))
+    .bind(identity_key(name))
     .execute(db.writer())
     .await
     .unwrap();
@@ -147,6 +148,66 @@ async fn merging_two_credited_tracks_keeps_one_credit_per_position() {
             .unwrap(),
         Some(survivor)
     );
+}
+
+/// Merging two albums that both sit in the index queue leaves one row.
+///
+/// The queue's primary key is the entity, so moving the loser's row onto the
+/// survivor's with a plain `UPDATE` failed the whole merge - and with it the
+/// scan that triggered it - whenever both rows were queued, which is the common
+/// case right after a scan enqueues an album and the indexer learns of a
+/// duplicate. The survivor keeps the deeper depth and the more urgent priority
+/// of the two.
+#[tokio::test]
+async fn merging_two_queued_albums_keeps_one_deeper_queue_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+
+    let mut ids = [Uuid::now_v7(), Uuid::now_v7()];
+    ids.sort();
+    let [survivor, loser] = ids;
+    for (id, title) in [(survivor, "An Awesome Wave"), (loser, "An Awesome Wave")] {
+        sqlx::query(
+            "INSERT INTO albums (id, title, sort_title, created_at, updated_at) \
+             VALUES (?, ?, ?, 0, 0)",
+        )
+        .bind(id.as_bytes().as_slice())
+        .bind(title)
+        .bind(sort_key(title))
+        .execute(db.writer())
+        .await
+        .unwrap();
+    }
+    for (id, depth, priority) in [(survivor, "page", 2_i64), (loser, "deep", 1_i64)] {
+        sqlx::query(
+            "INSERT INTO index_queue (entity_kind, entity_id, depth, priority, state, attempts, \
+                                      run_at, enqueued_at) \
+             VALUES ('album', ?, ?, ?, 'queued', 0, 0, 0)",
+        )
+        .bind(id.as_bytes().as_slice())
+        .bind(depth)
+        .bind(priority)
+        .execute(db.writer())
+        .await
+        .unwrap();
+    }
+
+    let mut tx = db.writer().begin().await.unwrap();
+    let merged = merge(&mut tx, EntityKind::Album, loser, survivor)
+        .await
+        .expect("a merge of two queued albums succeeds");
+    tx.commit().await.unwrap();
+
+    assert_eq!(merged, survivor, "the older row survives");
+    let rows: Vec<(Vec<u8>, String, i64)> =
+        sqlx::query_as("SELECT entity_id, depth, priority FROM index_queue ORDER BY depth")
+            .fetch_all(db.readers())
+            .await
+            .unwrap();
+    assert_eq!(rows.len(), 1, "one queue row is left");
+    assert_eq!(rows[0].0.as_slice(), survivor.as_bytes().as_slice());
+    assert_eq!(rows[0].1, "deep", "the deeper depth survives");
+    assert_eq!(rows[0].2, 1, "the more urgent priority survives");
 }
 
 /// Builds the client id of a raw track key.

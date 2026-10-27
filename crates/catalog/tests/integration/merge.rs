@@ -1,11 +1,11 @@
-//! Merging: two rows that turn out to name one artist become the older row, and
-//! the retired id keeps answering with the survivor.
+//! Merging and the one-MusicBrainz-id rule: two rows that turn out to name one
+//! artist become the older row, and two rows that hold different MusicBrainz ids
+//! stay apart.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::time::Duration;
 
-use hearthsound_catalog::Viewer;
 use hearthsound_core::providers::{
     ArtistCredit, CatalogAlbum, CatalogArtist, MB_ARTIST, provider_namespace,
 };
@@ -25,7 +25,7 @@ const PROVIDER_ARTIST: &str = "provider-artist-1";
 const PROVIDER_MBID: &str = "mb-artist-provider";
 
 #[tokio::test]
-async fn an_album_credit_carrying_both_ids_merges_the_rows_into_the_older() {
+async fn an_album_credit_naming_a_second_musicbrainz_id_keeps_the_rows_apart() {
     let env = Env::new().await;
     let slug = Slug::new("remote").unwrap();
 
@@ -61,13 +61,12 @@ async fn an_album_credit_carrying_both_ids_merges_the_rows_into_the_older() {
         provider, library_id,
         "a provider hit that states another canonical id does not adopt the library row"
     );
-    assert!(
-        library_id.uuid() < provider.uuid(),
-        "the library row is older, so it is the merge survivor"
-    );
 
     // An album page credits the artist with the provider's own id and the
-    // library row's MusicBrainz id: the two ids prove the rows are one.
+    // library row's MusicBrainz id. The credit names the library row - it is the
+    // artist whose MusicBrainz id the credit carries - and the provider's row
+    // keeps its own MusicBrainz id: two MusicBrainz ids are two artists, so the
+    // rows are not merged however one credit was written.
     let credit = ArtistCredit {
         name: "A".to_owned(),
         ids: vec![
@@ -100,41 +99,33 @@ async fn an_album_credit_carrying_both_ids_merges_the_rows_into_the_older() {
     )
     .await
     .unwrap();
+    let credited: Vec<Vec<u8>> = sqlx::query_scalar("SELECT artist_id FROM album_artists")
+        .fetch_all(&mut *connection)
+        .await
+        .unwrap();
     drop(connection);
 
     assert_eq!(
         canonical,
-        Some(library_id.uuid()),
-        "the retired id resolves to the older row"
+        Some(provider.uuid()),
+        "two MusicBrainz ids are two artists, so no row is retired"
     );
-    assert_eq!(env.count_rows("artists").await, 1, "one artist row remains");
-    assert_eq!(env.count_rows("entity_redirects").await, 1);
+    assert_eq!(env.count_rows("artists").await, 2, "both artists remain");
+    assert_eq!(env.count_rows("entity_redirects").await, 0);
+    assert_eq!(credited.len(), 1, "the credit resolved to one artist row");
+    assert_eq!(
+        credited[0].as_slice(),
+        library_id.uuid().as_bytes(),
+        "the credit names the artist whose MusicBrainz id it carries"
+    );
     let ids = env.ids_of(EntityKind::Artist, library_id).await;
     assert!(
         ids.iter()
-            .any(|id| id.namespace == provider_namespace(&slug) && id.value == PROVIDER_ARTIST),
-        "the survivor holds the provider's own id"
+            .any(|id| id.namespace == MB_ARTIST && id.value == LIBRARY_MBID),
+        "the library row keeps its own id"
     );
-
-    let user = env.user().await;
-    let view = service
-        .views()
-        .artist(
-            provider,
-            Viewer {
-                user,
-                vendor: false,
-            },
-        )
-        .await
-        .unwrap()
-        .expect("the retired id answers with the survivor");
-    assert_eq!(view.artist.id, library_id);
-    assert_eq!(
-        service
-            .canonical(EntityKind::Artist, provider)
-            .await
-            .unwrap(),
-        Some(library_id)
+    assert!(
+        !ids.iter().any(|id| id.value == PROVIDER_MBID),
+        "one artist never holds two MusicBrainz ids, got {ids:?}"
     );
 }

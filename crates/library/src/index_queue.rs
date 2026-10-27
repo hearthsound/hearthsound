@@ -132,6 +132,57 @@ pub async fn enqueue(
     Ok(())
 }
 
+/// Moves a merged entity's queue row to the row that survives it.
+///
+/// A merge deletes the loser's row and every table that names it, so moving the
+/// queue row with a plain `UPDATE` collided with the survivor's own row: the
+/// primary key is `(entity_kind, entity_id)`, and both rows are commonly queued.
+/// This reads the loser's depth and priority, deletes the row, and enqueues the
+/// survivor with them, which keeps the deeper depth and the lower priority the
+/// survivor already asked for.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `kind`: the entity kind.
+/// - `from`: the row that goes away.
+/// - `into`: the row that survives.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when a statement fails and
+/// [`LibraryError::UnknownLiteral`] for a kind the queue does not index.
+pub(crate) async fn absorb(
+    conn: &mut SqliteConnection,
+    kind: EntityKind,
+    from: Uuid,
+    into: Uuid,
+) -> Result<(), LibraryError> {
+    let kind_literal = kind_literal(kind)?;
+    let row: Option<(String, i64)> = sqlx::query_as(
+        "SELECT depth, priority FROM index_queue WHERE entity_kind = ? AND entity_id = ?",
+    )
+    .bind(kind_literal)
+    .bind(from.as_bytes().as_slice())
+    .fetch_optional(&mut *conn)
+    .await?;
+    sqlx::query("DELETE FROM index_queue WHERE entity_kind = ? AND entity_id = ?")
+        .bind(kind_literal)
+        .bind(from.as_bytes().as_slice())
+        .execute(&mut *conn)
+        .await?;
+    let Some((depth, priority)) = row else {
+        return Ok(());
+    };
+    let Some(depth) = Depth::parse(&depth) else {
+        return Err(LibraryError::UnknownLiteral {
+            kind: "index_queue.depth",
+            value: depth,
+        });
+    };
+    enqueue(conn, kind, into, depth, priority).await
+}
+
 /// Claims the next due row.
 ///
 /// The claim does not lock the row: the indexer is one worker, so a second
@@ -284,6 +335,38 @@ pub async fn fail(
 
 /// How many attempts one row gets before it is marked failed.
 pub const MAX_ATTEMPTS: i64 = 5;
+
+/// Returns the state one queued entity is in.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `kind`: the entity kind.
+/// - `entity`: the row's raw primary key.
+///
+/// # Returns
+///
+/// The stored `state` - `queued` or `failed` - or `None` when the entity is not
+/// queued.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when the query fails and
+/// [`LibraryError::UnknownLiteral`] for a kind the queue does not index.
+pub async fn state_of(
+    conn: &mut SqliteConnection,
+    kind: EntityKind,
+    entity: Uuid,
+) -> Result<Option<String>, LibraryError> {
+    let kind_literal = kind_literal(kind)?;
+    let state: Option<String> =
+        sqlx::query_scalar("SELECT state FROM index_queue WHERE entity_kind = ? AND entity_id = ?")
+            .bind(kind_literal)
+            .bind(entity.as_bytes().as_slice())
+            .fetch_optional(&mut *conn)
+            .await?;
+    Ok(state)
+}
 
 /// Returns how many rows wait, and how many are marked failed.
 ///

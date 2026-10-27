@@ -118,3 +118,70 @@ async fn scanned_track(env: &Env) -> EntityId {
         .unwrap();
     EntityId::from_uuid(IdPrefix::Track, uuid::Uuid::from_slice(&bytes).unwrap())
 }
+
+/// A credit that names two MusicBrainz artists resolves to the first one only.
+///
+/// ListenBrainz reports the recording `Buffalo` with the credit
+/// `alt-J feat. Mountain Man` and both artists' MusicBrainz ids. Attaching every
+/// id of a credit gave one row two artist ids, so the row's biography and
+/// portrait came from whichever was read first - the alt-J page showed Mountain
+/// Man's - and neither id's albums were complete. One credit names one artist:
+/// the first id names the row and the rest are dropped.
+#[tokio::test]
+async fn a_credit_with_two_musicbrainz_ids_resolves_to_its_first_artist_only() {
+    let env = Env::new().await;
+    let credit = hearthsound_core::providers::ArtistCredit {
+        name: "alt-J feat. Mountain Man".to_owned(),
+        ids: vec![
+            hearthsound_core::providers::ExternalId {
+                namespace: "mb-artist".to_owned(),
+                value: ALT_J.to_owned(),
+            },
+            hearthsound_core::providers::ExternalId {
+                namespace: "mb-artist".to_owned(),
+                value: MOUNTAIN_MAN.to_owned(),
+            },
+        ],
+    };
+    let mut connection = env.database.writer().acquire().await.unwrap();
+    let row = env
+        .service()
+        .resolver()
+        .credit(&mut connection, &credit, None)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let ids = env
+        .ids_of(
+            EntityKind::Artist,
+            EntityId::from_uuid(IdPrefix::Artist, row),
+        )
+        .await;
+    let held: Vec<&str> = ids
+        .iter()
+        .filter(|id| id.namespace == "mb-artist")
+        .map(|id| id.value.as_str())
+        .collect();
+    assert_eq!(
+        held,
+        [ALT_J],
+        "the row holds the first id of the credit and nothing else, got {ids:?}"
+    );
+    let stray: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM external_ids WHERE namespace = 'mb-artist' \
+                            AND value = ?",
+    )
+    .bind(MOUNTAIN_MAN)
+    .fetch_one(env.database.writer())
+    .await
+    .unwrap();
+    assert_eq!(stray, 0, "the second id belongs to no row");
+}
+
+/// The MusicBrainz id of alt-J.
+const ALT_J: &str = "fc7bbf00-fbaa-4736-986b-b3ac0266ca9b";
+
+/// The MusicBrainz id of Mountain Man, which one ListenBrainz credit pairs with
+/// alt-J's.
+const MOUNTAIN_MAN: &str = "ecc6e248-9ec4-4150-bbd2-d2b112f0b365";

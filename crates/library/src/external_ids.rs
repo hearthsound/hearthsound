@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use hearthsound_core::EntityKind;
-use hearthsound_core::providers::ExternalId;
+use hearthsound_core::providers::{ExternalId, MB_ARTIST};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
@@ -70,6 +70,13 @@ pub fn kind_literal(kind: EntityKind) -> Result<&'static str, LibraryError> {
 /// owned by another row is left where it is and reported, so the caller merges
 /// the two rows instead of silently stealing the identity.
 ///
+/// One case is not a conflict and is not attached: a second MusicBrainz artist
+/// id on an artist row that already holds one. An artist is one MusicBrainz
+/// entity, so a credit that carries two artist ids - ListenBrainz reports
+/// `alt-J feat. Mountain Man` as one credit naming both - must not hand the row
+/// both; the first id names the row and the rest are dropped with a warning. The
+/// `external_ids_one_mb_artist` index backs the rule up.
+///
 /// # Parameters
 ///
 /// - `conn`: the connection or transaction to write on.
@@ -119,6 +126,18 @@ pub async fn attach(
                 }
             }
             None => {
+                if kind == EntityKind::Artist
+                    && id.namespace == MB_ARTIST
+                    && let Some(held) = held_mb_artist(conn, entity).await?
+                {
+                    tracing::warn!(
+                        artist = %entity,
+                        held = %held,
+                        refused = %id.value,
+                        "refused a second MusicBrainz id for one artist"
+                    );
+                    continue;
+                }
                 sqlx::query(
                     "INSERT INTO external_ids (namespace, value, entity_kind, entity_id) \
                      VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
@@ -133,6 +152,30 @@ pub async fn attach(
         }
     }
     Ok(conflicts)
+}
+
+/// Returns the MusicBrainz artist id one artist row holds, if any.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `entity`: the artist row's raw primary key.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when the query fails.
+pub(crate) async fn held_mb_artist(
+    conn: &mut SqliteConnection,
+    entity: Uuid,
+) -> Result<Option<String>, LibraryError> {
+    let value: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM external_ids \
+         WHERE namespace = 'mb-artist' AND entity_kind = 'artist' AND entity_id = ? LIMIT 1",
+    )
+    .bind(entity.as_bytes().as_slice())
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(value)
 }
 
 /// Returns the row an identifier names, when any row holds it.

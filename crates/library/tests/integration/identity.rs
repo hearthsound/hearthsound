@@ -7,8 +7,15 @@ use std::sync::Arc;
 
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_library::identity::{consolidate_albums, consolidate_artists};
-use hearthsound_library::{LibraryRepository, sort_key};
+use hearthsound_library::{LibraryRepository, identity_key, sort_key};
 use uuid::Uuid;
+
+/// The MusicBrainz id of alt-J.
+const ALT_J: &str = "fc7bbf00-fbaa-4736-986b-b3ac0266ca9b";
+
+/// The MusicBrainz id of Mountain Man, which one ListenBrainz credit pairs with
+/// alt-J's.
+const MOUNTAIN_MAN: &str = "ecc6e248-9ec4-4150-bbd2-d2b112f0b365";
 
 async fn migrated(dir: &Path) -> Database {
     let db = Database::open(&dir.join("hearthsound.db")).await.unwrap();
@@ -35,12 +42,13 @@ async fn insert_user(db: &Database) -> Uuid {
 async fn insert_artist(db: &Database, name: &str, mbid: Option<&str>) -> Uuid {
     let id = Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO artists (id, name, sort_name, created_at, updated_at) \
-         VALUES (?, ?, ?, 0, 0)",
+        "INSERT INTO artists (id, name, sort_name, match_key, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, 0, 0)",
     )
     .bind(id.as_bytes().as_slice())
     .bind(name)
     .bind(sort_key(name))
+    .bind(identity_key(name))
     .execute(db.writer())
     .await
     .unwrap();
@@ -360,4 +368,90 @@ async fn merging_two_albums_moves_tracks_likes_saves_ratings_and_aliases() {
     ] {
         assert_eq!(count(&db, statement).await, 1, "{statement}");
     }
+}
+
+/// A second MusicBrainz id on one artist is dropped, not attached.
+///
+/// ListenBrainz reports a collaboration as one credit carrying every artist's
+/// MusicBrainz id, so the popularity path once attached both to one row: the
+/// artist's biography and portrait then came from whichever id was read first,
+/// which is how alt-J's page showed Mountain Man's. One artist is one
+/// MusicBrainz entity, so the row keeps the id it has.
+#[tokio::test]
+async fn a_second_musicbrainz_artist_id_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let artist = insert_artist(&db, "alt-J", Some(ALT_J)).await;
+
+    let mut conn = db.writer().acquire().await.unwrap();
+    let conflicts = hearthsound_library::external_ids::attach(
+        &mut conn,
+        hearthsound_core::EntityKind::Artist,
+        artist,
+        &[hearthsound_core::providers::ExternalId {
+            namespace: "mb-artist".to_owned(),
+            value: MOUNTAIN_MAN.to_owned(),
+        }],
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        conflicts.is_empty(),
+        "a second id is dropped, not reported as a conflict to merge"
+    );
+    let ids = hearthsound_library::external_ids::ids_of(
+        &mut conn,
+        hearthsound_core::EntityKind::Artist,
+        artist,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ids.len(), 1, "the row holds one identifier, got {ids:?}");
+    assert_eq!(ids[0].value, ALT_J, "the id it already held is kept");
+}
+
+/// A provider's credit for an artist row spelled with a Unicode hyphen finds it.
+///
+/// `alt-J` and `alt\u{2010}J` are the same name: the identity key folds the
+/// hyphen-like characters to `-`, so a Deezer credit does not open a second page
+/// for the act the MusicBrainz id already names.
+#[tokio::test]
+async fn a_provider_credit_finds_the_unicode_hyphen_artist() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let artist = insert_artist(&db, "alt\u{2010}J", Some(ALT_J)).await;
+
+    let mut input = hearthsound_library::ArtistInput::new("alt-J");
+    input.ids = vec![hearthsound_core::providers::ExternalId {
+        namespace: "p:deezer".to_owned(),
+        value: "1606315".to_owned(),
+    }];
+    let mut conn = db.writer().acquire().await.unwrap();
+    let resolved = hearthsound_library::artists::upsert_artist(&mut conn, &input)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resolved.uuid(),
+        artist,
+        "the credit resolves to the same row"
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artists")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1, "no second row was created");
+    let ids = hearthsound_library::external_ids::ids_of(
+        &mut conn,
+        hearthsound_core::EntityKind::Artist,
+        artist,
+    )
+    .await
+    .unwrap();
+    assert!(
+        ids.iter()
+            .any(|id| id.namespace == "p:deezer" && id.value == "1606315"),
+        "the provider id was attached to the existing row, got {ids:?}"
+    );
 }

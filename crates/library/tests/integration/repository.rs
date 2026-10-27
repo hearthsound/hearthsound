@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use hearthsound_core::providers::{ExternalId, MB_ARTIST, MB_RELEASE};
-use hearthsound_core::{Availability, EntityKind, StorageClass};
+use hearthsound_core::{Availability, EntityId, EntityKind, IdPrefix, StorageClass};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_library::{
     AlbumInput, ArtistCredit, ArtistInput, LibraryRepository, ManagedMediaFile, MediaFileInput,
@@ -536,12 +536,13 @@ fn sort_key_folds_case_and_whitespace() {
 async fn insert_artist_row(db: &Database, name: &str) -> uuid::Uuid {
     let id = uuid::Uuid::now_v7();
     sqlx::query(
-        "INSERT INTO artists (id, name, sort_name, created_at, updated_at) \
-         VALUES (?, ?, ?, 0, 0)",
+        "INSERT INTO artists (id, name, sort_name, match_key, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, 0, 0)",
     )
     .bind(id.as_bytes().as_slice())
     .bind(name)
     .bind(hearthsound_library::sort_key(name))
+    .bind(hearthsound_library::identity_key(name))
     .execute(db.writer())
     .await
     .unwrap();
@@ -597,9 +598,15 @@ async fn an_unidentified_artist_stays_apart_when_two_identified_artists_share_th
     assert_eq!(library.list_artists().await.unwrap().len(), 3);
 }
 
-/// An artist identified only by a provider alias counts as identified.
+/// An artist identified only by a provider alias does not count as identified.
+///
+/// A provider's own id says which row one provider's answer belongs to; it does
+/// not say which act the row is. MusicBrainz is what identifies an act, so a row
+/// that holds only a Deezer id is still adopted when the MusicBrainz id for its
+/// name arrives - otherwise the catalog would open a second page for the act the
+/// library already had.
 #[tokio::test]
-async fn an_artist_identified_only_by_a_provider_alias_counts_as_identified() {
+async fn an_artist_identified_only_by_a_provider_alias_is_adopted() {
     let dir = tempfile::tempdir().unwrap();
     let db = migrated(dir.path()).await;
     let library = LibraryRepository::new(&db);
@@ -607,21 +614,20 @@ async fn an_artist_identified_only_by_a_provider_alias_counts_as_identified() {
     let aliased = insert_artist_row(&db, "Alex G").await;
     insert_artist_alias(&db, aliased, "p:deezer", "3135556").await;
 
-    // One identified artist of the name exists, so a tagged file is a new act.
+    // The MusicBrainz id adopts the row the provider already knew.
     let tagged = library
         .upsert_artist(&mbid_artist("Alex G", "mbid-a"))
         .await
         .unwrap();
-    assert_ne!(tagged.uuid(), aliased);
+    assert_eq!(tagged.uuid(), aliased, "the provider's row is the act");
 
-    // Two identified artists share the name, so an untagged file gets its own.
+    // With one identified artist of the name, an untagged file credits it.
     let untagged = library
         .upsert_artist(&ArtistInput::new("Alex G"))
         .await
         .unwrap();
-    assert_ne!(untagged.uuid(), aliased);
-    assert_ne!(untagged, tagged);
-    assert_eq!(library.list_artists().await.unwrap().len(), 3);
+    assert_eq!(untagged.uuid(), aliased);
+    assert_eq!(library.list_artists().await.unwrap().len(), 1);
 }
 
 /// A MusicBrainz id stored as an alias finds its row.
@@ -853,12 +859,11 @@ async fn identifying_an_artist_merges_the_row_that_holds_the_id_into_the_older_r
     .await
     .unwrap();
 
-    // Resolution went by name and stored a second row for the same act.
-    let twin = library
-        .upsert_artist(&mbid_artist("Cocteau Twins", "mbid-ct"))
-        .await
-        .unwrap();
-    assert_ne!(twin, credited, "the name alone did not resolve it");
+    // An earlier resolution stored a second row for the same act and learned its
+    // MusicBrainz id, which is the shape identify_artist has to consolidate.
+    let twin = insert_artist_row(&db, "Cocteau Twins").await;
+    insert_artist_alias(&db, twin, "mb-artist", "mbid-ct").await;
+    assert_ne!(twin, credited.uuid(), "two rows for one act");
 
     let mut tx = db.writer().begin().await.unwrap();
     let survivor = hearthsound_library::artists::identify_artist(&mut tx, credited, "mbid-ct")
@@ -881,7 +886,13 @@ async fn identifying_an_artist_merges_the_row_that_holds_the_id_into_the_older_r
             }),
         "the id moved onto the surviving row"
     );
-    assert!(library.get_artist(twin).await.unwrap().is_none());
+    assert!(
+        library
+            .get_artist(EntityId::from_uuid(IdPrefix::Artist, twin))
+            .await
+            .unwrap()
+            .is_none()
+    );
     let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artists WHERE name = ?")
         .bind("Cocteau Twins")
         .fetch_one(db.readers())

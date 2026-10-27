@@ -462,9 +462,10 @@ pub(crate) async fn merge_album(
         .await?;
     for statement in [
         "UPDATE external_ids SET entity_id = ? WHERE entity_kind = 'album' AND entity_id = ?",
-        "UPDATE entity_sources SET entity_id = ? WHERE entity_kind = 'album' AND entity_id = ?",
-        "UPDATE entity_images SET entity_id = ? WHERE entity_kind = 'album' AND entity_id = ?",
-        "UPDATE index_queue SET entity_id = ? WHERE entity_kind = 'album' AND entity_id = ?",
+        "UPDATE OR IGNORE entity_sources SET entity_id = ? \
+          WHERE entity_kind = 'album' AND entity_id = ?",
+        "UPDATE OR IGNORE entity_images SET entity_id = ? \
+          WHERE entity_kind = 'album' AND entity_id = ?",
         "UPDATE album_genres SET album_id = ? WHERE album_id = ? AND genre_id NOT IN (\
              SELECT genre_id FROM album_genres WHERE album_id = ?)",
     ] {
@@ -483,6 +484,17 @@ pub(crate) async fn merge_album(
             .execute(&mut *conn)
             .await?;
     }
+    // The survivor's answer and its image slot win; whatever could not move is
+    // dropped with the loser below.
+    sqlx::query("DELETE FROM entity_sources WHERE entity_kind = 'album' AND entity_id = ?")
+        .bind(from_key.as_slice())
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("DELETE FROM entity_images WHERE entity_kind = 'album' AND entity_id = ?")
+        .bind(from_key.as_slice())
+        .execute(&mut *conn)
+        .await?;
+    crate::index_queue::absorb(conn, EntityKind::Album, from, into).await?;
     // The loser's credits move to the survivor; a duplicate of an artist it
     // already credits is dropped.
     crate::entities::move_album_credits(conn, from, into).await?;

@@ -15,13 +15,13 @@
 use std::collections::BTreeSet;
 
 use hearthsound_core::EntityKind;
-use sqlx::SqliteConnection;
+use sqlx::{Connection as _, SqliteConnection};
 use uuid::Uuid;
 
 use crate::albums::merge_album;
 use crate::artists::merge_artist;
 use crate::error::LibraryError;
-use crate::external_ids::kind_literal;
+use crate::external_ids::{self, kind_literal};
 use crate::model::decode_uuid;
 use crate::now_millis;
 use crate::tracks::merge_track;
@@ -99,6 +99,14 @@ pub async fn canonical(
 /// redirect that pointed at it is repointed at the survivor, so a chain of merges
 /// always resolves in one step.
 ///
+/// The whole merge is one transaction - a savepoint when the caller already
+/// holds one - so a statement that fails partway leaves both rows as they were
+/// rather than half-merged.
+///
+/// Two artists that each hold a different MusicBrainz artist id are not merged:
+/// each id names a distinct act, so the rows are two acts whatever their names
+/// suggest. The survivor is returned and a warning is logged.
+///
 /// # Parameters
 ///
 /// - `conn`: the connection or transaction to write on.
@@ -125,10 +133,27 @@ pub async fn merge(
         return Ok(a);
     }
     let (survivor, loser) = if a < b { (a, b) } else { (b, a) };
+    if kind == EntityKind::Artist {
+        let held = external_ids::held_mb_artist(conn, survivor).await?;
+        let other = external_ids::held_mb_artist(conn, loser).await?;
+        if let (Some(held), Some(other)) = (held, other)
+            && held != other
+        {
+            tracing::warn!(
+                survivor = %survivor,
+                loser = %loser,
+                held = %held,
+                other = %other,
+                "refused to merge two artists with different MusicBrainz ids"
+            );
+            return Ok(survivor);
+        }
+    }
+    let mut tx = conn.begin().await?;
     match kind {
-        EntityKind::Artist => merge_artist(conn, loser, survivor).await?,
-        EntityKind::Album => merge_album(conn, loser, survivor).await?,
-        EntityKind::Track => merge_track(conn, loser, survivor).await?,
+        EntityKind::Artist => merge_artist(&mut tx, loser, survivor).await?,
+        EntityKind::Album => merge_album(&mut tx, loser, survivor).await?,
+        EntityKind::Track => merge_track(&mut tx, loser, survivor).await?,
         EntityKind::Playlist => {
             return Err(LibraryError::UnknownLiteral {
                 kind: "mergeable entity",
@@ -141,7 +166,7 @@ pub async fn merge(
         .bind(survivor.as_bytes().as_slice())
         .bind(kind_literal)
         .bind(loser.as_bytes().as_slice())
-        .execute(&mut *conn)
+        .execute(&mut *tx)
         .await?;
     sqlx::query(
         "INSERT INTO entity_redirects (entity_kind, old_id, new_id, merged_at) \
@@ -151,8 +176,9 @@ pub async fn merge(
     .bind(loser.as_bytes().as_slice())
     .bind(survivor.as_bytes().as_slice())
     .bind(now_millis())
-    .execute(&mut *conn)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(survivor)
 }
 

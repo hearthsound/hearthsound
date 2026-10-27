@@ -59,10 +59,48 @@ pub fn sort_key(text: &str) -> String {
     out
 }
 
-/// The managed storage roots a media file's path is resolved against.
+/// Folds text into the identity key stored in `artists.match_key`.
 ///
-/// A `library` or `cache` media file stores a path relative to one of these
-/// roots; a `folder` media file stores a path relative to its library folder.
+/// The key is [`sort_key`] applied after mapping the Unicode punctuation that
+/// providers and tags disagree on to its ASCII form: the hyphen-like characters
+/// to `-`, the single-quote-like characters to `'`, and the double-quote-like
+/// characters to `"`. MusicBrainz spells an artist `alt-J` with a hyphen-minus
+/// one provider reports, a hyphen in another and a non-breaking hyphen in a
+/// third, and Deezer reports the same artist with the hyphen-minus; folding them
+/// together is what stops one artist from becoming two rows.
+///
+/// The key is what the artist dedupe compares, so it must stay stable for a
+/// given name. Two names that differ only in letter case, whitespace or the
+/// punctuation above share one key; anything else does not.
+///
+/// # Parameters
+///
+/// - `text`: the display name.
+///
+/// # Returns
+///
+/// The folded key, which is empty when the text holds only whitespace.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_library::identity_key;
+///
+/// assert_eq!(identity_key("alt\u{2010}J"), identity_key("Alt-J"));
+/// assert_eq!(identity_key("Guns N\u{2019} Roses"), "guns n' roses");
+/// ```
+pub fn identity_key(text: &str) -> String {
+    let folded: String = text
+        .chars()
+        .map(|ch| match ch {
+            '\u{2010}'..='\u{2015}' | '\u{2212}' | '\u{fe58}' | '\u{fe63}' | '\u{ff0d}' => '-',
+            '\u{2018}'..='\u{201b}' | '\u{2032}' | '\u{ff07}' => '\'',
+            '\u{201c}'..='\u{201f}' | '\u{2033}' | '\u{ff02}' => '"',
+            other => other,
+        })
+        .collect();
+    sort_key(&folded)
+}
 ///
 /// # Examples
 ///

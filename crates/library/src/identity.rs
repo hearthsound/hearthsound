@@ -249,6 +249,11 @@ impl JobHandler for ReidentityJobHandler {
 /// become one row of their own. An identified row is never merged away without an
 /// identifier match.
 ///
+/// The pass groups by `artists.match_key`, not by the display name, so rows that
+/// differ only in letter case or in the hyphen and quote characters providers
+/// spell differently are one group. A row whose key is empty belongs to no group:
+/// there is no name to compare it by.
+///
 /// Each name is one transaction, so the writer is never held for the whole pass.
 ///
 /// # Parameters
@@ -266,7 +271,8 @@ pub async fn consolidate_artists(database: &Database) -> Result<u64, LibraryErro
     let names: Vec<String> = {
         let mut read = database.readers().acquire().await?;
         sqlx::query_scalar(
-            "SELECT name FROM artists GROUP BY name COLLATE NOCASE HAVING COUNT(*) > 1",
+            "SELECT match_key FROM artists WHERE match_key <> '' \
+             GROUP BY match_key HAVING COUNT(*) > 1",
         )
         .fetch_all(&mut *read)
         .await?

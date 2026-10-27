@@ -7,12 +7,18 @@
 //! - rows that share an identifier are one artist. An identifier is the
 //!   MusicBrainz artist id or any row of `external_ids` for the artist, which is
 //!   where the catalog layer stores a provider's own id for it.
+//! - a row is *identified* when it holds a MusicBrainz artist id, which is the
+//!   identifier a provider resolves an act by. A provider's own id does not
+//!   identify a row.
 //! - a name identifies an artist only when it is unambiguous. A file whose tags
 //!   carry no id credits the one identified artist of that name; when two or
 //!   more identified artists share the name, every untagged file of that name
 //!   shares one separate row, so two acts called "Alex G" do not become one page
 //!   and neither absorbs an untagged rip; two untagged rows of one name are one
 //!   artist.
+//! - names are compared by [`crate::identity_key`], which folds case, whitespace
+//!   and the hyphen and quote characters providers spell differently, so
+//!   `alt-J` and `alt\u{2010}J` are the same name.
 //!
 //! A row that turns out to be a twin of another is merged into it, which moves
 //! its credits, aliases, likes, saves and ratings; see [`merge_artist`]. A caller
@@ -35,7 +41,9 @@ use uuid::Uuid;
 use crate::entities;
 use crate::error::LibraryError;
 use crate::external_ids;
-use crate::model::{Artist, ArtistInput, decode_entity, decode_uuid, entity_key, sort_key};
+use crate::model::{
+    Artist, ArtistInput, decode_entity, decode_uuid, entity_key, identity_key, sort_key,
+};
 use crate::now_millis;
 
 /// One row of the `artists` table as it is stored.
@@ -86,16 +94,23 @@ impl ArtistRow {
 pub(crate) struct NameGroupRow {
     /// The row's raw primary key.
     pub(crate) id: Uuid,
-    /// Whether the row carries any stored identifier.
+    /// Whether the row holds a MusicBrainz artist id.
     pub(crate) aliased: bool,
 }
 
 impl NameGroupRow {
     /// Reports whether the row is identified.
     ///
+    /// "Identified" means the row holds a MusicBrainz artist id, the identifier
+    /// a catalog provider resolves an act by. A row that holds only a provider's
+    /// own id - a Deezer artist id, say - is not identified: that id says which
+    /// row one provider's answer belongs to, not which act the row is, so it must
+    /// not stop the row from being adopted when the MusicBrainz id for the same
+    /// act arrives.
+    ///
     /// # Returns
     ///
-    /// `true` when the row carries any identifier in `external_ids`.
+    /// `true` when the row holds an `mb-artist` id.
     pub(crate) fn identified(&self) -> bool {
         self.aliased
     }
@@ -105,7 +120,8 @@ impl NameGroupRow {
 ///
 /// The identity rule is documented on this module, and it resolves to one row
 /// like this - `by_identifier` is the row the input's identifier belongs to, and
-/// "aside" counts the other identified artists of the same name:
+/// "aside" counts the other identified artists of the same name, where
+/// identified means the row holds a MusicBrainz artist id:
 ///
 /// | input | `by_identifier` | identified aside | target | absorbed |
 /// |---|---|---|---|---|
@@ -170,6 +186,7 @@ pub async fn upsert_artist(
         .sort_name
         .clone()
         .unwrap_or_else(|| sort_key(&artist.name));
+    let match_key = identity_key(&artist.name);
 
     let mbid = artist
         .ids
@@ -189,11 +206,12 @@ pub async fn upsert_artist(
     {
         let id = resolved.uuid();
         sqlx::query(
-            "UPDATE artists SET name = ?, sort_name = ?, \
+            "UPDATE artists SET name = ?, sort_name = ?, match_key = ?, \
                     file_tags = COALESCE(?, file_tags), updated_at = ? WHERE id = ?",
         )
         .bind(&artist.name)
         .bind(&sort_name)
+        .bind(&match_key)
         .bind(artist.file_tags.as_ref().map(serde_json::Value::to_string))
         .bind(now)
         .bind(id.as_bytes().as_slice())
@@ -258,11 +276,12 @@ pub async fn upsert_artist(
     let id = match target {
         Some(id) => {
             sqlx::query(
-                "UPDATE artists SET name = ?, sort_name = ?, \
+                "UPDATE artists SET name = ?, sort_name = ?, match_key = ?, \
                         file_tags = COALESCE(?, file_tags), updated_at = ? WHERE id = ?",
             )
             .bind(&artist.name)
             .bind(&sort_name)
+            .bind(&match_key)
             .bind(artist.file_tags.as_ref().map(serde_json::Value::to_string))
             .bind(now)
             .bind(id.as_bytes().as_slice())
@@ -276,12 +295,14 @@ pub async fn upsert_artist(
         None => {
             let id = new_uuid_v7();
             sqlx::query(
-                "INSERT INTO artists (id, name, sort_name, file_tags, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO artists (id, name, sort_name, match_key, file_tags, created_at, \
+                                     updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(id.as_bytes().as_slice())
             .bind(&artist.name)
             .bind(&sort_name)
+            .bind(&match_key)
             .bind(artist.file_tags.as_ref().map(serde_json::Value::to_string))
             .bind(now)
             .bind(now)
@@ -309,10 +330,15 @@ pub async fn upsert_artist(
 
 /// Reads every row whose name matches, oldest first.
 ///
+/// The match is on [`identity_key`], not on the stored name: `alt-J`,
+/// `alt\u{2010}J` and `ALT-J` are one name, because providers and tags spell the
+/// punctuation differently. A row whose key was never written - none exist after
+/// the baseline, which makes the column `NOT NULL` - does not match.
+///
 /// # Parameters
 ///
 /// - `conn`: the connection or transaction to read on.
-/// - `name`: the artist name to match, case-insensitively.
+/// - `name`: the artist name to match.
 ///
 /// # Returns
 ///
@@ -329,9 +355,10 @@ pub(crate) async fn name_group(
     let rows = sqlx::query!(
         "SELECT a.id AS id, \
                 EXISTS (SELECT 1 FROM external_ids e \
-                        WHERE e.entity_kind = 'artist' AND e.entity_id = a.id) AS \"aliased: bool\" \
-         FROM artists a WHERE a.name = ? COLLATE NOCASE ORDER BY a.id",
-        name,
+                        WHERE e.entity_kind = 'artist' AND e.entity_id = a.id \
+                          AND e.namespace = 'mb-artist') AS \"aliased: bool\" \
+         FROM artists a WHERE a.match_key = ? ORDER BY a.id",
+        identity_key(name),
     )
     .fetch_all(&mut *conn)
     .await?;
@@ -413,9 +440,10 @@ pub(crate) async fn merge_artist(
     crate::entities::move_album_artist_credits(conn, from, into).await?;
     for statement in [
         "UPDATE external_ids SET entity_id = ? WHERE entity_kind = 'artist' AND entity_id = ?",
-        "UPDATE entity_sources SET entity_id = ? WHERE entity_kind = 'artist' AND entity_id = ?",
-        "UPDATE entity_images SET entity_id = ? WHERE entity_kind = 'artist' AND entity_id = ?",
-        "UPDATE index_queue SET entity_id = ? WHERE entity_kind = 'artist' AND entity_id = ?",
+        "UPDATE OR IGNORE entity_sources SET entity_id = ? \
+          WHERE entity_kind = 'artist' AND entity_id = ?",
+        "UPDATE OR IGNORE entity_images SET entity_id = ? \
+          WHERE entity_kind = 'artist' AND entity_id = ?",
         "UPDATE artist_top_tracks SET artist_id = ? WHERE artist_id = ? AND position NOT IN ( \
              SELECT position FROM artist_top_tracks WHERE artist_id = ?)",
         "UPDATE artist_similar SET artist_id = ? WHERE artist_id = ? AND position NOT IN ( \
@@ -436,6 +464,17 @@ pub(crate) async fn merge_artist(
             .execute(&mut *conn)
             .await?;
     }
+    // The survivor's answer and its image slot win; whatever could not move is
+    // dropped with the loser below.
+    sqlx::query("DELETE FROM entity_sources WHERE entity_kind = 'artist' AND entity_id = ?")
+        .bind(from_key.as_slice())
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("DELETE FROM entity_images WHERE entity_kind = 'artist' AND entity_id = ?")
+        .bind(from_key.as_slice())
+        .execute(&mut *conn)
+        .await?;
+    crate::index_queue::absorb(conn, EntityKind::Artist, from, into).await?;
     // A similar-artist entry the survivor already lists is dropped with the
     // loser's row; the survivor's own position wins.
     sqlx::query("UPDATE OR IGNORE artist_similar SET similar_id = ? WHERE similar_id = ?")

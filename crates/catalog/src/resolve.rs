@@ -447,14 +447,16 @@ impl EntityResolver {
         credit: &ArtistCredit,
         parent: Option<(EntityKind, Uuid)>,
     ) -> Result<Uuid, CatalogError> {
-        let ids: Vec<ExternalId> = credit
-            .ids
-            .iter()
-            .map(|id| ExternalId {
-                namespace: id.namespace.clone(),
-                value: id.value.clone(),
-            })
-            .collect();
+        let ids = single_artist_id(
+            &credit
+                .ids
+                .iter()
+                .map(|id| ExternalId {
+                    namespace: id.namespace.clone(),
+                    value: id.value.clone(),
+                })
+                .collect::<Vec<_>>(),
+        );
         if let Some((kind, parent)) = parent
             && let Some(row) = existing_credit(conn, kind, parent, &credit.name)
                 .await
@@ -568,14 +570,16 @@ impl EntityResolver {
                 hearthsound_core::IdPrefix::Artist,
                 row,
             ));
-            input.ids = credit
-                .ids
-                .iter()
-                .map(|id| ExternalId {
-                    namespace: id.namespace.clone(),
-                    value: id.value.clone(),
-                })
-                .collect();
+            input.ids = single_artist_id(
+                &credit
+                    .ids
+                    .iter()
+                    .map(|id| ExternalId {
+                        namespace: id.namespace.clone(),
+                        value: id.value.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            );
             resolved.push((input, row));
         }
         Ok(resolved)
@@ -594,6 +598,8 @@ impl EntityResolver {
         name: &str,
         ids: &[ExternalId],
     ) -> Result<Uuid, CatalogError> {
+        let ids = single_artist_id(ids);
+        let ids = ids.as_slice();
         for id in ids {
             if id.namespace == MB_ARTIST
                 && let Some(owner) =
@@ -777,6 +783,37 @@ async fn attach_and_merge(
             .map_err(CatalogError::Library)?;
     }
     Ok(survivor)
+}
+
+/// Keeps the first MusicBrainz artist id of a credit and drops the rest.
+///
+/// One credit names one artist. ListenBrainz reports a collaboration as one
+/// credit carrying every artist's MusicBrainz id - `alt-J feat. Mountain Man`
+/// arrives with both - and attaching both makes one row claim two acts, so the
+/// row's bio and portrait come from whichever id is read first. The first id
+/// names the row; the rest are dropped before anything is attached.
+///
+/// # Parameters
+///
+/// - `ids`: the identifiers a credit carries, in the provider's order.
+///
+/// # Returns
+///
+/// The identifiers with at most one `mb-artist` entry, which is the first one
+/// the credit listed.
+fn single_artist_id(ids: &[ExternalId]) -> Vec<ExternalId> {
+    let mut kept = false;
+    ids.iter()
+        .filter(|id| {
+            if id.namespace != MB_ARTIST {
+                return true;
+            }
+            let first = !kept;
+            kept = true;
+            first
+        })
+        .cloned()
+        .collect()
 }
 
 /// Builds the identifier list of a record: the instance's own id, then its ids.

@@ -61,7 +61,8 @@ pub use error::LibraryError;
 pub use model::{
     Album, AlbumInput, Artist, ArtistCredit, ArtistInput, Credit, EditionInput,
     FolderRemovalImpact, Genre, LibraryFolder, ManagedMediaFile, MediaFile, MediaFileInput,
-    MediaRoot, ReplayGain, ScannedMediaFile, StorageRoots, Track, TrackInput, sort_key,
+    MediaRoot, ReplayGain, ScannedMediaFile, StorageRoots, Track, TrackInput, identity_key,
+    sort_key,
 };
 pub use repository::LibraryRepository;
 

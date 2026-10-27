@@ -98,6 +98,7 @@ CREATE TABLE artists (
   id              BLOB    PRIMARY KEY,
   name            TEXT    NOT NULL,
   sort_name       TEXT    NOT NULL,
+  match_key       TEXT    NOT NULL DEFAULT '',
   biography       TEXT,
   links           TEXT    NOT NULL DEFAULT '[]',
   album_count     INTEGER,
@@ -111,6 +112,8 @@ CREATE TABLE artists (
 ) STRICT;
 
 CREATE INDEX artists_sort_name_idx ON artists (sort_name);
+
+CREATE INDEX artists_match_key_idx ON artists (match_key);
 
 CREATE TABLE albums (
   id              BLOB    PRIMARY KEY,
@@ -200,6 +203,13 @@ CREATE TABLE external_ids (
 ) STRICT;
 
 CREATE INDEX external_ids_entity_idx ON external_ids (entity_kind, entity_id);
+
+-- One artist holds at most one MusicBrainz artist id: an artist is one
+-- MusicBrainz entity, and a second id on one row means a credit named two
+-- artists. The library refuses the second id in code; this index is the
+-- backstop.
+CREATE UNIQUE INDEX external_ids_one_mb_artist ON external_ids (entity_id)
+  WHERE entity_kind = 'artist' AND namespace = 'mb-artist';
 
 CREATE TABLE media_files (
   id               BLOB    PRIMARY KEY,

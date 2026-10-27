@@ -216,11 +216,12 @@ async fn recompute_artist(
         .map(i64::from);
 
     sqlx::query(
-        "UPDATE artists SET name = ?, sort_name = ?, biography = ?, links = ?, \
+        "UPDATE artists SET name = ?, sort_name = ?, match_key = ?, biography = ?, links = ?, \
                 album_count = COALESCE(album_count, ?) WHERE id = ?",
     )
     .bind(&name)
     .bind(hearthsound_library::sort_key(&name))
+    .bind(hearthsound_library::identity_key(&name))
     .bind(biography)
     .bind(serde_json::to_string(&links)?)
     .bind(album_count)
