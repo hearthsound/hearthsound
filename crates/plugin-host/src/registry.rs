@@ -296,6 +296,14 @@ pub struct ProviderRegistry {
     repository: PluginRepository,
     secrets: SecretBox,
     components: Mutex<HashMap<(String, String), Arc<InstalledPlugin>>>,
+    /// One HTTP client per instance, kept across rebuilds.
+    ///
+    /// The key is everything the client's grant and limiter are built from: the
+    /// plugin version, the server configuration and the approved HTTP
+    /// permission. A rebuild that changes any of them builds a new client; a
+    /// rebuild that changes nothing keeps the old one, so the instance's rate
+    /// limiter and connection pool survive a reload instead of restarting empty.
+    clients: Mutex<HashMap<uuid::Uuid, (String, Arc<HttpClient>)>>,
     state: RwLock<RegistryState>,
     /// Whether the entries may not match the plugin tables, because a rebuild
     /// failed after a write committed.
@@ -330,6 +338,7 @@ impl ProviderRegistry {
             repository,
             secrets,
             components: Mutex::new(HashMap::new()),
+            clients: Mutex::new(HashMap::new()),
             state: RwLock::new(RegistryState::default()),
             stale: std::sync::atomic::AtomicBool::new(true),
         }
@@ -485,6 +494,10 @@ impl ProviderRegistry {
             .lock()
             .unwrap_or_else(poisoned)
             .retain(|key, _| used.contains(key));
+        self.clients
+            .lock()
+            .unwrap_or_else(poisoned)
+            .retain(|id, _| built.contains_key(id));
 
         Ok(report)
     }
@@ -789,7 +802,8 @@ impl ProviderRegistry {
             .with_server_config(server_config)
             .with_permissions(permissions)
             .with_host_config(host_config.clone());
-        let http = instance_http_client(manifest, &instance).map_err(|error| error.to_string())?;
+        let http = self.shared_http_client(row.id, manifest, plugin, &instance)?;
+        let instance = instance.with_http(Arc::clone(&http));
 
         let mut catalog = None;
         let mut metadata = None;
@@ -883,6 +897,50 @@ impl ProviderRegistry {
             discovery,
             account_link,
         })
+    }
+
+    /// Returns the instance's HTTP client, building it only when it changed.
+    ///
+    /// The client carries the instance's approved allowlist, its rate limiters
+    /// and its address pins, and every store pool and provider adapter of the
+    /// instance shares it. Rebuilding one on every registry rebuild restarted
+    /// its token buckets, which is why a MusicBrainz instance in several layers
+    /// spent its whole burst on every reload and then answered rate limits.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the instance id, the cache key.
+    /// - `manifest`: the plugin's manifest, used for the User-Agent.
+    /// - `plugin`: the plugin row the instance runs, whose version is part of
+    ///   the cache key.
+    /// - `instance`: the instance's configuration, whose server configuration
+    ///   and approved HTTP permission are part of the cache key.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure text when the client cannot be built.
+    fn shared_http_client(
+        &self,
+        id: uuid::Uuid,
+        manifest: &Manifest,
+        plugin: &PluginRow,
+        instance: &InstanceConfig,
+    ) -> Result<Arc<HttpClient>, String> {
+        let key = format!(
+            "{}\n{}\n{}",
+            plugin.version,
+            instance.server_config,
+            serde_json::to_string(&instance.permissions.http).map_err(|error| error.to_string())?,
+        );
+        let mut clients = self.clients.lock().unwrap_or_else(poisoned);
+        if let Some((cached_key, client)) = clients.get(&id)
+            && *cached_key == key
+        {
+            return Ok(Arc::clone(client));
+        }
+        let client = instance_http_client(manifest, instance).map_err(|error| error.to_string())?;
+        clients.insert(id, (key, Arc::clone(&client)));
+        Ok(client)
     }
 
     /// Returns the compiled component of a plugin, loading it once.

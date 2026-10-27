@@ -740,7 +740,10 @@ impl PluginHost {
     ///
     /// Every world shares this setup, so an instance's log sink, HTTP client,
     /// key-value store and file grant are built the same way no matter which
-    /// layer drives it.
+    /// layer drives it. The HTTP client is the one the configuration carries
+    /// when the caller built it - the provider registry keeps one per instance
+    /// across rebuilds - so every world and every layer of an instance share one
+    /// rate limiter instead of one each.
     ///
     /// # Parameters
     ///
@@ -760,7 +763,10 @@ impl PluginHost {
         let manifest = plugin.manifest();
         let log = Arc::new(LogSink::new(manifest.id.clone(), instance.slug.clone()));
 
-        let http = instance_http_client(manifest, instance)?;
+        let http = match &instance.http {
+            Some(http) => Arc::clone(&http.0),
+            None => instance_http_client(manifest, instance)?,
+        };
         let kv = Arc::new(KvStore::from_permission(
             self.database.writer().clone(),
             instance.id,

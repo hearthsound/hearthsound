@@ -10,11 +10,13 @@
 //! database, and turning them into provider trait objects, happens one layer up.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use hearthsound_core::{ImportMode, Slug, new_uuid_v7};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::http::{HttpClient, SharedHttpClient};
 use crate::manifest::Permissions;
 
 /// The defaults a host configuration falls back to.
@@ -42,6 +44,14 @@ pub struct InstanceConfig {
     pub permissions: Permissions,
     /// The host-level settings of the instance.
     pub host_config: InstanceHostConfig,
+    /// The instance's HTTP client, when the caller already built it.
+    ///
+    /// The provider registry keeps one client per instance across rebuilds and
+    /// attaches it here, so the store pools and the provider adapters share the
+    /// instance's rate limiter and connection pool instead of each building its
+    /// own. `None` - the value [`InstanceConfig::new`] sets - makes every caller
+    /// that needs a client build one.
+    pub(crate) http: Option<SharedHttpClient>,
 }
 
 impl InstanceConfig {
@@ -69,6 +79,7 @@ impl InstanceConfig {
             server_config: "{}".to_owned(),
             permissions: Permissions::default(),
             host_config: InstanceHostConfig::default(),
+            http: None,
         }
     }
 
@@ -109,6 +120,17 @@ impl InstanceConfig {
     /// - `host_config`: the import roots and concurrency settings.
     pub fn with_host_config(mut self, host_config: InstanceHostConfig) -> InstanceConfig {
         self.host_config = host_config;
+        self
+    }
+
+    /// Attaches an already built HTTP client.
+    ///
+    /// # Parameters
+    ///
+    /// - `http`: the instance's client, shared by every store pool and provider
+    ///   adapter built from this configuration.
+    pub(crate) fn with_http(mut self, http: Arc<HttpClient>) -> InstanceConfig {
+        self.http = Some(SharedHttpClient(http));
         self
     }
 }

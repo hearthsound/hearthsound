@@ -304,6 +304,33 @@ pub struct HttpClient {
     pins: Arc<Mutex<HashMap<String, Vec<SocketAddr>>>>,
 }
 
+/// A [`HttpClient`] shared by every store and provider of one instance.
+///
+/// The engines' store pools and the provider adapters both need a client, and
+/// they are built at different times from the same instance configuration.
+/// Holding the client here lets the provider registry hand one client to both,
+/// so the instance has one rate limiter and one connection pool rather than one
+/// per product of the instance, the layer and the pool size.
+#[derive(Clone)]
+pub(crate) struct SharedHttpClient(pub(crate) Arc<HttpClient>);
+
+impl PartialEq for SharedHttpClient {
+    /// Compares the clients by identity: one instance's client is the same
+    /// client everywhere it is passed, and two separately built clients differ
+    /// even when their configuration is equal, because their rate limiters do.
+    fn eq(&self, other: &SharedHttpClient) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for SharedHttpClient {
+    /// Prints an opaque placeholder: the client holds a connection pool and a
+    /// rate limiter, neither of which is useful in a log line.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SharedHttpClient(..)")
+    }
+}
+
 /// The rate limiters of one instance.
 ///
 /// The instance-wide limiter holds every host whose allowlist entry declares no
