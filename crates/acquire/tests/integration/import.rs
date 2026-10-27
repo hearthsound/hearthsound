@@ -402,7 +402,7 @@ fn catalog_candidate() -> serde_json::Value {
 
 /// A lone catalog track is tagged with its album's real totals.
 ///
-/// The third track of the fixture's five-track album is materialized on its own,
+/// The third track of the fixture's five-track album is stored on its own,
 /// so the album row holds one track of five; the import has to read the album's
 /// tracklist from the instance that issued it rather than count the stored rows,
 /// or the file would claim to be the only track of its album.
@@ -453,7 +453,7 @@ async fn a_lone_catalog_track_is_tagged_with_its_album_total() {
 
 /// An album nobody credited is named and tagged with the track's own artist.
 ///
-/// This is the live case: a track materialized from an album reference that
+/// This is the live case: a track stored from an album reference that
 /// carries no artist leaves an album with no album artist, and the imported file
 /// still has to land under an artist's directory and carry an `albumartist` tag.
 #[tokio::test]

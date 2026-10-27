@@ -38,7 +38,7 @@ use crate::EntityKind;
 /// `i`, `l`, `o` and `u`. Index equals digit value.
 const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 
-/// The number of characters in a materialized id's payload.
+/// The number of characters in an id's payload.
 ///
 /// 26 characters carry 130 bits, which covers the 128 bits of a UUIDv7 with
 /// two leading zero bits.
@@ -69,7 +69,7 @@ pub fn new_uuid_v7() -> Uuid {
     Uuid::now_v7()
 }
 
-/// The prefix of a materialized client id.
+/// The prefix of an entity's client id.
 ///
 /// The prefix names what kind of record the id points at, which is what lets a
 /// router reject an id used on the wrong endpoint.
@@ -206,7 +206,7 @@ impl fmt::Display for IdPrefix {
     }
 }
 
-/// A materialized record's client id.
+/// An entity's client id.
 ///
 /// The id is a pure function of the record's UUIDv7 primary key, so a client
 /// id can be turned back into the primary key by decoding it; no lookup is
@@ -331,20 +331,20 @@ pub enum IdError {
     /// The characters before the first underscore are not a known prefix.
     #[error("unknown client id prefix `{0}`")]
     UnknownPrefix(String),
-    /// A materialized id's payload is not exactly 26 characters long.
+    /// An id's payload is not exactly 26 characters long.
     #[error("invalid client id payload length {0}: expected 26 characters")]
     InvalidPayloadLength(usize),
     /// A payload contains a character that is not a lowercase Crockford base32
     /// digit.
     #[error("invalid client id character `{0}`: expected a lowercase Crockford base32 digit")]
     InvalidCharacter(char),
-    /// A materialized id's first payload character encodes bits the 128-bit
+    /// An id's first payload character encodes bits the 128-bit
     /// value does not have.
     #[error("client id payload does not fit in a 128-bit identifier")]
     PayloadOverflow,
 }
 
-/// Parses a materialized id of the form `<prefix>_<payload>`.
+/// Parses an id of the form `<prefix>_<payload>`.
 ///
 /// # Errors
 ///
@@ -379,7 +379,7 @@ fn digit(byte: u8) -> Option<u8> {
     }
 }
 
-/// Decodes the 26-character payload of a materialized id.
+/// Decodes the 26-character payload of an id.
 ///
 /// The payload is the UUIDv7 left zero padded to 130 bits, so the two leading
 /// bits of the first character must be zero and the remaining 128 bits are the
@@ -415,7 +415,7 @@ mod tests {
     const ZERO_PAYLOAD: &str = "00000000000000000000000000";
 
     #[test]
-    fn materialized_ids_round_trip() {
+    fn ids_round_trip() {
         let uuid = Uuid::from_u128(0x0194_2a00_0000_7000_8000_0000_0000_0001);
         for kind in IdPrefix::ALL {
             let id = EntityId::from_uuid(kind, uuid);
@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_materialized_ids_with_bad_prefixes() {
+    fn rejects_ids_with_bad_prefixes() {
         assert_eq!(
             EntityId::parse("zz_00000000000000000000000000"),
             Err(IdError::UnknownPrefix("zz".to_owned()))
@@ -479,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_materialized_ids_with_bad_lengths() {
+    fn rejects_ids_with_bad_lengths() {
         let short = format!("tr_{}", "0".repeat(PAYLOAD_LEN - 1));
         assert_eq!(
             EntityId::parse(&short),

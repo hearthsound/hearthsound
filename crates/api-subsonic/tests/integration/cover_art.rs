@@ -428,7 +428,7 @@ async fn a_missing_id_is_400_and_an_unknown_id_is_404() {
 
     for id in [
         "nope".to_owned(),
-        "x_deezer_t_302127".to_owned(),
+        "tr_0000".to_owned(),
         EntityId::new(IdPrefix::Track).to_string(),
         EntityId::new(IdPrefix::Playlist).to_string(),
     ] {

@@ -1053,7 +1053,7 @@ impl IndexerHandle {
         Ok(())
     }
 
-    /// Asks the metadata layer to materialize an album's release.
+    /// Asks the metadata layer for an album's release.
     ///
     /// The first instance that answers stores its release payload, which is what
     /// lets a metadata provider's title, date, type, edition and genres win the
@@ -1098,7 +1098,7 @@ impl IndexerHandle {
                     tracing::warn!(
                         %error,
                         instance = instance.slug().as_str(),
-                        "a metadata instance could not materialize the release"
+                        "a metadata instance could not answer for the release"
                     );
                 }
             }

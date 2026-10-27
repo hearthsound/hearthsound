@@ -30,7 +30,7 @@ pub enum Operation {
     CatalogAlbums,
     /// A catalog's top tracks of an artist.
     CatalogTopTracks,
-    /// A metadata provider's release materialization.
+    /// A metadata provider's release answer.
     Release,
     /// A metadata provider's artist information.
     ArtistInfo,

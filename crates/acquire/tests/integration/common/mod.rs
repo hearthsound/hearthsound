@@ -674,8 +674,8 @@ impl Env {
 
     /// Installs the album catalog fixture and makes it the catalog layer.
     ///
-    /// The fixture answers one album of five tracks, so a test can materialize
-    /// a single track of a longer release - the state a client's stream of one
+    /// The fixture answers one album of five tracks, so a test can store a
+    /// single track of a longer release - the state a client's stream of one
     /// catalog track leaves behind - by asking for one of its provider ids.
     ///
     /// # Returns

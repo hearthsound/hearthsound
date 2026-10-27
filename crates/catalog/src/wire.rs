@@ -1,6 +1,6 @@
 //! The stored form of a provider response.
 //!
-//! `catalog_cache.response` holds JSON, and the core provider records are
+//! every stored source payload is JSON, and the core provider records are
 //! deliberately plain data with no serialization of their own. This module is
 //! the translation layer between the two: one mirror per record the cache
 //! stores, with a conversion in each direction.

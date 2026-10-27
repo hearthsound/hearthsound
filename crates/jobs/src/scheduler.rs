@@ -3,7 +3,7 @@
 //! Recurring work is a row in the `schedules` table: a job kind, a cron
 //! expression, an optional JSON payload, and an owner that is either `NULL` for
 //! a system schedule or a user id for that user's own schedule. Each row also
-//! carries `next_run_at`, the materialized next fire time, so a tick finds the
+//! carries `next_run_at`, the stored next fire time, so a tick finds the
 //! due schedules with one indexed read.
 //!
 //! [`Scheduler::upsert`] is how the server declares the schedules it owns: it is

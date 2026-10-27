@@ -523,7 +523,7 @@ pub async fn find_track_by_isrc(
 
 /// A stored track with the title of the album it belongs to.
 ///
-/// The catalog layer compares a track it wants to materialize against the rows
+/// The catalog layer compares a track it wants to store against the rows
 /// the server already holds, and the album title is part of that comparison.
 /// One query returns both, so a candidate read does not need a second lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]

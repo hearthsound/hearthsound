@@ -146,11 +146,6 @@ async fn star_accepts_a_search_hit() {
     )
     .await;
     assert_ok(&found);
-    assert!(
-        !found.body.contains("x_hello_"),
-        "a provider hit is a row: {}",
-        found.body
-    );
     let value: serde_json::Value = serde_json::from_str(&found.body).unwrap();
     let track = value["subsonic-response"]["searchResult3"]["song"][0]["id"]
         .as_str()

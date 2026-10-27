@@ -137,8 +137,7 @@ impl NameGroupRow {
 ///
 /// - `conn`: the connection or transaction to write on.
 /// - `artist`: the artist's fields. An omitted sort key is derived from the
-///   name with [`sort_key`], and the origin is written only by the insert, so
-///   a catalog-materialized artist must supply [`Origin::Catalog`](crate::Origin).
+///   name with [`sort_key`].
 ///
 /// # Returns
 ///

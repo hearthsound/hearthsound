@@ -525,7 +525,7 @@ pub(crate) async fn merge_album(
 
 /// Adds an album's artist credits when it has none.
 ///
-/// An album materialized from the album reference of a single track can arrive
+/// An album stored from the album reference of a single track can arrive
 /// without credits when the provider left the reference's artist list empty.
 /// The track's own credits are then the best evidence of who the album is by,
 /// and this writes them so the album is listed under those artists.

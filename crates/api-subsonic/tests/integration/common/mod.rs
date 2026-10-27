@@ -666,9 +666,9 @@ impl Fixture {
 
     /// album itself uncredited.
     ///
-    /// This is the shape a materialization used to leave behind when a
-    /// provider named an album with no artists: the album was uncredited while
-    /// its tracks credited the artist.
+    /// This is the shape a provider's answer used to leave behind when it named
+    /// an album with no artists: the album was uncredited while its tracks
+    /// credited the artist.
     ///
     /// # Parameters
     ///

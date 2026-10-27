@@ -762,7 +762,7 @@ mod tests {
         vec![
             ServerEvent::AcquisitionUpdated(AcquisitionUpdated {
                 acquisition_id: "ac_01j9z4k7m2q8v3n5r6t7w8x9za".to_owned(),
-                target_id: "x_deezer_t_3135556".to_owned(),
+                target_id: "tr_01j9z4k7m2q8v3n5r6t7w8x9zb".to_owned(),
                 state: AcquisitionState::Downloading,
                 priority: Priority::Play,
                 percent: Some(42),
@@ -867,7 +867,7 @@ mod tests {
     fn acquisition_updated_serializes_the_documented_shape() {
         let event = ServerEvent::AcquisitionUpdated(AcquisitionUpdated {
             acquisition_id: "ac_01j9z4k7m2q8v3n5r6t7w8x9za".to_owned(),
-            target_id: "x_deezer_t_3135556".to_owned(),
+            target_id: "tr_01j9z4k7m2q8v3n5r6t7w8x9zb".to_owned(),
             state: AcquisitionState::Downloading,
             priority: Priority::Play,
             percent: Some(42),
@@ -883,7 +883,7 @@ mod tests {
                 "type": "acquisition.updated",
                 "data": {
                     "acquisitionId": "ac_01j9z4k7m2q8v3n5r6t7w8x9za",
-                    "targetId": "x_deezer_t_3135556",
+                    "targetId": "tr_01j9z4k7m2q8v3n5r6t7w8x9zb",
                     "state": "downloading",
                     "priority": "play",
                     "percent": 42,

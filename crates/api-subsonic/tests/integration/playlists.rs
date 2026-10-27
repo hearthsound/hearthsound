@@ -406,11 +406,6 @@ async fn a_search_hit_becomes_a_playlist_entry() {
     )
     .await;
     assert_ok(&found);
-    assert!(
-        !found.body.contains("x_hello_"),
-        "a provider hit is a row: {}",
-        found.body
-    );
     let start = found
         .body
         .find("\"song\":[{\"id\":\"tr_")

@@ -56,13 +56,6 @@ async fn search3_answers_local_results_then_provider_rows() {
     )
     .await;
     assert_ok(&json);
-    // A provider hit is resolved into a row, so the answer carries one id form
-    // and no provider id at all.
-    assert!(
-        !json.body.contains("x_hello_"),
-        "a provider hit is a row: {}",
-        json.body
-    );
     assert!(json.body.contains("Hello"), "{}", json.body);
     insta::with_settings!({filters => stable_filters()}, {
         insta::assert_snapshot!("local-and-catalog-json", seeded.stabilize(&json.body));
@@ -98,11 +91,6 @@ async fn search3_with_an_empty_query_lists_the_local_library() {
     assert!(
         json.body.contains(&seeded.alpha.to_string()),
         "{}",
-        json.body
-    );
-    assert!(
-        !json.body.contains("x_hello_"),
-        "an empty query returns no catalog results: {}",
         json.body
     );
     insta::with_settings!({filters => stable_filters()}, {
@@ -185,11 +173,6 @@ async fn search3_drops_a_catalog_track_the_server_already_stores() {
         "the stored recording is listed once: {}",
         probe.body
     );
-    assert!(
-        !probe.body.contains("x_hello_"),
-        "every provider hit is a row: {}",
-        probe.body
-    );
 }
 
 #[tokio::test]
@@ -234,11 +217,6 @@ async fn search2_answers_the_same_matches_in_the_older_shape() {
         json.body
     );
     assert!(json.body.contains("\"isDir\":true"), "{}", json.body);
-    assert!(
-        !json.body.contains("x_hello_"),
-        "a provider hit is a row: {}",
-        json.body
-    );
     insta::with_settings!({filters => stable_filters()}, {
         insta::assert_snapshot!("search2-json", seeded.stabilize(&json.body));
     });
@@ -307,11 +285,6 @@ async fn search2_reports_stars_and_lists_the_library_for_an_empty_query() {
     assert!(
         empty.body.contains(&seeded.alpha.to_string()),
         "{}",
-        empty.body
-    );
-    assert!(
-        !empty.body.contains("x_hello_"),
-        "an empty query returns no catalog results: {}",
         empty.body
     );
 }

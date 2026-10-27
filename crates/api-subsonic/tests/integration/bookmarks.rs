@@ -144,11 +144,6 @@ async fn a_search_hit_is_bookmarked_as_its_row() {
     )
     .await;
     assert_ok(&found);
-    assert!(
-        !found.body.contains("x_hello_"),
-        "a provider hit is a row: {}",
-        found.body
-    );
     let start = found
         .body
         .find("\"song\":[{\"id\":\"tr_")

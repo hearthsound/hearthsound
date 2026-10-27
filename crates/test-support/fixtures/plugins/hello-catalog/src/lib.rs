@@ -5,7 +5,7 @@
 //! that reason it keeps its whole behavior in one file.
 //!
 //! Its entities carry canonical identifiers (`mb-recording`, `mb-release`,
-//! `mb-artist`), which is what identity resolution and materialization record
+//! `mb-artist`), which is what identity resolution records
 //! in `external_ids`, and its artist credits carry the artist's own id under
 //! the `hello` namespace, which is what names the instance to resolve a
 //! credited artist against. The identifiers are optional in the sense that a

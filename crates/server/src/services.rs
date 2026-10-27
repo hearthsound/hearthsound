@@ -694,7 +694,7 @@ impl Services {
 
     /// Returns the catalog layer.
     ///
-    /// The `/rest` surface searches it and resolves an unmaterialized `x_` id
+    /// The `/rest` surface searches it and resolves an id to its row
     /// through it.
     pub fn catalog(&self) -> &Arc<CatalogService> {
         &self.catalog

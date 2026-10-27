@@ -4,7 +4,7 @@
 //! appear on. A resolution matches a recording when the hint's ISRC equals the
 //! configured one, or when the hint's title equals the configured title
 //! ignoring case; the configured score is reported as-is, so a test can build
-//! any confidence it wants to exercise. `get-release` materializes the album the
+//! any confidence it wants to exercise. `get-release` answers for the album the
 //! matched recording appears on.
 
 use hearthsound_plugin::metadata_provider::exports::hearthsound::plugin::metadata::{
