@@ -5816,6 +5816,7 @@ dependencies = [
  "anyhow",
  "clap",
  "data-encoding",
+ "hearthsound-config",
  "semver",
  "serde",
  "serde_json",
