@@ -15,9 +15,10 @@
 //! passed.
 
 use async_trait::async_trait;
-use hearthsound_core::{EntityId, IdPrefix, PinReason};
+use hearthsound_core::{EntityId, EntityKind, IdPrefix, PinReason};
 use hearthsound_db::Database;
 use hearthsound_jobs::{Job, JobError, JobHandler};
+use hearthsound_library::index_queue;
 use hearthsound_library::maintenance::MaintenanceSignal;
 use hearthsound_library::retention;
 use sqlx::{SqliteConnection, SqlitePool};
@@ -524,8 +525,14 @@ impl Playlists {
             affected.sort_unstable_by_key(|track| *track.uuid().as_bytes());
             affected.dedup();
         }
-        for track in affected {
-            refresh_playlist_pin(&mut tx, track).await?;
+        for track in &affected {
+            refresh_playlist_pin(&mut tx, *track).await?;
+        }
+        // Every track a permanent playlist holds is in its owner's library.
+        if !stored.is_temporary || newly_detached {
+            for track in &affected {
+                index_queue::enqueue_library(&mut tx, EntityKind::Track, track.uuid()).await?;
+            }
         }
         tx.commit().await?;
         self.signal.notify();
@@ -827,6 +834,13 @@ impl Playlists {
         .await?;
         for track in playlist.track_ids() {
             refresh_playlist_pin(&mut tx, track).await?;
+        }
+        // A playlist made permanent puts its tracks in the owner's library, so
+        // they are indexed like any other library change.
+        if !temporary {
+            for track in playlist.track_ids() {
+                index_queue::enqueue_library(&mut tx, EntityKind::Track, track.uuid()).await?;
+            }
         }
         tx.commit().await?;
         self.signal.notify();

@@ -23,6 +23,7 @@
 //! changes nothing and publishes nothing.
 
 use hearthsound_core::{EntityId, EntityKind, IdPrefix, PinReason};
+use hearthsound_library::index_queue;
 use hearthsound_library::retention;
 use sqlx::SqliteConnection;
 use uuid::Uuid;
@@ -71,6 +72,9 @@ pub async fn like(
     .execute(&mut *conn)
     .await?;
     refresh_pins(conn, kind, entity_id).await?;
+    if previous.as_deref() != Some("like") {
+        index_queue::enqueue_library(conn, kind, entity_id).await?;
+    }
     Ok(previous.as_deref() != Some("like"))
 }
 
@@ -260,6 +264,9 @@ pub(crate) async fn save(
     .execute(&mut *conn)
     .await?;
     refresh_pins(conn, kind, entity_id).await?;
+    if existed == 0 {
+        index_queue::enqueue_library(conn, kind, entity_id).await?;
+    }
     Ok(existed == 0)
 }
 

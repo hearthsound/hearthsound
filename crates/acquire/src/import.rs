@@ -1127,6 +1127,14 @@ impl AcquisitionOrchestrator {
             Some("the file was imported into managed storage"),
         )
         .await?;
+        // An imported track is a library track, so its metadata is indexed like
+        // a scanned or uploaded one.
+        hearthsound_library::index_queue::enqueue_library(
+            &mut tx,
+            EntityKind::Track,
+            track_id.uuid(),
+        )
+        .await?;
         tx.commit().await?;
 
         let mut progress = self.progress_of_row(row, row.priority);

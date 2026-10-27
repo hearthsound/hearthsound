@@ -49,6 +49,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use crate::error::LibraryError;
+use crate::index_queue;
 use crate::maintenance::MaintenanceSignal;
 use crate::model::{ManagedMediaFile, ReplayGain, StorageRoots};
 use crate::naming::{NamingContext, NamingTemplate, NamingTemplateError};
@@ -337,6 +338,7 @@ impl UploadIngest {
         .execute(&mut *tx)
         .await?;
         retention::add_pin_reason(&mut tx, track_id, PinReason::UserLibrary).await?;
+        index_queue::enqueue_library(&mut tx, EntityKind::Track, track_key).await?;
         tx.commit().await?;
         Ok(IngestedUpload {
             track_id,
