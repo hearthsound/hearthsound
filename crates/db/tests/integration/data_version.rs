@@ -135,14 +135,15 @@ async fn shutdown_stops_the_watcher() {
     db.close().await;
 }
 
-/// A poll notices a foreign commit while the writer connection is busy.
+/// A foreign commit is reported once the writer connection can be asked.
 ///
-/// The poll used to read the pragma on the writer connection, so a long write
-/// transaction delayed every notification - and every write that arrived while a
-/// poll waited queued behind it. The poll now owns a read-only connection, and a
-/// change it cannot attribute because the writer is busy is still reported.
+/// A change that lands while the writer is busy cannot be attributed yet: the
+/// writer's own commits look exactly like it from the poll connection's side.
+/// Reporting it unseen rebuilt the provider registry on every indexing write;
+/// holding it until the writer is free reports it exactly once, and never drops
+/// it.
 #[tokio::test]
-async fn a_poll_does_not_wait_for_the_writer() {
+async fn a_foreign_commit_is_noticed_once_the_writer_is_free() {
     let dir = tempfile::tempdir().unwrap();
     let db = open_temp(dir.path()).await;
     let other = cli_pool(dir.path()).await;
@@ -150,7 +151,7 @@ async fn a_poll_does_not_wait_for_the_writer() {
     let watcher = db.watch_data_version(POLL).await;
     let mut changes = watcher.subscribe();
 
-    // The writer connection is held for as long as the assertion runs. A
+    // The writer connection is held for as long as the quiet assertion runs. A
     // deferred transaction holds the connection without blocking the other
     // connection's write, which an immediate one would.
     let mut held = db.writer().acquire().await.unwrap();
@@ -162,15 +163,70 @@ async fn a_poll_does_not_wait_for_the_writer() {
         .unwrap();
 
     assert!(
-        tokio::time::timeout(EXPECTED, changes.changed())
+        tokio::time::timeout(QUIET, changes.changed())
             .await
-            .expect("a foreign commit is noticed while the writer is busy"),
-        "a foreign commit is noticed while the writer is busy"
+            .is_err(),
+        "a change the writer cannot be asked about is held, not reported"
     );
 
     sqlx::query("COMMIT").execute(&mut *held).await.unwrap();
     drop(held);
+
+    assert!(
+        tokio::time::timeout(EXPECTED, changes.changed())
+            .await
+            .expect("a foreign commit is reported once the writer is free"),
+        "a foreign commit is reported once the writer is free"
+    );
+    assert!(
+        tokio::time::timeout(QUIET, changes.changed())
+            .await
+            .is_err(),
+        "the held change must be reported exactly once"
+    );
+
     watcher.shutdown().await;
     other.close().await;
+    db.close().await;
+}
+
+/// The server's own commits never notify, including those it makes while the
+/// writer connection is busy.
+///
+/// A commit made on the writer connection while it is held changes the poll
+/// connection's value, so the poll has to attribute it. The writer's own value
+/// stays put across its own commits, so the attribution recognizes it as the
+/// server's own write and reports nothing.
+#[tokio::test]
+async fn own_commits_seen_while_the_writer_is_busy_do_not_notify() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_temp(dir.path()).await;
+
+    let watcher = db.watch_data_version(POLL).await;
+    let mut changes = watcher.subscribe();
+
+    let mut held = db.writer().acquire().await.unwrap();
+    sqlx::query("CREATE TABLE a (id INTEGER PRIMARY KEY)")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO a (id) VALUES (1)")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+
+    // Keep the connection long enough for several polls to see the change and
+    // fail to attribute it.
+    tokio::time::sleep(POLL * 3).await;
+    drop(held);
+
+    assert!(
+        tokio::time::timeout(QUIET, changes.changed())
+            .await
+            .is_err(),
+        "the writer's own commits must not notify"
+    );
+
+    watcher.shutdown().await;
     db.close().await;
 }

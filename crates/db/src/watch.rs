@@ -17,9 +17,12 @@
 //! the writer connection did not, so a detected change is attributed: the writer
 //! connection's own value stays put across its own commits and moves for
 //! everyone else's. Reading it takes no lock and no wait - a free writer is asked
-//! with `try_acquire` - and a change that arrives while a write is in flight
-//! cannot be attributed, so it is reported: a missed reload of a command-line
-//! change is worse than one extra reload.
+//! with `try_acquire` - so a change that arrives while a write is in flight is
+//! remembered and attributed on a later poll, once the writer can be asked.
+//! Nothing is reported until the attribution succeeds: a busy writer reports
+//! nothing rather than everything, because the server's own commits during a
+//! long import or an indexing run are the common case, and reporting them
+//! rebuilt the plugin registry and the settings on every write.
 //!
 //! [`Database::watch_data_version`] starts the polling task;
 //! [`DataVersionWatcher`] owns it and [`DataVersionSubscription`]s observe it.
@@ -115,6 +118,7 @@ impl Database {
                     current,
                     writer: self.writer.clone(),
                     writer_current,
+                    unattributed: false,
                 })
             }
             Err(error) => {
@@ -261,6 +265,10 @@ struct Poller {
     writer: sqlx::SqlitePool,
     /// The writer connection's own value at the last attribution.
     writer_current: Option<i64>,
+    /// Set when the poll saw a change the writer could not yet be asked about.
+    /// The poll stays unattributed until an attribution succeeds, so a change
+    /// made while the writer was busy is neither lost nor reported unseen.
+    unattributed: bool,
 }
 
 /// How often the attribution retries a busy writer before it gives up.
@@ -272,11 +280,16 @@ const ATTRIBUTION_RETRY_DELAY: Duration = Duration::from_millis(2);
 impl Poller {
     /// Reads the data version and reports whether another connection committed.
     ///
+    /// A change the writer could not be asked about on an earlier poll is
+    /// attributed by this one, so a change is reported at most once but never
+    /// dropped.
+    ///
     /// # Returns
     ///
     /// `true` when a connection other than the server's writer committed since
-    /// the last poll, `false` when nothing changed or the change was the
-    /// server's own write.
+    /// the last poll, `false` when nothing changed, the change was the server's
+    /// own write, or the writer stayed busy and the change is held for a later
+    /// poll.
     ///
     /// # Errors
     ///
@@ -284,33 +297,39 @@ impl Poller {
     /// is closed.
     async fn foreign_commit(&mut self) -> Result<bool, sqlx::Error> {
         let version = read_data_version(&mut self.connection).await?;
-        if self.current == Some(version) {
+        if self.current != Some(version) {
+            let first = self.current.is_none();
+            self.current = Some(version);
+            if first {
+                return Ok(false);
+            }
+            self.unattributed = true;
+        }
+        if !self.unattributed {
             return Ok(false);
         }
-        let first = self.current.is_none();
-        self.current = Some(version);
-        if first {
-            return Ok(false);
-        }
-        self.attribute().await
+        Ok(self.attribute().await?.unwrap_or(false))
     }
 
     /// Reports whether the change the poll saw came from another connection.
     ///
     /// The writer connection's own value does not move for its own commits, so a
     /// difference from the last attribution means another connection committed.
-    /// A writer that stays busy through every attempt cannot be asked, and the
-    /// change is reported: a command-line change that is never acted on is worse
-    /// than one unnecessary reload.
+    /// A busy writer cannot be asked; that answers `None`, which leaves the
+    /// change unattributed so the next poll asks again. Several changes that
+    /// accumulate while the writer is busy are attributed together, which is all
+    /// a reload needs.
     ///
     /// # Returns
     ///
-    /// `true` when the change came from another connection.
+    /// `Some(true)` when the change came from another connection, `Some(false)`
+    /// when every change since the last attribution was the writer's own, and
+    /// `None` when the writer stayed busy through every attempt.
     ///
     /// # Errors
     ///
     /// Returns the [`sqlx::Error`] of the pragma read.
-    async fn attribute(&mut self) -> Result<bool, sqlx::Error> {
+    async fn attribute(&mut self) -> Result<Option<bool>, sqlx::Error> {
         for attempt in 0..=ATTRIBUTION_RETRIES {
             if attempt > 0 {
                 tokio::time::sleep(ATTRIBUTION_RETRY_DELAY).await;
@@ -323,9 +342,10 @@ impl Poller {
             let version = read_data_version(&mut connection).await?;
             let foreign = self.writer_current != Some(version);
             self.writer_current = Some(version);
-            return Ok(foreign);
+            self.unattributed = false;
+            return Ok(Some(foreign));
         }
-        Ok(true)
+        Ok(None)
     }
 }
 
