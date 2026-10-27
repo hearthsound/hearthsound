@@ -19,21 +19,21 @@ use serde::{Deserialize, Serialize};
 /// neither version is refused with [`InstallError::UnsupportedApi`].
 ///
 /// [`InstallError::UnsupportedApi`]: crate::error::InstallError::UnsupportedApi
-pub const SUPPORTED_APIS: [&str; 2] = ["hearthsound:plugin@0.4.0", "hearthsound:plugin@0.3.0"];
+pub const SUPPORTED_APIS: [&str; 2] = ["hearthsound:plugin@0.5.0", "hearthsound:plugin@0.4.0"];
 
 /// The newest API version this server hosts; the one a new plugin should target.
 pub const NEWEST_API: &str = SUPPORTED_APIS[0];
 
 /// The supported versions as one readable phrase, for error messages.
-pub const SUPPORTED_APIS_LIST: &str = "hearthsound:plugin@0.4.0 and hearthsound:plugin@0.3.0";
+pub const SUPPORTED_APIS_LIST: &str = "hearthsound:plugin@0.5.0 and hearthsound:plugin@0.4.0";
 
 /// One plugin API package version the host can load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiVersion {
     /// The frozen previous minor.
-    V0_3,
-    /// The current minor.
     V0_4,
+    /// The current minor.
+    V0_5,
 }
 
 impl ApiVersion {
@@ -44,13 +44,13 @@ impl ApiVersion {
     /// ```
     /// use hearthsound_plugin_host::manifest::ApiVersion;
     ///
+    /// assert_eq!(ApiVersion::V0_5.api(), "hearthsound:plugin@0.5.0");
     /// assert_eq!(ApiVersion::V0_4.api(), "hearthsound:plugin@0.4.0");
-    /// assert_eq!(ApiVersion::V0_3.api(), "hearthsound:plugin@0.3.0");
     /// ```
     pub const fn api(self) -> &'static str {
         match self {
-            ApiVersion::V0_3 => SUPPORTED_APIS[1],
-            ApiVersion::V0_4 => SUPPORTED_APIS[0],
+            ApiVersion::V0_4 => SUPPORTED_APIS[1],
+            ApiVersion::V0_5 => SUPPORTED_APIS[0],
         }
     }
 
@@ -61,12 +61,12 @@ impl ApiVersion {
     /// ```
     /// use hearthsound_plugin_host::manifest::ApiVersion;
     ///
-    /// assert_eq!(ApiVersion::V0_4.package(), "0.4.0");
+    /// assert_eq!(ApiVersion::V0_5.package(), "0.5.0");
     /// ```
     pub const fn package(self) -> &'static str {
         match self {
-            ApiVersion::V0_3 => "0.3.0",
             ApiVersion::V0_4 => "0.4.0",
+            ApiVersion::V0_5 => "0.5.0",
         }
     }
 
@@ -75,7 +75,7 @@ impl ApiVersion {
     /// # Parameters
     ///
     /// - `api`: the manifest's `api` string, for example
-    ///   `hearthsound:plugin@0.4.0`.
+    ///   `hearthsound:plugin@0.5.0`.
     ///
     /// # Returns
     ///
@@ -85,8 +85,8 @@ impl ApiVersion {
             .iter()
             .position(|supported| *supported == api)
             .map(|index| match index {
-                0 => ApiVersion::V0_4,
-                _ => ApiVersion::V0_3,
+                0 => ApiVersion::V0_5,
+                _ => ApiVersion::V0_4,
             })
     }
 }
@@ -137,9 +137,6 @@ pub struct Manifest {
     pub config: PluginConfig,
     /// The resources the plugin asks for.
     pub resources: Resources,
-    /// Catalog-specific options; only valid when `catalog` is provided.
-    #[serde(default)]
-    pub catalog: Option<CatalogOptions>,
     /// URL patterns the plugin imports; only valid for `playlist-import`.
     #[serde(default)]
     pub url_patterns: Option<Vec<String>>,
@@ -263,14 +260,6 @@ impl Manifest {
             }
             _ => {}
         }
-        if self.catalog.is_some() && !layers.contains(&Layer::Catalog) {
-            return Err(self.invalid(
-                "catalog",
-                "present".to_owned(),
-                "is only allowed when catalog is provided",
-            ));
-        }
-
         self.validate_permissions()?;
         self.validate_config()?;
         self.validate_resources(settings)?;
@@ -289,12 +278,21 @@ impl Manifest {
                     "must not be empty",
                 ));
             }
-            for host in &http.hosts {
-                if !valid_host(host) {
+            for entry in &http.hosts {
+                if !valid_host(entry.host()) {
                     return Err(self.invalid(
                         "permissions.http.hosts",
-                        host.clone(),
+                        entry.host().to_owned(),
                         "is not a hostname, a wildcard hostname, or a $config: reference",
+                    ));
+                }
+                if let Some(rate_limit) = entry.rate_limit()
+                    && (rate_limit.per_second < 1 || rate_limit.burst < 1)
+                {
+                    return Err(self.invalid(
+                        "permissions.http.hosts",
+                        entry.host().to_owned(),
+                        "has a rateLimit whose perSecond and burst must both be at least 1",
                     ));
                 }
             }
@@ -460,8 +458,8 @@ pub struct Permissions {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HttpPermission {
-    /// The approved hosts.
-    pub hosts: Vec<String>,
+    /// The approved hosts, each with an optional rate limit of its own.
+    pub hosts: Vec<HostEntry>,
     /// An optional request rate limit.
     #[serde(default)]
     pub rate_limit: Option<RateLimit>,
@@ -470,8 +468,63 @@ pub struct HttpPermission {
     pub max_body_bytes: Option<u64>,
 }
 
+/// One approved host of an instance's HTTP allowlist.
+///
+/// A plain string is a host pattern that shares the instance-wide
+/// `permissions.http.rateLimit`. An object pins one pattern to its own limit,
+/// so a service that allows one request per second can sit beside an API that
+/// tolerates more, whatever order the hosts are listed in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum HostEntry {
+    /// A host pattern with no limit of its own.
+    Pattern(String),
+    /// A host pattern with its own rate limit.
+    Limited {
+        /// The host pattern: a literal name, a `*.domain` wildcard, or a
+        /// `$config:<field>` reference.
+        host: String,
+        /// The limit this host is held to.
+        #[serde(rename = "rateLimit")]
+        rate_limit: RateLimit,
+    },
+}
+
+impl HostEntry {
+    /// Returns the host pattern this entry approves.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use hearthsound_plugin_host::manifest::{HostEntry, RateLimit};
+    ///
+    /// let plain = HostEntry::Pattern("api.example.com".to_owned());
+    /// assert_eq!(plain.host(), "api.example.com");
+    ///
+    /// let limited = HostEntry::Limited {
+    ///     host: "*.example.com".to_owned(),
+    ///     rate_limit: RateLimit { per_second: 1, burst: 1 },
+    /// };
+    /// assert_eq!(limited.host(), "*.example.com");
+    /// ```
+    pub fn host(&self) -> &str {
+        match self {
+            HostEntry::Pattern(host) | HostEntry::Limited { host, .. } => host,
+        }
+    }
+
+    /// Returns the limit this entry declares, or `None` for the instance-wide
+    /// limit.
+    pub fn rate_limit(&self) -> Option<RateLimit> {
+        match self {
+            HostEntry::Pattern(_) => None,
+            HostEntry::Limited { rate_limit, .. } => Some(*rate_limit),
+        }
+    }
+}
+
 /// A request rate limit.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RateLimit {
     /// Sustained requests per second.
@@ -556,26 +609,6 @@ fn default_call_timeout_ms() -> u32 {
 /// The default `resources.maxInstances`.
 fn default_max_instances() -> u8 {
     2
-}
-
-/// Catalog-specific manifest options.
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CatalogOptions {
-    /// How the host caches the plugin's cover images.
-    #[serde(default)]
-    pub image_cache_policy: ImageCachePolicy,
-}
-
-/// How the host treats cover images a catalog plugin returns.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ImageCachePolicy {
-    /// Cache images under the artwork cache.
-    #[default]
-    Cache,
-    /// Do not store the images.
-    NoStore,
 }
 
 /// An error from parsing or validating a manifest.
@@ -698,35 +731,36 @@ mod tests {
     #[test]
     fn parses_the_api_versions_this_host_supports() {
         assert_eq!(
+            ApiVersion::parse("hearthsound:plugin@0.5.0"),
+            Some(ApiVersion::V0_5)
+        );
+        assert_eq!(
             ApiVersion::parse("hearthsound:plugin@0.4.0"),
             Some(ApiVersion::V0_4)
         );
-        assert_eq!(
-            ApiVersion::parse("hearthsound:plugin@0.3.0"),
-            Some(ApiVersion::V0_3)
-        );
+        assert_eq!(ApiVersion::parse("hearthsound:plugin@0.3.0"), None);
         assert_eq!(ApiVersion::parse("hearthsound:plugin@0.2.0"), None);
         assert_eq!(ApiVersion::parse("hearthsound:plugin@0.4"), None);
         assert_eq!(ApiVersion::parse(""), None);
-        assert_eq!(ApiVersion::V0_4.api(), SUPPORTED_APIS[0]);
+        assert_eq!(ApiVersion::V0_5.api(), SUPPORTED_APIS[0]);
+        assert_eq!(ApiVersion::V0_5.package(), "0.5.0");
         assert_eq!(ApiVersion::V0_4.package(), "0.4.0");
-        assert_eq!(ApiVersion::V0_3.package(), "0.3.0");
     }
 
     #[test]
     fn the_supported_versions_phrase_is_built_from_the_list() {
         assert_eq!(SUPPORTED_APIS.join(" and "), SUPPORTED_APIS_LIST);
-        assert_eq!(NEWEST_API, "hearthsound:plugin@0.4.0");
+        assert_eq!(NEWEST_API, "hearthsound:plugin@0.5.0");
     }
 
     #[test]
     fn a_manifest_reports_the_api_version_it_names() {
         let settings = store(&SettingSources::default());
         let mut value = hello_value();
-        value["api"] = serde_json::json!("hearthsound:plugin@0.4.0");
+        value["api"] = serde_json::json!("hearthsound:plugin@0.5.0");
         assert_eq!(
             parse(&value, &settings).unwrap().api_version(),
-            Some(ApiVersion::V0_4)
+            Some(ApiVersion::V0_5)
         );
 
         value["api"] = serde_json::json!("hearthsound:plugin@0.2.0");

@@ -9,8 +9,6 @@ use std::path::PathBuf;
 
 use uuid::Uuid;
 
-use crate::model::UnknownOrigin;
-
 /// An error from the library layer.
 #[derive(Debug, thiserror::Error)]
 pub enum LibraryError {
@@ -34,9 +32,6 @@ pub enum LibraryError {
         /// The unexpected value.
         value: String,
     },
-    /// An `origin` column held a value outside `local` and `catalog`.
-    #[error(transparent)]
-    Origin(#[from] UnknownOrigin),
     /// A library folder path does not exist, is not a directory, or cannot be
     /// canonicalized.
     #[error("library folder path `{path}` is not a usable directory: {source}")]

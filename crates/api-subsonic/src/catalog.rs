@@ -1,28 +1,22 @@
-//! The catalog settings and error mapping the catalog-facing endpoints share.
+//! The catalog settings and error mapping the entity-facing endpoints share.
 //!
-//! A catalog entity is one a provider knows but the server has not stored. When
-//! a response describes one, its container and MIME type are unknown, because no
-//! file exists yet: the projection emits those legacy fields empty, and a client
-//! that trusts them cannot prepare for bytes the server has not produced. The
-//! suffix appended to every catalog title (`subsonic.catalog_title_suffix`) does
-//! come from a setting, and tells a user which results are not local. It is read
-//! here so `search3` and the catalog-id browse endpoints agree on it.
+//! Every artist, album and track a response describes is a stored row, so this
+//! module no longer resolves provider entities: what remains is the title
+//! suffix a third-party client's copy of a remote entity carries
+//! (`subsonic.catalog_title_suffix`), the mapping of a [`CatalogError`] onto the
+//! failure envelope, and the reading of an entity's canonical identifiers,
+//! which the `musicBrainzId` and `isrc` members are built from.
 //!
-//! The module also names the artists a catalog entity credits: a provider
-//! record carries an artist's identifiers as external ids, and the first one
-//! outside the canonical namespaces is what the issuing instance resolves. And
-//! it maps a [`CatalogError`] onto the failure envelope: an entity that does not
-//! exist is a Subsonic not-found, while anything else is a failure the client
-//! cannot act on and is reported as a generic error carrying the provider's
-//! message for an operator.
+//! An entity that is remote - stored, known to a provider, but without a file -
+//! is still projected from its row: its container and MIME type are unknown
+//! because no file exists yet, so the projection emits those legacy fields
+//! empty, and the suffix tells a user which rows are not local.
 
 use hearthsound_catalog::CatalogError;
 use hearthsound_config::SettingsStore;
 use hearthsound_config::keys;
-use hearthsound_core::providers::{self, ArtistCredit};
-use hearthsound_core::{CatalogId, ClientId, EntityKind, Slug};
+use hearthsound_core::providers::ExternalId;
 
-use crate::auth::Call;
 use crate::browse;
 use crate::response::{SubsonicError, codes};
 
@@ -34,7 +28,7 @@ use crate::response::{SubsonicError, codes};
 ///
 /// # Returns
 ///
-/// The suffix appended to a catalog entity's title, empty by default.
+/// The suffix appended to a remote entity's title, empty by default.
 ///
 /// # Errors
 ///
@@ -70,151 +64,77 @@ pub(crate) fn failure(error: &CatalogError) -> SubsonicError {
     }
 }
 
-/// Builds the catalog id of the artist one credit names.
-///
-/// A provider record carries an artist's credit as a name plus the external
-/// identifiers it knows for that artist. A catalog provider puts its own id for
-/// the artist in that list, under a namespace that is not canonical, and that
-/// id is what the issuing instance resolves, so it becomes the payload of an
-/// `x_<slug>_r_<payload>` id. A credit that carries only canonical identifiers
-/// yields `None`, and the caller emits an empty `artistId` rather than an id the
-/// catalog cannot resolve.
-///
-/// # Parameters
-///
-/// - `slug`: the slug of the instance that issued the entity.
-/// - `credit`: the artist credit.
-///
-/// # Returns
-///
-/// The artist's catalog id, or `None` when the credit carries no provider
-/// identifier.
-pub(crate) fn artist_id(slug: &Slug, credit: &ArtistCredit) -> Option<CatalogId> {
-    let id = providers::credit_provider_id(credit)?;
-    CatalogId::new(slug.clone(), EntityKind::Artist, id.value.clone()).ok()
-}
-
-/// Returns the MusicBrainz identifier an entity's external ids carry.
+/// Returns the value an entity carries in one identifier namespace.
 ///
 /// # Parameters
 ///
 /// - `ids`: the entity's external identifiers.
+/// - `namespace`: the namespace to read, for example `mb-release`.
 ///
 /// # Returns
 ///
-/// The value namespaced `musicbrainz`, or an empty string when there is none.
-pub(crate) fn music_brainz_id(ids: &[hearthsound_core::providers::ExternalId]) -> String {
+/// The value, or an empty string when the entity has none in that namespace.
+pub(crate) fn identifier(ids: &[ExternalId], namespace: &str) -> String {
     ids.iter()
-        .find(|id| id.namespace == "musicbrainz")
+        .find(|id| id.namespace == namespace)
         .map(|id| id.value.clone())
         .unwrap_or_default()
 }
 
-/// Asks for the catalog extras of one entity when the caller opted into the
-/// vendor extension and nothing has asked yet for this listener.
+/// Returns the values an entity carries in one identifier namespace.
 ///
-/// The read that calls this has already answered from the library and the cache,
-/// so this is an addition: a process without a job queue, a payload that cannot
-/// be encoded and an enqueue that fails are logged and dropped, and a later read
-/// asks again. The claim is released on a failure so the retry is not suppressed
-/// for the whole deduplication window.
+/// A track may carry more than one ISRC, so the child's `isrc` member is a list.
 ///
 /// # Parameters
 ///
-/// - `call`: the authenticated call, whose listener is the audience of the
-///   completion event and whose job queue runs the work.
-/// - `id`: the entity whose page asked.
-pub(crate) async fn request_enrichment(call: &Call, id: &ClientId) {
-    use hearthsound_catalog::{ENRICH_JOB_KIND, EnrichJobPayload};
-    use hearthsound_jobs::NewJob;
-
-    if !call.params().vendor_enabled() {
-        return;
-    }
-    let Some(jobs) = call.state().jobs() else {
-        return;
-    };
-    let catalog = call.state().catalog();
-    let user = call.principal().user_id.uuid();
-    if !catalog.begin_enrichment(id, user).await {
-        return;
-    }
-    let (entity_id, kind) = match id {
-        ClientId::Entity(entity) => (
-            entity.to_string(),
-            match entity.kind() {
-                hearthsound_core::IdPrefix::Artist => EntityKind::Artist,
-                _ => EntityKind::Album,
-            },
-        ),
-        ClientId::Catalog(catalog_id) => (catalog_id.to_string(), catalog_id.kind()),
-    };
-    let payload = EnrichJobPayload {
-        entity_id,
-        kind,
-        user_id: user,
-    };
-    let job = match NewJob::new(ENRICH_JOB_KIND)
-        .priority(hearthsound_core::Priority::Queue)
-        .payload(&payload)
-    {
-        Ok(job) => job,
-        Err(error) => {
-            tracing::warn!(%error, entity = %id, "a catalog enrichment could not be encoded");
-            catalog.finish_enrichment(id, user).await;
-            return;
-        }
-    };
-    if let Err(error) = jobs.enqueue(job).await {
-        tracing::warn!(%error, entity = %id, "a catalog enrichment could not be enqueued");
-        catalog.finish_enrichment(id, user).await;
-    }
+/// - `ids`: the entity's external identifiers.
+/// - `namespace`: the namespace to read, for example `isrc`.
+///
+/// # Returns
+///
+/// The values, in the order the identifiers were read.
+pub(crate) fn identifiers(ids: &[ExternalId], namespace: &str) -> Vec<String> {
+    ids.iter()
+        .filter(|id| id.namespace == namespace)
+        .map(|id| id.value.clone())
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hearthsound_core::providers::ExternalId;
 
-    /// Builds a credit carrying the given identifiers.
+    /// Builds an identifier.
     ///
     /// # Parameters
     ///
-    /// - `ids`: the namespace and value of each identifier, in credit order.
-    fn credit(ids: &[(&str, &str)]) -> ArtistCredit {
-        ArtistCredit {
-            name: "Daft Punk".to_owned(),
-            ids: ids
-                .iter()
-                .map(|(namespace, value)| ExternalId {
-                    namespace: (*namespace).to_owned(),
-                    value: (*value).to_owned(),
-                })
-                .collect(),
+    /// - `namespace`: the identifier's namespace.
+    /// - `value`: the identifier's value.
+    fn id(namespace: &str, value: &str) -> ExternalId {
+        ExternalId {
+            namespace: namespace.to_owned(),
+            value: value.to_owned(),
         }
     }
 
-    /// Returns the slug of the instance the tests resolve ids for.
-    fn slug() -> Slug {
-        Slug::new("deezer").unwrap()
+    #[test]
+    fn a_known_namespace_yields_its_value() {
+        let ids = [
+            id("isrc", "USQX91300105"),
+            id("mb-release", "release-1"),
+            id("isrc", "GBAYE0000001"),
+        ];
+
+        assert_eq!(identifier(&ids, "mb-release"), "release-1");
+        assert_eq!(
+            identifiers(&ids, "isrc"),
+            ["USQX91300105".to_owned(), "GBAYE0000001".to_owned()]
+        );
     }
 
     #[test]
-    fn an_artist_id_is_built_from_the_credits_provider_id() {
-        let credit = credit(&[("mb-artist", "artist-1"), ("deezer", "27")]);
-
-        let id = artist_id(&slug(), &credit).unwrap();
-
-        assert_eq!(id.slug(), &slug());
-        assert_eq!(id.kind(), EntityKind::Artist);
-        assert_eq!(id.provider_id(), "27");
-    }
-
-    #[test]
-    fn a_credit_of_canonical_identifiers_names_no_catalog_artist() {
-        let canonical = credit(&[("mb-artist", "artist-1"), ("isrc", "USQX91300105")]);
-
-        assert_eq!(artist_id(&slug(), &canonical), None);
-        assert_eq!(artist_id(&slug(), &credit(&[])), None);
+    fn a_missing_namespace_is_empty() {
+        assert_eq!(identifier(&[], "mb-release"), "");
+        assert!(identifiers(&[], "isrc").is_empty());
     }
 }

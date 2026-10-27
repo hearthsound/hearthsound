@@ -1317,8 +1317,7 @@ async fn the_acquisition_listing_names_an_album_target() {
         ))
         .await
         .unwrap();
-    let mut album_input =
-        hearthsound_library::AlbumInput::new("Reload Album", hearthsound_library::Origin::Catalog);
+    let mut album_input = hearthsound_library::AlbumInput::new("Reload Album");
     album_input.display_artist = Some("Reload Artist".to_owned());
     let album = library.upsert_album(&album_input, &[]).await.unwrap();
     {
@@ -1713,7 +1712,7 @@ mod plugin_admin {
     const DEZER_ID: &str = "app.hearthsound.deezer";
 
     /// The API version this server hosts.
-    const API: &str = "hearthsound:plugin@0.4.0";
+    const API: &str = "hearthsound:plugin@0.5.0";
 
     /// The path an index document is served at in these tests.
     const INDEX_PATH: &str = "/v1/index.json";

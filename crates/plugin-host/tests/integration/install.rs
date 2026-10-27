@@ -132,14 +132,13 @@ async fn a_manifest_promising_metadata_is_rejected() {
     let archive = dir.path().join("metadata.hsplugin");
     archive_with_manifest(&archive, |manifest| {
         manifest["provides"] = serde_json::json!(["metadata"]);
-        manifest.as_object_mut().unwrap().remove("catalog");
     });
 
     let error = host.install(&archive).await.unwrap_err();
 
     match error {
         InstallError::MissingExport { interface } => {
-            assert_eq!(interface, "hearthsound:plugin/metadata@0.4.0");
+            assert_eq!(interface, "hearthsound:plugin/metadata@0.5.0");
         }
         other => panic!("unexpected error: {other}"),
     }
@@ -158,7 +157,7 @@ async fn an_account_link_export_needs_a_scrobble_or_discovery_layer() {
 
     assert!(
         matches!(error, InstallError::UndeclaredExport(ref interface)
-            if interface == "hearthsound:plugin/account-link@0.4.0"),
+            if interface == "hearthsound:plugin/account-link@0.5.0"),
         "unexpected error: {error}"
     );
 }
@@ -180,13 +179,13 @@ async fn an_unsupported_api_version_is_rejected() {
     );
     let message = error.to_string();
     assert!(
-        message.contains("hearthsound:plugin@0.4.0")
-            && message.contains("hearthsound:plugin@0.3.0"),
+        message.contains("hearthsound:plugin@0.5.0")
+            && message.contains("hearthsound:plugin@0.4.0"),
         "expected both hosted versions in the message, got: {message}"
     );
     assert_eq!(
         SUPPORTED_APIS_LIST,
-        "hearthsound:plugin@0.4.0 and hearthsound:plugin@0.3.0"
+        "hearthsound:plugin@0.5.0 and hearthsound:plugin@0.4.0"
     );
 }
 
@@ -211,13 +210,13 @@ async fn every_fixture_installs_and_reports_its_own_api() {
         let installed = host.install(&fixture_plugin(fixture)).await.unwrap();
         assert_eq!(
             installed.api(),
-            ApiVersion::V0_4,
+            ApiVersion::V0_5,
             "{fixture} should be built for the newest API"
         );
     }
 
     let legacy = host.install(&fixture_plugin(LEGACY_CATALOG)).await.unwrap();
-    assert_eq!(legacy.api(), ApiVersion::V0_3);
+    assert_eq!(legacy.api(), ApiVersion::V0_4);
 }
 
 #[tokio::test]
@@ -226,7 +225,7 @@ async fn a_manifest_newer_than_its_component_is_rejected() {
     let host = host(dir.path()).await;
     let archive = dir.path().join("newer-manifest.hsplugin");
     archive_with_source(&fixture_plugin(LEGACY_CATALOG), &archive, |manifest| {
-        manifest["api"] = serde_json::json!("hearthsound:plugin@0.4.0");
+        manifest["api"] = serde_json::json!("hearthsound:plugin@0.5.0");
     });
 
     let error = host.install(&archive).await.unwrap_err();
@@ -235,8 +234,8 @@ async fn a_manifest_newer_than_its_component_is_rejected() {
         matches!(
             error,
             InstallError::ApiMismatch { ref declared, ref component }
-                if declared == "hearthsound:plugin@0.4.0"
-                    && component == "hearthsound:plugin@0.3.0"
+                if declared == "hearthsound:plugin@0.5.0"
+                    && component == "hearthsound:plugin@0.4.0"
         ),
         "unexpected error: {error}"
     );
@@ -248,7 +247,7 @@ async fn a_manifest_older_than_its_component_is_rejected() {
     let host = host(dir.path()).await;
     let archive = dir.path().join("older-manifest.hsplugin");
     archive_with_manifest(&archive, |manifest| {
-        manifest["api"] = serde_json::json!("hearthsound:plugin@0.3.0");
+        manifest["api"] = serde_json::json!("hearthsound:plugin@0.4.0");
     });
 
     let error = host.install(&archive).await.unwrap_err();
@@ -257,8 +256,8 @@ async fn a_manifest_older_than_its_component_is_rejected() {
         matches!(
             error,
             InstallError::ApiMismatch { ref declared, ref component }
-                if declared == "hearthsound:plugin@0.3.0"
-                    && component == "hearthsound:plugin@0.4.0"
+                if declared == "hearthsound:plugin@0.4.0"
+                    && component == "hearthsound:plugin@0.5.0"
         ),
         "unexpected error: {error}"
     );

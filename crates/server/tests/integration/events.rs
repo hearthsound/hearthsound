@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hearthsound_core::events::{Audience, PlaylistChanged, ServerEvent, UploadUpdated};
 use hearthsound_core::{Availability, EntityId};
-use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, Origin, TrackInput};
+use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, TrackInput};
 use hearthsound_plugin_host::{InstanceSpec, PluginRepository, PluginSource};
 use hearthsound_test_support::{SCROBBLE_FIXTURE, fixture_plugin};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, SET_COOKIE};
@@ -959,107 +959,55 @@ async fn a_demoted_administrator_loses_administrator_events() {
     fixture.stop().await;
 }
 
-/// The enrichment job publishes its completion to the listener whose page asked.
+/// A page the indexer's worker walked is announced to every stream as
+/// `entity.updated`.
 #[tokio::test]
-async fn a_finished_enrichment_is_announced_to_its_listener_once() {
-    use hearthsound_catalog::{ENRICH_JOB_KIND, EnrichJobPayload};
-    use hearthsound_core::providers::CatalogQuery;
-    use hearthsound_core::{ClientId, EntityKind};
-    use hearthsound_jobs::{NewJob, Shutdown};
+async fn a_finished_index_run_announces_the_entity_to_everyone() {
+    use hearthsound_core::EntityKind;
 
     let fixture = Fixture::new().await;
     let services = std::sync::Arc::clone(&fixture.services);
     crate::on_demand::install_catalog(&services).await;
     services.registry().rebuild().await.unwrap();
 
-    // A catalog artist exists, so the run has something to fetch.
-    let artist = services
+    let mut stream = open_stream(&fixture, &fixture.api_key).await;
+
+    // Resolving a provider hit stores its row, which is what the page walk then
+    // indexes; the walk publishes the announcement every client listens for.
+    let answer = services
         .catalog()
-        .search(&CatalogQuery {
-            text: "Fixture".to_owned(),
-            kinds: vec![EntityKind::Artist],
-            limit: 10,
-            offset: 0,
-        })
+        .search(fixture.user_id, "Fixture", &[EntityKind::Album], 5, 0)
         .await
-        .unwrap()
-        .artists
+        .unwrap();
+    let album = answer
+        .albums
         .into_iter()
         .next()
-        .expect("the fixture answers an artist");
-    let id = ClientId::Catalog(artist.id.clone());
-    let listener = fixture.user_id;
-
-    let mut events = services.events().subscribe();
-    let shutdown = Shutdown::new();
-    let runner = std::sync::Arc::clone(services.runner());
-    let handle = tokio::spawn({
-        let shutdown = shutdown.clone();
-        async move { runner.run(shutdown).await }
-    });
-
-    assert!(services.catalog().begin_enrichment(&id, listener).await);
+        .expect("the fixture answers an album")
+        .album
+        .id;
     services
-        .queue()
-        .enqueue(
-            NewJob::new(ENRICH_JOB_KIND)
-                .priority(hearthsound_core::Priority::Queue)
-                .payload(&EnrichJobPayload {
-                    entity_id: id.to_string(),
-                    kind: EntityKind::Artist,
-                    user_id: listener,
-                })
-                .unwrap(),
-        )
+        .catalog()
+        .refresh(EntityKind::Album, album)
         .await
         .unwrap();
 
-    let envelope = tokio::time::timeout(FRAME_WAIT, async {
+    let frame = tokio::time::timeout(FRAME_WAIT, async {
         loop {
-            let envelope = events.recv().await.expect("the bus stays open");
-            if envelope.event.type_str() == "catalog.enriched" {
-                return envelope;
+            let frame = next_frames(&mut stream, 1).await.remove(0);
+            if frame.event == "entity.updated" {
+                return frame;
             }
         }
     })
     .await
-    .expect("the completion is published");
+    .expect("the finished run is announced");
 
-    match &envelope.event {
-        ServerEvent::CatalogEnriched(payload) => {
-            assert_eq!(payload.entity_id, id.to_string());
-            assert_eq!(payload.kind, EntityKind::Artist);
-        }
-        other => panic!(
-            "expected a catalog.enriched event, got {}",
-            other.type_str()
-        ),
-    }
-    assert_eq!(envelope.audience, Audience::User(listener));
-    assert!(envelope.audience.is_visible_to(listener, false));
-    assert!(
-        !envelope
-            .audience
-            .is_visible_to(uuid::Uuid::from_u128(99), false)
-    );
+    assert_eq!(frame.data["data"]["id"], album.to_string());
+    assert_eq!(frame.data["data"]["kind"], "album");
 
-    // The extras are cached now: a cached read answers without a provider call.
-    assert!(
-        services
-            .catalog()
-            .cached_artist(&artist.id)
-            .await
-            .unwrap()
-            .is_some(),
-        "the run cached the artist"
-    );
-    assert!(
-        services.catalog().begin_enrichment(&id, listener).await,
-        "a finished run releases its claim"
-    );
-
-    shutdown.trigger();
-    handle.await.unwrap();
+    drop(stream);
+    fixture.stop().await;
 }
 
 /// Inserts one stored track and returns its client id.
@@ -1071,12 +1019,12 @@ async fn seed_track(fixture: &Fixture) -> EntityId {
     let library = LibraryRepository::new(fixture.services.database());
     let album = library
         .upsert_album(
-            &AlbumInput::new("Event Album", Origin::Local),
+            &AlbumInput::new("Event Album"),
             &[ArtistCredit::new("Event Artist", "main")],
         )
         .await
         .unwrap();
-    let mut input = TrackInput::new("Event Song", Origin::Local, Availability::Local);
+    let mut input = TrackInput::new("Event Song", Availability::Local);
     input.album_id = Some(album);
     input.display_artist = Some("Event Artist".to_owned());
     input.duration_ms = Some(180_000);

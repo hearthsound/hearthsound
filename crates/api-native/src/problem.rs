@@ -260,6 +260,16 @@ impl Problem {
         )
     }
 
+    /// The write would remove, switch off or unhook a mandatory plugin.
+    pub fn plugin_required(detail: impl Into<String>) -> Problem {
+        Problem::new(
+            StatusCode::CONFLICT,
+            "plugin-required",
+            "Required plugin",
+            detail,
+        )
+    }
+
     /// The request contradicts the current state.
     pub fn conflict(detail: impl Into<String>) -> Problem {
         Problem::new(StatusCode::CONFLICT, "conflict", "Conflict", detail)

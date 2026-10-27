@@ -1,11 +1,170 @@
 //! Build script of the server crate.
 //!
-//! The pinned web client is embedded from `target/web-client/` at the
-//! repository root (see `web-client.lock` and `cargo xtask fetch-web-client`).
-//! rust-embed walks the folder at compile time, so a fetch, or its removal,
-//! must rebuild the crate instead of shipping a client the lock file no
-//! longer pins, or none where one is pinned.
+//! It embeds two sets of files that must be compiled into the binary:
+//!
+//! - the pinned web client, from `target/web-client/` at the repository root
+//!   (see `web-client.lock` and `cargo xtask fetch-web-client`), which
+//!   rust-embed walks at compile time;
+//! - the mandatory plugin archives, from `target/bundled-plugins/` (see
+//!   `bundled-plugins.lock` and `cargo xtask fetch-plugins`), rendered into
+//!   `$OUT_DIR/bundled.rs`.
+//!
+//! A fetch, or the removal of either directory, must therefore rebuild the
+//! crate instead of shipping a client the lock file no longer pins, or none
+//! where one is pinned.
+
+use std::env;
+use std::fmt::Write as _;
+use std::fs;
+use std::path::Path;
+
+/// The lock file that pins the bundled plugin archives.
+const BUNDLED_PLUGINS_LOCK: &str = "../../bundled-plugins.lock";
+
+/// The directory `cargo xtask fetch-plugins` downloads into.
+const BUNDLED_PLUGINS_DIR: &str = "../../target/bundled-plugins";
+
+/// The lock file as parsed; only the plugin tables matter here.
+#[derive(Debug, serde::Deserialize)]
+struct Lock {
+    /// One entry per bundled archive, in lock file order.
+    #[serde(default)]
+    plugin: Vec<Entry>,
+}
+
+/// One plugin pinned in `bundled-plugins.lock`.
+#[derive(Debug, serde::Deserialize)]
+struct Entry {
+    /// The plugin id from its manifest.
+    id: String,
+    /// The released plugin version; the release tag is `v<version>`.
+    version: String,
+    /// Lowercase hex SHA-256 of the archive.
+    sha256: String,
+    /// Whether the server installs the plugin by itself and protects it.
+    #[serde(default)]
+    mandatory: bool,
+}
 
 fn main() {
     println!("cargo:rerun-if-changed=../../target/web-client");
+    println!("cargo:rerun-if-changed={BUNDLED_PLUGINS_LOCK}");
+    println!("cargo:rerun-if-changed={BUNDLED_PLUGINS_DIR}");
+
+    let out_dir = match env::var("OUT_DIR") {
+        Ok(dir) => dir,
+        Err(error) => panic!("cargo did not set OUT_DIR: {error}"),
+    };
+    let target = Path::new(&out_dir).join("bundled.rs");
+    if let Err(error) = fs::write(&target, render()) {
+        panic!("writing {}: {error}", target.display());
+    }
+}
+
+/// Renders `bundled.rs` for the current lock file and archive directory.
+///
+/// Every mandatory entry becomes an id in `MANDATORY_PLUGIN_IDS`, whether or not
+/// its archive was downloaded: the protection applies to a plugin the lock
+/// declares required, not to whether this particular build could embed it. An
+/// entry whose archive is present with a parseable digest also becomes an
+/// `EMBEDDED_PLUGINS` row; a missing archive emits a `cargo:warning` and no row,
+/// so a build without `cargo xtask fetch-plugins` still compiles and the server
+/// reports the missing plugin at startup.
+fn render() -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let lock_path = root.join("bundled-plugins.lock");
+    let text = match fs::read_to_string(&lock_path) {
+        Ok(text) => text,
+        Err(error) => panic!("reading {}: {error}", lock_path.display()),
+    };
+    let lock: Lock = match toml::from_str(&text) {
+        Ok(lock) => lock,
+        Err(error) => panic!("parsing {}: {error}", lock_path.display()),
+    };
+    let archive_dir = root.join("target").join("bundled-plugins");
+
+    let mut ids: Vec<&str> = Vec::new();
+    let mut rows: Vec<String> = Vec::new();
+    for entry in &lock.plugin {
+        if !entry.mandatory {
+            continue;
+        }
+        ids.push(&entry.id);
+        let archive = archive_dir.join(format!("{}-{}.hsplugin", entry.id, entry.version));
+        let Some(digest) = parse_sha256(&entry.sha256) else {
+            println!(
+                "cargo:warning=bundled-plugins.lock has a malformed sha256 for {}, so it is not embedded",
+                entry.id
+            );
+            continue;
+        };
+        match fs::metadata(&archive) {
+            Ok(metadata) if metadata.is_file() => {}
+            _ => {
+                println!(
+                    "cargo:warning={} is not embedded: {} is missing; run `cargo xtask fetch-plugins`",
+                    entry.id,
+                    archive.display()
+                );
+                continue;
+            }
+        }
+        println!("cargo:rerun-if-changed={}", archive.display());
+        rows.push(format!(
+            "    EmbeddedPlugin {{\n        id: {:?},\n        version: {:?},\n        sha256: {digest:?},\n        bytes: include_bytes!({:?}),\n    }},",
+            entry.id,
+            entry.version,
+            archive.to_string_lossy(),
+        ));
+    }
+
+    let mut source = String::from(
+        "// Generated by `crates/server/build.rs` from `bundled-plugins.lock`; do not edit.\n\n",
+    );
+    let _ = writeln!(
+        source,
+        "/// The plugin ids the server installs by itself and refuses to let an\n/// administrator remove.\npub const MANDATORY_PLUGIN_IDS: &[&str] = &{ids:?};\n"
+    );
+    source.push_str(
+        "/// One plugin archive compiled into the binary.\n\
+         #[derive(Debug, Clone, Copy)]\n\
+         pub struct EmbeddedPlugin {\n\
+         \x20   /// The plugin id from its manifest.\n\
+         \x20   pub id: &'static str,\n\
+         \x20   /// The released plugin version.\n\
+         \x20   pub version: &'static str,\n\
+         \x20   /// The archive's SHA-256, checked before it is installed.\n\
+         \x20   pub sha256: [u8; 32],\n\
+         \x20   /// The `.hsplugin` archive itself.\n\
+         \x20   pub bytes: &'static [u8],\n\
+         }\n\n\
+         /// The mandatory plugins embedded in this build, in lock file order.\n\
+         pub static EMBEDDED_PLUGINS: &[EmbeddedPlugin] = &[\n",
+    );
+    for row in rows {
+        source.push_str(&row);
+        source.push('\n');
+    }
+    source.push_str("];\n");
+    source
+}
+
+/// Parses a lowercase hex SHA-256 into its 32 bytes.
+///
+/// # Parameters
+///
+/// - `hex`: the digest as the lock file spells it.
+///
+/// # Returns
+///
+/// The digest, or `None` when the text is not 64 hex digits.
+fn parse_sha256(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 || !hex.is_ascii() {
+        return None;
+    }
+    let mut digest = [0u8; 32];
+    for (index, slot) in digest.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(digest)
 }

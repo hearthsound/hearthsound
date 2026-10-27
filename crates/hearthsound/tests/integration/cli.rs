@@ -1597,10 +1597,7 @@ async fn acquisitions_lists_and_cancels_an_acquisition() {
         .await
         .unwrap();
     let library = hearthsound_library::LibraryRepository::new(&database);
-    let mut album_input = hearthsound_library::AlbumInput::new(
-        "Hello Song album",
-        hearthsound_library::Origin::Catalog,
-    );
+    let mut album_input = hearthsound_library::AlbumInput::new("Hello Song album");
     album_input.year = Some(1993);
     album_input.display_artist = Some("Hello Artist".to_owned());
     let album = library
@@ -1613,11 +1610,8 @@ async fn acquisitions_lists_and_cancels_an_acquisition() {
         )
         .await
         .unwrap();
-    let mut input = hearthsound_library::TrackInput::new(
-        "Hello Song",
-        hearthsound_library::Origin::Catalog,
-        hearthsound_core::Availability::Remote,
-    );
+    let mut input =
+        hearthsound_library::TrackInput::new("Hello Song", hearthsound_core::Availability::Remote);
     input.album_id = Some(album);
     input.display_artist = Some("Hello Artist".to_owned());
     input.track_number = Some(1);

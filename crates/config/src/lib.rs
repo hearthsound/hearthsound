@@ -543,6 +543,19 @@ pub mod keys {
     pub const METADATA_ARTIST_INFO_TIMEOUT_MS: SettingKey<i64> =
         SettingKey::new("metadata.artist_info.timeout_ms");
 
+    /// Whether file tags or plugin metadata win a field both state.
+    pub const METADATA_PRECEDENCE: SettingKey<String> = SettingKey::new("metadata.precedence");
+
+    /// Days after which a library entity's stored provider data is refreshed.
+    pub const INDEX_REFRESH_DAYS: SettingKey<i64> = SettingKey::new("index.refresh_days");
+    /// Milliseconds a page request waits for a missing entity's data.
+    pub const INDEX_VIEW_TIMEOUT_MS: SettingKey<i64> = SettingKey::new("index.view_timeout_ms");
+    /// Days after which heavy data of an unviewed remote entity is pruned.
+    pub const INDEX_PRUNE_AFTER_DAYS: SettingKey<i64> = SettingKey::new("index.prune_after_days");
+    /// Days after which an unreferenced remote entity is deleted; 0 keeps them.
+    pub const INDEX_DELETE_UNREFERENCED_AFTER_DAYS: SettingKey<i64> =
+        SettingKey::new("index.delete_unreferenced_after_days");
+
     /// Whether a rating of one also counts as a dislike.
     pub const SUBSONIC_RATING_ONE_IS_DISLIKE: SettingKey<bool> =
         SettingKey::new("subsonic.rating_one_is_dislike");
@@ -1076,6 +1089,41 @@ impl SettingsRegistry {
                     },
                     SettingValue::Integer(5_000),
                     "Deadline for one artist-info lookup, in milliseconds",
+                ),
+                def(
+                    keys::METADATA_PRECEDENCE,
+                    SettingKind::String {
+                        allowed: &["tags", "plugins"],
+                    },
+                    SettingValue::String("tags".to_owned()),
+                    "Whether file tags or plugin metadata win when both state a value",
+                ),
+                def(
+                    keys::INDEX_REFRESH_DAYS,
+                    SettingKind::Integer { min: 1, max: 3_650 },
+                    SettingValue::Integer(30),
+                    "Days after which a library entity's stored provider data is refreshed",
+                ),
+                def(
+                    keys::INDEX_VIEW_TIMEOUT_MS,
+                    SettingKind::Integer {
+                        min: 500,
+                        max: 30_000,
+                    },
+                    SettingValue::Integer(5_000),
+                    "Milliseconds a page request waits for a missing entity's data before answering partial",
+                ),
+                def(
+                    keys::INDEX_PRUNE_AFTER_DAYS,
+                    SettingKind::Integer { min: 0, max: 3_650 },
+                    SettingValue::Integer(90),
+                    "Days after which an unviewed remote entity's stored images and provider answers are pruned; 0 keeps them",
+                ),
+                def(
+                    keys::INDEX_DELETE_UNREFERENCED_AFTER_DAYS,
+                    SettingKind::Integer { min: 0, max: 3_650 },
+                    SettingValue::Integer(0),
+                    "Days after which an unreferenced remote entity is deleted; 0 keeps it",
                 ),
                 def(
                     keys::SUBSONIC_RATING_ONE_IS_DISLIKE,

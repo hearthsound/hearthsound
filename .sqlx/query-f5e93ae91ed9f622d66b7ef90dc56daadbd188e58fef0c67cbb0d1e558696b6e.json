@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE tracks SET album_id = ?, title = ?, sort_title = ?, display_artist = ?, disc_number = ?, track_number = ?, duration_ms = ?, explicit = ?, file_tags = COALESCE(?, file_tags), updated_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "f5e93ae91ed9f622d66b7ef90dc56daadbd188e58fef0c67cbb0d1e558696b6e"
+}

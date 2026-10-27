@@ -20,10 +20,8 @@ use hearthsound_acquire::orchestrator::{AcquireRequest, AcquisitionOrchestrator}
 use hearthsound_acquire::repo::{AcquisitionRow, ListFilter};
 use hearthsound_catalog::CatalogService;
 use hearthsound_config::{SettingValue, keys};
-use hearthsound_core::{
-    AcquisitionState, Availability, CatalogId, EntityId, EntityKind, Layer, Slug,
-};
-use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, Origin, TrackInput};
+use hearthsound_core::{AcquisitionState, Availability, EntityId, EntityKind, Layer};
+use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, TrackInput};
 use hearthsound_media::{Container, probe};
 use hearthsound_plugin_host::{InstanceSpec, PluginRepository, PluginSource};
 use hearthsound_server::Services;
@@ -46,9 +44,6 @@ const CATALOG_SLUG: &str = "album";
 
 /// The slug of the acquisition instance.
 const ACQ_SLUG: &str = "acq";
-
-/// The provider id prefix of the fixture's tracks.
-const TRACK_PREFIX: &str = "album-catalog-track-";
 
 /// The title of the fixture's first track.
 const FIRST_TITLE: &str = "Fixture Song 1";
@@ -197,40 +192,63 @@ fn candidate() -> Value {
     })
 }
 
-/// Returns the catalog id of one track of the fixture's album.
+/// Resolves the fixture's album through the search surface and returns its row.
 ///
 /// # Parameters
 ///
-/// - `number`: the track number within the album, one-based.
-fn catalog_track(number: u8) -> CatalogId {
-    CatalogId::new(
-        Slug::new(CATALOG_SLUG).unwrap(),
-        EntityKind::Track,
-        format!("{TRACK_PREFIX}{number}"),
-    )
-    .unwrap()
-}
-
-/// Returns the catalog id of one track, as a client writes it.
+/// - `catalog`: the running catalog layer.
 ///
-/// # Parameters
+/// # Panics
 ///
-/// - `number`: the track number within the album, one-based.
-pub(crate) fn catalog_id(number: u8) -> String {
-    catalog_track(number).to_string()
+/// Panics when the fixture answers no album, which means the layer is not
+/// installed or not assigned to the catalog layer.
+pub(crate) async fn catalog_album(catalog: &CatalogService) -> EntityId {
+    catalog
+        .search(uuid::Uuid::nil(), "Fixture", &[EntityKind::Album], 5, 0)
+        .await
+        .unwrap()
+        .albums
+        .into_iter()
+        .next()
+        .expect("the fixture answers an album")
+        .album
+        .id
 }
 
 /// Resolves one track of the fixture's album to its stored row.
+///
+/// The album is found through search and its page walked, which is how a client
+/// reaches the same rows: the album page resolves the provider's whole
+/// tracklist, so every one of its tracks has a row before the caller plays it.
 ///
 /// # Parameters
 ///
 /// - `catalog`: the running catalog layer.
 /// - `number`: the track number within the album, one-based.
-pub(crate) async fn materialize(catalog: &CatalogService, number: u8) -> EntityId {
-    catalog
-        .materialize_track(&catalog_track(number))
+///
+/// # Panics
+///
+/// Panics when the album page holds no track with that number.
+pub(crate) async fn resolve_track(catalog: &CatalogService, number: u8) -> EntityId {
+    let album = catalog_album(catalog).await;
+    let page = catalog
+        .views()
+        .album(
+            album,
+            hearthsound_catalog::views::Viewer {
+                user: uuid::Uuid::nil(),
+                vendor: false,
+            },
+        )
         .await
         .unwrap()
+        .expect("the resolved album has a page");
+    page.tracks
+        .into_iter()
+        .find(|entry| entry.track.track_number == Some(i64::from(number)))
+        .unwrap_or_else(|| panic!("the album page holds track {number}"))
+        .track
+        .id
 }
 
 /// Creates the instance's import root inside the fixture's data directory.
@@ -282,12 +300,18 @@ pub(crate) async fn place_audio(downloads: &Path) -> PathBuf {
 /// - `track`: the stored track to write.
 /// - `isrc`: the code to store.
 pub(crate) async fn give_track_isrc(services: &Arc<Services>, track: EntityId, isrc: &str) {
-    sqlx::query("UPDATE tracks SET isrc = ? WHERE id = ?")
-        .bind(isrc)
-        .bind(track.uuid().as_bytes().to_vec())
-        .execute(services.database().writer())
-        .await
-        .unwrap();
+    let mut connection = services.database().writer().acquire().await.unwrap();
+    hearthsound_library::external_ids::attach(
+        &mut connection,
+        EntityKind::Track,
+        track.uuid(),
+        &[hearthsound_core::providers::ExternalId {
+            namespace: hearthsound_core::providers::ISRC.to_owned(),
+            value: isrc.to_owned(),
+        }],
+    )
+    .await
+    .unwrap();
 }
 
 /// Returns the path of a `stream` request for one id.
@@ -295,12 +319,12 @@ pub(crate) async fn give_track_isrc(services: &Arc<Services>, track: EntityId, i
 /// # Parameters
 ///
 /// - `fixture`: the running fixture, for its api key.
-/// - `id`: the track or catalog id to stream.
+/// - `id`: the track id to stream.
 fn stream_path(fixture: &Fixture, id: &str) -> String {
     format!("/rest/stream?id={id}&apiKey={}", fixture.api_key)
 }
 
-/// Plays one catalog id and returns the bytes the client received.
+/// Plays one remote track and returns the bytes the client received.
 ///
 /// The answer is the held pending stream: nothing is sent while the acquisition
 /// runs, and once it has imported the file the response is the stored file
@@ -310,7 +334,7 @@ fn stream_path(fixture: &Fixture, id: &str) -> String {
 /// # Parameters
 ///
 /// - `fixture`: the running fixture.
-/// - `id`: the catalog id to stream.
+/// - `id`: the track id to stream.
 ///
 /// # Returns
 ///
@@ -490,12 +514,12 @@ async fn search3_lists_local_results_before_catalog_results() {
     let library = LibraryRepository::new(services.database());
     let album = library
         .upsert_album(
-            &AlbumInput::new("Fixture Local Album", Origin::Local),
+            &AlbumInput::new("Fixture Local Album"),
             &[ArtistCredit::new("Fixture Local Artist", "main")],
         )
         .await
         .unwrap();
-    let mut input = TrackInput::new("Fixture Local Song", Origin::Local, Availability::Local);
+    let mut input = TrackInput::new("Fixture Local Song", Availability::Local);
     input.album_id = Some(album);
     input.display_artist = Some("Fixture Local Artist".to_owned());
     input.track_number = Some(1);
@@ -529,38 +553,44 @@ async fn search3_lists_local_results_before_catalog_results() {
     let body: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
     let result = &body["subsonic-response"]["searchResult3"];
 
-    for kind in ["artist", "album", "song"] {
-        let ids: Vec<String> = result[kind]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|entry| entry["id"].as_str().unwrap().to_owned())
-            .collect();
-        let first_catalog = ids
-            .iter()
-            .position(|id| id.starts_with("x_"))
-            .unwrap_or_else(|| panic!("`{kind}` has a catalog result: {ids:?}"));
+    // Every hit is a stored row, so the order is the only thing that tells the
+    // caller's own library from what the catalog layer contributed: the local
+    // row of each kind comes first and the provider's rows follow it.
+    for (kind, field) in [("artist", "name"), ("album", "name")] {
+        let entries = result[kind].as_array().unwrap();
         assert!(
-            first_catalog > 0,
-            "`{kind}` has a local result before its catalog ones: {ids:?}"
+            entries.len() >= 2,
+            "`{kind}` has a catalog result: {entries:?}"
         );
         assert!(
-            ids[first_catalog..].iter().all(|id| id.starts_with("x_")),
-            "no local result of `{kind}` follows a catalog one: {ids:?}"
+            entries[0][field]
+                .as_str()
+                .unwrap()
+                .starts_with("Fixture Local"),
+            "`{kind}` lists the local row first: {entries:?}"
+        );
+        assert!(
+            entries[1..]
+                .iter()
+                .all(|entry| !entry[field].as_str().unwrap().starts_with("Fixture Local")),
+            "no local row of `{kind}` follows a catalog one: {entries:?}"
         );
     }
 
-    let songs: Vec<String> = result["song"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| entry["id"].as_str().unwrap().to_owned())
-        .collect();
-    assert_eq!(songs[0], local.to_string(), "the local track comes first");
+    let songs = result["song"].as_array().unwrap();
     assert_eq!(
-        songs[1],
-        catalog_id(1),
-        "the catalog's own track follows it"
+        songs[0]["id"],
+        local.to_string(),
+        "the local track comes first"
+    );
+    assert_eq!(
+        songs[1]["title"], "Fixture Song 1",
+        "the catalog's own track follows it: {songs:?}"
+    );
+    assert_ne!(
+        songs[1]["id"],
+        local.to_string(),
+        "the catalog hit is its own stored row"
     );
 }
 
@@ -575,9 +605,9 @@ async fn a_catalog_stream_serves_the_imported_file() {
     services.registry().rebuild().await.unwrap();
     let source = place_audio(&downloads).await;
 
-    let id = catalog_id(1);
-    let track = materialize(services.catalog(), 1).await;
+    let track = resolve_track(services.catalog(), 1).await;
     give_track_isrc(&services, track, FIRST_ISRC).await;
+    let id = track.to_string();
 
     let body = play_stream(&fixture, &id).await;
 
@@ -601,7 +631,7 @@ async fn a_catalog_stream_serves_the_imported_file() {
     assert_eq!(probed.tags.album.as_deref(), Some("Fixture Album"));
     assert_eq!(probed.tags.album_artist.as_deref(), Some("Fixture Artist"));
     assert_eq!(probed.tags.track_number, Some(1));
-    assert_eq!(probed.tags.date.as_deref(), Some("2026"));
+    assert_eq!(probed.tags.date.as_deref(), Some("2026-02-01"));
     assert_eq!(probed.tags.isrc.as_deref(), Some(FIRST_ISRC));
     assert!(
         !source.exists(),
@@ -618,7 +648,7 @@ async fn a_catalog_stream_serves_the_imported_file() {
     );
 }
 
-/// Replaying an imported catalog id serves the stored file with a range.
+/// Replaying an imported track serves the stored file with a range.
 #[tokio::test]
 async fn a_replay_of_an_imported_track_serves_a_range() {
     let fixture = Fixture::new().await;
@@ -629,8 +659,8 @@ async fn a_replay_of_an_imported_track_serves_a_range() {
     services.registry().rebuild().await.unwrap();
     place_audio(&downloads).await;
 
-    let id = catalog_id(1);
-    let track = materialize(services.catalog(), 1).await;
+    let track = resolve_track(services.catalog(), 1).await;
+    let id = track.to_string();
     play_stream(&fixture, &id).await;
 
     let imported = services.config().paths.cache.join(FIRST_REL_PATH);
@@ -678,7 +708,8 @@ async fn a_track_with_no_sources_ends_its_stream_and_cools_down() {
     install_acquisition(&services, &downloads, "no-candidates", 0).await;
     services.registry().rebuild().await.unwrap();
 
-    let id = catalog_id(1);
+    let track = resolve_track(services.catalog(), 1).await;
+    let id = track.to_string();
     let response = fixture.get(&stream_path(&fixture, &id)).await;
     assert_eq!(
         response.status(),
@@ -690,7 +721,6 @@ async fn a_track_with_no_sources_ends_its_stream_and_cools_down() {
         "a failed acquisition sends no bytes"
     );
 
-    let track = materialize(services.catalog(), 1).await;
     let orchestrator = Arc::clone(services.orchestrator());
     eventual(|| {
         let orchestrator = Arc::clone(&orchestrator);
@@ -740,6 +770,9 @@ async fn the_pending_mode_switches_between_hold_and_fail() {
     services.registry().rebuild().await.unwrap();
     place_audio(&downloads).await;
 
+    let first = resolve_track(services.catalog(), 1).await;
+    let second = resolve_track(services.catalog(), 2).await;
+
     // `hold` sends nothing until the file is there, then serves it as any stored
     // track is served.
     services
@@ -756,7 +789,7 @@ async fn the_pending_mode_switches_between_hold_and_fail() {
         .get(format!(
             "{}{}",
             fixture.base_url(),
-            stream_path(&fixture, &catalog_id(1))
+            stream_path(&fixture, &first.to_string())
         ))
         .send()
         .await
@@ -782,7 +815,9 @@ async fn the_pending_mode_switches_between_hold_and_fail() {
         )
         .await
         .unwrap();
-    let response = fixture.get(&stream_path(&fixture, &catalog_id(2))).await;
+    let response = fixture
+        .get(&stream_path(&fixture, &second.to_string()))
+        .await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(header(&response, RETRY_AFTER), Some("10"));
 }
@@ -801,7 +836,8 @@ async fn a_stream_no_source_can_serve_answers_at_once() {
     install_catalog(&services).await;
     services.registry().rebuild().await.unwrap();
 
-    let id = catalog_id(1);
+    let track = resolve_track(services.catalog(), 1).await;
+    let id = track.to_string();
     let response = tokio::time::timeout(
         Duration::from_secs(2),
         fixture.get(&stream_path(&fixture, &id)),
@@ -819,7 +855,6 @@ async fn a_stream_no_source_can_serve_answers_at_once() {
         "a parked stream sends no bytes"
     );
 
-    let track = materialize(services.catalog(), 1).await;
     let rows = ledger_rows(services.orchestrator(), track).await;
     assert_eq!(rows.len(), 1, "the request started one acquisition");
     assert_eq!(rows[0].state, AcquisitionState::Queued);
@@ -857,7 +892,8 @@ async fn a_stream_whose_acquisition_parks_during_the_hold_answers_at_once() {
         .await
         .unwrap();
 
-    let id = catalog_id(1);
+    let track = resolve_track(services.catalog(), 1).await;
+    let id = track.to_string();
     let started = std::time::Instant::now();
     let response = tokio::time::timeout(
         Duration::from_secs(15),
@@ -885,7 +921,6 @@ async fn a_stream_whose_acquisition_parks_during_the_hold_answers_at_once() {
         "a parked stream sends no bytes"
     );
 
-    let track = materialize(services.catalog(), 1).await;
     let rows = ledger_rows(services.orchestrator(), track).await;
     assert_eq!(rows.len(), 1, "the request started one acquisition");
     assert_eq!(
@@ -935,11 +970,13 @@ async fn a_restart_mid_download_finishes_the_acquisition() {
                 )
                 .await
                 .unwrap();
-            let response = fixture.get(&stream_path(&fixture, &catalog_id(1))).await;
+            let track = resolve_track(services.catalog(), 1).await;
+            let response = fixture
+                .get(&stream_path(&fixture, &track.to_string()))
+                .await;
             assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(header(&response, RETRY_AFTER), Some("10"));
 
-            let track = materialize(services.catalog(), 1).await;
             let row = wait_for_download(services.orchestrator(), track).await;
 
             let api_key = fixture.api_key.clone();
@@ -980,7 +1017,10 @@ async fn a_restart_mid_download_finishes_the_acquisition() {
     );
 }
 
-/// Finds the catalog id of the fixture's album through `search3`.
+/// Finds the fixture album's stored row through `search3`.
+///
+/// The search resolves the provider's album hit to a row, which is the id every
+/// later request names.
 pub(crate) async fn catalog_album_id(fixture: &Fixture) -> String {
     let response = fixture
         .get(&format!(
@@ -994,7 +1034,7 @@ pub(crate) async fn catalog_album_id(fixture: &Fixture) -> String {
         .unwrap()
         .iter()
         .map(|album| album["id"].as_str().unwrap().to_owned())
-        .find(|id| id.starts_with("x_"))
+        .next()
         .expect("the catalog answers the fixture album")
 }
 
@@ -1023,12 +1063,19 @@ async fn starring_a_catalog_album_acquires_it_into_the_library() {
     services.registry().rebuild().await.unwrap();
     place_audio(&downloads).await;
 
-    let album = catalog_album_id(&fixture).await;
-    star(&fixture, "albumId", &album).await;
+    // The client opens the album before it likes it, which is what stores the
+    // provider's tracklist; the like then adopts every track of the album.
+    let album = crate::on_demand::catalog_album(services.catalog()).await;
+    services
+        .catalog()
+        .ensure_album_page(album, Duration::from_secs(5))
+        .await
+        .unwrap();
+    star(&fixture, "albumId", &album.to_string()).await;
 
     let mut tracks = Vec::new();
     for number in 1..=5 {
-        let track = materialize(services.catalog(), number).await;
+        let track = resolve_track(services.catalog(), number).await;
         let rows = ledger_rows(services.orchestrator(), track).await;
         assert_eq!(rows.len(), 1, "one acquisition per album track");
         assert_eq!(rows[0].priority, hearthsound_core::Priority::Queue);
@@ -1095,8 +1142,8 @@ async fn a_like_acquires_nothing_without_permission_or_with_the_setting_off() {
         )
         .await
         .unwrap();
-    star(&fixture, "id", &catalog_id(1)).await;
-    let first = materialize(services.catalog(), 1).await;
+    let first = resolve_track(services.catalog(), 1).await;
+    star(&fixture, "id", &first.to_string()).await;
     assert!(ledger_rows(services.orchestrator(), first).await.is_empty());
 
     services
@@ -1117,8 +1164,8 @@ async fn a_like_acquires_nothing_without_permission_or_with_the_setting_off() {
         )
         .await
         .unwrap();
-    star(&fixture, "id", &catalog_id(2)).await;
-    let second = materialize(services.catalog(), 2).await;
+    let second = resolve_track(services.catalog(), 2).await;
+    star(&fixture, "id", &second.to_string()).await;
     assert!(
         ledger_rows(services.orchestrator(), second)
             .await
@@ -1143,11 +1190,11 @@ async fn adding_a_catalog_track_to_a_playlist_acquires_it() {
     services.registry().rebuild().await.unwrap();
     place_audio(&downloads).await;
 
+    let first = resolve_track(services.catalog(), 1).await;
     let response = fixture
         .get(&format!(
             "/rest/createPlaylist?name=Mix&songId={}&apiKey={}&f=json",
-            catalog_id(1),
-            fixture.api_key
+            first, fixture.api_key
         ))
         .await;
     let body: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
@@ -1155,7 +1202,6 @@ async fn adding_a_catalog_track_to_a_playlist_acquires_it() {
         .as_str()
         .unwrap()
         .to_owned();
-    let first = materialize(services.catalog(), 1).await;
     let rows = ledger_rows(services.orchestrator(), first).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].reason, "playlist");
@@ -1184,15 +1230,14 @@ async fn adding_a_catalog_track_to_a_playlist_acquires_it() {
         )
         .await
         .unwrap();
+    let second = resolve_track(services.catalog(), 2).await;
     let response = fixture
         .get(&format!(
             "/rest/updatePlaylist?playlistId={playlist}&songIdToAdd={}&apiKey={}&f=json",
-            catalog_id(2),
-            fixture.api_key
+            second, fixture.api_key
         ))
         .await;
     assert!(response.text().await.unwrap().contains("\"status\":\"ok\""));
-    let second = materialize(services.catalog(), 2).await;
     assert!(
         ledger_rows(services.orchestrator(), second)
             .await
@@ -1264,7 +1309,7 @@ async fn a_track_is_acquired_through_a_configured_tool() {
     install_catalog(&services).await;
     install_process_fixture(&services, Some(&fixture_tool(FAKE_YT_DLP))).await;
 
-    let track = materialize(services.catalog(), 1).await;
+    let track = resolve_track(services.catalog(), 1).await;
     services
         .orchestrator()
         .request(
@@ -1318,7 +1363,9 @@ async fn a_track_is_acquired_through_a_configured_tool() {
             .unwrap()
     );
     assert_eq!(row.track_id, Some(track));
-    let response = fixture.get(&stream_path(&fixture, &catalog_id(1))).await;
+    let response = fixture
+        .get(&stream_path(&fixture, &track.to_string()))
+        .await;
     assert_eq!(response.status(), StatusCode::OK);
 
     let (format, codec, tier): (Option<String>, Option<String>, Option<String>) =
@@ -1340,7 +1387,7 @@ async fn an_unconfigured_tool_fails_the_acquisition() {
     install_catalog(&services).await;
     install_process_fixture(&services, None).await;
 
-    let track = materialize(services.catalog(), 1).await;
+    let track = resolve_track(services.catalog(), 1).await;
     services
         .orchestrator()
         .request(

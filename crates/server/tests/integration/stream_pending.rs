@@ -2,9 +2,9 @@
 //!
 //! The server is built by the composition root with a real acquisition
 //! orchestrator and a real catalog layer, both backed by the fixture plugins, so
-//! `/rest/stream` of an unmaterialized catalog id runs the whole path: the
-//! catalog materializes the track, the acquisition layer is asked for it, and
-//! `stream.pending.mode` decides what the client receives.
+//! `/rest/stream` of a track row with no file runs the whole path: the
+//! acquisition layer is asked for it, and `stream.pending.mode` decides what
+//! the client receives.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hearthsound_config::{SettingValue, keys};
-use hearthsound_core::{CatalogId, EntityKind, Layer, Slug};
+use hearthsound_core::{EntityKind, Layer};
 use hearthsound_plugin_host::{InstanceSpec, PluginRepository, PluginSource};
 use hearthsound_test_support::{ACQUISITION_FIXTURE, HELLO_CATALOG, fixture_plugin};
 use reqwest::StatusCode;
@@ -25,9 +25,6 @@ const HELLO_ID: &str = "com.example.hello-catalog";
 
 /// The acquisition fixture's manifest id.
 const ACQ_ID: &str = "com.example.acquisition-fixture";
-
-/// The track provider id the catalog fixture answers with.
-const HELLO_TRACK: &str = "hello-track-1";
 
 /// How long the acquisition fixture answers `running` before a search completes.
 ///
@@ -143,7 +140,23 @@ async fn a_catalog_stream_is_held_and_then_answers_503_in_fail_mode() {
     install_acquisition(&services, &downloads).await;
     services.registry().rebuild().await.unwrap();
 
-    let id = CatalogId::new(Slug::new("hello").unwrap(), EntityKind::Track, HELLO_TRACK).unwrap();
+    // The track's row is what the client names: a search resolves the provider's
+    // hit, and the page read is what makes the row remote rather than local.
+    let hit = services
+        .catalog()
+        .search(uuid::Uuid::nil(), "Hello", &[EntityKind::Track], 5, 0)
+        .await
+        .unwrap()
+        .tracks
+        .into_iter()
+        .next()
+        .expect("the fixture answers a track");
+    assert!(
+        hit.track.title.contains("Hello"),
+        "the fixture answered its greeting track: {}",
+        hit.track.title
+    );
+    let id = hit.track.id;
     let path = format!("/rest/stream?id={id}&apiKey={}", fixture.api_key);
 
     // The wait bound is shortened so the held request ends as a `503` instead

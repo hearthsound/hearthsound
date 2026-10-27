@@ -23,11 +23,11 @@ use std::time::Duration;
 
 use hearthsound_config::keys;
 use hearthsound_core::providers::{
-    AcquisitionContext, AcquisitionProvider, AcquisitionQuery, Candidate, ExternalId, SearchState,
-    WantedTrack,
+    AcquisitionContext, AcquisitionProvider, AcquisitionQuery, Candidate, ExternalId, ISRC,
+    MB_RELEASE, MB_RELEASE_GROUP, SearchState, UPC, WantedTrack,
 };
 use hearthsound_core::{
-    AcquisitionState, FailureReason, Granularity, Layer, ProviderError, QualityTier,
+    AcquisitionState, EntityKind, FailureReason, Granularity, Layer, ProviderError, QualityTier,
 };
 use hearthsound_library::Track;
 use hearthsound_plugin_host::RegistryInstance;
@@ -182,7 +182,11 @@ impl AcquisitionOrchestrator {
             },
             None => None,
         };
-        let wanted = wanted_track(&track, &artists);
+        let wanted = wanted_track(
+            &track,
+            &artists,
+            &self.stored_ids(EntityKind::Track, track_id).await?,
+        );
 
         let snapshot = self.settings().current();
         let profile = QualityProfile::builtin(&snapshot.get(keys::ACQUISITION_QUALITY_PROFILE)?)
@@ -331,6 +335,7 @@ impl AcquisitionOrchestrator {
             .album_id
             .ok_or(AcquireError::UnknownAcquisition(row.id))?;
         let album = self.library().get_album(album_id).await?;
+        let album_ids = self.stored_ids(EntityKind::Album, album_id).await?;
         let tracks = self.library().list_tracks_for_album(album_id).await?;
         if tracks.is_empty() {
             return Err(AcquireError::UnknownAlbum(album_id));
@@ -357,9 +362,13 @@ impl AcquisitionOrchestrator {
                 .into_iter()
                 .map(|artist| artist.name)
                 .collect::<Vec<_>>();
-            let mut wanted_track = wanted_track(track, &artists);
-            if let Some(album) = &album {
-                wanted_track.ids.extend(album_external_ids(album));
+            let mut wanted_track = wanted_track(
+                track,
+                &artists,
+                &self.stored_ids(EntityKind::Track, track.id).await?,
+            );
+            if album.is_some() {
+                wanted_track.ids.extend(album_external_ids(&album_ids));
             }
             wanted.push(wanted_track);
         }
@@ -815,11 +824,15 @@ impl LayerSearch<'_> {
 
 /// The wanted track the query and the scoring target are built from.
 ///
+/// The identifiers come from `external_ids`, so the recording's ISRC and its
+/// canonical ids are whatever the server has stored for the row.
+///
 /// # Parameters
 ///
 /// - `track`: the library track being acquired.
 /// - `artists`: the credited artist names, in credit order.
-fn wanted_track(track: &Track, artists: &[String]) -> WantedTrack {
+/// - `ids`: the identifiers stored for the track.
+fn wanted_track(track: &Track, artists: &[String], ids: &[ExternalId]) -> WantedTrack {
     WantedTrack {
         title: track.title.clone(),
         artists: artists.to_vec(),
@@ -832,17 +845,28 @@ fn wanted_track(track: &Track, artists: &[String]) -> WantedTrack {
         duration_ms: track
             .duration_ms
             .and_then(|value| u32::try_from(value).ok()),
-        isrc: track.isrc.clone(),
-        ids: track
-            .mb_recording_id
-            .clone()
-            .map(|value| ExternalId {
-                namespace: "mb-recording".to_owned(),
-                value,
-            })
-            .into_iter()
+        isrc: isrc_of(ids),
+        ids: ids
+            .iter()
+            .filter(|id| id.namespace != ISRC)
+            .cloned()
             .collect(),
     }
+}
+
+/// Returns a track's ISRC from its stored identifiers.
+///
+/// # Parameters
+///
+/// - `ids`: the identifiers stored for the track.
+///
+/// # Returns
+///
+/// The ISRC, when one is stored.
+fn isrc_of(ids: &[ExternalId]) -> Option<String> {
+    ids.iter()
+        .find(|id| id.namespace == ISRC)
+        .map(|id| id.value.clone())
 }
 
 /// The file extensions a quality profile prefers, best first.
@@ -885,31 +909,25 @@ pub fn preferred_formats(profile: &QualityProfile) -> Vec<String> {
 /// The album-level ids an album search repeats on every wanted track.
 ///
 /// A track's own ids name the recording; an album folder is looked up by its
-/// release, so the release group, the release and the UPC are carried on each
-/// wanted track where the library knows them.
+/// release, so the release group, the release and the UPC the album's
+/// `external_ids` rows hold are carried on each wanted track.
 ///
 /// # Parameters
 ///
-/// - `album`: the album being searched for.
+/// - `ids`: the identifiers stored for the album.
 ///
 /// # Returns
 ///
-/// The ids, in a fixed order, with the ones the album does not know left out.
-fn album_external_ids(album: &hearthsound_library::Album) -> Vec<ExternalId> {
-    let mut ids = Vec::new();
-    for (namespace, value) in [
-        ("mb-release-group", album.mb_release_group_id.as_deref()),
-        ("mb-release", album.mb_release_id.as_deref()),
-        ("upc", album.upc.as_deref()),
-    ] {
-        if let Some(value) = value {
-            ids.push(ExternalId {
-                namespace: namespace.to_owned(),
-                value: value.to_owned(),
-            });
+/// The album-level ids, in a fixed order, with the namespaces an acquisition
+/// query does not use left out.
+fn album_external_ids(ids: &[ExternalId]) -> Vec<ExternalId> {
+    let mut picked = Vec::new();
+    for namespace in [MB_RELEASE_GROUP, MB_RELEASE, UPC] {
+        for id in ids.iter().filter(|id| id.namespace == namespace) {
+            picked.push(id.clone());
         }
     }
-    ids
+    picked
 }
 
 /// The canonical extensions of one quality tier.
@@ -930,60 +948,57 @@ fn formats_for(tier: QualityTier) -> &'static [&'static str] {
 
 #[cfg(test)]
 mod tests {
-    use hearthsound_core::EntityId;
-    use hearthsound_core::IdPrefix;
-    use hearthsound_library::{Album, Origin};
-
     use super::*;
 
-    /// Builds an album with the ids a test cares about.
-    fn album(
-        mb_release_group_id: Option<&str>,
-        mb_release_id: Option<&str>,
-        upc: Option<&str>,
-    ) -> Album {
-        Album {
-            id: EntityId::new(IdPrefix::Album),
-            title: "Album".to_owned(),
-            sort_title: "Album".to_owned(),
-            display_artist: Some("Hello Artist".to_owned()),
-            year: Some(1993),
-            release_date: None,
-            album_type: None,
-            mb_release_id: mb_release_id.map(str::to_owned),
-            mb_release_group_id: mb_release_group_id.map(str::to_owned),
-            upc: upc.map(str::to_owned),
-            edition: None,
-            origin: Origin::Catalog,
-            created_at: 0,
-            updated_at: 0,
+    /// Builds one stored identifier.
+    ///
+    /// # Parameters
+    ///
+    /// - `namespace`: the identifier's namespace.
+    /// - `value`: the identifier's value.
+    fn id(namespace: &str, value: &str) -> ExternalId {
+        ExternalId {
+            namespace: namespace.to_owned(),
+            value: value.to_owned(),
         }
     }
 
     #[test]
     fn an_album_search_carries_the_album_level_ids() {
-        let ids = album_external_ids(&album(Some("group-1"), Some("release-1"), Some("upc-1")));
+        let stored = [
+            id("mb-release", "release-1"),
+            id("mb-artist", "artist-1"),
+            id("upc", "upc-1"),
+            id("mb-release-group", "group-1"),
+        ];
         assert_eq!(
-            ids,
+            album_external_ids(&stored),
             [
-                ExternalId {
-                    namespace: "mb-release-group".to_owned(),
-                    value: "group-1".to_owned(),
-                },
-                ExternalId {
-                    namespace: "mb-release".to_owned(),
-                    value: "release-1".to_owned(),
-                },
-                ExternalId {
-                    namespace: "upc".to_owned(),
-                    value: "upc-1".to_owned(),
-                },
+                id("mb-release-group", "group-1"),
+                id("mb-release", "release-1"),
+                id("upc", "upc-1"),
             ]
         );
     }
 
     #[test]
     fn an_album_without_ids_contributes_none() {
-        assert!(album_external_ids(&album(None, None, None)).is_empty());
+        assert!(album_external_ids(&[]).is_empty());
+        assert!(album_external_ids(&[id("mb-artist", "artist-1")]).is_empty());
+    }
+
+    #[test]
+    fn a_track_carries_its_isrc_and_its_canonical_ids() {
+        let stored = [id(ISRC, "USRC17607839"), id("mb-recording", "recording-1")];
+        assert_eq!(isrc_of(&stored).as_deref(), Some("USRC17607839"));
+        assert_eq!(
+            stored
+                .iter()
+                .filter(|id| id.namespace != ISRC)
+                .cloned()
+                .collect::<Vec<_>>(),
+            [id("mb-recording", "recording-1")]
+        );
+        assert_eq!(isrc_of(&[]), None);
     }
 }

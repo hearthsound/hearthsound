@@ -1,0 +1,35 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH doomed AS ( SELECT t.id FROM tracks t WHERE NOT EXISTS (SELECT 1 FROM external_ids e WHERE e.entity_kind = 'track' AND e.entity_id = t.id) AND EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id AND mf.folder_id = ?) AND NOT EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = t.id AND (mf.folder_id IS NULL OR mf.folder_id <> ?)) ) SELECT (SELECT COUNT(*) FROM doomed) AS tracks, (SELECT COUNT(*) FROM user_feedback f JOIN doomed d ON d.id = f.entity_id WHERE f.entity_kind = 'track' AND f.value = 'like') AS likes, (SELECT COUNT(*) FROM playlist_tracks pt JOIN doomed d ON d.id = pt.track_id) AS playlist_entries",
+  "describe": {
+    "columns": [
+      {
+        "name": "tracks",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "likes",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "playlist_entries",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "48d7b09fbcc82d813c4f695772d4bac67b8195f17345c903946b22e54283684c"
+}

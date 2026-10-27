@@ -9,7 +9,7 @@
 use axum::http::StatusCode;
 use axum::http::header::{CONTENT_DISPOSITION, HeaderValue};
 use axum::response::{IntoResponse, Response};
-use hearthsound_core::ClientId;
+use hearthsound_core::EntityId;
 
 use crate::auth::BinaryCall;
 use crate::stream::StreamRequest;
@@ -79,9 +79,9 @@ pub async fn download(call: BinaryCall) -> Response {
 /// The track's client id with an extension a client can save, which is a name
 /// the server knows is its own and therefore safe to offer.
 fn file_name(id: &str) -> String {
-    let name = match ClientId::parse(id) {
-        Ok(ClientId::Entity(entity)) => entity.to_string(),
-        _ => id.to_owned(),
+    let name = match EntityId::parse(id) {
+        Ok(entity) => entity.to_string(),
+        Err(_) => id.to_owned(),
     };
     format!("{name}.audio")
 }

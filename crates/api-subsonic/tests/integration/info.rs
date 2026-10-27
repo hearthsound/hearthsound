@@ -1,8 +1,10 @@
-//! Integration tests for the information endpoints: the biography and links a
-//! metadata instance answers, the identifiers the library holds, and the ids
-//! each endpoint refuses.
+//! Integration tests for the information endpoints: the biography and links the
+//! artist row stores, the identifiers the library holds, the stored similar
+//! artists, and the ids each endpoint refuses.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use hearthsound_core::EntityId;
 
 use crate::common::seed::{Seeded, library};
 use crate::common::{Fixture, PORTRAIT_BASE, SNAPSHOT_FILTERS, assert_error, assert_ok, get};
@@ -172,43 +174,105 @@ async fn information_requests_are_refused_without_usable_ids() {
     assert_error(&unknown, 70);
 }
 
-/// `getArtistInfo2` lists similar artists from the discovery layer, describes
-/// their portraits, and keeps the metadata layer's order for the biography.
+/// Gives one artist the profile the indexer stores: a biography, an external
+/// link and a MusicBrainz identifier.
+///
+/// # Parameters
+///
+/// - `fixture`: the fixture whose database is written.
+/// - `artist`: the artist row.
+async fn store_profile(fixture: &Fixture, artist: EntityId) {
+    let mut conn = fixture.database.writer().acquire().await.unwrap();
+    // The page was fetched, so the view serves the row as it is stored instead
+    // of walking it again.
+    sqlx::query(
+        "UPDATE artists SET biography = ?, links = ?, fetched_at = 1, page_fetched_at = 1 \
+         WHERE id = ?",
+    )
+    .bind("A quartet from the valley.")
+    .bind(r#"[{"kind":"lastfm","url":"https://www.last.fm/music/The+Cardinals"}]"#)
+    .bind(artist.uuid().as_bytes().as_slice())
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO external_ids (entity_kind, entity_id, namespace, value) \
+         VALUES ('artist', ?, 'mb-artist', 'artist-1')",
+    )
+    .bind(artist.uuid().as_bytes().as_slice())
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+}
+
+/// Stores one similar-artist relationship.
+///
+/// # Parameters
+///
+/// - `fixture`: the fixture whose database is written.
+/// - `artist`: the artist the shelf belongs to.
+/// - `similar`: the artist it names.
+async fn store_similar(fixture: &Fixture, artist: EntityId, similar: EntityId) {
+    let mut conn = fixture.database.writer().acquire().await.unwrap();
+    sqlx::query("INSERT INTO artist_similar (artist_id, position, similar_id) VALUES (?, 0, ?)")
+        .bind(artist.uuid().as_bytes().as_slice())
+        .bind(similar.uuid().as_bytes().as_slice())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+}
+
+/// `getArtistInfo2` answers the profile stored on the row and lists the similar
+/// artists the indexer stored, filtered to the caller's scopes for a third-party
+/// client.
 #[tokio::test]
-async fn artist_info_lists_similar_artists_and_portraits() {
+async fn artist_info_lists_the_stored_profile_and_similar_artists() {
     let (fixture, seeded) = fixture().await;
-    fixture.install_album_catalog(serde_json::json!({})).await;
-    fixture
-        .install_discovery_layer(&[(
-            "scrobble",
-            serde_json::json!({
-                "similarArtists": [
-                    { "name": "The Cardinals" },
-                    { "name": "Fixture Artist" },
-                ],
-            }),
-        )])
-        .await;
-    fixture.install_artist_portraits(&["The Cardinals"]).await;
-    fixture
-        .install_metadata_layer(&[
-            serde_json::json!({
-                "artists": [{
-                    "name": "The Cardinals",
-                    "biography": "First biography",
-                }],
-            }),
-            serde_json::json!({
-                "artists": [{
-                    "name": "The Cardinals",
-                    "biography": "Second biography",
-                }],
-            }),
-        ])
-        .await;
+    store_profile(&fixture, seeded.cardinals).await;
+    // `2 Mello` sits in a generic folder, so the account's personal scope does
+    // not hold it: only a caller that asked for absent entities sees it.
+    store_similar(&fixture, seeded.cardinals, seeded.mello).await;
     let app = fixture.app();
 
-    let listed = get(
+    let json = get(
+        &app,
+        &format!(
+            "/rest/getArtistInfo2?id={}&hearthsound=1&apiKey={}&f=json",
+            seeded.cardinals, fixture.api_key
+        ),
+    )
+    .await;
+    assert_ok(&json);
+    assert!(
+        json.body.contains("A quartet from the valley."),
+        "the row's biography is served: {}",
+        json.body
+    );
+    assert!(
+        json.body
+            .contains("https://www.last.fm/music/The+Cardinals"),
+        "a last.fm link fills lastFmUrl: {}",
+        json.body
+    );
+    assert!(
+        json.body.contains("\"musicBrainzId\":\"artist-1\""),
+        "the stored identifier is reported: {}",
+        json.body
+    );
+    assert!(
+        json.body.contains(&seeded.mello.to_string()),
+        "the stored similar artist is listed: {}",
+        json.body
+    );
+    assert!(
+        json.body.contains("\"smallImageUrl\":\"\""),
+        "no unauthenticated image URL is emitted: {}",
+        json.body
+    );
+    let local = json.body.find(&seeded.mello.to_string()).unwrap();
+    assert!(local > json.body.find("similarArtist").unwrap());
+
+    let third_party = get(
         &app,
         &format!(
             "/rest/getArtistInfo2?id={}&apiKey={}&f=json",
@@ -216,116 +280,54 @@ async fn artist_info_lists_similar_artists_and_portraits() {
         ),
     )
     .await;
-    assert_ok(&listed);
+    assert_ok(&third_party);
     assert!(
-        listed.body.contains("First biography"),
-        "the first metadata instance answers: {}",
-        listed.body
+        !third_party.body.contains(&seeded.mello.to_string()),
+        "a third-party client sees only in-scope artists: {}",
+        third_party.body
     );
-    assert!(
-        !listed.body.contains("Second biography"),
-        "the second instance is not asked: {}",
-        listed.body
-    );
-    let portrait = format!("{PORTRAIT_BASE}/portrait.jpg");
-    assert_eq!(
-        listed.body.matches(&portrait).count(),
-        3,
-        "one portrait fills the three sizes: {}",
-        listed.body
-    );
-    assert!(
-        listed.body.contains(&seeded.cardinals.to_string()),
-        "the stored similar artist is listed: {}",
-        listed.body
-    );
-    assert!(
-        !listed.body.contains("x_album_r_"),
-        "a catalog artist is not listed without includeNotPresent: {}",
-        listed.body
-    );
-    let local = listed.body.find(&seeded.cardinals.to_string()).unwrap();
-    assert!(local > listed.body.find("similarArtist").unwrap());
 
-    let with_catalog = get(
+    let wide = get(
         &app,
         &format!(
-            "/rest/getArtistInfo2?id={}&apiKey={}&includeNotPresent=true&f=json",
+            "/rest/getArtistInfo2?id={}&includeNotPresent=true&apiKey={}&f=json",
             seeded.cardinals, fixture.api_key
         ),
     )
     .await;
-    assert_ok(&with_catalog);
+    assert_ok(&wide);
     assert!(
-        with_catalog.body.contains(catalog_artist().as_str()),
-        "the catalog artist is listed with includeNotPresent: {}",
-        with_catalog.body
-    );
-    let stored = with_catalog
-        .body
-        .find(&seeded.cardinals.to_string())
-        .unwrap();
-    let catalog = with_catalog.body.find(catalog_artist().as_str()).unwrap();
-    assert!(
-        stored < catalog,
-        "the stored artists are listed first: {}",
-        with_catalog.body
+        wide.body.contains(&seeded.mello.to_string()),
+        "includeNotPresent lists the artists outside the scope: {}",
+        wide.body
     );
 
     let xml = get(
         &app,
         &format!(
-            "/rest/getArtistInfo2.view?id={}&apiKey={}&includeNotPresent=true",
+            "/rest/getArtistInfo2.view?id={}&includeNotPresent=true&apiKey={}",
             seeded.cardinals, fixture.api_key
         ),
     )
     .await;
     assert_ok(&xml);
     assert!(
-        xml.body.contains(&portrait),
-        "the portrait URL is an element text: {}",
-        xml.body
-    );
-    assert!(
         xml.body.contains("<similarArtist"),
         "the similar artists are child elements: {}",
         xml.body
     );
+    assert!(
+        !xml.body.contains(&format!("{PORTRAIT_BASE}/portrait.jpg")),
+        "no portrait URL is emitted: {}",
+        xml.body
+    );
 }
 
-/// Returns the client id of the album catalog fixture's artist.
-fn catalog_artist() -> String {
-    hearthsound_core::CatalogId::new(
-        hearthsound_core::Slug::new("album").expect("the fixture slug is valid"),
-        hearthsound_core::EntityKind::Artist,
-        "album-catalog-artist-1",
-    )
-    .expect("the fixture id is valid")
-    .to_string()
-}
-
-/// A stored artist's biography is served on every first-party read once the
-/// enrichment run has fetched it, including after a browser refresh.
-///
-/// The first-party read answers from the cache alone, so a biography the run
-/// stored has to be found by the identifiers the page asks with. It also has to
-/// be fetched at all for a library artist no catalog instance knows: the
-/// metadata layer answers by name, so the biography does not depend on a catalog
-/// pairing.
+/// A stored artist's biography is served on every read, including a repeat.
 #[tokio::test]
 async fn a_stored_artist_keeps_its_biography_across_refreshes() {
-    use hearthsound_core::ClientId;
-
     let (fixture, seeded) = fixture().await;
-    fixture
-        .install_metadata_layer(&[serde_json::json!({
-            "artists": [{
-                "name": "The Cardinals",
-                "biography": "A quartet from the valley.",
-            }],
-        })])
-        .await;
-    fixture.enrich(&ClientId::Entity(seeded.cardinals)).await;
+    store_profile(&fixture, seeded.cardinals).await;
     let app = fixture.app();
 
     for attempt in 0..2 {

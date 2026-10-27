@@ -13,7 +13,7 @@ use hearthsound_library::query::{
     self, AlbumSort, ArtistSort, Scope, ServerBrowse, TrackSort, content_type_for, sanitize_match,
 };
 use hearthsound_library::{
-    Album, AlbumInput, ArtistCredit, LibraryRepository, ManagedMediaFile, Origin, ScannedMediaFile,
+    Album, AlbumInput, ArtistCredit, LibraryRepository, ManagedMediaFile, ScannedMediaFile,
     StorageRoots, TrackInput,
 };
 use uuid::Uuid;
@@ -45,7 +45,7 @@ async fn make_album(
     artist: &str,
     title: &str,
 ) -> (EntityId, EntityId) {
-    let album = AlbumInput::new(title, Origin::Local);
+    let album = AlbumInput::new(title);
     let credits = [ArtistCredit::new(artist, "main")];
     let album_id = library.upsert_album(&album, &credits).await.unwrap();
     let artist_id = library.list_album_artists(album_id).await.unwrap()[0].id;
@@ -59,7 +59,7 @@ async fn make_track(
     title: &str,
     availability: Availability,
 ) -> EntityId {
-    let mut input = TrackInput::new(title, Origin::Local, availability);
+    let mut input = TrackInput::new(title, availability);
     input.album_id = album;
     library.insert_track(&input, &[], &[]).await.unwrap()
 }
@@ -855,7 +855,7 @@ async fn the_preferred_file_resolves_its_absolute_path() {
     );
 
     // A track with no file has no preferred file.
-    let mut input = TrackInput::new("Nothing", Origin::Local, Availability::Remote);
+    let mut input = TrackInput::new("Nothing", Availability::Remote);
     input.album_id = None;
     let empty = seeded.library.insert_track(&input, &[], &[]).await.unwrap();
     assert!(
@@ -902,7 +902,7 @@ async fn make_dated_album(
     title: &str,
     year: i64,
 ) -> (EntityId, EntityId) {
-    let mut album = AlbumInput::new(title, Origin::Local);
+    let mut album = AlbumInput::new(title);
     album.year = Some(year);
     let credits = [ArtistCredit::new(artist, "main")];
     let album_id = library.upsert_album(&album, &credits).await.unwrap();
@@ -917,7 +917,7 @@ async fn make_genre_track(
     title: &str,
     genre: &str,
 ) -> EntityId {
-    let mut input = TrackInput::new(title, Origin::Local, Availability::Local);
+    let mut input = TrackInput::new(title, Availability::Local);
     input.album_id = Some(album);
     library
         .insert_track(&input, &[], &[genre.to_owned()])
@@ -946,7 +946,7 @@ async fn make_dated_track(
     title: &str,
     genres: &[&str],
 ) -> EntityId {
-    let mut input = TrackInput::new(title, Origin::Local, Availability::Local);
+    let mut input = TrackInput::new(title, Availability::Local);
     input.album_id = Some(album);
     let genres: Vec<String> = genres.iter().map(|genre| (*genre).to_owned()).collect();
     library.insert_track(&input, &[], &genres).await.unwrap()
@@ -1578,7 +1578,7 @@ async fn released_album(
     title: &str,
     year: i64,
 ) -> (EntityId, EntityId) {
-    let mut album = AlbumInput::new(title, Origin::Local);
+    let mut album = AlbumInput::new(title);
     album.year = Some(year);
     let credits = [ArtistCredit::new(artist, "main")];
     let album_id = library.upsert_album(&album, &credits).await.unwrap();
@@ -1606,7 +1606,7 @@ async fn credited_track(
     title: &str,
     genres: &[&str],
 ) -> EntityId {
-    let mut input = TrackInput::new(title, Origin::Local, Availability::Local);
+    let mut input = TrackInput::new(title, Availability::Local);
     input.album_id = Some(album);
     input.display_artist = Some(artist.to_owned());
     let genres: Vec<String> = genres.iter().map(|genre| (*genre).to_owned()).collect();

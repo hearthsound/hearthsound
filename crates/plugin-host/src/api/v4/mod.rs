@@ -1,7 +1,9 @@
-//! Adapters for `hearthsound:plugin@0.4.0`, the newest hosted plugin API.
+//! Adapters for `hearthsound:plugin@0.4.0`, the frozen previous plugin API.
 //!
-//! Each module converts one interface's WIT types to core types and back; the
-//! host imports the guest calls live in [`state`].
+//! The bindings here read `wit/since_v0.4/`, the package the host still loads
+//! for plugins that have not moved to 0.5.0. Each module converts one
+//! interface's WIT types to core types and back; the host imports the guest
+//! calls live in [`state`].
 
 pub(crate) mod account_link;
 pub(crate) mod acquisition;

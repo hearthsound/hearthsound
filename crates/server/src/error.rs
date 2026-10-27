@@ -43,6 +43,11 @@ pub enum ServerError {
     /// The plugin, instance, or layer tables could not be read.
     #[error(transparent)]
     Provider(#[from] hearthsound_plugin_host::RepoError),
+    /// A mandatory plugin could not be brought to its expected state; the
+    /// failure itself is logged and reported to administrators, so this variant
+    /// only carries a failure that stopped the whole pass.
+    #[error(transparent)]
+    Bundled(#[from] crate::bundled::BundledError),
     /// The client that downloads plugin indexes and archives could not be
     /// built.
     #[error("could not build the outbound HTTP client: {0}")]

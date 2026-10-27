@@ -9,9 +9,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- An album carries an edition label, derived from the release's MusicBrainz disambiguation tag or, when that is absent, from the album's folder (`Solar Power (Deluxe Edition)` under the title `Solar Power` is `Deluxe Edition`); the scanner keeps it current, the new `library.editions` pass fills it in for a library that already existed, and the OpenSubsonic `album` carries it as `version`, empty when the release states none.
+- Every artist, album and track the server sees is one row with one id: a search hit, a discography entry, a tracklist row, a discovery suggestion, a download and a scanned file all resolve to the same entity, and every provider's identifier for it is stored in `external_ids`. Two rows that turn out to be one item are merged into the older one, and the merged-away id keeps resolving, so a client that holds it is never answered with an error.
+- The server stores what the providers say: `entity_sources` keeps each instance's answer per entity and operation, and the entity's fields, credits and list relations are recomputed from the file tags and those answers. `metadata.precedence` (`tags` by default, or `plugins`) decides which side wins, and `PUT /admin/layers` reorders the providers the recomputation reads.
+- Every image is the server's own: local covers and the images providers name are stored under `<data>/artwork/blobs` and scaled on demand, so a page and its pictures render with no provider request and no network at all.
+- A recursive entity index: library tracks, their albums and their primary artists are indexed deeply (an artist's discography with tracklists and covers, top tracks, similar artists); other entities are indexed when someone first looks at one. `GET /api/v1/admin/index` and the `index.progress` event report it; `POST /api/v1/admin/entities/{id}/refresh` and the admin UI's "Refresh Metadata" queue one entity.
+- MusicBrainz is a required plugin: the server installs it from its own binary on startup, assigns it to the catalog, metadata and artwork layers, and refuses to remove, disable or unhook it. Deezer and ListenBrainz are bundled and preselected.
+- The native API gains the entity pages: `GET /artists/{id}`, `GET /artists/{id}/top-tracks`, `GET /albums/{id}`, `GET /tracks/{id}`, `GET /search`, `GET /images/{id}` and `GET /admin/index`.
+- Plugin manifests may give one host its own `rateLimit`, so a service that allows one request per second can sit beside an API that tolerates more.
+- An album carries an edition label, derived from the release's MusicBrainz disambiguation tag or, when that is absent, from the album's folder (`Solar Power (Deluxe Edition)` under the title `Solar Power` is `Deluxe Edition`); the scanner keeps it current and the OpenSubsonic `album` carries it as `version`, empty when the release states none.
+
+- Music an account saves can be written into a scanned folder that account owns: `library.save_folder` is the per-account save location (empty keeps the managed library), `GET /api/v1/me/folders` lists the folders it may name, and a directory with no owner never receives a file. A like, a save, or an addition to a permanent playlist moves a file the library already holds into the folder, and a download a save triggers is imported straight there under `library.naming_template` as a `folder` media file with no managed copy kept. A track whose only file is in another account's folder is copied into the saver's folder; unsaving leaves the folder file in place, and folder files are outside eviction, demotion and delete. An unavailable folder keeps the setting, falls back to the managed library for that save, and raises a `save-folder-unavailable` notice. There is no backfill: music saved before this stays in managed storage. `AGENTS.md` invariant 2 and the matching rules in the design documents are replaced: the server now writes exactly one kind of file into a scanned folder, the one a user saves there.
+
+- `search3` (and `search2`) order an empty-query song listing by a vendor `sort` - `title`, `added`, `played`, `artist`, `album` or `year` - and narrow it by `genre`; `getArtists` orders its index by `sort` - `name`, `added` or `played`; `GET /api/v1/library/queue` takes `sort` for its `songs` source. Each is read only with `hearthsound=1`, so a standard client's response is byte-identical to before.
+- `POST /api/v1/setup/check` reports whether a setup link is still the live one
+  without spending it, so the setup wizard can refuse a stale link before it
+  draws its form. A wrong token answers `403 invalid-setup-token`, a server that
+  already has an account answers `409 conflict`, and the check is charged to the
+  caller's address exactly like a setup attempt.
+- Liking, unliking, saving and unsaving publish `library.changed` to the account whose library changed (and to administrators), carrying the entity's client id and whether it was added or removed. A repeated like or a dislike of something that was never liked publishes nothing.
+- An acquisition that cannot be attempted waits for a source instead of failing:
+  when the acquisition layer serves no instance, or the instance it chose does
+  not answer, the job returns to `queued` with `parkReason` `no-source` or
+  `source-unavailable` (on the SSE event, in `/api/v1/admin/acquisitions` and in
+  the vendor acquisition rows as `awaitingSource`). Nothing is written to the
+  track's cooldown. The job retries by itself - at once when an instance is
+  added, enabled or removed, otherwise a minute later, doubling up to an hour -
+  so a like made while no downloader is configured is acquired as soon as one
+  is, without a restart.
+- `acquisition.attempt_timeout_secs` (default 21600, `0` disables it) bounds one
+  candidate download from the moment its transfer starts. A transfer past it is
+  abandoned, its backend transfer cancelled, and the next candidate tried; a
+  song whose every candidate trickles fails with `timeout` and cools down as
+  before.
+- A download whose backend reports it failed, or no longer knows its token, has
+  that candidate's transfer cancelled at the backend before the acquisition
+  moves on.
+
+- `POST /api/v1/me/password` lets a signed-in user change their own password
+  with the current one; the change ends every other session and revokes all of
+  the account's API keys and app passwords, while the session that made it keeps
+  working. A wrong current password is 403 `wrong-password`, charged to the
+  address's login budget.
+- `GET /api/v1/admin/folders` answers `lastScanError`, the reason a folder's last
+  scan failed or ended with a warning.
+- Provider instance health is checked when an instance is created or enabled and
+  periodically on the new `plugins.health_check_minutes` interval (default 15,
+  `0` disables the periodic checks), through the new `plugin.health` job, which
+  records exactly what the manual Check Health route records.
 
 ### Changed
+
+- The plugin API is `hearthsound:plugin@0.5.0`; the host loads 0.5.0 and 0.4.0 and no longer loads 0.3.0. A catalog provider gains `lookup-album`, and album references carry their type, edition, track count and identifiers.
+- A plugin manifest no longer declares an image cache policy: the server stores every image it serves.
+- The web client's artist and album pages are addressed by id (`/artist/<id>`, `/album/<id>`) and read one native call each instead of resolving readable names through Subsonic.
+- A search answers with stored rows only: the library first, then the first catalog instance, whose hits are resolved into rows. A catalog hit the library already holds is not repeated.
+- Discovery suggestions resolve to rows and their answers are stored, so the Home shelf is served from the database.
+- Subsonic `getArtist`, `getAlbum`, `getMusicDirectory`, `getSong`, `getTopSongs`, `getArtistInfo2` and `getAlbumInfo2` answer from the stored rows; a third-party client sees only its own scopes, and artist images are served by the server.
 
 - A scanned folder that an account owns and uses as its save location is mounted read-write, so the documentation, the development compose file and the `/music` example volume now say "read-only, or read-write when owned and used for saves" instead of "read-only".
 
@@ -48,17 +101,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Catalog artist results carry the provider's album count and a `coverArt` id for the artist picture; a library album and an online album are kept apart when their release years differ by more than one; editing a provider instance drops its cached answers; an empty chart is remembered for an hour.
 - Pairing a stored album costs one title search, and the metadata and artwork layers are asked in parallel under one deadline.
-- Browse pages answer from the library and the cached catalog data only; a `catalog.enrich` job fetches the missing extras, publishes `catalog.enriched` to the listener whose page asked, and the open page refreshes without a reload.
 - `hsAcquire` takes `retry=1` (or `true`/`yes`) and passes it to the acquisition layer, so a client's retry of a cooling-down track starts a fresh attempt instead of answering the cooled row, for a track and for an album.
 - The acquisition listing names its target: `targetKind` is `track` or `album`, and an album target carries `albumTitle` and `albumArtist`, so an album acquisition is no longer drawn as an unknown track.
 - `GET /api/v1/library/queue?source=songs&genre=` narrows the songs queue to one genre, compared to the stored folded name exactly as the song listing and `getSongsByGenre` compare it; every other source ignores the parameter.
-- A readable path resolves on a cold cache: `hsResolve` answers from the library, the aliases and the cached answers first and spends at most one catalog search, and an online artist or album opens with one bounded read of its own record, so a card's link works before anything cached the provider's answer while the discography, top songs and biography still wait for the enrichment.
 - Search results promote their artists and album references into the cache, so opening a result costs no catalog call.
 - A cover the catalog layers already cached is served without asking the provider again: the reference a search or a discography promoted carries the album's own image URLs, so a grid of cards spends no lookup per cover on the instance's rate limit and no longer queues the page's reads behind them. A refused cover request logs the id the client asked for and the instance separately.
-- An artist's biography is cached under every identifier the request carries and under the name alone, so the enrichment run, a stored artist's page and a catalog page - which ask with different sets, or with none - read the same answer instead of the page losing the biography on a refresh.
 - A library artist no catalog instance knows still gets its biography and portraits, and a stored artist's page lists the discography a cached listing already holds before its own catalog record was read.
 - A song row's cover is served from the record the cached chart promoted, so a chart spends no provider lookup per row, and a rate-limited cover refusal is logged as a warning naming the id and the instance instead of a bare 503.
-- A stored artist's top songs list the chart its catalog counterpart reports once the enrichment run has cached it: the library rows come first and a song the library already lists is not repeated.
 - `playlist.changed` is delivered to the playlist's owner and to administrators only, instead of every connected account.
 - `hsSave`, `hsUnsave` and `hsSetFeedback` answer `bulkResult` with `{applied: [id], failed: [{id, reason}]}`: every id is applied in a transaction of its own, so one id that does not resolve (or fails to write) is reported instead of failing the whole action. A repeated like or save is applied and listed as applied, and a client that ignores the member sees the same successful answer as before.
 - `reportPlayback` stores an unnamed client under `unknown`, the same name `scrobble` uses, so one client is one now-playing row instead of two.
@@ -70,54 +119,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removing a discovery instance, or the plugin that provided it, deletes the generated playlists it produced that are still temporary, and tells each owner with `playlist.changed` `deleted`; a playlist the listener made permanent or edited is kept.
 - The first edit of a generated playlist - a rename, a reorder, an added or a removed track - makes it the listener's own: it stops being temporary, loses its expiry, and is never refreshed again. Its service slot is remembered so the daily sync recognises it instead of creating a copy; a not-yet-edited playlist still reads with `hearthsound.generatedBy` and `hearthsound.expiresAt`.
 - A playlist another account cannot see is reported as missing by every edit as well as by the read: `updatePlaylist`, `deletePlaylist`, `createPlaylist?playlistId=`, `hsSetPlaylistLifetime` and the native edit routes answer the same 70/404 a missing id does, and only a public playlist they can see is reported as another account's.
-
-### Added
-
-- Music an account saves can be written into a scanned folder that account owns: `library.save_folder` is the per-account save location (empty keeps the managed library), `GET /api/v1/me/folders` lists the folders it may name, and a directory with no owner never receives a file. A like, a save, or an addition to a permanent playlist moves a file the library already holds into the folder, and a download a save triggers is imported straight there under `library.naming_template` as a `folder` media file with no managed copy kept. A track whose only file is in another account's folder is copied into the saver's folder; unsaving leaves the folder file in place, and folder files are outside eviction, demotion and delete. An unavailable folder keeps the setting, falls back to the managed library for that save, and raises a `save-folder-unavailable` notice. There is no backfill: music saved before this stays in managed storage. `AGENTS.md` invariant 2 and the matching rules in the design documents are replaced: the server now writes exactly one kind of file into a scanned folder, the one a user saves there.
-
-- `search3` (and `search2`) order an empty-query song listing by a vendor `sort` - `title`, `added`, `played`, `artist`, `album` or `year` - and narrow it by `genre`; `getArtists` orders its index by `sort` - `name`, `added` or `played`; `GET /api/v1/library/queue` takes `sort` for its `songs` source. Each is read only with `hearthsound=1`, so a standard client's response is byte-identical to before.
-- `POST /api/v1/setup/check` reports whether a setup link is still the live one
-  without spending it, so the setup wizard can refuse a stale link before it
-  draws its form. A wrong token answers `403 invalid-setup-token`, a server that
-  already has an account answers `409 conflict`, and the check is charged to the
-  caller's address exactly like a setup attempt.
-- Liking, unliking, saving and unsaving publish `library.changed` to the account whose library changed (and to administrators), carrying the entity's client id and whether it was added or removed. A repeated like or a dislike of something that was never liked publishes nothing.
-- An acquisition that cannot be attempted waits for a source instead of failing:
-  when the acquisition layer serves no instance, or the instance it chose does
-  not answer, the job returns to `queued` with `parkReason` `no-source` or
-  `source-unavailable` (on the SSE event, in `/api/v1/admin/acquisitions` and in
-  the vendor acquisition rows as `awaitingSource`). Nothing is written to the
-  track's cooldown. The job retries by itself - at once when an instance is
-  added, enabled or removed, otherwise a minute later, doubling up to an hour -
-  so a like made while no downloader is configured is acquired as soon as one
-  is, without a restart.
-- `acquisition.attempt_timeout_secs` (default 21600, `0` disables it) bounds one
-  candidate download from the moment its transfer starts. A transfer past it is
-  abandoned, its backend transfer cancelled, and the next candidate tried; a
-  song whose every candidate trickles fails with `timeout` and cools down as
-  before.
-- A download whose backend reports it failed, or no longer knows its token, has
-  that candidate's transfer cancelled at the backend before the acquisition
-  moves on.
-
-- `POST /api/v1/me/password` lets a signed-in user change their own password
-  with the current one; the change ends every other session and revokes all of
-  the account's API keys and app passwords, while the session that made it keeps
-  working. A wrong current password is 403 `wrong-password`, charged to the
-  address's login budget.
-- The server loads plugins built for `hearthsound:plugin@0.4.0` and keeps loading
-  `0.3.0` adapters, from `wit/since_v0.3/`.
-- The first start after this version scans every library folder in full once and
-  merges the duplicate artists and albums older versions left behind, through
-  the `library.reidentity` job and the `library_maintenance` marker.
-- `GET /api/v1/admin/folders` answers `lastScanError`, the reason a folder's last
-  scan failed or ended with a warning.
-- Provider instance health is checked when an instance is created or enabled and
-  periodically on the new `plugins.health_check_minutes` interval (default 15,
-  `0` disables the periodic checks), through the new `plugin.health` job, which
-  records exactly what the manual Check Health route records.
-
-### Changed
 
 - Fingerprint verification now follows the verification layer: any instance in
   it verifies every download and an empty layer verifies none. The
@@ -263,16 +264,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A transcode declares no `Content-Length` and `estimateContentLength` changes
   nothing, because an encoded body's size is only known once the encoder exits; an
   encoder that fails to start is answered `500` instead of an empty `200`.
-- A stream request from an account that may not acquire is refused before its
-  catalog id is materialized, so a refusal writes no library row.
 - A multi-id `scrobble` resolves every id before it records any play, so an id it
   cannot resolve leaves no play behind.
 - A reported playback position past the end of its track is applied as the track's
   length, so a client that overshoots cannot inflate the play it earns.
-- A cover image served through the catalog or artwork layer follows the issuing
-  instance's image cache policy: a `no-store` instance's picture is not cacheable
-  by the client.
-
 - A known `/api/v1` path asked with a method it does not support answers `405`
   `method-not-allowed` as a problem document, instead of an empty 405 with no body.
 - The provider link callback answers a sign-in page when it is opened without a
@@ -283,18 +278,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A live event subscriber receives ids in the order they were assigned, so the
   `Last-Event-ID` it reports never skips an event.
 
+### Removed
+
+- `catalog.imageCachePolicy`, and the Subsonic vendor `path`, `artistPath` and `albumPath` members.
+
 ### Fixed
 
-- An identity a metadata instance resolves is written to the row it resolved,
-  not to a row a name match creates: the artist a track credits, the album it
-  belongs to and the artists an album credits take the MusicBrainz ids, and a
-  row that already holds one absorbs its twin instead of a second row being
-  written for the act or the release. Materialization resolves a credited artist
-  through the provider's own id first, so a second materialization of one artist
-  credits the row the first one wrote instead of adding another, and an import
-  therefore carries `MUSICBRAINZ_ARTISTID`, `MUSICBRAINZ_ALBUMARTISTID` and
-  `MUSICBRAINZ_ALBUMID`, which is what a rescan of the saved file reads back to
-  keep its artist and album.
 - A file that two overlapping folders hold is indexed once, by the deepest
   folder that contains it: a folder added inside another one takes over the rows
   the outer folder indexed, so the track keeps its id, its likes, its ratings,

@@ -35,7 +35,7 @@
 //! assert!(relevance("rolling stones", "Rocks Off", Some("The Rolling Stones")) < 0.89);
 //! ```
 
-use crate::dedupe::normalize;
+use crate::normalize::normalize;
 
 /// Scores how well a result answers a query.
 ///

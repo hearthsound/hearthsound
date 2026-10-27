@@ -12,7 +12,7 @@ use hearthsound_core::events::{EventBus, Replay, ServerEvent};
 use hearthsound_core::{Availability, EntityId, PinReason, StorageClass};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_library::maintenance::StorageMaintainer;
-use hearthsound_library::{LibraryRepository, ManagedMediaFile, Origin, StorageRoots, TrackInput};
+use hearthsound_library::{LibraryRepository, ManagedMediaFile, StorageRoots, TrackInput};
 
 async fn migrated(dir: &Path) -> Database {
     let db = Database::open(&dir.join("hearthsound.db")).await.unwrap();
@@ -77,11 +77,7 @@ impl Fixture {
     /// Inserts a track with the given starting availability.
     async fn track(&self, availability: Availability) -> EntityId {
         self.library
-            .insert_track(
-                &TrackInput::new("Cafe del Mar", Origin::Local, availability),
-                &[],
-                &[],
-            )
+            .insert_track(&TrackInput::new("Cafe del Mar", availability), &[], &[])
             .await
             .unwrap()
     }

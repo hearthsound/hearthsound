@@ -4,11 +4,15 @@
   "name": "Metadata fixture",
   "version": "0.1.0",
   "description": "A metadata plugin that resolves recordings from a configured table.",
-  "authors": ["Hearthsound contributors"],
+  "authors": [
+    "Hearthsound contributors"
+  ],
   "license": "MIT OR Apache-2.0",
   "homepage": "https://github.com/hearthsound/hearthsound",
-  "api": "hearthsound:plugin@0.4.0",
-  "provides": ["metadata"],
+  "api": "hearthsound:plugin@0.5.0",
+  "provides": [
+    "metadata"
+  ],
   "permissions": {},
   "config": {
     "server": {
@@ -19,16 +23,37 @@
           "recordings": {
             "type": "array",
             "title": "Recordings",
-            "items": { "type": "object" }
+            "items": {
+              "type": "object"
+            }
+          },
+          "delayMs": {
+            "type": "integer",
+            "title": "Answer delay",
+            "minimum": 0,
+            "description": "How long a release answer waits before it is returned, in milliseconds."
           }
         }
       },
       "uiSchema": {
         "type": "VerticalLayout",
-        "elements": [{ "type": "Control", "scope": "#/properties/recordings" }]
+        "elements": [
+          {
+            "type": "Control",
+            "scope": "#/properties/recordings"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/delayMs"
+          }
+        ]
       }
     },
     "user": null
   },
-  "resources": { "memoryMb": 64, "callTimeoutMs": 5000, "maxInstances": 2 }
+  "resources": {
+    "memoryMb": 64,
+    "callTimeoutMs": 5000,
+    "maxInstances": 2
+  }
 }

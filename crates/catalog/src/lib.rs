@@ -1,27 +1,25 @@
-//! The catalog layer: provider lookups, caching, aliasing and materialization.
+//! The entity layer: one row per artist, album and track, whoever named it.
 //!
-//! The server can play a song it does not store. Behind that behavior sits this
-//! crate: it turns a client's catalog id into provider calls, keeps the answers
-//! a provider gave so a search does not spend quota twice, and writes the rows
-//! that turn an external entity into a stored one.
+//! Every artist, album and track the server sees - scanned, uploaded,
+//! downloaded, found by a search, listed in a discography, suggested by
+//! discovery - is one row, and every provider's identifier for it is a row of
+//! `external_ids`. This crate is what turns what the providers say into those
+//! rows and what recomputes the rows' fields from everything stored:
 //!
-//! [`CatalogService`] is the only entry point. It is built from the provider
-//! registry, the database and the settings service, and it never sees
-//! WebAssembly: the registry hands it core trait objects, and this crate only
-//! ever calls those.
+//! - [`resolve`] is the one identity rule, and every provider record enters the
+//!   database through it;
+//! - [`index`] walks the queue and stores what each instance answered, at the
+//!   depth the queue asked for;
+//! - [`fields`] recomputes an entity's fields, credits and list relations from
+//!   its file tags and its stored provider answers, following the administrator's
+//!   precedence and layer order;
+//! - [`images`] serves every picture from the server's own store;
+//! - [`views`] composes the pages both APIs render;
+//! - [`search`] answers with stored rows, the library first and the catalog
+//!   second;
+//! - [`discovery`] resolves suggestions into rows and stores its answers.
 //!
-//! The four rules the design fixes, and where they live:
-//!
-//! - the catalog layer has one primary instance for search and lookups; later
-//!   instances are tried only when the primary errors or times out, and their
-//!   results are never merged ([`CatalogService::search`]);
-//! - every result carries the [`CatalogId`] that names it, which is the
-//!   provider instance slug plus the provider's own id, so a client can stream,
-//!   save or acquire the entity later;
-//! - an unmaterialized entity is materialized through the `external_ids`
-//!   aliases, which keep the original id resolving forever and which let two
-//!   providers that know the same recording agree on one row;
-//! - these tables are this crate's: `external_ids` and `catalog_cache`.
+//! [`CatalogService`] is the handle the rest of the server holds.
 //!
 //! # Examples
 //!
@@ -29,65 +27,50 @@
 //! use std::sync::Arc;
 //!
 //! use hearthsound_catalog::CatalogService;
-//! use hearthsound_core::providers::CatalogQuery;
 //! use hearthsound_core::EntityKind;
 //!
 //! # async fn example(
 //! #     registry: Arc<hearthsound_plugin_host::ProviderRegistry>,
 //! #     database: Arc<hearthsound_db::Database>,
-//! #     settings: hearthsound_config::settings::Settings,
+//! #     settings: Arc<hearthsound_config::SettingsStore>,
+//! #     ffmpeg: Arc<hearthsound_media::FfmpegRunner>,
 //! # ) -> Result<(), Box<dyn std::error::Error>> {
-//! let catalog = CatalogService::new(registry, database, settings, "/srv/hearthsound/artwork");
-//! let results = catalog
-//!     .search(&CatalogQuery {
-//!         text: "Energy 52".to_owned(),
-//!         kinds: vec![EntityKind::Track],
-//!         limit: 10,
-//!         offset: 0,
-//!     })
+//! let catalog = CatalogService::new(registry, database, settings, "/srv/artwork", ffmpeg);
+//! let answer = catalog
+//!     .search(Uuid::nil(), "Energy 52", &[EntityKind::Track], 10, 0)
 //!     .await?;
-//! for track in results.tracks {
-//!     println!("{} {}", track.id, track.track.title);
-//! }
+//! println!("{} tracks", answer.tracks.len());
 //! # Ok(())
 //! # }
 //! ```
 #![forbid(unsafe_code)]
 
-pub mod aliases;
-pub mod artist_info;
-pub mod artwork;
-pub mod cache;
-pub mod dedupe;
 pub mod discovery;
-pub mod enrichment;
 mod error;
-mod identity;
-mod materialize;
-pub mod pages;
-pub mod paths;
+pub mod fields;
+pub mod identity;
+pub mod images;
+pub mod index;
+pub mod normalize;
 pub mod relevance;
+pub mod resolve;
+pub mod search;
 mod service;
-mod wire;
+pub mod sources;
+pub mod views;
+pub mod wire;
 
-pub use artwork::{CoverArt, CoverArtRequest};
-pub use cache::{EMPTY_TOP_TRACKS_TTL, ENTITY_CACHE_TTL, RequestKey, SEARCH_CACHE_TTL};
-pub use dedupe::{
-    DURATION_TOLERANCE_MS, DedupedCatalog, LocalMatches, LocalTrackHit, MaterializedEntity,
-};
 pub use discovery::{
-    DiscoveryService, InstancePlaylist, LinkedUserContexts, NoUserContexts, ResolvedAlbum,
-    ResolvedArtist, SimilarArtistAlbums, UserContextSource,
+    DiscoveryService, InstancePlaylist, LinkedUserContexts, NoUserContexts, UserContextSource,
 };
-pub use enrichment::{ENRICH_JOB_KIND, EnrichJobPayload, Enrichment, TOP_TRACKS_CACHE_LIMIT};
 pub use error::CatalogError;
-pub use identity::{IDENTITY_MATCH_THRESHOLD, IdentityRequest, ResolvedRecording};
-pub use materialize::{MaterializedAlbum, ProviderAlias, materialize_entity};
-pub use pages::{
-    AlbumHead, AlbumPage, ArtistHead, ArtistPage, MAX_PAGE_ALBUMS, PageAlbum, PageDepth, PageTrack,
-};
-pub use paths::ResolvedPath;
-pub use service::{
-    CatalogAlbumRefResult, CatalogAlbumResult, CatalogArtistResult, CatalogSearch, CatalogService,
-    CatalogTrackResult,
-};
+pub use fields::{LayerOrder, Precedence};
+pub use identity::{IDENTITY_MATCH_THRESHOLD, IdentityRequest, IdentityService, ResolvedRecording};
+pub use images::{ImageService, ServedImage};
+pub use index::{Completeness, Indexer};
+pub use normalize::{DURATION_TOLERANCE_MS, base_title, normalize};
+pub use resolve::EntityResolver;
+pub use search::{ANSWER_TTL, SearchAnswer, SearchService};
+pub use service::CatalogService;
+pub use sources::{Operation, PAYLOAD_VERSION, Source, Status};
+pub use views::{AlbumRef, AlbumView, ArtistRef, ArtistView, EntityViews, Link, TrackRef, Viewer};

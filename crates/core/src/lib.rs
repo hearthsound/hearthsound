@@ -29,7 +29,7 @@ pub use acquisition::{
 };
 pub use availability::{Availability, UnknownAvailability};
 pub use error::ProviderError;
-pub use id::{CatalogId, ClientId, EntityId, IdError, IdPrefix, new_uuid_v7};
+pub use id::{EntityId, IdError, IdPrefix, new_uuid_v7};
 pub use kind::EntityKind;
 pub use layer::{Layer, UnknownLayer};
 pub use quality::{QualityTier, UnknownQualityTier};

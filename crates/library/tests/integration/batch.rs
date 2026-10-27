@@ -10,7 +10,7 @@ use hearthsound_core::{Availability, EntityId, StorageClass};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_library::query::{MAX_IDS_PER_QUERY, personal_track_ids};
 use hearthsound_library::{
-    AlbumInput, ArtistCredit, LibraryRepository, ManagedMediaFile, Origin, TrackInput,
+    AlbumInput, ArtistCredit, LibraryRepository, ManagedMediaFile, TrackInput,
     media_files::preferred_media_files,
 };
 
@@ -37,7 +37,7 @@ async fn insert_user(db: &Database, name: &str) -> uuid::Uuid {
 
 /// Inserts a catalog album and returns its id.
 async fn make_album(library: &LibraryRepository) -> EntityId {
-    let album = AlbumInput::new("Batch Album", Origin::Local);
+    let album = AlbumInput::new("Batch Album");
     library
         .upsert_album(&album, &[ArtistCredit::new("Batch Artist", "main")])
         .await
@@ -46,11 +46,7 @@ async fn make_album(library: &LibraryRepository) -> EntityId {
 
 /// Inserts a track in `album` and returns its id.
 async fn make_track(library: &LibraryRepository, album: EntityId, number: i64) -> EntityId {
-    let mut input = TrackInput::new(
-        format!("Track {number}"),
-        Origin::Local,
-        Availability::Remote,
-    );
+    let mut input = TrackInput::new(format!("Track {number}"), Availability::Remote);
     input.album_id = Some(album);
     input.track_number = Some(number);
     library.insert_track(&input, &[], &[]).await.unwrap()

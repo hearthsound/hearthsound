@@ -49,16 +49,19 @@
 //! ```
 #![forbid(unsafe_code)]
 
+pub mod entities;
 mod error;
-mod model;
+pub mod external_ids;
+pub mod images;
+pub mod index_queue;
+pub mod model;
 mod repository;
 
 pub use error::LibraryError;
 pub use model::{
     Album, AlbumInput, Artist, ArtistCredit, ArtistInput, Credit, EditionInput,
     FolderRemovalImpact, Genre, LibraryFolder, ManagedMediaFile, MediaFile, MediaFileInput,
-    MediaRoot, Origin, ReplayGain, ScannedMediaFile, StorageRoots, Track, TrackInput,
-    UnknownOrigin, sort_key,
+    MediaRoot, ReplayGain, ScannedMediaFile, StorageRoots, Track, TrackInput, sort_key,
 };
 pub use repository::LibraryRepository;
 

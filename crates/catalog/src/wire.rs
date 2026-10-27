@@ -68,6 +68,18 @@ pub(crate) struct WireAlbumRef {
     /// The cover images.
     #[serde(default)]
     pub images: Vec<WireImage>,
+    /// The album type, when known.
+    #[serde(default)]
+    pub album_type: Option<String>,
+    /// The provider's name for this pressing, when known.
+    #[serde(default)]
+    pub edition: Option<String>,
+    /// The provider's track count for the release, when known.
+    #[serde(default)]
+    pub track_count: Option<u32>,
+    /// The canonical identifiers of the release.
+    #[serde(default)]
+    pub ids: Vec<WireExternalId>,
 }
 
 /// The stored form of a [`CatalogTrack`].
@@ -134,6 +146,9 @@ pub(crate) struct WireAlbum {
     /// The album's external identifiers.
     #[serde(default)]
     pub ids: Vec<WireExternalId>,
+    /// The provider's name for this pressing, when known.
+    #[serde(default)]
+    pub edition: Option<String>,
 }
 
 /// The stored form of a [`CatalogArtist`].
@@ -173,7 +188,14 @@ pub(crate) struct WireResults {
 /// A newtype for the same reason as [`WireAlbumRefs`]; a stored answer is a JSON
 /// array of [`WireImage`] objects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct WireImages(pub Vec<WireImage>);
+pub(crate) struct WireImages(pub(crate) Vec<WireImage>);
+
+impl WireImages {
+    /// Builds the stored form of a list of images.
+    pub(crate) fn new(images: Vec<WireImage>) -> WireImages {
+        WireImages(images)
+    }
+}
 
 /// The stored form of a list of album references.
 ///
@@ -184,11 +206,20 @@ pub(crate) struct WireImages(pub Vec<WireImage>);
 pub(crate) struct WireAlbumRefs(Vec<WireAlbumRef>);
 
 /// The stored form of a list of tracks.
-///
-/// A newtype for the same reason as [`WireAlbumRefs`]; a stored listing is a
-/// JSON array of [`WireTrack`] objects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct WireTracks(Vec<WireTrack>);
+pub(crate) struct WireTracks(pub(crate) Vec<WireTrack>);
+
+impl WireTracks {
+    /// Returns whether the list is empty.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Iterates the stored tracks.
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, WireTrack> {
+        self.0.iter()
+    }
+}
 
 /// The stored form of a [`ReleaseSummary`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +235,18 @@ pub(crate) struct WireReleaseSummary {
     /// The number of tracks on the release, when known.
     #[serde(default)]
     pub track_count: Option<u32>,
+}
+
+impl WireAlbumRefs {
+    /// Builds the stored form of a list of album references.
+    pub(crate) fn new(refs: Vec<WireAlbumRef>) -> WireAlbumRefs {
+        WireAlbumRefs(refs)
+    }
+
+    /// Returns the stored list.
+    pub(crate) fn into_inner(self) -> Vec<WireAlbumRef> {
+        self.0
+    }
 }
 
 /// The stored form of a [`RecordingMatch`].
@@ -236,15 +279,6 @@ pub(crate) struct WireRecordingMatch {
 /// JSON array of [`WireRecordingMatch`] objects.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WireRecordingMatches(Vec<WireRecordingMatch>);
-
-/// The stored form of an artist-info answer.
-///
-/// An instance may answer that it knows no such artist, which is a miss worth
-/// remembering for a shorter time than an answer, so the wrapper distinguishes
-/// "the cache holds nothing" from "the cache holds that the instance knows
-/// nothing".
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct WireArtistInfoAnswer(pub Option<WireArtistInfo>);
 
 /// The stored form of what a metadata instance knows about an artist.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -404,6 +438,10 @@ impl From<&CatalogAlbumRef> for WireAlbumRef {
             artists: value.artists.iter().map(WireArtistCredit::from).collect(),
             year: value.year,
             images: value.images.iter().map(WireImage::from).collect(),
+            album_type: value.album_type.clone(),
+            edition: value.edition.clone(),
+            track_count: value.track_count,
+            ids: value.ids.iter().map(WireExternalId::from).collect(),
         }
     }
 }
@@ -417,6 +455,10 @@ impl From<WireAlbumRef> for CatalogAlbumRef {
             artists: value.artists.into_iter().map(ArtistCredit::from).collect(),
             year: value.year,
             images: value.images.into_iter().map(Image::from).collect(),
+            album_type: value.album_type,
+            edition: value.edition,
+            track_count: value.track_count,
+            ids: value.ids.into_iter().map(ExternalId::from).collect(),
         }
     }
 }
@@ -471,6 +513,7 @@ impl From<&CatalogAlbum> for WireAlbum {
             images: value.images.iter().map(WireImage::from).collect(),
             tracks: value.tracks.iter().map(WireTrack::from).collect(),
             ids: value.ids.iter().map(WireExternalId::from).collect(),
+            edition: value.edition.clone(),
         }
     }
 }
@@ -489,6 +532,7 @@ impl From<WireAlbum> for CatalogAlbum {
             images: value.images.into_iter().map(Image::from).collect(),
             tracks: value.tracks.into_iter().map(CatalogTrack::from).collect(),
             ids: value.ids.into_iter().map(ExternalId::from).collect(),
+            edition: value.edition,
         }
     }
 }
@@ -652,6 +696,13 @@ mod tests {
                         width: Some(500),
                         height: Some(500),
                     }],
+                    album_type: Some("album".to_owned()),
+                    edition: Some("Deluxe".to_owned()),
+                    track_count: Some(1),
+                    ids: vec![ExternalId {
+                        namespace: "mb-release".to_owned(),
+                        value: "rel".to_owned(),
+                    }],
                 }),
                 duration_ms: Some(1_000),
                 disc_number: Some(1),
@@ -666,6 +717,10 @@ mod tests {
                 artists: Vec::new(),
                 year: None,
                 images: Vec::new(),
+                album_type: None,
+                edition: None,
+                track_count: None,
+                ids: Vec::new(),
             }],
             artists: vec![CatalogArtist {
                 id: "ar1".to_owned(),
@@ -725,5 +780,74 @@ mod tests {
         assert_eq!(results.tracks[0].duration_ms, Some(1_000));
         assert_eq!(results.tracks[0].album, None);
         assert!(results.tracks[0].ids.is_empty());
+    }
+}
+
+/// The stored form of a list of provider ids.
+///
+/// Discovery lists similar artists by the provider's own ids, and the stored
+/// answer keeps them that way: the rows are resolved when the fields are
+/// recomputed, so an answer survives a restart that renamed nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WireProviderIds(Vec<String>);
+
+impl WireProviderIds {
+    /// Builds the stored form of a list of provider ids.
+    pub(crate) fn new(ids: Vec<String>) -> WireProviderIds {
+        WireProviderIds(ids)
+    }
+
+    /// Returns whether the list is empty.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Iterates the provider ids.
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, String> {
+        self.0.iter()
+    }
+}
+
+/// Returns the row a provider id names, when it names one.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `kind`: the entity kind.
+/// - `namespace_prefix`: the prefix of the namespace the provider ids use,
+///   `p:` for a catalog or discovery instance.
+/// - `value`: the provider's own id.
+///
+/// # Returns
+///
+/// The row, or `None` when no stored identifier names it.
+///
+/// # Errors
+///
+/// Returns [`crate::error::CatalogError::Database`] when the read fails.
+pub(crate) async fn stored_row(
+    conn: &mut sqlx::SqliteConnection,
+    kind: hearthsound_core::EntityKind,
+    namespace_prefix: &str,
+    value: &str,
+) -> Result<Option<uuid::Uuid>, crate::error::CatalogError> {
+    let kind_literal = match kind {
+        hearthsound_core::EntityKind::Track => "track",
+        hearthsound_core::EntityKind::Album => "album",
+        hearthsound_core::EntityKind::Artist => "artist",
+        hearthsound_core::EntityKind::Playlist => "playlist",
+    };
+    let row: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT entity_id FROM external_ids \
+         WHERE entity_kind = ? AND namespace LIKE ? AND value = ? LIMIT 1",
+    )
+    .bind(kind_literal)
+    .bind(format!("{namespace_prefix}%"))
+    .bind(value)
+    .fetch_optional(&mut *conn)
+    .await?;
+    match row {
+        Some(bytes) if bytes.len() == 16 => Ok(uuid::Uuid::from_slice(&bytes).ok()),
+        _ => Ok(None),
     }
 }

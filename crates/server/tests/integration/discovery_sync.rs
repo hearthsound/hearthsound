@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use hearthsound_core::Layer;
-use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, Origin, TrackInput};
+use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, TrackInput};
 use hearthsound_plugin_host::{InstanceSpec, PluginRepository, PluginSource};
 use hearthsound_test_support::{ALBUM_CATALOG, HTTP_CATALOG, SCROBBLE_FIXTURE, fixture_plugin};
 use reqwest::StatusCode;
@@ -353,16 +353,12 @@ async fn seed_track(fixture: &Fixture) -> hearthsound_core::EntityId {
     let library = LibraryRepository::new(fixture.services.database());
     let album = library
         .upsert_album(
-            &AlbumInput::new("Sync Album", Origin::Local),
+            &AlbumInput::new("Sync Album"),
             &[ArtistCredit::new("Sync Artist", "main")],
         )
         .await
         .unwrap();
-    let mut input = TrackInput::new(
-        "Sync Song",
-        Origin::Local,
-        hearthsound_core::Availability::Local,
-    );
+    let mut input = TrackInput::new("Sync Song", hearthsound_core::Availability::Local);
     input.album_id = Some(album);
     input.display_artist = Some("Sync Artist".to_owned());
     input.duration_ms = Some(180_000);

@@ -40,9 +40,10 @@ use hearthsound_core::events::{
 };
 use hearthsound_core::providers::AcquisitionContext;
 use hearthsound_core::providers::AcquisitionProvider;
+use hearthsound_core::providers::ExternalId;
 use hearthsound_core::{
-    AcquisitionState, Availability, EntityId, FailureReason, Granularity, IdPrefix, ParkReason,
-    Priority, QualityTier, new_uuid_v7,
+    AcquisitionState, Availability, EntityId, EntityKind, FailureReason, Granularity, IdPrefix,
+    ParkReason, Priority, QualityTier, new_uuid_v7,
 };
 use hearthsound_db::Database;
 use hearthsound_library::locks::FolderLocks;
@@ -139,7 +140,7 @@ fn park_retry_delay(park_count: i64) -> Duration {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcquireRequest {
-    /// The materialized track to acquire.
+    /// The track row to acquire.
     pub track_id: EntityId,
     /// How urgent the acquisition is.
     pub priority: Priority,
@@ -167,7 +168,7 @@ impl AcquireRequest {
     ///
     /// # Parameters
     ///
-    /// - `track_id`: the materialized track to acquire.
+    /// - `track_id`: the track row to acquire.
     /// - `priority`: how urgent the acquisition is.
     /// - `reason`: why it was requested.
     ///
@@ -237,7 +238,7 @@ impl AcquireRequest {
 /// album track instead, all carrying the album request's priority and reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlbumAcquireRequest {
-    /// The materialized album to acquire.
+    /// The album row to acquire.
     pub album_id: EntityId,
     /// How urgent every track request is.
     pub priority: Priority,
@@ -891,6 +892,37 @@ impl AcquisitionOrchestrator {
     /// Returns the library repository the wanted track is read from.
     pub fn library(&self) -> &LibraryRepository {
         &self.inner.library
+    }
+
+    /// Reads the provider identifiers stored for one row.
+    ///
+    /// Every identity an acquisition needs - the recording's ISRC and
+    /// MusicBrainz id, the album's release and release group, an artist's
+    /// MusicBrainz id - is a row of `external_ids`, so this is the one read the
+    /// stages use instead of the columns the schema no longer has.
+    ///
+    /// # Parameters
+    ///
+    /// - `kind`: the entity kind.
+    /// - `id`: the row.
+    ///
+    /// # Returns
+    ///
+    /// The identifiers, ordered by namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcquireError::Database`] or [`AcquireError::Library`] when the
+    /// read fails.
+    pub(crate) async fn stored_ids(
+        &self,
+        kind: EntityKind,
+        id: EntityId,
+    ) -> Result<Vec<ExternalId>, AcquireError> {
+        let mut connection = self.database().readers().acquire().await?;
+        hearthsound_library::external_ids::ids_of(&mut connection, kind, id.uuid())
+            .await
+            .map_err(AcquireError::Library)
     }
 
     /// Returns the service that resolves and writes a user's save location.
@@ -2067,7 +2099,7 @@ impl AcquisitionOrchestrator {
             return self.run_album_pipeline(&row).await;
         }
         if row.state == AcquisitionState::Resolving {
-            self.resolve_identity(&row).await;
+            self.resolve_identity(&mut row).await;
             self.inner
                 .repository
                 .transition(
@@ -3527,19 +3559,22 @@ mod tests {
             PluginRepository::new(&database),
             secrets,
         ));
-        let catalog = Arc::new(CatalogService::new(
+        let events = Arc::new(EventBus::new());
+        let catalog = CatalogService::new(
             Arc::clone(&registry),
             Arc::clone(&database),
             settings.clone(),
+            Arc::clone(&events),
             dir.join("artwork"),
-        ));
+            Arc::new(FfmpegRunner::new(None, 8)),
+        );
         Arc::new(AcquisitionOrchestrator::new(
             database,
             settings,
             registry,
             catalog,
             Arc::new(FfmpegRunner::new(None, 8)),
-            Arc::new(EventBus::new()),
+            events,
             AcquisitionStorage::new(
                 dir.join("storage/staging"),
                 StorageRoots::new(dir.join("storage/library"), dir.join("storage/cache")),

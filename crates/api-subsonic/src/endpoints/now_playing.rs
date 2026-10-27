@@ -7,17 +7,14 @@
 //! own override when they have one, otherwise the server-wide value. The
 //! caller's own rows are always listed.
 
-use std::collections::HashMap;
-
-use hearthsound_activity::Annotation;
 use hearthsound_config::keys;
-use hearthsound_core::{EntityId, EntityKind};
+use hearthsound_core::EntityId;
 use uuid::Uuid;
 
 use crate::auth::Call;
+use crate::browse;
 use crate::response::{Encoded, Response};
 use crate::value::{Array, Object};
-use crate::{browse, projection};
 
 /// Answers `getNowPlaying`: the fresh now-playing rows the caller may see.
 ///
@@ -57,34 +54,24 @@ pub async fn get_now_playing(call: Call) -> Encoded {
     };
 
     let ids: Vec<EntityId> = entries.iter().map(|entry| entry.track_id).collect();
-    let annotations = match annotations(&call, &ids).await {
-        Ok(annotations) => annotations,
+    let page = match browse::SongPage::of(&call, &ids).await {
+        Ok(page) => page,
         Err(error) => return call.encode(Response::failed(error)),
     };
 
-    let database = call.state().database();
+    // A track that left the database between the now-playing read and the page
+    // is left out rather than listed with stale data.
     let mut playing = Vec::with_capacity(entries.len());
     for entry in &entries {
-        let loaded = match browse::track_any(database, entry.track_id).await {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                return call.encode(Response::failed(browse::failure("getNowPlaying", &error)));
-            }
-        };
-        let Some(loaded) = loaded else {
+        let Some(position) = page
+            .rows
+            .iter()
+            .position(|row| row.view.track.id == entry.track_id)
+        else {
             continue;
         };
-        let child = projection::child(
-            &loaded.view,
-            loaded.file.as_ref(),
-            &loaded.album_artists,
-            &annotations
-                .get(&entry.track_id.uuid())
-                .copied()
-                .unwrap_or_default(),
-        );
         playing.push(
-            child
+            page.object(position)
                 .set("username", entry.username.clone())
                 .set("minutesAgo", (now - entry.started_at).max(0) / 60_000)
                 // The protocol asks for a player identity; this server has one
@@ -138,37 +125,5 @@ async fn visible_to(call: &Call, user: Uuid) -> bool {
             );
             false
         }
-    }
-}
-
-/// Loads the caller's annotations for the listed tracks.
-///
-/// # Parameters
-///
-/// - `call`: the authenticated call.
-/// - `ids`: the tracks being played.
-///
-/// # Returns
-///
-/// The annotations, keyed by track id.
-///
-/// # Errors
-///
-/// Answers a generic error when the read fails.
-async fn annotations(
-    call: &Call,
-    ids: &[EntityId],
-) -> Result<HashMap<Uuid, Annotation>, crate::response::SubsonicError> {
-    let plain: Vec<Uuid> = ids.iter().map(EntityId::uuid).collect();
-    match browse::annotations(
-        call.state(),
-        call.principal().user_id.uuid(),
-        EntityKind::Track,
-        &plain,
-    )
-    .await
-    {
-        Ok(annotations) => Ok(annotations),
-        Err(error) => Err(browse::failure("getNowPlaying", &error)),
     }
 }

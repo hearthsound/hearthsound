@@ -44,13 +44,15 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use hearthsound_catalog::CoverArtRequest;
 use hearthsound_config::keys;
 use hearthsound_core::events::{LibraryChange, LibraryChanged, ServerEvent};
-use hearthsound_core::providers::{Candidate, CandidateFile};
+use hearthsound_core::providers::{
+    Candidate, CandidateFile, ExternalId, ISRC, MB_ARTIST, MB_RECORDING, MB_RELEASE,
+    MB_RELEASE_GROUP,
+};
 use hearthsound_core::{
-    AcquisitionState, Availability, ClientId, EntityId, EntityKind, FailureReason, ImportMode,
-    PinReason, Priority, QualityTier, StorageClass,
+    AcquisitionState, Availability, EntityId, EntityKind, FailureReason, ImportMode, PinReason,
+    Priority, QualityTier, StorageClass,
 };
 use hearthsound_library::naming::NamingTemplate;
 use hearthsound_library::{
@@ -61,7 +63,6 @@ use hearthsound_media::{
     Artwork, Codec, ProbeResult, probe, verify_decodes, write_sidecar_cover, write_tags,
 };
 use hearthsound_plugin_host::RegistryInstance;
-use hearthsound_plugin_host::manifest::ImageCachePolicy;
 use uuid::Uuid;
 
 use crate::download::{ResolvedFile, STAGING_ROOT, StoredResolvedFile, stored_candidate};
@@ -70,7 +71,7 @@ use crate::orchestrator::{AcquisitionOrchestrator, DestinationReservation};
 use crate::profile;
 use crate::repo::{self, AcquisitionRow};
 use crate::save_folder::{
-    FolderDestination, IssuedAlbum, NamingInputs, SaveTarget, issued_album, naming_facts,
+    AlbumTotals, FolderDestination, NamingInputs, SaveTarget, issued_album, naming_facts,
 };
 use crate::select::AlbumFileMapping;
 use crate::verify::SourceFile;
@@ -1211,20 +1212,21 @@ impl AcquisitionOrchestrator {
             Some(album_id) => self.library().get_album(album_id).await?,
             None => None,
         };
-        let album_tracks = match track.album_id {
-            Some(album_id) => self.library().list_tracks_for_album(album_id).await?,
-            None => Vec::new(),
-        };
-        let issued = match track.album_id {
-            Some(album_id) => issued_album(self.catalog(), album_id, track.disc_number).await,
-            None => IssuedAlbum::Local,
+        // The album's page is walked before the file is tagged, so the totals and
+        // the tags describe the whole release rather than the single row a
+        // remote track left behind.
+        let totals = match track.album_id {
+            Some(album_id) => {
+                issued_album(self.catalog(), self.library(), album_id, track.disc_number).await
+            }
+            None => AlbumTotals::default(),
         };
         let artists = self.library().list_track_artists(track_id).await?;
         let album_artists = match track.album_id {
             Some(album_id) => self.library().list_album_artists(album_id).await?,
             None => Vec::new(),
         };
-        let genres = self.library().list_track_genres(track_id).await?;
+        let genres = self.genres_of(track_id, track.album_id).await;
         let pinned = self.library().track_is_pinned(track_id).await?;
 
         let snapshot = self.settings().current();
@@ -1237,8 +1239,7 @@ impl AcquisitionOrchestrator {
             &track,
             NamingInputs {
                 album: album.as_ref(),
-                album_tracks: &album_tracks,
-                issued: &issued,
+                totals,
                 artists: &artists,
                 album_artists: &album_artists,
             },
@@ -1257,6 +1258,29 @@ impl AcquisitionOrchestrator {
         create_dir_all(&staged_dir).await?;
 
         let cover = self.cover_art(track_id, track.album_id).await;
+        let track_ids = self.stored_ids(EntityKind::Track, track_id).await?;
+        let album_ids = match track.album_id {
+            Some(album_id) => self.stored_ids(EntityKind::Album, album_id).await?,
+            None => Vec::new(),
+        };
+        let mut mb_artist_ids = Vec::new();
+        for artist in &artists {
+            mb_artist_ids.extend(
+                self.stored_ids(EntityKind::Artist, artist.id)
+                    .await?
+                    .into_iter()
+                    .filter(|id| id.namespace == MB_ARTIST),
+            );
+        }
+        let mut mb_album_artist_ids = Vec::new();
+        for artist in &album_artists {
+            mb_album_artist_ids.extend(
+                self.stored_ids(EntityKind::Artist, artist.id)
+                    .await?
+                    .into_iter()
+                    .filter(|id| id.namespace == MB_ARTIST),
+            );
+        }
         let tags = hearthsound_media::TrackTags {
             title: Some(track.title.clone()),
             artists: artists.iter().map(|artist| artist.name.clone()).collect(),
@@ -1272,21 +1296,13 @@ impl AcquisitionOrchestrator {
                 .as_ref()
                 .and_then(|album| album.release_date.clone())
                 .or_else(|| year.map(|year| year.to_string())),
-            genres: genres.iter().map(|genre| genre.name.clone()).collect(),
-            isrc: track.isrc.clone(),
-            mb_recording_id: track.mb_recording_id.clone(),
-            mb_release_id: album.as_ref().and_then(|album| album.mb_release_id.clone()),
-            mb_release_group_id: album
-                .as_ref()
-                .and_then(|album| album.mb_release_group_id.clone()),
-            mb_artist_ids: artists
-                .iter()
-                .filter_map(|artist| artist.mb_artist_id.clone())
-                .collect(),
-            mb_album_artist_ids: album_artists
-                .iter()
-                .filter_map(|artist| artist.mb_artist_id.clone())
-                .collect(),
+            genres,
+            isrc: id_value(&track_ids, ISRC),
+            mb_recording_id: id_value(&track_ids, MB_RECORDING),
+            mb_release_id: id_value(&album_ids, MB_RELEASE),
+            mb_release_group_id: id_value(&album_ids, MB_RELEASE_GROUP),
+            mb_artist_ids: mb_artist_ids.into_iter().map(|id| id.value).collect(),
+            mb_album_artist_ids: mb_album_artist_ids.into_iter().map(|id| id.value).collect(),
             acquired_via: Some(instance.slug().clone()),
             ..Default::default()
         };
@@ -1637,36 +1653,103 @@ impl AcquisitionOrchestrator {
 
     /// Fetches the cover art an imported track should carry.
     ///
-    /// The cover is only persisted when the catalog instance that issued the
-    /// track's catalog entity allows its images to be stored: an instance whose
-    /// manifest declares `catalog.imageCachePolicy = "no-store"` (Deezer, for
-    /// example) gets no sidecar file and no embedded picture, because storing
-    /// its bytes on disk is outside what its manifest permits.
+    /// The bytes come from the server's own image store, which is the only place
+    /// an image is kept: the artwork layer stored what it fetched during
+    /// indexing, and a save never depends on a provider being reachable.
     ///
     /// # Parameters
     ///
     /// - `track_id`: the track being imported.
-    /// - `album_id`: the track's album, when it has one; the cover is looked up
-    ///   for the album when it does.
+    /// - `album_id`: the track's album, when it has one; the cover is the album's
+    ///   when it does, and the track's own otherwise.
     ///
     /// # Returns
     ///
-    /// The cover, or `None` when no catalog instance issued the track, the
-    /// issuing instance forbids storing its images, or it has no image.
+    /// The cover, or `None` when the entity has no image.
     async fn cover_art(&self, track_id: EntityId, album_id: Option<EntityId>) -> Option<Artwork> {
-        let aliases = self.catalog().provider_aliases(track_id).await.ok()?;
-        let alias = aliases.first()?;
-        let instance = self.registry().instance(alias.slug.as_str())?;
-        if instance.image_cache_policy() != ImageCachePolicy::Cache {
-            return None;
-        }
-        let request = CoverArtRequest {
-            id: ClientId::Entity(album_id.unwrap_or(track_id)),
-            size: None,
+        let (kind, id) = match album_id {
+            Some(album) => (EntityKind::Album, album.uuid()),
+            None => (EntityKind::Track, track_id.uuid()),
         };
-        let cover = self.catalog().cover_art(&request).await.ok()?;
-        Some(Artwork::new(cover.mime_type, cover.bytes))
+        let served = self.catalog().images().serve(kind, id, None).await.ok()??;
+        Some(Artwork::new(served.content_type, served.bytes))
     }
+
+    /// Returns the genre names an imported file is tagged with.
+    ///
+    /// The album's genres are the release's, which is what a `GENRE` tag means,
+    /// and they are the ones the catalog stored for the album during indexing.
+    /// A track without an album, or an album no provider named genres for, falls
+    /// back to the track's own stored genres.
+    ///
+    /// # Parameters
+    ///
+    /// - `track_id`: the track being imported.
+    /// - `album_id`: the track's album, when it has one.
+    ///
+    /// # Returns
+    ///
+    /// The genre names, ordered by name.
+    async fn genres_of(&self, track_id: EntityId, album_id: Option<EntityId>) -> Vec<String> {
+        if let Some(album_id) = album_id {
+            match self.album_genres(album_id).await {
+                Ok(genres) if !genres.is_empty() => return genres,
+                Ok(_) => {}
+                Err(error) => tracing::debug!(
+                    album = %album_id,
+                    %error,
+                    "an album's genres could not be read"
+                ),
+            }
+        }
+        match self.library().list_track_genres(track_id).await {
+            Ok(genres) => genres.into_iter().map(|genre| genre.name).collect(),
+            Err(error) => {
+                tracing::debug!(track = %track_id, %error, "a track's genres could not be read");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Reads an album's stored genre names.
+    ///
+    /// # Parameters
+    ///
+    /// - `album_id`: the album to read.
+    ///
+    /// # Returns
+    ///
+    /// The genre names, ordered by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`sqlx::Error`] when the read fails.
+    async fn album_genres(&self, album_id: EntityId) -> Result<Vec<String>, sqlx::Error> {
+        let mut connection = self.database().readers().acquire().await?;
+        sqlx::query_scalar::<_, String>(
+            "SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id \
+             WHERE ag.album_id = ? ORDER BY g.name",
+        )
+        .bind(album_id.uuid().as_bytes().as_slice())
+        .fetch_all(&mut *connection)
+        .await
+    }
+}
+
+/// Returns the value of one namespace from a row's stored identifiers.
+///
+/// # Parameters
+///
+/// - `ids`: the identifiers stored for the row.
+/// - `namespace`: the namespace to look for.
+///
+/// # Returns
+///
+/// The first value in that namespace, when one is stored.
+fn id_value(ids: &[ExternalId], namespace: &str) -> Option<String> {
+    ids.iter()
+        .find(|id| id.namespace == namespace)
+        .map(|id| id.value.clone())
 }
 
 /// Returns the key a candidate file is blocklisted under.

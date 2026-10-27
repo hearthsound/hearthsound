@@ -267,11 +267,7 @@ async fn fans_an_album_request_out_into_one_acquisition_per_track() {
     let env = Env::normal(&[]).await;
     let first = env.remote_track("First Song", "Hello Artist").await;
     let album = env.track(first).await.album_id.unwrap();
-    let mut second = hearthsound_library::TrackInput::new(
-        "Second Song",
-        hearthsound_library::Origin::Catalog,
-        Availability::Remote,
-    );
+    let mut second = hearthsound_library::TrackInput::new("Second Song", Availability::Remote);
     second.album_id = Some(album);
     second.display_artist = Some("Hello Artist".to_owned());
     second.track_number = Some(2);

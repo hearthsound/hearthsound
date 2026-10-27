@@ -8,11 +8,11 @@
 //! is recorded in place of a like and pins nothing, and `none` removes whichever
 //! the account held.
 //!
-//! A catalog id is materialized first, the way `star` does it, so a client can
-//! save, like or dislike what a search returned before the server has stored it.
-//! A save and a like are also adoptions: `library.acquire_on_save` asks the
-//! acquisition layer for the remote tracks the request names, under the
-//! requester's permission and quota.
+//! An id resolves through the catalog layer's redirects the way `star` resolves
+//! it, so a client can save, like or dislike what a search returned before the
+//! server has stored a file for it. A save and a like are also adoptions:
+//! `library.acquire_on_save` asks the acquisition layer for the remote tracks
+//! the request names, under the requester's permission and quota.
 //!
 //! `hsSetPlaylistLifetime` belongs here too, because a playlist's lifetime is a
 //! statement about the library: a permanent playlist pins every track it holds
@@ -62,7 +62,7 @@ const NONE: &str = "none";
 /// Answers `hsSave`: adds the named entities to the personal library.
 ///
 /// The parameter may be repeated and each value names a track, an album or an
-/// artist, stored or catalog. A save is an adoption (`library.acquire_on_save`),
+/// artist. A save is an adoption (`library.acquire_on_save`),
 /// so a saved track that is not stored is requested at priority `queue`; a
 /// refusal or an error there is only logged, because the save itself is already
 /// written.
@@ -114,7 +114,7 @@ pub async fn hs_save(call: Call) -> Encoded {
 /// Answers `hsUnsave`: removes the named entities from the personal library.
 ///
 /// The parameter may be repeated and each value names a track, an album or an
-/// artist, stored or catalog. Only the membership a save wrote is removed; an
+/// artist. Only the membership a save wrote is removed; an
 /// entity the account also uploaded keeps its row, and a track that a like or a
 /// playlist still holds stays pinned.
 ///
@@ -165,7 +165,7 @@ pub async fn hs_unsave(call: Call) -> Encoded {
 /// # Parameters
 ///
 /// - `call`: the authenticated call. `id` may be repeated and names tracks,
-///   albums and artists, stored or catalog; `value` is `like`, `dislike` or
+///   albums and artists; `value` is `like`, `dislike` or
 ///   `none`. The request must carry `hearthsound=1`.
 ///
 /// # Returns
@@ -478,7 +478,7 @@ async fn resolved(call: &Call) -> Result<Vec<BulkId>, SubsonicError> {
         let entity = match resolve(call, "id", value, None).await {
             Ok(pair) => Ok(pair),
             Err(error) if error.code() == codes::NOT_FOUND => Err("not found".to_owned()),
-            Err(_) => Err("the catalog could not store this id".to_owned()),
+            Err(_) => Err("the server could not resolve this id".to_owned()),
         };
         named.push(BulkId {
             raw: value.to_owned(),

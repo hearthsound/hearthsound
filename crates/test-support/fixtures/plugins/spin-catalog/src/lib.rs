@@ -8,7 +8,7 @@ use hearthsound_plugin::catalog_provider::exports::hearthsound::plugin::catalog:
     SearchQuery, SearchResults,
 };
 use hearthsound_plugin::catalog_provider::exports::hearthsound::plugin::{catalog, lifecycle};
-use hearthsound_plugin::types::{Album, AlbumRef, Artist, ProviderError, Track};
+use hearthsound_plugin::types::{Album, AlbumRef, Artist, IdPair, ProviderError, Track};
 
 /// The plugin implementation.
 struct SpinCatalog;
@@ -54,6 +54,9 @@ impl catalog::Guest for SpinCatalog {
 
     fn lookup_isrc(_isrc: String) -> Result<Vec<Track>, ProviderError> {
         Err(ProviderError::NotFound)
+    }
+    fn lookup_album(_ids: Vec<IdPair>) -> Result<Vec<AlbumRef>, ProviderError> {
+        Ok(vec![])
     }
 }
 

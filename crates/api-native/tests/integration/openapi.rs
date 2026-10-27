@@ -27,3 +27,23 @@ fn the_committed_document_is_current() -> Result<(), Box<dyn std::error::Error>>
     );
     Ok(())
 }
+
+#[test]
+fn the_document_lists_the_entity_routes() {
+    let document = hearthsound_api_native::openapi();
+    for path in [
+        "/api/v1/artists/{id}",
+        "/api/v1/artists/{id}/top-tracks",
+        "/api/v1/albums/{id}",
+        "/api/v1/tracks/{id}",
+        "/api/v1/search",
+        "/api/v1/images/{id}",
+        "/api/v1/admin/index",
+        "/api/v1/admin/entities/{id}/refresh",
+    ] {
+        assert!(
+            document.paths.paths.contains_key(path),
+            "the OpenAPI document does not list {path}"
+        );
+    }
+}

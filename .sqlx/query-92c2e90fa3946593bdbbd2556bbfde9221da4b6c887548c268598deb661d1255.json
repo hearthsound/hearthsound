@@ -1,0 +1,170 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT ar.id, ar.name, ar.sort_name, ar.biography, ar.links, ar.album_count, ar.file_tags, ar.fetched_at, ar.page_fetched_at, ar.deep_indexed_at, ar.viewed_at, ar.created_at, ar.updated_at FROM plays p JOIN track_artists ta ON ta.track_id = p.track_id AND ta.position = 0 JOIN artists ar ON ar.id = ta.artist_id WHERE p.user_id = ? ORDER BY p.started_at DESC, p.id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "name": "sort_name",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "sort_name"
+          }
+        }
+      },
+      {
+        "name": "biography",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "biography"
+          }
+        }
+      },
+      {
+        "name": "links",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "links"
+          }
+        }
+      },
+      {
+        "name": "album_count",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "album_count"
+          }
+        }
+      },
+      {
+        "name": "file_tags",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "file_tags"
+          }
+        }
+      },
+      {
+        "name": "fetched_at",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "fetched_at"
+          }
+        }
+      },
+      {
+        "name": "page_fetched_at",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "page_fetched_at"
+          }
+        }
+      },
+      {
+        "name": "deep_indexed_at",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "deep_indexed_at"
+          }
+        }
+      },
+      {
+        "name": "viewed_at",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "viewed_at"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 12,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artists",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "92c2e90fa3946593bdbbd2556bbfde9221da4b6c887548c268598deb661d1255"
+}

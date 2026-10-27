@@ -26,12 +26,15 @@
 //! inside its own transaction; the pool-level convenience is on
 //! [`crate::LibraryRepository`].
 
-use hearthsound_core::{EntityId, IdPrefix, new_uuid_v7};
+use hearthsound_core::providers::{ExternalId, MB_RELEASE, MB_RELEASE_GROUP};
+use hearthsound_core::{EntityId, EntityKind, IdPrefix, new_uuid_v7};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::artists::upsert_artist;
+use crate::entities;
 use crate::error::LibraryError;
+use crate::external_ids;
 use crate::model::{
     Album, AlbumInput, ArtistCredit, Credit, decode_entity, decode_uuid, entity_key, sort_key,
 };
@@ -47,11 +50,13 @@ pub(crate) struct AlbumRow {
     pub(crate) year: Option<i64>,
     pub(crate) release_date: Option<String>,
     pub(crate) album_type: Option<String>,
-    pub(crate) mb_release_id: Option<String>,
-    pub(crate) mb_release_group_id: Option<String>,
-    pub(crate) upc: Option<String>,
     pub(crate) edition: Option<String>,
-    pub(crate) origin: String,
+    pub(crate) track_count: Option<i64>,
+    pub(crate) file_tags: Option<String>,
+    pub(crate) fetched_at: Option<i64>,
+    pub(crate) page_fetched_at: Option<i64>,
+    pub(crate) deep_indexed_at: Option<i64>,
+    pub(crate) viewed_at: Option<i64>,
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
 }
@@ -61,9 +66,7 @@ impl AlbumRow {
     ///
     /// # Errors
     ///
-    /// Returns [`LibraryError::CorruptId`] when the primary key is not 16 bytes
-    /// and [`LibraryError::Origin`] when the `origin` column is not a known
-    /// literal.
+    /// Returns [`LibraryError::CorruptId`] when the primary key is not 16 bytes.
     pub(crate) fn into_album(self) -> Result<Album, LibraryError> {
         Ok(Album {
             id: decode_entity(IdPrefix::Album, &self.id)?,
@@ -73,11 +76,13 @@ impl AlbumRow {
             year: self.year,
             release_date: self.release_date,
             album_type: self.album_type,
-            mb_release_id: self.mb_release_id,
-            mb_release_group_id: self.mb_release_group_id,
-            upc: self.upc,
             edition: self.edition,
-            origin: self.origin.parse()?,
+            track_count: self.track_count,
+            file_tags: self.file_tags,
+            fetched_at: self.fetched_at,
+            page_fetched_at: self.page_fetched_at,
+            deep_indexed_at: self.deep_indexed_at,
+            viewed_at: self.viewed_at,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -89,8 +94,8 @@ impl AlbumRow {
 pub(crate) struct AlbumIdentityRow {
     /// The row's raw primary key.
     pub(crate) id: Uuid,
-    /// The row's MusicBrainz release id.
-    pub(crate) mb_release_id: Option<String>,
+    /// Whether the row carries any stored identifier.
+    pub(crate) identified: bool,
 }
 
 /// Inserts an album, or refreshes the one that already matches.
@@ -137,11 +142,11 @@ pub(crate) struct AlbumIdentityRow {
 /// # Examples
 ///
 /// ```no_run
-/// use hearthsound_library::{AlbumInput, ArtistCredit, Origin};
+/// use hearthsound_library::{AlbumInput, ArtistCredit};
 /// use hearthsound_library::albums::upsert_album;
 ///
 /// # async fn example(conn: &mut sqlx::SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
-/// let album = AlbumInput::new("Cafe del Mar", Origin::Local);
+/// let album = AlbumInput::new("Cafe del Mar");
 /// let credits = [ArtistCredit::new("Energy 52", "main")];
 /// let id = upsert_album(conn, &album, &credits).await?;
 /// println!("{id}");
@@ -164,15 +169,14 @@ pub async fn upsert_album(
         .clone()
         .unwrap_or_else(|| sort_key(&album.title));
 
-    let by_identifier: Option<Uuid> = match album.mb_release_id.as_deref() {
-        Some(mbid) => {
-            let found: Option<Vec<u8>> = sqlx::query_scalar!(
-                "SELECT id FROM albums WHERE mb_release_id = ? LIMIT 1",
-                mbid
-            )
-            .fetch_optional(&mut *conn)
-            .await?;
-            found.as_deref().map(decode_uuid).transpose()?
+    let release = album
+        .ids
+        .iter()
+        .find(|id| id.namespace == MB_RELEASE)
+        .map(|id| id.value.clone());
+    let by_identifier: Option<Uuid> = match release.as_deref() {
+        Some(release) => {
+            external_ids::owner_of(conn, EntityKind::Album, MB_RELEASE, release).await?
         }
         None => None,
     };
@@ -184,19 +188,19 @@ pub async fn upsert_album(
     };
     let identified: Vec<Uuid> = group
         .iter()
-        .filter(|row| row.mb_release_id.is_some())
+        .filter(|row| row.identified)
         .map(|row| row.id)
         .collect();
     let unidentified: Vec<Uuid> = group
         .iter()
-        .filter(|row| row.mb_release_id.is_none())
+        .filter(|row| !row.identified)
         .map(|row| row.id)
         .collect();
 
     // A row of the same title and primary artist that has no id yet is what an
     // input carrying a new id adopts, whatever year it stored: a re-tagged file
     // is the same album, and the year it was first scanned with stays.
-    let candidates = if album.mb_release_id.is_some() && by_identifier.is_none() {
+    let candidates = if release.is_some() && by_identifier.is_none() {
         match artist_ids.first() {
             Some(primary) => adoption_candidates(conn, &sort_title, *primary).await?,
             None => Vec::new(),
@@ -205,39 +209,39 @@ pub async fn upsert_album(
         Vec::new()
     };
 
-    let (target, absorbed): (Option<Uuid>, Vec<Uuid>) =
-        match (album.mb_release_id.is_some(), by_identifier) {
-            (_, Some(row)) => {
-                let aside = identified.iter().filter(|id| **id != row).count();
-                let absorbed = if aside == 0 {
-                    unidentified.clone()
-                } else {
-                    Vec::new()
-                };
-                (Some(row), absorbed)
+    let (target, absorbed): (Option<Uuid>, Vec<Uuid>) = match (release.is_some(), by_identifier) {
+        (_, Some(row)) => {
+            let aside = identified.iter().filter(|id| **id != row).count();
+            let absorbed = if aside == 0 {
+                unidentified.clone()
+            } else {
+                Vec::new()
+            };
+            (Some(row), absorbed)
+        }
+        (true, None) => {
+            if identified.is_empty() {
+                (
+                    candidates.first().copied(),
+                    candidates.iter().skip(1).copied().collect(),
+                )
+            } else {
+                (None, Vec::new())
             }
-            (true, None) => {
-                if identified.is_empty() {
-                    (
-                        candidates.first().copied(),
-                        candidates.iter().skip(1).copied().collect(),
-                    )
-                } else {
-                    (None, Vec::new())
-                }
+        }
+        (false, None) => {
+            if identified.len() == 1 {
+                (identified.first().copied(), unidentified.clone())
+            } else {
+                (
+                    unidentified.first().copied(),
+                    unidentified.iter().skip(1).copied().collect(),
+                )
             }
-            (false, None) => {
-                if identified.len() == 1 {
-                    (identified.first().copied(), unidentified.clone())
-                } else {
-                    (
-                        unidentified.first().copied(),
-                        unidentified.iter().skip(1).copied().collect(),
-                    )
-                }
-            }
-        };
+        }
+    };
 
+    let file_tags = album.file_tags.as_ref().map(serde_json::Value::to_string);
     let id = match target {
         Some(id) => {
             sqlx::query!(
@@ -246,9 +250,8 @@ pub async fn upsert_album(
                         year = COALESCE(year, ?), \
                         release_date = COALESCE(release_date, ?), \
                         album_type = COALESCE(?, album_type), \
-                        mb_release_id = COALESCE(?, mb_release_id), \
-                        mb_release_group_id = COALESCE(?, mb_release_group_id), \
-                        upc = COALESCE(?, upc), \
+                        track_count = COALESCE(?, track_count), \
+                        file_tags = COALESCE(?, file_tags), \
                         edition = CASE WHEN ? THEN ? ELSE edition END, \
                         updated_at = ? WHERE id = ?",
                 album.title,
@@ -257,9 +260,8 @@ pub async fn upsert_album(
                 album.year,
                 album.release_date,
                 album.album_type,
-                album.mb_release_id,
-                album.mb_release_group_id,
-                album.upc,
+                album.track_count,
+                file_tags,
                 album.edition.is_stated(),
                 album.edition.label(),
                 now,
@@ -274,12 +276,11 @@ pub async fn upsert_album(
         }
         None => {
             let id = new_uuid_v7();
-            let origin = album.origin.as_str();
             sqlx::query!(
                 "INSERT INTO albums (id, title, sort_title, display_artist, year, release_date, \
-                                     album_type, mb_release_id, mb_release_group_id, upc, edition, \
-                                     origin, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                     album_type, track_count, file_tags, edition, \
+                                     created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 id.as_bytes().as_slice(),
                 album.title,
                 sort_title,
@@ -287,11 +288,9 @@ pub async fn upsert_album(
                 album.year,
                 album.release_date,
                 album.album_type,
-                album.mb_release_id,
-                album.mb_release_group_id,
-                album.upc,
+                album.track_count,
+                file_tags,
                 album.edition.label(),
-                origin,
                 now,
                 now,
             )
@@ -302,7 +301,21 @@ pub async fn upsert_album(
     };
 
     write_album_credits(conn, id, credits, &artist_ids).await?;
-    Ok(EntityId::from_uuid(IdPrefix::Album, id))
+    // Every identifier the input carries is attached to the resolved row; one
+    // another row already holds means the two rows are one album, and the merge
+    // decides which survives.
+    let mut survivor = id;
+    let conflicts = external_ids::attach(conn, EntityKind::Album, survivor, &album.ids).await?;
+    for conflict in conflicts {
+        // A release group is a grouping key, never an album's identity: two
+        // editions of one group are two rows, so the album that first claimed the
+        // group's id keeps it and the other one keeps its own release id.
+        if conflict.namespace == MB_RELEASE_GROUP {
+            continue;
+        }
+        survivor = entities::merge(conn, EntityKind::Album, survivor, conflict.owner).await?;
+    }
+    Ok(EntityId::from_uuid(IdPrefix::Album, survivor))
 }
 
 /// Reads the albums of one identity: folded title, primary artist, year.
@@ -332,7 +345,10 @@ pub(crate) async fn identity_group(
     year: Option<i64>,
 ) -> Result<Vec<AlbumIdentityRow>, LibraryError> {
     let rows = sqlx::query!(
-        "SELECT a.id AS id, a.mb_release_id AS mb_release_id \
+        "SELECT a.id AS id, \
+                EXISTS (SELECT 1 FROM external_ids e \
+                        WHERE e.entity_kind = 'album' AND e.entity_id = a.id) \
+                    AS \"identified: bool\" \
            FROM albums a JOIN album_artists aa ON aa.album_id = a.id AND aa.position = 0 \
           WHERE a.sort_title = ? AND aa.artist_id = ? AND a.year IS ? \
           ORDER BY a.id",
@@ -346,7 +362,7 @@ pub(crate) async fn identity_group(
         .map(|row| {
             Ok(AlbumIdentityRow {
                 id: decode_uuid(&row.id)?,
-                mb_release_id: row.mb_release_id,
+                identified: row.identified,
             })
         })
         .collect()
@@ -381,7 +397,9 @@ async fn adoption_candidates(
     let rows = sqlx::query_scalar!(
         "SELECT a.id FROM albums a \
            JOIN album_artists aa ON aa.album_id = a.id AND aa.position = 0 \
-          WHERE a.sort_title = ? AND aa.artist_id = ? AND a.mb_release_id IS NULL \
+          WHERE a.sort_title = ? AND aa.artist_id = ? \
+            AND NOT EXISTS (SELECT 1 FROM external_ids e \
+                            WHERE e.entity_kind = 'album' AND e.entity_id = a.id) \
           ORDER BY a.id",
         sort_title,
         entity_key(primary),
@@ -395,11 +413,11 @@ async fn adoption_candidates(
 
 /// Merges one album row into another, moving everything that names it.
 ///
-/// The survivor keeps a release id, a release-group id or a UPC that only the
-/// loser had; the loser's tracks, acquisitions, aliases, likes, dislikes, saves
-/// and ratings move to it, and the loser row is deleted. The identity includes
-/// the year, so the survivor's year, title and display artist are left to the
-/// caller.
+/// The survivor keeps an edition label or a track count only the loser had; the
+/// loser's tracks, credits, identifiers, provider answers, images, genres,
+/// acquisitions, likes, dislikes, saves and ratings move to it, and the loser row
+/// is deleted. The identity includes the year, so the survivor's year, title and
+/// display artist are left to the caller.
 ///
 /// # Parameters
 ///
@@ -420,16 +438,12 @@ pub(crate) async fn merge_album(
     let into_key = into.as_bytes().to_vec();
     sqlx::query(
         "UPDATE albums SET \
-             mb_release_id = COALESCE(mb_release_id, (SELECT mb_release_id FROM albums WHERE id = ?)), \
-             mb_release_group_id = COALESCE(mb_release_group_id, \
-                 (SELECT mb_release_group_id FROM albums WHERE id = ?)), \
-             upc = COALESCE(upc, (SELECT upc FROM albums WHERE id = ?)), \
              edition = COALESCE(edition, (SELECT edition FROM albums WHERE id = ?)), \
+             track_count = COALESCE(track_count, \
+                 (SELECT track_count FROM albums WHERE id = ?)), \
              updated_at = ? \
          WHERE id = ?",
     )
-    .bind(from_key.as_slice())
-    .bind(from_key.as_slice())
     .bind(from_key.as_slice())
     .bind(from_key.as_slice())
     .bind(now)
@@ -446,13 +460,32 @@ pub(crate) async fn merge_album(
         .bind(from_key.as_slice())
         .execute(&mut *conn)
         .await?;
-    sqlx::query(
+    for statement in [
         "UPDATE external_ids SET entity_id = ? WHERE entity_kind = 'album' AND entity_id = ?",
-    )
-    .bind(into_key.as_slice())
-    .bind(from_key.as_slice())
-    .execute(&mut *conn)
-    .await?;
+        "UPDATE entity_sources SET entity_id = ? WHERE entity_kind = 'album' AND entity_id = ?",
+        "UPDATE entity_images SET entity_id = ? WHERE entity_kind = 'album' AND entity_id = ?",
+        "UPDATE index_queue SET entity_id = ? WHERE entity_kind = 'album' AND entity_id = ?",
+        "UPDATE album_genres SET album_id = ? WHERE album_id = ? AND genre_id NOT IN (\
+             SELECT genre_id FROM album_genres WHERE album_id = ?)",
+    ] {
+        if statement.contains("album_genres") {
+            sqlx::query(statement)
+                .bind(into_key.as_slice())
+                .bind(from_key.as_slice())
+                .bind(into_key.as_slice())
+                .execute(&mut *conn)
+                .await?;
+            continue;
+        }
+        sqlx::query(statement)
+            .bind(into_key.as_slice())
+            .bind(from_key.as_slice())
+            .execute(&mut *conn)
+            .await?;
+    }
+    // The loser's credits move to the survivor; a duplicate of an artist it
+    // already credits is dropped.
+    crate::entities::move_album_credits(conn, from, into).await?;
     for (insert, delete) in [
         (
             "INSERT OR IGNORE INTO user_feedback (user_id, entity_kind, entity_id, value, at) \
@@ -639,61 +672,23 @@ pub async fn identify_album(
     release: &str,
     release_group: Option<&str>,
 ) -> Result<EntityId, LibraryError> {
-    let now = now_millis();
     let key = album.uuid();
-    let holder: Option<Vec<u8>> = sqlx::query_scalar!(
-        "SELECT id FROM albums WHERE mb_release_id = ? LIMIT 1",
-        release,
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
-    let holder = match holder {
-        Some(id) => Some(decode_uuid(&id)?),
-        None => None,
-    };
-    match holder {
-        Some(holder) if holder == key => {
-            sqlx::query!(
-                "UPDATE albums SET mb_release_group_id = COALESCE(mb_release_group_id, ?), \
-                        updated_at = ? WHERE id = ?",
-                release_group,
-                now,
-                key.as_bytes().as_slice(),
-            )
-            .execute(&mut *conn)
-            .await?;
-            Ok(album)
-        }
-        Some(holder) => {
-            merge_album(conn, key, holder).await?;
-            if let Some(group) = release_group {
-                sqlx::query!(
-                    "UPDATE albums SET mb_release_group_id = COALESCE(mb_release_group_id, ?), \
-                            updated_at = ? WHERE id = ?",
-                    group,
-                    now,
-                    holder.as_bytes().as_slice(),
-                )
-                .execute(&mut *conn)
-                .await?;
-            }
-            Ok(EntityId::from_uuid(IdPrefix::Album, holder))
-        }
-        None => {
-            sqlx::query!(
-                "UPDATE albums SET mb_release_id = ?, \
-                        mb_release_group_id = COALESCE(mb_release_group_id, ?), \
-                        updated_at = ? WHERE id = ?",
-                release,
-                release_group,
-                now,
-                key.as_bytes().as_slice(),
-            )
-            .execute(&mut *conn)
-            .await?;
-            Ok(album)
-        }
+    let mut ids = vec![ExternalId {
+        namespace: MB_RELEASE.to_owned(),
+        value: release.to_owned(),
+    }];
+    if let Some(group) = release_group {
+        ids.push(ExternalId {
+            namespace: MB_RELEASE_GROUP.to_owned(),
+            value: group.to_owned(),
+        });
     }
+    let conflicts = external_ids::attach(conn, EntityKind::Album, key, &ids).await?;
+    let mut survivor = key;
+    for conflict in conflicts {
+        survivor = entities::merge(conn, EntityKind::Album, survivor, conflict.owner).await?;
+    }
+    Ok(EntityId::from_uuid(IdPrefix::Album, survivor))
 }
 
 /// Reads an album by its client id.
@@ -716,8 +711,9 @@ pub async fn get_album(
 ) -> Result<Option<Album>, LibraryError> {
     let row = sqlx::query_as!(
         AlbumRow,
-        "SELECT id, title, sort_title, display_artist, year, release_date, album_type, \
-                mb_release_id, mb_release_group_id, upc, edition, origin, created_at, updated_at \
+        "SELECT id, title, sort_title, display_artist, year, release_date, album_type, edition, \
+                track_count, file_tags, fetched_at, page_fetched_at, deep_indexed_at, \
+                viewed_at, created_at, updated_at \
          FROM albums WHERE id = ?",
         entity_key(id),
     )
@@ -746,9 +742,12 @@ pub async fn find_album_by_mb_release_id(
 ) -> Result<Option<Album>, LibraryError> {
     let row = sqlx::query_as!(
         AlbumRow,
-        "SELECT id, title, sort_title, display_artist, year, release_date, album_type, \
-                mb_release_id, mb_release_group_id, upc, edition, origin, created_at, updated_at \
-         FROM albums WHERE mb_release_id = ? LIMIT 1",
+        "SELECT id, title, sort_title, display_artist, year, release_date, album_type, edition, \
+                track_count, file_tags, fetched_at, page_fetched_at, deep_indexed_at, \
+                viewed_at, created_at, updated_at \
+         FROM albums WHERE id = (SELECT entity_id FROM external_ids \
+                                 WHERE entity_kind = 'album' AND namespace = 'mb-release' \
+                                   AND value = ? LIMIT 1)",
         mbid,
     )
     .fetch_optional(&mut *conn)
@@ -778,8 +777,9 @@ pub async fn list_albums_for_artist(
     let rows = sqlx::query_as!(
         AlbumRow,
         "SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
-                al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.edition, \
-                al.origin, al.created_at, al.updated_at \
+                al.album_type, al.edition, al.track_count, al.file_tags, al.fetched_at, \
+                al.page_fetched_at, al.deep_indexed_at, al.viewed_at, al.created_at, \
+                al.updated_at \
          FROM albums al \
          WHERE (EXISTS (SELECT 1 FROM album_artists aa \
                         WHERE aa.album_id = al.id AND aa.artist_id = ?) \

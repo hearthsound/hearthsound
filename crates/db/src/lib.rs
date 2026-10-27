@@ -170,6 +170,7 @@ impl Database {
         migrator: &Migrator,
         backup_dir: &Path,
     ) -> Result<MigrationOutcome, DbError> {
+        refuse_legacy_schema(self.writer()).await?;
         let from = current_version(self.writer()).await?;
         let to = migrator
             .iter()
@@ -256,6 +257,49 @@ pub fn read_only_options(path: &Path) -> SqliteConnectOptions {
 ///
 /// Returns zero when the migration bookkeeping table does not exist yet, which
 /// is the case for a brand new database file.
+/// Refuses a database that was migrated past the baseline by an older release.
+///
+/// The baseline replaced every migration of the releases before v0.1.7, so a
+/// database stamped with one of those versions holds a different schema at
+/// version 1 and a completely different history above it. Neither can be
+/// migrated here: the only supported path is a fresh data directory, and the
+/// error says so.
+///
+/// # Parameters
+///
+/// - `pool`: the writer connection, which owns every migration write.
+///
+/// # Errors
+///
+/// Returns [`DbError::LegacySchema`] for a bookkeeping table that records a
+/// version above 1, or version 1 under the old first migration's name, and
+/// [`DbError::Sqlx`] when the table cannot be read.
+async fn refuse_legacy_schema(pool: &SqlitePool) -> Result<(), DbError> {
+    let has_table: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_table == 0 {
+        return Ok(());
+    }
+    let recorded: Option<(i64, String)> = sqlx::query_as(
+        "SELECT MAX(version), COALESCE((SELECT description FROM _sqlx_migrations
+                                         WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)),
+                                       '')
+         FROM _sqlx_migrations",
+    )
+    .fetch_optional(pool)
+    .await?;
+    match recorded {
+        Some((version, _description)) if version > 1 => Err(DbError::LegacySchema),
+        Some((version, description)) if version == 1 && description == "initial" => {
+            Err(DbError::LegacySchema)
+        }
+        _ => Ok(()),
+    }
+}
+
 async fn current_version(pool: &SqlitePool) -> Result<i64, DbError> {
     let has_table: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
@@ -282,6 +326,11 @@ pub enum DbError {
     /// A migration failed to apply.
     #[error("migration error: {0}")]
     Migrate(#[from] MigrateError),
+    /// The database was created by a release older than the v0.1.7 baseline.
+    #[error(
+        "This database was created by a Hearthsound build older than the v0.1.7 baseline and cannot be upgraded. Stop the server, move the data directory aside and start with an empty one."
+    )]
+    LegacySchema,
     /// The backup directory could not be created.
     #[error("could not create backup directory `{path}`: {source}")]
     BackupDir {

@@ -8,10 +8,12 @@
 #
 # Format: one `[[plugin]]` table per archive, with
 #
-#   id      reverse-DNS plugin id, as it appears in the plugin's manifest
-#   version released plugin version; the release tag is `v<version>`
-#   url     direct download URL of the `.hsplugin` release asset
-#   sha256  lowercase hex SHA-256 of that asset, checked on every download
+#   id        reverse-DNS plugin id, as it appears in the plugin's manifest
+#   version   released plugin version; the release tag is `v<version>`
+#   url       direct download URL of the `.hsplugin` release asset
+#   sha256    lowercase hex SHA-256 of that asset, checked on every download
+#   mandatory `true` for a plugin the server installs by itself and refuses to
+#             let the administrator remove; omitted or `false` otherwise
 #
 # The file name an archive is written under is `<id>-<version>.hsplugin`.
 # Update a pin only together with a release whose digest was computed from the
@@ -19,15 +21,22 @@
 
 [[plugin]]
 id = "app.hearthsound.deezer"
-version = "0.4.0"
-url = "https://github.com/hearthsound/plugin-deezer/releases/download/v0.4.0/app.hearthsound.deezer-0.4.0.hsplugin"
-sha256 = "65110c6ed3210db352d063e6a6f291cccc58ba12d2166d57a6b7f497cbd8a30c"
+version = "0.5.0"
+url = "https://github.com/hearthsound/plugin-deezer/releases/download/v0.5.0/app.hearthsound.deezer-0.5.0.hsplugin"
+sha256 = "371fd2231577772c718994a39a18c973fbe3c842299b1c4db6b70b777949abe9"
+
+[[plugin]]
+id = "app.hearthsound.listenbrainz"
+version = "0.2.0"
+url = "https://github.com/hearthsound/plugin-listenbrainz/releases/download/v0.2.0/app.hearthsound.listenbrainz-0.2.0.hsplugin"
+sha256 = "e546c2dfc5649fbf4bc6473f8782f5e32ec0c87dc5f1c70dd8024340c626d0bc"
 
 [[plugin]]
 id = "app.hearthsound.musicbrainz"
-version = "0.4.0"
-url = "https://github.com/hearthsound/plugin-musicbrainz/releases/download/v0.4.0/app.hearthsound.musicbrainz-0.4.0.hsplugin"
-sha256 = "1668db049679f9089778e7f75f36d324198fec2a6919b9e8ab97127abee4e3ab"
+version = "0.5.2"
+url = "https://github.com/hearthsound/plugin-musicbrainz/releases/download/v0.5.2/app.hearthsound.musicbrainz-0.5.2.hsplugin"
+sha256 = "6ba77352d91d931f869a4198a47498cac30a291f667076bec291f756d144be69"
+mandatory = true
 
 [[plugin]]
 id = "app.hearthsound.slskd"

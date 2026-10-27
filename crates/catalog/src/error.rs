@@ -71,12 +71,12 @@ pub enum CatalogError {
         /// The slug of the instance that returned the entity.
         instance: String,
     },
-    /// A stored identifier of the alias table is not a UUID.
+    /// A stored identifier is not a UUID.
     ///
-    /// Every `external_ids.entity_id` is a 16-byte UUIDv7, so this means the row
-    /// was written by something other than this server.
-    #[error("a stored external id is not a UUID")]
-    CorruptAlias,
+    /// Every id the catalog reads is a 16-byte UUIDv7, so this means the row was
+    /// written by something other than this server.
+    #[error("a stored id is not a UUID")]
+    CorruptId,
     /// The library layer rejected a row the catalog layer writes.
     ///
     /// Materialization stores artists, albums and tracks through the library's
@@ -95,6 +95,9 @@ pub enum CatalogError {
     /// The database rejected a read or a write.
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
+    /// The job queue refused a job.
+    #[error("job queue error: {0}")]
+    Queue(#[from] hearthsound_jobs::JobsError),
 }
 
 impl CatalogError {
@@ -160,10 +163,11 @@ impl CatalogError {
     pub fn instance(&self) -> Option<&str> {
         match self {
             CatalogError::NotFound
-            | CatalogError::CorruptAlias
+            | CatalogError::CorruptId
             | CatalogError::Library(_)
             | CatalogError::Setting(_)
             | CatalogError::Json(_)
+            | CatalogError::Queue(_)
             | CatalogError::Database(_) => None,
             CatalogError::Unavailable { instance }
             | CatalogError::RateLimited { instance, .. }

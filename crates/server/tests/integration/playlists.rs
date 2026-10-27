@@ -4,7 +4,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use hearthsound_core::{Availability, EntityId};
-use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, Origin, TrackInput};
+use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, TrackInput};
 use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{Value, json};
@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::common::Fixture;
 use crate::multi_user::create_user;
 use crate::native::json as read_json;
-use crate::on_demand::{catalog_album_id, install_catalog, materialize};
+use crate::on_demand::{catalog_album_id, install_catalog, resolve_track};
 
 /// Inserts an album with `count` tracks and returns the track ids in order.
 ///
@@ -25,7 +25,7 @@ use crate::on_demand::{catalog_album_id, install_catalog, materialize};
 ///
 /// The track ids, in track-number order.
 async fn seed_tracks(library: &LibraryRepository, count: usize) -> Vec<EntityId> {
-    let mut album = AlbumInput::new("Reorder Album", Origin::Local);
+    let mut album = AlbumInput::new("Reorder Album");
     album.display_artist = Some("Reorder Artist".to_owned());
     let album_id = library
         .upsert_album(&album, &[ArtistCredit::new("Reorder Artist", "main")])
@@ -33,11 +33,7 @@ async fn seed_tracks(library: &LibraryRepository, count: usize) -> Vec<EntityId>
         .unwrap();
     let mut tracks = Vec::with_capacity(count);
     for index in 0..count {
-        let mut input = TrackInput::new(
-            format!("Reorder Song {index}"),
-            Origin::Local,
-            Availability::Local,
-        );
+        let mut input = TrackInput::new(format!("Reorder Song {index}"), Availability::Local);
         input.album_id = Some(album_id);
         input.display_artist = Some("Reorder Artist".to_owned());
         input.track_number = Some(index as i64 + 1);
@@ -212,9 +208,9 @@ async fn add_tracks(
         .unwrap()
 }
 
-/// A catalog album is materialized and appended with its whole tracklist.
+/// A catalog album is appended with its whole tracklist.
 #[tokio::test]
-async fn adding_a_catalog_album_materializes_it() {
+async fn adding_a_catalog_album_appends_its_whole_tracklist() {
     let fixture = Fixture::new().await;
     install_catalog(&fixture.services).await;
     fixture.services.registry().rebuild().await.unwrap();
@@ -246,9 +242,13 @@ async fn adding_a_partially_stored_catalog_album_adds_every_track() {
     let album = catalog_album_id(&fixture).await;
 
     // Two of the album's five tracks are already stored, the way a search
-    // result or a suggested track materializes them on their own.
-    let first = materialize(fixture.services.catalog(), 1).await.to_string();
-    let third = materialize(fixture.services.catalog(), 3).await.to_string();
+    // result or a suggested track resolves them on their own.
+    let first = resolve_track(fixture.services.catalog(), 1)
+        .await
+        .to_string();
+    let third = resolve_track(fixture.services.catalog(), 3)
+        .await
+        .to_string();
 
     let playlist = create_playlist(&fixture, &[]).await;
     let response = add_tracks(
@@ -310,8 +310,8 @@ async fn adding_a_stored_album_adds_its_whole_tracklist() {
     install_catalog(&fixture.services).await;
     fixture.services.registry().rebuild().await.unwrap();
 
-    let first = materialize(fixture.services.catalog(), 1).await;
-    let third = materialize(fixture.services.catalog(), 3).await;
+    let first = resolve_track(fixture.services.catalog(), 1).await;
+    let third = resolve_track(fixture.services.catalog(), 3).await;
     let library = LibraryRepository::new(fixture.services.database());
     let album = library
         .get_track(first)

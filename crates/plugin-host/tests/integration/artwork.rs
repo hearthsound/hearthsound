@@ -11,7 +11,6 @@ use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore};
 use hearthsound_core::Layer;
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_plugin_host::http::HttpError;
-use hearthsound_plugin_host::manifest::ImageCachePolicy;
 use hearthsound_plugin_host::{
     FetchError, InstanceService, InstanceSpec, PluginHost, PluginRepository, PluginSource,
     ProviderRegistry,
@@ -152,9 +151,6 @@ async fn fetches_an_image_under_the_instances_permissions() {
     assert_eq!(image.status, 200);
     assert_eq!(image.content_type.as_deref(), Some("image/png"));
     assert_eq!(image.bytes, IMAGE);
-    // The fixture's manifest forbids caching its images, and the policy travels
-    // with the fetch so the caller cannot store one by accident.
-    assert_eq!(image.cache_policy, ImageCachePolicy::NoStore);
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 

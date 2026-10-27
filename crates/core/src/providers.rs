@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
-use crate::{EntityKind, Granularity, ProviderError};
+use crate::{EntityKind, Granularity, ProviderError, Slug};
 
 /// An external identifier attached to an entity.
 ///
@@ -79,6 +79,32 @@ pub const CANONICAL_NAMESPACES: [&str; 6] = [
     MB_RELEASE_GROUP,
     MB_ARTIST,
 ];
+
+/// The prefix of the namespace of a provider id issued by one instance.
+pub const PROVIDER_PREFIX: &str = "p:";
+
+/// Returns the namespace of a provider id issued by one instance.
+///
+/// # Parameters
+///
+/// - `slug`: the instance slug that issued the id.
+///
+/// # Returns
+///
+/// The namespace, `p:<slug>`.
+///
+/// # Examples
+///
+/// ```
+/// use hearthsound_core::providers::provider_namespace;
+/// use hearthsound_core::Slug;
+///
+/// let slug = Slug::new("deezer").unwrap();
+/// assert_eq!(provider_namespace(&slug), "p:deezer");
+/// ```
+pub fn provider_namespace(slug: &Slug) -> String {
+    format!("{PROVIDER_PREFIX}{}", slug.as_str())
+}
 
 /// Returns the provider id a credit carries for its artist.
 ///
@@ -151,6 +177,17 @@ pub struct CatalogAlbumRef {
     pub year: Option<u16>,
     /// Cover images for the album.
     pub images: Vec<Image>,
+    /// The album type, lowercase: `album`, `ep`, `single`, or a secondary type
+    /// such as `compilation`, `live` or `soundtrack` when the release group has
+    /// one.
+    pub album_type: Option<String>,
+    /// The provider's own name for this pressing, when it disambiguates one.
+    pub edition: Option<String>,
+    /// The number of tracks the provider reports for this release.
+    pub track_count: Option<u32>,
+    /// The canonical identifiers the provider knows for the release, such as
+    /// `mb-release`, `mb-release-group` and `upc`.
+    pub ids: Vec<ExternalId>,
 }
 
 /// A track returned by a catalog provider.
@@ -201,6 +238,8 @@ pub struct CatalogAlbum {
     pub tracks: Vec<CatalogTrack>,
     /// External identifiers for the album.
     pub ids: Vec<ExternalId>,
+    /// The provider's own name for this pressing, when it disambiguates one.
+    pub edition: Option<String>,
 }
 
 /// An artist returned by a catalog provider.
@@ -380,6 +419,26 @@ pub trait CatalogProvider: ProviderLifecycle {
     /// Returns [`ProviderError`] when the lookup could not be performed. An ISRC
     /// with no matches is an empty vector, not an error.
     async fn lookup_isrc(&self, isrc: &str) -> Result<Vec<CatalogTrack>, ProviderError>;
+
+    /// Finds the provider's albums for any of the canonical identifiers given.
+    ///
+    /// # Parameters
+    ///
+    /// - `ids`: the canonical identifiers to look for, typically `upc`,
+    ///   `mb-release` and `mb-release-group`. A namespace the provider does not
+    ///   know is ignored.
+    ///
+    /// # Returns
+    ///
+    /// Coarse album references, one per matching release. An empty vector means
+    /// the provider holds none of them; it is not an error, and it is the normal
+    /// answer for a provider that cannot look an album up by a canonical id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] when the lookup could not be performed.
+    async fn lookup_album(&self, ids: &[ExternalId])
+    -> Result<Vec<CatalogAlbumRef>, ProviderError>;
 }
 
 /// A hint describing the recording a caller is looking for.
@@ -991,7 +1050,7 @@ pub struct ScrobbleLimits {
 }
 
 /// A track a discovery service suggests.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SuggestedTrack {
     /// The track title.
     pub title: String,
@@ -1008,7 +1067,7 @@ pub struct SuggestedTrack {
 }
 
 /// An artist a discovery service suggests.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SuggestedArtist {
     /// The artist's name.
     pub name: String,
@@ -1039,7 +1098,7 @@ pub struct ArtistSeed {
 }
 
 /// A playlist a discovery service generated for the listener.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlaylistSummary {
     /// The service's stable reference for this playlist slot, so a refresh
     /// replaces it in place.
@@ -1053,7 +1112,7 @@ pub struct PlaylistSummary {
 }
 
 /// A generated playlist with its tracks.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GeneratedPlaylist {
     /// The playlist's identity and display fields.
     pub summary: PlaylistSummary,

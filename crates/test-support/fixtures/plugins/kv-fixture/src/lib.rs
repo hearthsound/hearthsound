@@ -15,7 +15,7 @@ use hearthsound_plugin::catalog_provider::exports::hearthsound::plugin::catalog:
     SearchQuery, SearchResults,
 };
 use hearthsound_plugin::catalog_provider::exports::hearthsound::plugin::{catalog, lifecycle};
-use hearthsound_plugin::types::{Album, AlbumRef, Artist, EntityKind, ProviderError, Track};
+use hearthsound_plugin::types::{Album, AlbumRef, Artist, EntityKind, IdPair, ProviderError, Track};
 
 /// The plugin implementation.
 struct KvFixture;
@@ -125,6 +125,9 @@ impl catalog::Guest for KvFixture {
 
     fn lookup_isrc(_isrc: String) -> Result<Vec<Track>, ProviderError> {
         Err(ProviderError::NotFound)
+    }
+    fn lookup_album(_ids: Vec<IdPair>) -> Result<Vec<AlbumRef>, ProviderError> {
+        Ok(vec![])
     }
 }
 

@@ -4,14 +4,21 @@
   "name": "HTTP catalog",
   "version": "0.1.0",
   "description": "A catalog plugin that answers a search with an outbound HTTP request.",
-  "authors": ["Hearthsound contributors"],
+  "authors": [
+    "Hearthsound contributors"
+  ],
   "license": "MIT OR Apache-2.0",
   "homepage": "https://github.com/hearthsound/hearthsound",
-  "api": "hearthsound:plugin@0.4.0",
-  "provides": ["catalog"],
+  "api": "hearthsound:plugin@0.5.0",
+  "provides": [
+    "catalog"
+  ],
   "permissions": {
     "http": {
-      "hosts": ["$config:url", "$config:coverUrl"],
+      "hosts": [
+        "$config:url",
+        "$config:coverUrl"
+      ],
       "maxBodyBytes": 1048576
     }
   },
@@ -20,22 +27,42 @@
       "schema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
-        "required": ["url"],
+        "required": [
+          "url"
+        ],
         "properties": {
-          "url": { "type": "string", "format": "uri", "title": "Search endpoint", "writeOnly": true },
-          "coverUrl": { "type": "string", "format": "uri", "title": "Cover image URL" }
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "title": "Search endpoint",
+            "writeOnly": true
+          },
+          "coverUrl": {
+            "type": "string",
+            "format": "uri",
+            "title": "Cover image URL"
+          }
         }
       },
       "uiSchema": {
         "type": "VerticalLayout",
         "elements": [
-          { "type": "Control", "scope": "#/properties/url" },
-          { "type": "Control", "scope": "#/properties/coverUrl" }
+          {
+            "type": "Control",
+            "scope": "#/properties/url"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/coverUrl"
+          }
         ]
       }
     },
     "user": null
   },
-  "resources": { "memoryMb": 64, "callTimeoutMs": 5000, "maxInstances": 2 },
-  "catalog": { "imageCachePolicy": "no-store" }
+  "resources": {
+    "memoryMb": 64,
+    "callTimeoutMs": 5000,
+    "maxInstances": 2
+  }
 }

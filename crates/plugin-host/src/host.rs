@@ -25,7 +25,7 @@ use uuid::Uuid;
 use wasmtime::Engine;
 use wasmtime::component::{Component, HasSelf, Linker};
 
-use crate::api::{v3, v4};
+use crate::api::{v4, v5};
 use crate::archive::PluginArchive;
 use crate::engine::PluginEngine;
 use crate::error::{HostError, InstallError};
@@ -37,6 +37,7 @@ use crate::log::LogSink;
 use crate::manifest::{ApiVersion, Manifest, ManifestError};
 use crate::pool::{self, PoolConfig, StorePool};
 use crate::process::ProcessTable;
+use crate::protected::ProtectedPlugins;
 use crate::repo::InstanceDisabler;
 use crate::state::InstanceState;
 use crate::validate;
@@ -101,6 +102,7 @@ pub struct PluginHost {
     live_settings: Option<Settings>,
     database: Arc<Database>,
     events: Arc<EventBus>,
+    protected: ProtectedPlugins,
     disabled: tokio::sync::broadcast::Sender<Slug>,
 }
 
@@ -138,7 +140,7 @@ impl PluginHost {
             state
         })
         .map_err(HostError::Engine)?;
-        v3::bindings::imports::HostImports::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| {
+        v5::bindings::imports::HostImports::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| {
             state
         })
         .map_err(HostError::Engine)?;
@@ -151,6 +153,7 @@ impl PluginHost {
             live_settings: None,
             database,
             events: Arc::new(EventBus::new()),
+            protected: ProtectedPlugins::none(),
             disabled: tokio::sync::broadcast::channel(64).0,
         })
     }
@@ -205,6 +208,23 @@ impl PluginHost {
     pub fn with_live_settings(mut self, settings: Settings) -> PluginHost {
         self.live_settings = Some(settings);
         self
+    }
+
+    /// Marks plugins the server installs by itself and refuses to let an
+    /// administrator remove, switch off, or drop from a layer they provide.
+    ///
+    /// # Parameters
+    ///
+    /// - `protected`: the ids; the server passes the mandatory ids of
+    ///   `bundled-plugins.lock`.
+    pub fn with_protected_plugins(mut self, protected: ProtectedPlugins) -> PluginHost {
+        self.protected = protected;
+        self
+    }
+
+    /// Returns the ids this host will not let an administrator remove.
+    pub fn protected(&self) -> &ProtectedPlugins {
+        &self.protected
     }
 
     /// Publishes plugin status events on `events` instead of a private bus.
@@ -413,10 +433,10 @@ impl PluginHost {
                     instance.slug,
                 )))
             }
-            ApiVersion::V0_3 => {
+            ApiVersion::V0_5 => {
                 let (pool, _process) =
-                    self.store_pool::<v3::bindings::CatalogProvider>(plugin, &instance)?;
-                Ok(Arc::new(v3::catalog::WasmCatalogProvider::new(
+                    self.store_pool::<v5::bindings::CatalogProvider>(plugin, &instance)?;
+                Ok(Arc::new(v5::catalog::WasmCatalogProvider::new(
                     pool,
                     plugin.manifest().id.clone(),
                     instance.slug,
@@ -454,10 +474,10 @@ impl PluginHost {
                     instance.slug,
                 )))
             }
-            ApiVersion::V0_3 => {
+            ApiVersion::V0_5 => {
                 let (pool, _process) =
-                    self.store_pool::<v3::bindings::MetadataProvider>(plugin, &instance)?;
-                Ok(Arc::new(v3::metadata::WasmMetadataProvider::new(
+                    self.store_pool::<v5::bindings::MetadataProvider>(plugin, &instance)?;
+                Ok(Arc::new(v5::metadata::WasmMetadataProvider::new(
                     pool,
                     plugin.manifest().id.clone(),
                     instance.slug,
@@ -495,10 +515,10 @@ impl PluginHost {
                     instance.slug,
                 )))
             }
-            ApiVersion::V0_3 => {
+            ApiVersion::V0_5 => {
                 let (pool, _process) =
-                    self.store_pool::<v3::bindings::ArtworkProvider>(plugin, &instance)?;
-                Ok(Arc::new(v3::artwork::WasmArtworkProvider::new(
+                    self.store_pool::<v5::bindings::ArtworkProvider>(plugin, &instance)?;
+                Ok(Arc::new(v5::artwork::WasmArtworkProvider::new(
                     pool,
                     plugin.manifest().id.clone(),
                     instance.slug,
@@ -537,10 +557,10 @@ impl PluginHost {
                     instance.slug,
                 )))
             }
-            ApiVersion::V0_3 => {
+            ApiVersion::V0_5 => {
                 let (pool, process) =
-                    self.store_pool::<v3::bindings::AcquisitionProvider>(plugin, &instance)?;
-                Ok(Arc::new(v3::acquisition::WasmAcquisitionProvider::new(
+                    self.store_pool::<v5::bindings::AcquisitionProvider>(plugin, &instance)?;
+                Ok(Arc::new(v5::acquisition::WasmAcquisitionProvider::new(
                     pool,
                     process,
                     plugin.manifest().id.clone(),
@@ -579,10 +599,10 @@ impl PluginHost {
                     instance.slug,
                 )))
             }
-            ApiVersion::V0_3 => {
+            ApiVersion::V0_5 => {
                 let (pool, _process) =
-                    self.store_pool::<v3::bindings::VerificationProvider>(plugin, &instance)?;
-                Ok(Arc::new(v3::verification::WasmVerificationProvider::new(
+                    self.store_pool::<v5::bindings::VerificationProvider>(plugin, &instance)?;
+                Ok(Arc::new(v5::verification::WasmVerificationProvider::new(
                     pool,
                     plugin.manifest().id.clone(),
                     instance.slug,
@@ -620,10 +640,10 @@ impl PluginHost {
                     instance.slug,
                 )))
             }
-            ApiVersion::V0_3 => {
+            ApiVersion::V0_5 => {
                 let (pool, _process) =
-                    self.store_pool::<v3::bindings::ScrobbleProvider>(plugin, &instance)?;
-                Ok(Arc::new(v3::scrobble::WasmScrobbleProvider::new(
+                    self.store_pool::<v5::bindings::ScrobbleProvider>(plugin, &instance)?;
+                Ok(Arc::new(v5::scrobble::WasmScrobbleProvider::new(
                     pool,
                     plugin.manifest().id.clone(),
                     instance.slug,
@@ -661,10 +681,10 @@ impl PluginHost {
                     instance.slug,
                 )))
             }
-            ApiVersion::V0_3 => {
+            ApiVersion::V0_5 => {
                 let (pool, _process) =
-                    self.store_pool::<v3::bindings::DiscoveryProvider>(plugin, &instance)?;
-                Ok(Arc::new(v3::discovery::WasmDiscoveryProvider::new(
+                    self.store_pool::<v5::bindings::DiscoveryProvider>(plugin, &instance)?;
+                Ok(Arc::new(v5::discovery::WasmDiscoveryProvider::new(
                     pool,
                     plugin.manifest().id.clone(),
                     instance.slug,
@@ -704,10 +724,10 @@ impl PluginHost {
                     instance.slug,
                 )))
             }
-            ApiVersion::V0_3 => {
+            ApiVersion::V0_5 => {
                 let (pool, _process) =
-                    self.store_pool::<v3::bindings::AccountLinkProvider>(plugin, &instance)?;
-                Ok(Arc::new(v3::account_link::WasmAccountLinkProvider::new(
+                    self.store_pool::<v5::bindings::AccountLinkProvider>(plugin, &instance)?;
+                Ok(Arc::new(v5::account_link::WasmAccountLinkProvider::new(
                     pool,
                     plugin.manifest().id.clone(),
                     instance.slug,
@@ -792,6 +812,7 @@ impl PluginHost {
                     instance.id,
                     manifest.id.clone(),
                     instance.slug.clone(),
+                    self.protected.contains(&manifest.id),
                     self.disabled.clone(),
                 ),
             },
@@ -1074,26 +1095,26 @@ fn ensure_instantiable(
             (ApiVersion::V0_4, Layer::Discovery) => {
                 v4::bindings::DiscoveryProviderPre::new(pre).map_err(incompatible)?;
             }
-            (ApiVersion::V0_3, Layer::Catalog) => {
-                v3::bindings::CatalogProviderPre::new(pre).map_err(incompatible)?;
+            (ApiVersion::V0_5, Layer::Catalog) => {
+                v5::bindings::CatalogProviderPre::new(pre).map_err(incompatible)?;
             }
-            (ApiVersion::V0_3, Layer::Metadata) => {
-                v3::bindings::MetadataProviderPre::new(pre).map_err(incompatible)?;
+            (ApiVersion::V0_5, Layer::Metadata) => {
+                v5::bindings::MetadataProviderPre::new(pre).map_err(incompatible)?;
             }
-            (ApiVersion::V0_3, Layer::Acquisition) => {
-                v3::bindings::AcquisitionProviderPre::new(pre).map_err(incompatible)?;
+            (ApiVersion::V0_5, Layer::Acquisition) => {
+                v5::bindings::AcquisitionProviderPre::new(pre).map_err(incompatible)?;
             }
-            (ApiVersion::V0_3, Layer::Artwork) => {
-                v3::bindings::ArtworkProviderPre::new(pre).map_err(incompatible)?;
+            (ApiVersion::V0_5, Layer::Artwork) => {
+                v5::bindings::ArtworkProviderPre::new(pre).map_err(incompatible)?;
             }
-            (ApiVersion::V0_3, Layer::Verification) => {
-                v3::bindings::VerificationProviderPre::new(pre).map_err(incompatible)?;
+            (ApiVersion::V0_5, Layer::Verification) => {
+                v5::bindings::VerificationProviderPre::new(pre).map_err(incompatible)?;
             }
-            (ApiVersion::V0_3, Layer::Scrobble) => {
-                v3::bindings::ScrobbleProviderPre::new(pre).map_err(incompatible)?;
+            (ApiVersion::V0_5, Layer::Scrobble) => {
+                v5::bindings::ScrobbleProviderPre::new(pre).map_err(incompatible)?;
             }
-            (ApiVersion::V0_3, Layer::Discovery) => {
-                v3::bindings::DiscoveryProviderPre::new(pre).map_err(incompatible)?;
+            (ApiVersion::V0_5, Layer::Discovery) => {
+                v5::bindings::DiscoveryProviderPre::new(pre).map_err(incompatible)?;
             }
             (_, other) => return Err(InstallError::UnsupportedCapability(*other)),
         }
@@ -1105,8 +1126,8 @@ fn ensure_instantiable(
             ApiVersion::V0_4 => {
                 v4::bindings::AccountLinkProviderPre::new(pre).map_err(incompatible)?;
             }
-            ApiVersion::V0_3 => {
-                v3::bindings::AccountLinkProviderPre::new(pre).map_err(incompatible)?;
+            ApiVersion::V0_5 => {
+                v5::bindings::AccountLinkProviderPre::new(pre).map_err(incompatible)?;
             }
         }
     }

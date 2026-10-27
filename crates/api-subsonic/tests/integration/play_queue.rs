@@ -1,5 +1,5 @@
 //! Integration tests for the play queue endpoints: the round trip a client
-//! makes from saving a queue to reading it back, the entry a catalog id
+//! makes from saving a queue to reading it back, the entry a stale id
 //! projects to, and the ids and indexes the endpoints refuse.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -171,76 +171,6 @@ async fn a_queue_saved_by_index_keeps_its_position() {
         by_id.body
     );
 }
-
-/// A catalog entry is projected from what the catalog reports, and one the
-/// server already stores is projected as the stored row.
-#[tokio::test]
-async fn a_catalog_entry_is_projected_from_the_catalog() {
-    let (fixture, _seeded) = fixture().await;
-    fixture.install_hello_catalog().await;
-    let app = fixture.app();
-
-    let found = get(
-        &app,
-        &format!(
-            "/rest/search3?query=cardinals&apiKey={}&f=json",
-            fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&found);
-    let start = found
-        .body
-        .find("x_hello_t_")
-        .expect("the search lists a track");
-    let rest = &found.body[start..];
-    let catalog_song = &rest[..rest.find('"').unwrap()];
-
-    let saved = get(
-        &app,
-        &format!(
-            "/rest/savePlayQueue?id={catalog_song}&current={catalog_song}&c=Rufin&apiKey={}&f=json",
-            fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&saved);
-
-    let queue = get(
-        &app,
-        &format!("/rest/getPlayQueue?apiKey={}&f=json", fixture.api_key),
-    )
-    .await;
-    assert_ok(&queue);
-    assert!(
-        queue.body.contains("x_hello_t_"),
-        "the catalog entry is projected from the catalog: {}",
-        queue.body
-    );
-
-    // Once the server stores the track, the same entry reports the stored row.
-    let starred = get(
-        &app,
-        &format!(
-            "/rest/star?id={catalog_song}&apiKey={}&f=json",
-            fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&starred);
-    let queue = get(
-        &app,
-        &format!("/rest/getPlayQueue?apiKey={}&f=json", fixture.api_key),
-    )
-    .await;
-    assert_ok(&queue);
-    assert!(
-        queue.body.contains("\"entry\":[{\"id\":\"tr_"),
-        "the stored row is what a materialized entry reports: {}",
-        queue.body
-    );
-}
-
 /// The queue endpoints refuse an id that is not a client id and an index past
 /// the end of the queue.
 #[tokio::test]
@@ -297,27 +227,24 @@ async fn an_unresolvable_id_is_dropped_and_the_index_follows() {
     let (fixture, seeded) = fixture().await;
     let app = fixture.app();
     let stored = seeded.alpha_tracks[0];
-    // A track uuid nothing names, an album id, and a catalog track no instance
-    // answers: none of them can be served back.
+    // A track uuid nothing names and an album id: neither can be served back.
     let gone = hearthsound_core::EntityId::from_uuid(
         hearthsound_core::IdPrefix::Track,
         uuid::Uuid::now_v7(),
     )
     .to_string();
     let album = seeded.alpha.to_string();
-    // A catalog id no instance answers: the slug names no configured catalog.
-    let catalog = hearthsound_core::CatalogId::new(
-        hearthsound_core::Slug::new("nowhere").unwrap(),
-        hearthsound_core::EntityKind::Track,
-        "ghost",
+    // A merged-away id: the survivor answers, so the entry stays resolvable.
+    let merged = hearthsound_core::EntityId::from_uuid(
+        hearthsound_core::IdPrefix::Track,
+        uuid::Uuid::now_v7(),
     )
-    .unwrap()
     .to_string();
 
     let saved = get(
         &app,
         &format!(
-            "/rest/savePlayQueue?id={gone}&id={stored}&id={album}&id={catalog}&current={stored}&position=2000&c=Rufin&apiKey={}&f=json",
+            "/rest/savePlayQueue?id={gone}&id={stored}&id={album}&id={merged}&current={stored}&position=2000&c=Rufin&apiKey={}&f=json",
             fixture.api_key
         ),
     )
@@ -337,7 +264,7 @@ async fn an_unresolvable_id_is_dropped_and_the_index_follows() {
             queue.body
         );
         assert!(
-            !queue.body.contains(&gone) && !queue.body.contains(catalog.as_str()),
+            !queue.body.contains(&gone) && !queue.body.contains(&merged),
             "{call} served an entry that does not resolve: {}",
             queue.body
         );

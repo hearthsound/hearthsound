@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use hearthsound_core::ClientId;
+use hearthsound_core::{EntityId, IdPrefix};
 use hearthsound_media::TranscodeFormat;
 
 use crate::auth::BinaryCall;
@@ -99,15 +99,17 @@ pub async fn stream(call: BinaryCall) -> Response {
 ///
 /// - `call`: the authenticated call. Its principal names the user and its
 ///   permission, and its `c` parameter names the client instance.
-/// - `id`: the `id` parameter the stream was served for: a stored track id or an
-///   `x_` catalog id.
+/// - `id`: the `id` parameter the stream was served for, which names a track.
 fn note_stream(call: &BinaryCall, id: &str) {
     let Some(prefetch) = call.state().prefetch().cloned() else {
         return;
     };
-    let Ok(track) = ClientId::parse(id) else {
+    let Ok(track) = EntityId::parse(id) else {
         return;
     };
+    if track.kind() != IdPrefix::Track {
+        return;
+    }
     let user = call.principal().user_id.uuid();
     let client = call.client_name().unwrap_or_default().to_owned();
     let can_acquire = call.principal().can_acquire;

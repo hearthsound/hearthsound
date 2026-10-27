@@ -87,8 +87,8 @@
 //! | `getAlbumInfo` | the identifiers the library holds for one album |
 //! | `getAlbumInfo2` | the same answer in the ID3 shape |
 //! | `getTopSongs` | the most played songs of one artist |
-//! | `getSimilarSongs` | an empty similar-songs listing |
-//! | `getSimilarSongs2` | the same empty listing in the ID3 shape |
+//! | `getSimilarSongs` | similar songs from the discovery layer, resolved to rows |
+//! | `getSimilarSongs2` | the same listing in the ID3 shape |
 //! | `download` | the stored file of one track, as an attachment |
 //! | `getUser` | one account's name, roles, and music folders |
 //! | `getUsers` | every account, for an administrator |
@@ -125,16 +125,15 @@
 //! | `getAlbumList` | the albums in scope as folders, in any of the album list orders |
 //! | `getAlbumList2` | the same albums as `AlbumID3`, in any of the album list orders |
 //! | `search2` | the same matches as `search3`, in the older response shape |
-//! | `search3` | local matches first, then catalog matches when `search.catalog.enabled` |
+//! | `search3` | the library's matches, then the catalog layer's |
 //! | `stream` | the track's media bytes: the stored file with ranges and validators, or a transcode |
-//! | `getCoverArt` | the stored entity's own image, or the issuing instance's through the catalog layer; local images are served unscaled |
+//! | `getCoverArt` | the entity's stored image, fetched from a provider when the server has none and scaled to the requested size |
 //! | `scrobble` | records a play for a stored track; a now-playing report is listed by `getNowPlaying` |
 //! | `hsGetAvailability` | what the server knows about the named tracks and albums: their availability, the caller's library membership, and the acquisition in flight |
 //! | `hsAcquire` | asks the acquisition layer for the named tracks and albums, at the priority the request names |
 //! | `hsGetAcquisitions` | the acquisitions of the caller's account, or of every account for an administrator |
 //! | `hsCancelAcquisition` | ends one acquisition, idempotently |
 //! | `hsSetQueue` | takes the queue a client is playing and prefetches its next items |
-//! | `hsResolve` | resolves an entity's readable path to its id, or its id to the canonical path |
 //! | `hsSave` | adds the named tracks, albums and artists to the caller's personal library |
 //! | `hsUnsave` | removes the named entities from the caller's personal library |
 //! | `hsSetFeedback` | records a like, a dislike, or neither, for the named entities |
@@ -149,13 +148,12 @@
 //! answered only when the request carries `hearthsound=1`; without it they answer
 //! Subsonic error 70, the way an endpoint this server does not implement does.
 //!
-//! `search3`, `getSong`, `getAlbum`, and `getArtist` also answer for entities
-//! the server has not stored: a catalog provider's entity is projected with an
-//! `x_` id, so the client can stream, save, or acquire it later. The catalog
-//! layer is a dependency of this crate for exactly that reason, and it never
-//! makes a search fail: a catalog instance that is down leaves the local
-//! results, while a single-entity catalog lookup answers with the provider's
-//! failure.
+//! Every entity a response describes is a stored row with one id: a search hit, a
+//! discography entry and a suggestion all resolve to a row, and a row the server
+//! has not downloaded yet is projected with its file-derived fields empty and,
+//! for a third-party client, the configured title suffix. The catalog layer is a
+//! dependency of this crate because it owns that resolution, the composed views
+//! every page reads, and the image store.
 //!
 //! Every other path under `/rest/`, including the endpoint families this server
 //! never implements (podcast, internet radio, share, video, and chat), answers

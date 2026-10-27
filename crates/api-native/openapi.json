@@ -225,6 +225,77 @@
         ]
       }
     },
+    "/api/v1/admin/entities/{id}/refresh": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Answers `POST /admin/entities/{id}/refresh`: queue one entity for a refresh.",
+        "description": "# Parameters\n\n- `_authed`: the administrator the extractor requires.\n- `state`: the shared services.\n- `id`: the entity's client id (`tr_`, `al_` or `ar_...`); a merged-away id\n  queues the surviving row.\n\n# Returns\n\n`202 Accepted` with `{ \"queued\": true }`.\n\n# Errors\n\nAnswers `forbidden` (403) for a caller who is not an administrator,\n`unauthenticated` without credentials, `not-found` (404) when the id names\nno stored track, album or artist, and `internal` when the write fails.",
+        "operationId": "refresh_entity",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The entity's client id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The entity is queued for a refresh",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefreshView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not an administrator",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No track, album or artist with that id is stored",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/admin/folders": {
       "get": {
         "tags": [
@@ -530,6 +601,56 @@
           },
           "404": {
             "description": "No such folder",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/index": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Answers `GET /admin/index`: the index queue's state.",
+        "description": "# Parameters\n\n- `_authed`: the administrator the extractor requires.\n- `state`: the shared services.\n\n# Returns\n\nWhat is queued, what failed, and what this process has done.\n\n# Errors\n\nAnswers `forbidden` (403) for a caller who is not an administrator,\n`unauthenticated` without credentials, and `internal` when the queue cannot\nbe read.",
+        "operationId": "index_status",
+        "responses": {
+          "200": {
+            "description": "The index queue's state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndexStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not an administrator",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -2322,6 +2443,210 @@
         ]
       }
     },
+    "/api/v1/albums/{id}": {
+      "get": {
+        "tags": [
+          "entities"
+        ],
+        "summary": "Answers `GET /albums/{id}`: one album's page.",
+        "description": "# Parameters\n\n- `authed`: the caller, whose library and feedback the page reports.\n- `state`: the shared services.\n- `id`: the album's client id (`al_...`); a merged-away id answers the\n  surviving album.\n\n# Returns\n\nThe album's page.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `not-found` (404) when the id\nnames no stored album, and `internal` when a read fails.",
+        "operationId": "album_page",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The album's client id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The album's page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlbumPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No album with that id is stored",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/artists/{id}": {
+      "get": {
+        "tags": [
+          "entities"
+        ],
+        "summary": "Answers `GET /artists/{id}`: one artist's page.",
+        "description": "# Parameters\n\n- `authed`: the caller, whose library and feedback the page reports.\n- `state`: the shared services.\n- `id`: the artist's client id (`ar_...`); a merged-away id answers the\n  surviving artist.\n\n# Returns\n\nThe artist's page.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `not-found` (404) when the id\nnames no stored artist, and `internal` when a read fails.",
+        "operationId": "artist_page",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The artist's client id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The artist's page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtistPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No artist with that id is stored",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/artists/{id}/top-tracks": {
+      "get": {
+        "tags": [
+          "entities"
+        ],
+        "summary": "Answers `GET /artists/{id}/top-tracks`: one artist's most popular tracks.",
+        "description": "# Parameters\n\n- `authed`: the caller, whose library and feedback the tracks report.\n- `state`: the shared services.\n- `id`: the artist's client id (`ar_...`).\n- `query`: how many tracks to return.\n\n# Returns\n\nThe tracks, most popular first; empty when the artist has none stored.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `invalid-request` (400) when\n`limit` is outside 1..=100, `not-found` (404) when the id names no stored\nartist, and `internal` when a read fails.",
+        "operationId": "artist_top_tracks",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The artist's client id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many tracks to return, from 1 to 100; absent returns 100",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The artist's top tracks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopTracksView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`limit` is outside 1..=100",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No artist with that id is stored",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/auth/login": {
       "post": {
         "tags": [
@@ -2568,13 +2893,73 @@
         ]
       }
     },
+    "/api/v1/images/{id}": {
+      "get": {
+        "tags": [
+          "images"
+        ],
+        "summary": "Answers `GET /images/{id}`: one entity's stored picture.",
+        "description": "# Parameters\n\n- `authed`: the caller, whose playlists may be named.\n- `state`: the shared services.\n- `id`: the entity's client id (`tr_`, `al_`, `ar_` or `pl_...`); a\n  merged-away id answers the surviving row's image.\n- `query`: the requested size in pixels.\n- `headers`: the request's head, which may carry `If-None-Match`.\n\n# Returns\n\nThe image with its type, length, `ETag` and `Cache-Control`, HTTP 304 when\nthe client's `If-None-Match` already has it, HTTP 400 for an unusable\n`size`, HTTP 404 when the entity has no image, or HTTP 503 with\n`Retry-After` when the image cannot be fetched right now. A refusal has an\nempty body.",
+        "operationId": "entity_image",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The entity's client id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "description": "The requested size in pixels; absent or zero asks for any size",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The image bytes"
+          },
+          "304": {
+            "description": "The client's cached image is current"
+          },
+          "400": {
+            "description": "`size` is not a size in pixels"
+          },
+          "401": {
+            "description": "No valid credential"
+          },
+          "404": {
+            "description": "The entity has no image"
+          },
+          "503": {
+            "description": "The image cannot be fetched right now"
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/library/queue": {
       "get": {
         "tags": [
           "library"
         ],
         "summary": "Queues a whole collection for the caller's player.",
-        "description": "One request answers every track of the collection, in the collection's own\norder: the requested order for `songs` (by title when the request names\nnone), the like order for `liked`, the upload order for `uploads`, the\nplaylist's own order, and the artist's play count order. Nothing is paged\nand nothing is truncated.\n\n# Parameters\n\n- `authed`: the caller, whose library the collection is read from.\n- `state`: the shared services.\n- `query`: the source, the track to start at, and the order a `songs`\n  source is read in.\n\n# Returns\n\nThe collection's items, the position of `from` in them (`0` when absent),\nand the source.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `unknown-source` (400) for a\nsource this server does not offer, `not-found` (404) when the playlist or\nartist is unknown or outside the caller's library, `not-in-source`\n(404) when `from` is not one of the collection's tracks, and `internal` when\nthe read fails.",
+        "description": "One request answers every track of the collection, in the collection's own\norder: the requested order for `songs` (by title when the request names\nnone), the like order for `liked`, the upload order for `uploads`, the\nplaylist's own order, and the artist's play count order. An artist whose\ntracks the caller's personal library does not hold answers its stored top\ntracks instead, which is how a remote artist's Play button is filled.\nNothing is paged and nothing is truncated.\n\n# Parameters\n\n- `authed`: the caller, whose library the collection is read from.\n- `state`: the shared services.\n- `query`: the source, the track to start at, and the order a `songs`\n  source is read in.\n\n# Returns\n\nThe collection's items, the position of `from` in them (`0` when absent),\nand the source.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `unknown-source` (400) for a\nsource this server does not offer, `not-found` (404) when the playlist is\nunknown or outside the caller's library or the artist names no track at\nall, `not-in-source` (404) when `from` is not one of the collection's\ntracks, and `internal` when the read fails.",
         "operationId": "collection_queue",
         "parameters": [
           {
@@ -3527,7 +3912,7 @@
           "playlists"
         ],
         "summary": "Appends a whole album, playlist or artist to a playlist.",
-        "description": "The source is resolved exactly as `GET /api/v1/library/queue` resolves it:\nthrough the caller's personal library, in the collection's own order. A\ncatalog album id is materialized first, which is what an album result of a\nsearch carries, and its whole tracklist is appended in provider order.\n\nThe edit applies the same playlist pin and the same\n`library.acquire_on_playlist_add` step as an edit through `updatePlaylist`,\nso a missing track that a user keeps in a playlist is acquired at priority\n`queue`.\n\n# Parameters\n\n- `authed`: the caller, who must own the playlist.\n- `state`: the shared services.\n- `id`: the playlist's client id (`pl_...`).\n- `body`: the collection to append.\n\n# Returns\n\nHow many tracks were appended and how many the playlist holds afterwards.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `not-found` (404) when the\nplaylist, album, playlist source or artist is unknown or outside the\ncaller's library, `unknown-source` (400) for a source this route does not\naccept, and `internal` when a read, materialization or write fails.",
+        "description": "The source is resolved exactly as `GET /api/v1/library/queue` resolves it:\nthrough the caller's personal library, in the collection's own order. An\nalbum's stored tracklist is completed from the catalog first, so an album the\nserver holds a page for adds its whole tracklist.\n\nThe edit applies the same playlist pin and the same\n`library.acquire_on_playlist_add` step as an edit through `updatePlaylist`,\nso a missing track that a user keeps in a playlist is acquired at priority\n`queue`.\n\n# Parameters\n\n- `authed`: the caller, who must own the playlist.\n- `state`: the shared services.\n- `id`: the playlist's client id (`pl_...`).\n- `body`: the collection to append.\n\n# Returns\n\nHow many tracks were appended and how many the playlist holds afterwards.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `not-found` (404) when the\nplaylist, album, playlist source or artist is unknown or outside the\ncaller's library, `unknown-source` (400) for a source this route does not\naccept, and `internal` when a read, an index walk or a write fails.",
         "operationId": "add_playlist_tracks",
         "parameters": [
           {
@@ -3583,6 +3968,96 @@
           },
           "404": {
             "description": "The playlist, or a collection in the source, is unknown to the caller",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/search": {
+      "get": {
+        "tags": [
+          "search"
+        ],
+        "summary": "Answers `GET /search`: one query across the library and the catalog.",
+        "description": "# Parameters\n\n- `authed`: the caller, whose library is searched first.\n- `state`: the shared services.\n- `query`: the text, the kinds, the per-kind limit and the cursor.\n\n# Returns\n\nEach kind's hits, best first, and the cursor for the next page of the one\nkind the request narrowed to.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `invalid-request` (400) for a\nkind this server does not know, a `limit` outside 1..=60, or a `cursor` that\nis malformed or sent with more than one kind, and `internal` when the search\nfails.",
+        "operationId": "search",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "The text to search for",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kinds",
+            "in": "query",
+            "description": "The kinds to return, comma separated: `artists`, `albums`, `tracks`; absent returns all three",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "The most hits to return per kind, from 1 to 60; absent returns 20",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque continuation of one kind's list, from a previous answer's `nextCursor`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The search's hits and the next cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A kind, a limit or a cursor the request may not use",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3770,6 +4245,67 @@
           },
           "401": {
             "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          },
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/tracks/{id}": {
+      "get": {
+        "tags": [
+          "entities"
+        ],
+        "summary": "Answers `GET /tracks/{id}`: one track, in the shape every list uses.",
+        "description": "# Parameters\n\n- `authed`: the caller, whose library and feedback the track reports.\n- `state`: the shared services.\n- `id`: the track's client id (`tr_...`); a merged-away id answers the\n  surviving track.\n\n# Returns\n\nThe track's summary.\n\n# Errors\n\nAnswers `unauthenticated` without credentials, `not-found` (404) when the id\nnames no stored track, and `internal` when a read fails.",
+        "operationId": "track_page",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The track's client id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The track",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackSummary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No track with that id is stored",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -4038,7 +4574,7 @@
         "properties": {
           "source": {
             "type": "string",
-            "description": "The collection to append: `album:<id>`, `playlist:<id>` or\n`artist:<id>`. An album id may be a stored album or a catalog album\n(`x_<slug>_a_<id>`), which is stored first."
+            "description": "The collection to append: `album:<id>`, `playlist:<id>` or\n`artist:<id>`. Any album id the server accepts is an album row id; a\nmerged-away id is answered the surviving row."
           }
         }
       },
@@ -4082,6 +4618,212 @@
           }
         ],
         "description": "An account as an administrator sees it."
+      },
+      "AlbumPage": {
+        "type": "object",
+        "description": "One album's page.",
+        "required": [
+          "id",
+          "title",
+          "artists",
+          "genres",
+          "hasImage",
+          "inLibrary",
+          "liked",
+          "disliked",
+          "tracks",
+          "moreByArtist",
+          "complete"
+        ],
+        "properties": {
+          "albumType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The release type: `album`, `ep`, `single` or a secondary type."
+          },
+          "artists": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtistRefView"
+            },
+            "description": "The credited artists, in order."
+          },
+          "complete": {
+            "type": "boolean",
+            "description": "Whether the stored data covers the page."
+          },
+          "disliked": {
+            "type": "boolean",
+            "description": "Whether the caller dislikes the album."
+          },
+          "displayArtist": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The album artist as it is displayed."
+          },
+          "durationMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How long the album plays, in milliseconds, from the lengths the stored\ntracks state."
+          },
+          "edition": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The edition label, when the release states one."
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The album's genres."
+          },
+          "hasImage": {
+            "type": "boolean",
+            "description": "Whether the server holds a cover."
+          },
+          "id": {
+            "type": "string",
+            "description": "The album's client id (`al_...`)."
+          },
+          "inLibrary": {
+            "type": "boolean",
+            "description": "Whether the caller's personal library holds the album."
+          },
+          "liked": {
+            "type": "boolean",
+            "description": "Whether the caller likes the album."
+          },
+          "moreByArtist": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlbumSummary"
+            },
+            "description": "Other albums by the primary artist, at most twelve."
+          },
+          "rating": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The caller's rating, from 1 to 5.",
+            "minimum": 0
+          },
+          "releaseDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The release date as the provider stated it, when known."
+          },
+          "title": {
+            "type": "string",
+            "description": "The album's title."
+          },
+          "trackCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many tracks the release holds."
+          },
+          "tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrackSummary"
+            },
+            "description": "The album's tracks, in disc and track order."
+          },
+          "year": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The release year, when known."
+          }
+        }
+      },
+      "AlbumSummary": {
+        "type": "object",
+        "description": "One album in a shelf or a result list.",
+        "required": [
+          "id",
+          "title",
+          "hasImage",
+          "inLibrary",
+          "score"
+        ],
+        "properties": {
+          "albumType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The release type: `album`, `ep`, `single` or a secondary type."
+          },
+          "artistId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The primary credited artist's client id (`ar_...`)."
+          },
+          "displayArtist": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The album artist as it is displayed."
+          },
+          "edition": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The edition label, when the release states one."
+          },
+          "hasImage": {
+            "type": "boolean",
+            "description": "Whether the server holds a cover."
+          },
+          "id": {
+            "type": "string",
+            "description": "The album's client id (`al_...`)."
+          },
+          "inLibrary": {
+            "type": "boolean",
+            "description": "Whether the caller's personal library holds the album."
+          },
+          "score": {
+            "type": "number",
+            "format": "float",
+            "description": "How strongly the album matched, from 1.0 (the best) down towards zero.\n\nThe catalog layer does not expose a relevance score yet, so a search\nranks each kind's hits by their position in the answer: the first hit is\n`1.0` and each later one is `1 / (offset + position + 1)`, which keeps a\nlater page's hits below an earlier page's. An entity page carries `1.0`\nfor its own entity and for every member it names."
+          },
+          "title": {
+            "type": "string",
+            "description": "The album's title."
+          },
+          "year": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The release year, when known."
+          }
+        }
       },
       "ApiKeyView": {
         "type": "object",
@@ -4193,6 +4935,154 @@
           "version": {
             "type": "string",
             "description": "The version the archive carries."
+          }
+        }
+      },
+      "ArtistPage": {
+        "type": "object",
+        "description": "One artist's page.",
+        "required": [
+          "id",
+          "name",
+          "sortName",
+          "links",
+          "hasImage",
+          "inLibrary",
+          "liked",
+          "disliked",
+          "topTracks",
+          "albums",
+          "similarArtists",
+          "complete"
+        ],
+        "properties": {
+          "albums": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlbumSummary"
+            },
+            "description": "The discography, one album per release group, newest first."
+          },
+          "biography": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The biography a provider stated, when one is stored."
+          },
+          "complete": {
+            "type": "boolean",
+            "description": "Whether the stored data covers the page."
+          },
+          "disliked": {
+            "type": "boolean",
+            "description": "Whether the caller dislikes the artist."
+          },
+          "hasImage": {
+            "type": "boolean",
+            "description": "Whether the server holds a portrait."
+          },
+          "id": {
+            "type": "string",
+            "description": "The artist's client id (`ar_...`)."
+          },
+          "inLibrary": {
+            "type": "boolean",
+            "description": "Whether the caller's personal library holds the artist."
+          },
+          "liked": {
+            "type": "boolean",
+            "description": "Whether the caller likes the artist."
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinkView"
+            },
+            "description": "The external pages the artist is linked from."
+          },
+          "name": {
+            "type": "string",
+            "description": "The artist's display name."
+          },
+          "rating": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The caller's rating, from 1 to 5.",
+            "minimum": 0
+          },
+          "similarArtists": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtistSummary"
+            },
+            "description": "Similar artists, at most twelve."
+          },
+          "sortName": {
+            "type": "string",
+            "description": "The ordering key derived from the name."
+          },
+          "topTracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrackSummary"
+            },
+            "description": "The artist's most popular tracks, at most five."
+          }
+        }
+      },
+      "ArtistRefView": {
+        "type": "object",
+        "description": "One artist as a list names it.",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The artist's client id (`ar_...`)."
+          },
+          "name": {
+            "type": "string",
+            "description": "The artist's display name."
+          }
+        }
+      },
+      "ArtistSummary": {
+        "type": "object",
+        "description": "One artist in a shelf or a result list.",
+        "required": [
+          "id",
+          "name",
+          "hasImage",
+          "inLibrary",
+          "score"
+        ],
+        "properties": {
+          "hasImage": {
+            "type": "boolean",
+            "description": "Whether the server holds a portrait."
+          },
+          "id": {
+            "type": "string",
+            "description": "The artist's client id (`ar_...`)."
+          },
+          "inLibrary": {
+            "type": "boolean",
+            "description": "Whether the caller's personal library holds the artist."
+          },
+          "name": {
+            "type": "string",
+            "description": "The artist's display name."
+          },
+          "score": {
+            "type": "number",
+            "format": "float",
+            "description": "How strongly the artist matched, from 1.0 (the best) down towards zero.\n\nThe catalog layer does not expose a relevance score yet, so a search\nranks each kind's hits by their position in the answer: the first hit is\n`1.0` and each later one is `1 / (offset + position + 1)`, which keeps a\nlater page's hits below an earlier page's. An entity page carries `1.0`\nfor its own entity and for every member it names."
           }
         }
       },
@@ -4639,6 +5529,42 @@
           }
         }
       },
+      "IndexStatus": {
+        "type": "object",
+        "description": "How the entity index queue stands.",
+        "required": [
+          "pending",
+          "failed",
+          "done",
+          "total"
+        ],
+        "properties": {
+          "done": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many entities this process has indexed.",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many entities failed their last pass and wait for a retry.",
+            "minimum": 0
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many entities are waiting to be indexed.",
+            "minimum": 0
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many entities this process has claimed.",
+            "minimum": 0
+          }
+        }
+      },
       "InstallRequest": {
         "type": "object",
         "description": "What an install asks for.",
@@ -4734,6 +5660,24 @@
           "layer": {
             "type": "string",
             "description": "The layer, for example `catalog` or `acquisition`."
+          }
+        }
+      },
+      "LinkView": {
+        "type": "object",
+        "description": "One external page an artist is linked from.",
+        "required": [
+          "kind",
+          "url"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "The kind of page, for example `wikipedia` or `homepage`."
+          },
+          "url": {
+            "type": "string",
+            "description": "The page's URL."
           }
         }
       },
@@ -5655,6 +6599,19 @@
           }
         }
       },
+      "RefreshView": {
+        "type": "object",
+        "description": "What one refresh request queued.",
+        "required": [
+          "queued"
+        ],
+        "properties": {
+          "queued": {
+            "type": "boolean",
+            "description": "Whether the entity was queued; always `true` on a 202."
+          }
+        }
+      },
       "RelocationView": {
         "type": "object",
         "description": "The files one maintenance pass moved or removed.",
@@ -5866,6 +6823,45 @@
           "jobId": {
             "type": "string",
             "description": "The queued job's id."
+          }
+        }
+      },
+      "SearchView": {
+        "type": "object",
+        "description": "One search's answer.",
+        "required": [
+          "artists",
+          "albums",
+          "tracks"
+        ],
+        "properties": {
+          "albums": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlbumSummary"
+            },
+            "description": "Matching albums, best first."
+          },
+          "artists": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtistSummary"
+            },
+            "description": "Matching artists, best first."
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The continuation of the one kind the request narrowed to, when more of\nits hits remain; `null` otherwise."
+          },
+          "tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrackSummary"
+            },
+            "description": "Matching tracks, best first."
           }
         }
       },
@@ -6227,6 +7223,133 @@
           }
         }
       },
+      "TopTracksView": {
+        "type": "object",
+        "description": "One artist's top tracks.",
+        "required": [
+          "tracks"
+        ],
+        "properties": {
+          "tracks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrackSummary"
+            },
+            "description": "The tracks, most popular first."
+          }
+        }
+      },
+      "TrackSummary": {
+        "type": "object",
+        "description": "One track as a page, a shelf or a result list names it.",
+        "required": [
+          "id",
+          "title",
+          "artists",
+          "availability",
+          "inLibrary",
+          "liked",
+          "disliked",
+          "hasImage",
+          "score"
+        ],
+        "properties": {
+          "albumId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The album's client id (`al_...`); `null` when the track has no album."
+          },
+          "albumTitle": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The album's title; `null` when the track has no album."
+          },
+          "artists": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtistRefView"
+            },
+            "description": "The credited artists, in order."
+          },
+          "availability": {
+            "type": "string",
+            "description": "The track's availability: `local`, `cached`, `acquiring`, `remote` or\n`unavailable`."
+          },
+          "discNumber": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The disc number within the release."
+          },
+          "disliked": {
+            "type": "boolean",
+            "description": "Whether the caller disliked the track."
+          },
+          "durationMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The track's length in milliseconds."
+          },
+          "explicit": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the track is explicit, when the tags say."
+          },
+          "hasImage": {
+            "type": "boolean",
+            "description": "Whether the server holds a cover for the track or its album."
+          },
+          "id": {
+            "type": "string",
+            "description": "The track's client id (`tr_...`), which `/rest/stream` accepts."
+          },
+          "inLibrary": {
+            "type": "boolean",
+            "description": "Whether the caller's personal library holds the track."
+          },
+          "liked": {
+            "type": "boolean",
+            "description": "Whether the caller liked the track."
+          },
+          "rating": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The caller's rating, from 1 to 5.",
+            "minimum": 0
+          },
+          "score": {
+            "type": "number",
+            "format": "float",
+            "description": "How strongly the track matched, from 1.0 (the best) down towards zero.\n\nThe catalog layer does not expose a relevance score yet, so a search\nranks each kind's hits by their position in the answer: the first hit is\n`1.0` and each later one is `1 / (offset + position + 1)`, which keeps a\nlater page's hits below an earlier page's. An entity page carries `1.0`\nfor its own entity and for every member it names."
+          },
+          "title": {
+            "type": "string",
+            "description": "The track's title."
+          },
+          "trackNumber": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The track number within its disc."
+          }
+        }
+      },
       "UnavailableView": {
         "type": "object",
         "description": "Why a plugin an index lists cannot be installed here.",
@@ -6571,6 +7694,22 @@
     {
       "name": "me",
       "description": "The caller's own credentials and settings"
+    },
+    {
+      "name": "library",
+      "description": "The caller's own music"
+    },
+    {
+      "name": "entities",
+      "description": "Artist, album and track pages"
+    },
+    {
+      "name": "search",
+      "description": "One query across the library and the catalog"
+    },
+    {
+      "name": "images",
+      "description": "The stored pictures of entities"
     },
     {
       "name": "playlists",

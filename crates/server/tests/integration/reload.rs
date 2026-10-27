@@ -227,7 +227,7 @@ async fn cancel_through_another_connection(path: &std::path::Path, id: uuid::Uui
 /// `hearthsound acquisitions cancel` writes the terminal row through its own
 /// connection and cannot reach the running process, so the reload path is what
 /// undoes the acquisition: the worker is woken, the staging directory is
-/// removed, and the track goes back to catalog-only availability.
+/// removed, and the track goes back to remote availability.
 #[tokio::test]
 async fn a_cancellation_written_by_another_connection_is_reconciled() {
     let fixture = crate::common::Fixture::new().await;

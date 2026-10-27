@@ -203,6 +203,10 @@ fn to_album_ref(remote: RemoteAlbum) -> AlbumRef {
             .collect(),
         year: remote.year,
         images: Vec::new(),
+        album_type: None,
+        edition: None,
+        track_count: None,
+        ids: vec![],
     }
 }
 
@@ -285,6 +289,10 @@ fn to_track(remote: RemoteTrack, cover_url: Option<&str>) -> Track {
                     }]
                 })
                 .unwrap_or_default(),
+            album_type: None,
+            edition: None,
+            track_count: None,
+            ids: vec![],
         }),
         duration_ms: remote.duration_ms,
         disc_number: None,
@@ -380,6 +388,9 @@ impl catalog::Guest for HttpCatalog {
     }
 
     fn lookup_isrc(_isrc: String) -> Result<Vec<Track>, ProviderError> {
+        Ok(vec![])
+    }
+    fn lookup_album(_ids: Vec<IdPair>) -> Result<Vec<AlbumRef>, ProviderError> {
         Ok(vec![])
     }
 }

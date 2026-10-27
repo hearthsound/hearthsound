@@ -38,6 +38,11 @@
 //! | `GET`/`PATCH /api/v1/admin/settings` | administrators |
 //! | `GET /api/v1/admin/acquisitions`, `POST /api/v1/admin/acquisitions/{id}/cancel`, `POST /api/v1/admin/acquisitions/{id}/retry` | administrators |
 //! | `GET /api/v1/admin/storage`, `POST /api/v1/admin/storage/evict` | administrators |
+//! | `GET /api/v1/admin/index`, `POST /api/v1/admin/entities/{id}/refresh` | administrators |
+//! | `GET /api/v1/artists/{id}`, `GET /api/v1/artists/{id}/top-tracks` | any user |
+//! | `GET /api/v1/albums/{id}`, `GET /api/v1/tracks/{id}` | any user |
+//! | `GET /api/v1/search` | any user |
+//! | `GET /api/v1/images/{id}` | any user |
 //! | `GET`/`POST /api/v1/admin/plugins`, `POST /api/v1/admin/plugins/upload`, `POST /api/v1/admin/plugins/inspect`, `GET /api/v1/admin/plugins/available` | administrators |
 //! | `GET`/`DELETE /api/v1/admin/plugins/{id}`, `POST /api/v1/admin/plugins/{id}/{enable,disable,decline-upgrade}` | administrators |
 //! | `POST /api/v1/admin/plugins/{id}/approve`, which applies a staged upgrade | administrators |
@@ -88,6 +93,10 @@ pub const OPENAPI_PATH: &str = "/api/v1/openapi.json";
         (name = "system", description = "What the server is and offers"),
         (name = "auth", description = "Web sessions"),
         (name = "me", description = "The caller's own credentials and settings"),
+        (name = "library", description = "The caller's own music"),
+        (name = "entities", description = "Artist, album and track pages"),
+        (name = "search", description = "One query across the library and the catalog"),
+        (name = "images", description = "The stored pictures of entities"),
         (name = "playlists", description = "The caller's own playlists"),
         (name = "admin", description = "Server administration"),
         (name = "uploads", description = "Audio files sent into the caller's library"),
@@ -213,6 +222,14 @@ fn api_router() -> OpenApiRouter<NativeState> {
         .routes(routes!(routes::events::create_ticket))
         .routes(routes!(routes::events::stream))
         .routes(routes!(routes::library::collection_queue))
+        .routes(routes!(routes::entities::artist_page))
+        .routes(routes!(routes::entities::artist_top_tracks))
+        .routes(routes!(routes::entities::album_page))
+        .routes(routes!(routes::entities::track_page))
+        .routes(routes!(routes::search::search))
+        .routes(routes!(routes::images::entity_image))
+        .routes(routes!(routes::admin_index::index_status))
+        .routes(routes!(routes::admin_index::refresh_entity))
         .routes(routes!(routes::playlists::reorder_playlist))
         .routes(routes!(routes::playlists::add_playlist_tracks))
         .merge(

@@ -403,6 +403,7 @@ pub async fn delete_provider(
         .instance_by_slug(&slug)
         .await
         .map_err(|error| problem::internal("reading a provider instance", &error))?;
+    let instance_id = row.as_ref().map(|row| row.id);
     let removed = match row {
         Some(row) => state
             .activity()
@@ -420,6 +421,19 @@ pub async fn delete_provider(
         .delete(&slug)
         .await
         .map_err(|error| instance_problem(&error))?;
+    if let Some(instance_id) = instance_id
+        && let Err(error) = state
+            .services()
+            .catalog
+            .invalidate_instance(instance_id)
+            .await
+    {
+        tracing::warn!(
+            %error,
+            instance = %slug,
+            "the removed instance's cached answers could not be dropped"
+        );
+    }
     rebuild(&state).await?;
     publish_deleted_playlists(&state, removed);
     Ok(StatusCode::NO_CONTENT)
@@ -627,6 +641,7 @@ fn instance_problem(error: &InstanceError) -> Problem {
         InstanceError::SlugTaken(_) | InstanceError::PluginMismatch { .. } => {
             Problem::conflict(error.to_string())
         }
+        InstanceError::Required { .. } => Problem::plugin_required(error.to_string()),
         InstanceError::UnknownPlugin(_)
         | InstanceError::PluginDisabled(_)
         | InstanceError::ServerConfig(_)
@@ -650,6 +665,16 @@ fn instance_problem(error: &InstanceError) -> Problem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_required_plugin_refusal_is_a_409_with_its_own_code() {
+        let problem = instance_problem(&InstanceError::Required {
+            plugin_id: "app.hearthsound.musicbrainz".to_owned(),
+        });
+
+        assert_eq!(problem.status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(problem.code, "plugin-required");
+    }
 
     #[test]
     fn the_document_describes_the_provider_routes() {

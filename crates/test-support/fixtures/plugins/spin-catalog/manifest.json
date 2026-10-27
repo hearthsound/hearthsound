@@ -4,23 +4,44 @@
   "name": "Spin catalog",
   "version": "0.1.0",
   "description": "Test fixture whose search never returns.",
-  "authors": ["Hearthsound contributors"],
+  "authors": [
+    "Hearthsound contributors"
+  ],
   "license": "MIT OR Apache-2.0",
   "homepage": "https://github.com/hearthsound/plugin-template-rust",
-  "api": "hearthsound:plugin@0.4.0",
-  "provides": ["catalog"],
+  "api": "hearthsound:plugin@0.5.0",
+  "provides": [
+    "catalog"
+  ],
   "permissions": {},
   "config": {
     "server": {
       "schema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
-        "properties": { "greeting": { "type": "string", "title": "Greeting", "default": "Hello" } }
+        "properties": {
+          "greeting": {
+            "type": "string",
+            "title": "Greeting",
+            "default": "Hello"
+          }
+        }
       },
-      "uiSchema": { "type": "VerticalLayout", "elements": [ { "type": "Control", "scope": "#/properties/greeting" } ] }
+      "uiSchema": {
+        "type": "VerticalLayout",
+        "elements": [
+          {
+            "type": "Control",
+            "scope": "#/properties/greeting"
+          }
+        ]
+      }
     },
     "user": null
   },
-  "resources": { "memoryMb": 64, "callTimeoutMs": 250, "maxInstances": 1 },
-  "catalog": { "imageCachePolicy": "cache" }
+  "resources": {
+    "memoryMb": 64,
+    "callTimeoutMs": 250,
+    "maxInstances": 1
+  }
 }

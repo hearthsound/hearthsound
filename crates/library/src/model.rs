@@ -11,10 +11,9 @@
 //! folders and media files have no client-facing id, so they use a plain
 //! [`Uuid`] primary key.
 
-use std::fmt;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
+use hearthsound_core::providers::ExternalId;
 use hearthsound_core::{Availability, EntityId, IdPrefix, QualityTier, StorageClass};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -58,80 +57,6 @@ pub fn sort_key(text: &str) -> String {
         }
     }
     out
-}
-
-/// Where an entity row came from.
-///
-/// The literals are the values stored in `artists.origin`, `albums.origin`, and
-/// `tracks.origin`, so they must not be renamed.
-///
-/// # Examples
-///
-/// ```
-/// use hearthsound_library::Origin;
-///
-/// assert_eq!(Origin::Catalog.as_str(), "catalog");
-/// assert_eq!("local".parse::<Origin>().unwrap(), Origin::Local);
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Origin {
-    /// Created by scanning a folder or ingesting an upload.
-    Local,
-    /// Materialized from a catalog provider.
-    Catalog,
-}
-
-impl Origin {
-    /// Every origin, in a fixed order.
-    pub const ALL: [Origin; 2] = [Origin::Local, Origin::Catalog];
-
-    /// Returns the literal stored in the `origin` column.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Origin::Local => "local",
-            Origin::Catalog => "catalog",
-        }
-    }
-
-    /// Parses an origin from its literal.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UnknownOrigin`] when `value` is not one of the literals
-    /// produced by [`Origin::as_str`].
-    pub fn from_literal(value: &str) -> Result<Origin, UnknownOrigin> {
-        Origin::ALL
-            .iter()
-            .copied()
-            .find(|origin| origin.as_str() == value)
-            .ok_or_else(|| UnknownOrigin(value.to_owned()))
-    }
-}
-
-impl fmt::Display for Origin {
-    /// Writes the literal.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// The error returned when a string is not a known [`Origin`].
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("unknown origin `{0}`")]
-pub struct UnknownOrigin(pub String);
-
-impl FromStr for Origin {
-    type Err = UnknownOrigin;
-
-    /// Parses an origin from its literal.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UnknownOrigin`] when `s` is not a known origin.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Origin::from_literal(s)
-    }
 }
 
 /// The managed storage roots a media file's path is resolved against.
@@ -200,10 +125,22 @@ pub struct Artist {
     pub name: String,
     /// The ordering key derived from the name.
     pub sort_name: String,
-    /// The MusicBrainz artist id, when known.
-    pub mb_artist_id: Option<String>,
-    /// Where the row came from.
-    pub origin: Origin,
+    /// The artist's biography, as a provider stated it.
+    pub biography: Option<String>,
+    /// The artist's external links, as JSON `[{"kind", "url"}]`.
+    pub links: String,
+    /// The number of albums a provider reports for the artist.
+    pub album_count: Option<i64>,
+    /// The file tags the row was written from, as JSON.
+    pub file_tags: Option<String>,
+    /// When provider data was last fetched for the row, in unix milliseconds.
+    pub fetched_at: Option<i64>,
+    /// When the artist's own page data was last fetched.
+    pub page_fetched_at: Option<i64>,
+    /// When the artist was last deep-indexed.
+    pub deep_indexed_at: Option<i64>,
+    /// When the artist was last viewed.
+    pub viewed_at: Option<i64>,
     /// When the row was created, in unix milliseconds.
     pub created_at: i64,
     /// When the row was last written, in unix milliseconds.
@@ -227,17 +164,21 @@ pub struct Album {
     pub release_date: Option<String>,
     /// The release type, for example `album` or `single`, when known.
     pub album_type: Option<String>,
-    /// The MusicBrainz release id, when known.
-    pub mb_release_id: Option<String>,
-    /// The MusicBrainz release-group id, when known.
-    pub mb_release_group_id: Option<String>,
-    /// The release UPC, when known.
-    pub upc: Option<String>,
     /// The edition label that tells this release apart from another release of
     /// the same title, when it states one.
     pub edition: Option<String>,
-    /// Where the row came from.
-    pub origin: Origin,
+    /// The number of tracks a provider reports for the release.
+    pub track_count: Option<i64>,
+    /// The file tags the row was written from, as JSON.
+    pub file_tags: Option<String>,
+    /// When provider data was last fetched for the row, in unix milliseconds.
+    pub fetched_at: Option<i64>,
+    /// When the album's page data was last fetched.
+    pub page_fetched_at: Option<i64>,
+    /// When the album was last deep-indexed.
+    pub deep_indexed_at: Option<i64>,
+    /// When the album was last viewed.
+    pub viewed_at: Option<i64>,
     /// When the row was created, in unix milliseconds.
     pub created_at: i64,
     /// When the row was last written, in unix milliseconds.
@@ -263,14 +204,14 @@ pub struct Track {
     pub track_number: Option<i64>,
     /// The duration in milliseconds, when known.
     pub duration_ms: Option<i64>,
-    /// The International Standard Recording Code, when known.
-    pub isrc: Option<String>,
-    /// The MusicBrainz recording id, when known.
-    pub mb_recording_id: Option<String>,
     /// Whether the track is explicit, when the tags say.
     pub explicit: Option<bool>,
-    /// Where the row came from.
-    pub origin: Origin,
+    /// The file tags the row was written from, as JSON.
+    pub file_tags: Option<String>,
+    /// When provider data was last fetched for the row, in unix milliseconds.
+    pub fetched_at: Option<i64>,
+    /// When the track was last deep-indexed.
+    pub deep_indexed_at: Option<i64>,
     /// The track's availability on this server.
     pub availability: Availability,
     /// The instant before which an `unavailable` track is not retried, in unix
@@ -521,13 +462,10 @@ pub struct Credit {
 /// # Examples
 ///
 /// ```
-/// use hearthsound_library::{ArtistInput, Origin};
+/// use hearthsound_library::ArtistInput;
 ///
 /// let input = ArtistInput::new("Energy 52");
 /// assert_eq!(input.name, "Energy 52");
-///
-/// let catalog = ArtistInput::new("Energy 52").origin(Origin::Catalog);
-/// assert_eq!(catalog.origin, Origin::Catalog);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtistInput {
@@ -535,8 +473,10 @@ pub struct ArtistInput {
     pub name: String,
     /// The ordering key, derived from the name when omitted.
     pub sort_name: Option<String>,
-    /// The MusicBrainz artist id, when known.
-    pub mb_artist_id: Option<String>,
+    /// Every identifier the writer knows for the artist.
+    pub ids: Vec<ExternalId>,
+    /// The file tags the writer read for the row, as JSON.
+    pub file_tags: Option<serde_json::Value>,
     /// The stored row the caller already resolved this input to, if it has.
     ///
     /// A caller that knows which row an artist is (the catalog layer, which
@@ -545,16 +485,10 @@ pub struct ArtistInput {
     /// instead of applying the name rule to a name that two identified artists
     /// may share.
     pub row: Option<EntityId>,
-    /// Where the row comes from.
-    pub origin: Origin,
 }
 
 impl ArtistInput {
     /// Builds an input with only a name.
-    ///
-    /// The origin is [`Origin::Local`], which is what a scan or an upload
-    /// writes; a caller materializing a catalog entity sets
-    /// [`ArtistInput::origin`] instead.
     ///
     /// # Parameters
     ///
@@ -563,9 +497,9 @@ impl ArtistInput {
         ArtistInput {
             name: name.into(),
             sort_name: None,
-            mb_artist_id: None,
+            ids: Vec::new(),
+            file_tags: None,
             row: None,
-            origin: Origin::Local,
         }
     }
 
@@ -580,27 +514,6 @@ impl ArtistInput {
     /// - `row`: the artist row the caller resolved the input to.
     pub fn row(mut self, row: EntityId) -> ArtistInput {
         self.row = Some(row);
-        self
-    }
-
-    /// Sets the MusicBrainz artist id.
-    ///
-    /// # Parameters
-    ///
-    /// - `mb_artist_id`: the MBID, when known.
-    pub fn mb_artist_id(mut self, mb_artist_id: impl Into<String>) -> ArtistInput {
-        self.mb_artist_id = Some(mb_artist_id.into());
-        self
-    }
-
-    /// Sets where the row comes from.
-    ///
-    /// # Parameters
-    ///
-    /// - `origin`: [`Origin::Local`] for a scanned or uploaded artist,
-    ///   [`Origin::Catalog`] for one materialized from a catalog provider.
-    pub fn origin(mut self, origin: Origin) -> ArtistInput {
-        self.origin = origin;
         self
     }
 }
@@ -698,16 +611,14 @@ pub struct AlbumInput {
     pub release_date: Option<String>,
     /// The release type, when known.
     pub album_type: Option<String>,
-    /// The MusicBrainz release id, when known.
-    pub mb_release_id: Option<String>,
-    /// The MusicBrainz release-group id, when known.
-    pub mb_release_group_id: Option<String>,
-    /// The release UPC, when known.
-    pub upc: Option<String>,
+    /// The number of tracks a provider reports for the release, when known.
+    pub track_count: Option<i64>,
+    /// Every identifier the writer knows for the album.
+    pub ids: Vec<ExternalId>,
+    /// The file tags the writer read for the row, as JSON.
+    pub file_tags: Option<serde_json::Value>,
     /// What the writer states about the album's edition label.
     pub edition: EditionInput,
-    /// Where the row comes from.
-    pub origin: Origin,
 }
 
 impl AlbumInput {
@@ -716,8 +627,7 @@ impl AlbumInput {
     /// # Parameters
     ///
     /// - `title`: the album title.
-    /// - `origin`: where the row comes from.
-    pub fn new(title: impl Into<String>, origin: Origin) -> AlbumInput {
+    pub fn new(title: impl Into<String>) -> AlbumInput {
         AlbumInput {
             title: title.into(),
             sort_title: None,
@@ -725,11 +635,10 @@ impl AlbumInput {
             year: None,
             release_date: None,
             album_type: None,
-            mb_release_id: None,
-            mb_release_group_id: None,
-            upc: None,
+            track_count: None,
+            ids: Vec::new(),
+            file_tags: None,
             edition: EditionInput::default(),
-            origin,
         }
     }
 }
@@ -751,14 +660,12 @@ pub struct TrackInput {
     pub track_number: Option<i64>,
     /// The duration in milliseconds, when known.
     pub duration_ms: Option<i64>,
-    /// The International Standard Recording Code, when known.
-    pub isrc: Option<String>,
-    /// The MusicBrainz recording id, when known.
-    pub mb_recording_id: Option<String>,
     /// Whether the track is explicit, when the tags say.
     pub explicit: Option<bool>,
-    /// Where the row comes from.
-    pub origin: Origin,
+    /// Every identifier the writer knows for the track.
+    pub ids: Vec<ExternalId>,
+    /// The file tags the writer read for the row, as JSON.
+    pub file_tags: Option<serde_json::Value>,
     /// The track's availability on this server.
     pub availability: Availability,
     /// The instant before which an `unavailable` track is not retried, in unix
@@ -767,14 +674,13 @@ pub struct TrackInput {
 }
 
 impl TrackInput {
-    /// Builds an input for a title and an origin.
+    /// Builds an input for a title and an availability.
     ///
     /// # Parameters
     ///
     /// - `title`: the track title.
-    /// - `origin`: where the row comes from.
     /// - `availability`: the track's availability.
-    pub fn new(title: impl Into<String>, origin: Origin, availability: Availability) -> TrackInput {
+    pub fn new(title: impl Into<String>, availability: Availability) -> TrackInput {
         TrackInput {
             album_id: None,
             title: title.into(),
@@ -783,10 +689,9 @@ impl TrackInput {
             disc_number: None,
             track_number: None,
             duration_ms: None,
-            isrc: None,
-            mb_recording_id: None,
             explicit: None,
-            origin,
+            ids: Vec::new(),
+            file_tags: None,
             availability,
             unavailable_until: None,
         }

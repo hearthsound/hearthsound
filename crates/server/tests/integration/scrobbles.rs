@@ -16,7 +16,7 @@
 use std::time::{Duration, Instant};
 
 use hearthsound_core::{Availability, EntityId, IdPrefix, Layer};
-use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, Origin, TrackInput};
+use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, TrackInput};
 use hearthsound_plugin_host::{PluginRepository, PluginSource};
 use hearthsound_test_support::{SCROBBLE_FIXTURE, fixture_plugin};
 use reqwest::StatusCode;
@@ -109,13 +109,13 @@ async fn link(fixture: &Fixture) {
 async fn insert_track(fixture: &Fixture) -> EntityId {
     let database = fixture.services.database();
     let library = LibraryRepository::new(database);
-    let mut album = AlbumInput::new("Fixture Album", Origin::Catalog);
+    let mut album = AlbumInput::new("Fixture Album");
     album.display_artist = Some("Fixture Artist".to_owned());
     let album_id = library
         .upsert_album(&album, &[ArtistCredit::new("Fixture Artist", "main")])
         .await
         .unwrap();
-    let mut input = TrackInput::new("Fixture Song", Origin::Catalog, Availability::Remote);
+    let mut input = TrackInput::new("Fixture Song", Availability::Remote);
     input.album_id = Some(EntityId::from_uuid(IdPrefix::Album, album_id.uuid()));
     input.track_number = Some(1);
     library

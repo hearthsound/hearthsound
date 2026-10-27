@@ -11,9 +11,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::http::{HeaderName, Method, StatusCode, header};
-use hearthsound_core::{Availability, CatalogId, EntityId, EntityKind, IdPrefix, Slug};
+use hearthsound_core::{Availability, EntityId, IdPrefix};
 use hearthsound_library::{
-    AlbumInput, ArtistCredit, LibraryRepository, Origin, ScannedMediaFile, TrackInput,
+    AlbumInput, ArtistCredit, LibraryRepository, ScannedMediaFile, TrackInput,
 };
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
 use uuid::Uuid;
@@ -78,13 +78,10 @@ async fn streamed_as(
         .unwrap();
     let credit = ArtistCredit::new("Echo", "main");
     let album = library
-        .upsert_album(
-            &AlbumInput::new("Streaming", Origin::Local),
-            std::slice::from_ref(&credit),
-        )
+        .upsert_album(&AlbumInput::new("Streaming"), std::slice::from_ref(&credit))
         .await
         .unwrap();
-    let mut input = TrackInput::new("Streamed", Origin::Local, Availability::Local);
+    let mut input = TrackInput::new("Streamed", Availability::Local);
     input.album_id = Some(album);
     input.display_artist = Some("Echo".to_owned());
     input.track_number = Some(1);
@@ -483,15 +480,19 @@ async fn stream_answers_an_unknown_track_with_404() {
 }
 
 #[tokio::test]
-async fn stream_answers_a_catalog_id_with_404() {
+async fn stream_answers_a_provider_id_with_404() {
     let streamed = streamed().await;
     let app = streamed.fixture.app();
-    let id = CatalogId::new(Slug::new("hello").unwrap(), EntityKind::Track, "hello-1").unwrap();
 
+    // A provider id is not an entity id: every entity the server knows has a
+    // row, so a client that kept one answers 404 rather than a stream.
     let probe = request(
         &app,
         Method::GET,
-        &format!("/rest/stream?id={id}&apiKey={}", streamed.fixture.api_key),
+        &format!(
+            "/rest/stream?id=x_hello_t_hello-1&apiKey={}",
+            streamed.fixture.api_key
+        ),
         &[],
     )
     .await;
@@ -507,13 +508,10 @@ async fn stream_answers_a_track_without_a_file_with_404() {
     let library = LibraryRepository::new(&streamed.fixture.database);
     let credit = ArtistCredit::new("Echo", "main");
     let album = library
-        .upsert_album(
-            &AlbumInput::new("Empty", Origin::Local),
-            std::slice::from_ref(&credit),
-        )
+        .upsert_album(&AlbumInput::new("Empty"), std::slice::from_ref(&credit))
         .await
         .unwrap();
-    let mut input = TrackInput::new("Pending", Origin::Local, Availability::Remote);
+    let mut input = TrackInput::new("Pending", Availability::Remote);
     input.album_id = Some(album);
     let pending = library
         .insert_track(&input, std::slice::from_ref(&credit), &[])

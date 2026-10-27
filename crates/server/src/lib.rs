@@ -52,9 +52,11 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod bundled;
 mod cors;
 mod error;
 pub mod http;
+pub mod index_jobs;
 pub mod jobs;
 pub mod paths;
 mod reload;

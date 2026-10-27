@@ -1,9 +1,16 @@
-//! The database reads the browse endpoints share.
+//! The database reads and id resolutions the browse endpoints share.
 //!
 //! The scope-filtered queries live in `hearthsound_library::query`; this module
 //! adds the preferred media file row a projection needs, which the query
 //! projection does not carry in full, and maps a library failure onto the
 //! Subsonic failure envelope. `search3` reuses [`track`] for its local results.
+//!
+//! It also owns the one rule every endpoint follows when it reads an `id`
+//! parameter: the value is an [`EntityId`], and the row it names is the one
+//! [`CatalogService::canonical`](hearthsound_catalog::CatalogService::canonical)
+//! returns, so an id that was merged away answers the survivor and an id that
+//! names nothing is a not-found. A client never writes a provider id: every
+//! entity a response describes has a row.
 //!
 //! Each load acquires one reader connection for the whole entity, so a load
 //! never holds more than one connection at a time and the pool cannot be
@@ -11,19 +18,160 @@
 
 use std::collections::HashMap;
 
+use futures_util::stream::{self, StreamExt, TryStreamExt};
 use hearthsound_activity::{ActivityError, Annotation, load_annotations};
 use hearthsound_core::EntityId;
 use hearthsound_core::EntityKind;
+use hearthsound_core::IdPrefix;
+use hearthsound_core::providers::ExternalId;
 use hearthsound_db::Database;
 use hearthsound_library::query::{
-    AlbumDetail, AlbumSort, ArtistDetail, ArtistSort, ArtistSummary, GenreCount, Scope,
-    SearchResults, TrackSort, TrackView,
+    AlbumDetail, AlbumSort, ArtistDetail, ArtistSort, ArtistSummary, GenreCount, Scope, TrackSort,
+    TrackView,
 };
-use hearthsound_library::{Album, Artist, LibraryError, MediaFile, artists, media_files, query};
+use hearthsound_library::{
+    Album, Artist, LibraryError, MediaFile, artists, external_ids, media_files, query,
+};
 use uuid::Uuid;
 
+use crate::auth::Call;
+use crate::catalog;
+use crate::projection;
 use crate::response::SubsonicError;
 use crate::state::SubsonicState;
+use crate::value::Object;
+
+/// How many rows one response reads at once.
+///
+/// Four, which is the number of reader connections the database pool holds: a
+/// listing then never waits for a connection it is itself holding.
+const READ_PARALLELISM: usize = 4;
+
+/// Resolves the entity an `id` parameter names, of the kind the endpoint reads.
+///
+/// # Parameters
+///
+/// - `state`: the endpoint state, whose catalog layer resolves the redirects a
+///   merge leaves.
+/// - `expected`: the id prefix the endpoint can answer for.
+/// - `value`: the id the client wrote.
+///
+/// # Returns
+///
+/// The row that stands for the entity now, or `None` when the value is not an
+/// id of that kind or names no row.
+///
+/// # Errors
+///
+/// Returns a generic Subsonic error when the redirect lookup fails.
+pub(crate) async fn entity_id(
+    state: &SubsonicState,
+    expected: IdPrefix,
+    value: &str,
+) -> Result<Option<EntityId>, SubsonicError> {
+    let Ok(id) = EntityId::parse(value) else {
+        tracing::debug!(value, "a request named an id that is not an entity id");
+        return Ok(None);
+    };
+    if id.kind() != expected {
+        tracing::debug!(
+            id = %id,
+            expected = expected.as_str(),
+            "a request named an entity of another kind"
+        );
+        return Ok(None);
+    }
+    let Some(kind) = expected.entity_kind() else {
+        return Ok(None);
+    };
+    match state.catalog().canonical(kind, id).await {
+        Ok(found) => Ok(found),
+        Err(error) => Err(catalog::failure(&error)),
+    }
+}
+
+/// Resolves the entity an `id` parameter names, of any kind the server stores.
+///
+/// # Parameters
+///
+/// - `state`: the endpoint state, whose catalog layer resolves the redirects a
+///   merge leaves.
+/// - `value`: the id the client wrote.
+///
+/// # Returns
+///
+/// The row that stands for the entity now, or `None` when the value is not an
+/// entity id of a catalog kind or names no row. The kind is the id's own, which
+/// the survivor of a merge keeps.
+///
+/// # Errors
+///
+/// Returns a generic Subsonic error when the redirect lookup fails.
+pub(crate) async fn any_entity(
+    state: &SubsonicState,
+    value: &str,
+) -> Result<Option<EntityId>, SubsonicError> {
+    let Ok(id) = EntityId::parse(value) else {
+        tracing::debug!(value, "a request named an id that is not an entity id");
+        return Ok(None);
+    };
+    if id.kind().entity_kind().is_none() {
+        tracing::debug!(id = %id, "a request named a record that is not an entity");
+        return Ok(None);
+    }
+    entity_id(state, id.kind(), value).await
+}
+
+/// Reads the identifiers of many entities of one kind.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `kind`: the entity kind.
+/// - `ids`: the rows' raw primary keys.
+///
+/// # Returns
+///
+/// The identifiers of every row that has any, keyed by the row's primary key.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a read fails.
+pub(crate) async fn identifiers(
+    database: &Database,
+    kind: EntityKind,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<ExternalId>>, LibraryError> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut conn = database.readers().acquire().await?;
+    external_ids::ids_of_many(&mut conn, kind, ids).await
+}
+
+/// Reads the identifiers of one entity.
+///
+/// # Parameters
+///
+/// - `database`: the open database.
+/// - `kind`: the entity kind.
+/// - `id`: the row's raw primary key.
+///
+/// # Returns
+///
+/// The identifiers, empty when the entity carries none.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a read fails.
+pub(crate) async fn identifiers_of(
+    database: &Database,
+    kind: EntityKind,
+    id: Uuid,
+) -> Result<Vec<ExternalId>, LibraryError> {
+    let mut conn = database.readers().acquire().await?;
+    external_ids::ids_of(&mut conn, kind, id).await
+}
 
 /// A track with the data a `Child` projection reports.
 #[derive(Debug, Clone)]
@@ -34,129 +182,6 @@ pub(crate) struct LoadedTrack {
     pub(crate) file: Option<MediaFile>,
     /// The credited artists of the track's album, empty when it has no album.
     pub(crate) album_artists: Vec<Artist>,
-}
-
-/// Reads one track, if the scope contains it.
-///
-/// # Parameters
-///
-/// - `database`: the open database.
-/// - `scope`: the scope to filter by.
-/// - `track_id`: the track to read.
-///
-/// # Returns
-///
-/// The track with its file and its album's artists, or `None` when the track
-/// does not exist or is outside the scope.
-///
-/// # Errors
-///
-/// Returns [`LibraryError`] when a query fails.
-pub(crate) async fn track(
-    database: &Database,
-    scope: Scope,
-    track_id: EntityId,
-) -> Result<Option<LoadedTrack>, LibraryError> {
-    let mut conn = database.readers().acquire().await?;
-    let Some(view) = query::track(&mut conn, scope, track_id).await? else {
-        return Ok(None);
-    };
-    let file = media_files::preferred_media_file(&mut conn, track_id).await?;
-    let album_artists = match view.album.as_ref() {
-        Some(album) => artists::list_album_artists(&mut conn, album.id).await?,
-        None => Vec::new(),
-    };
-    Ok(Some(LoadedTrack {
-        view,
-        file,
-        album_artists,
-    }))
-}
-
-/// Reads one album, if the scope contains it.
-///
-/// # Parameters
-///
-/// - `database`: the open database.
-/// - `scope`: the scope to filter by.
-/// - `album_id`: the album to read.
-///
-/// # Returns
-///
-/// The album with its artists and tracks, or `None` when the album does not
-/// exist or is outside the scope.
-///
-/// # Errors
-///
-/// Returns [`LibraryError`] when a query fails.
-pub(crate) async fn album(
-    database: &Database,
-    scope: Scope,
-    album_id: EntityId,
-) -> Result<Option<AlbumDetail>, LibraryError> {
-    let mut conn = database.readers().acquire().await?;
-    query::album_detail(&mut conn, scope, album_id).await
-}
-
-/// Reads one track from the first scope that contains it.
-///
-/// # Parameters
-///
-/// - `database`: the open database.
-/// - `scopes`: the scopes to try, in preference order.
-/// - `track_id`: the track to read.
-///
-/// # Returns
-///
-/// The track and the scope it was found in, or `None` when no scope contains
-/// it.
-///
-/// # Errors
-///
-/// Returns [`LibraryError`] when a query fails.
-pub(crate) async fn track_in_scopes(
-    database: &Database,
-    scopes: &[Scope],
-    track_id: EntityId,
-) -> Result<Option<(Scope, LoadedTrack)>, LibraryError> {
-    for scope in scopes {
-        if let Some(loaded) = track(database, *scope, track_id).await? {
-            return Ok(Some((*scope, loaded)));
-        }
-    }
-    Ok(None)
-}
-
-/// Reads one album for a listing that does not project its files.
-///
-/// A listing that reports an album - the artist detail, the album list - builds
-/// each album's payload from its row, its artists and its track titles, and
-/// never asks for the track's files: an album names its own cover art, and the
-/// endpoint that serves the image resolves whether there is one. Reading each
-/// track's preferred file here would double the reads of a listing and change
-/// nothing in the response.
-///
-/// # Parameters
-///
-/// - `database`: the open database.
-/// - `scope`: the scope to filter by.
-/// - `album_id`: the album to read.
-///
-/// # Returns
-///
-/// The album with its artists and tracks, or `None` when the album does not
-/// exist or is outside the scope.
-///
-/// # Errors
-///
-/// Returns [`LibraryError`] when a query fails.
-pub(crate) async fn album_summary(
-    database: &Database,
-    scope: Scope,
-    album_id: EntityId,
-) -> Result<Option<AlbumDetail>, LibraryError> {
-    let mut conn = database.readers().acquire().await?;
-    query::album_detail(&mut conn, scope, album_id).await
 }
 
 /// Reads one album without an availability filter.
@@ -370,32 +395,6 @@ pub(crate) async fn annotation(
     Ok(annotations.remove(&id).unwrap_or_default())
 }
 
-/// Lists the most played songs crediting an artist.
-///
-/// # Parameters
-///
-/// - `database`: the open database.
-/// - `scope`: the scope to count in.
-/// - `artist_id`: the artist whose songs are listed.
-/// - `count`: the maximum number of songs.
-///
-/// # Returns
-///
-/// The songs, most played first.
-///
-/// # Errors
-///
-/// Returns [`LibraryError`] when a read fails.
-pub(crate) async fn top_tracks_for_artist(
-    database: &Database,
-    scope: Scope,
-    artist_id: EntityId,
-    count: i64,
-) -> Result<Vec<TrackView>, LibraryError> {
-    let mut conn = database.readers().acquire().await?;
-    query::top_tracks_for_artist(&mut conn, scope, artist_id, count).await
-}
-
 /// Finds one artist by name.
 ///
 /// # Parameters
@@ -579,62 +578,6 @@ pub(crate) async fn list_tracks(
     query::list_tracks(&mut conn, scope, sort, genre, limit, offset).await
 }
 
-/// Searches the local full-text index for one entity kind.
-///
-/// # Parameters
-///
-/// - `database`: the open database.
-/// - `scope`: the scope to filter by.
-/// - `text`: the raw search text.
-/// - `kind`: the entity kind to search.
-/// - `limit`: the maximum number of results.
-/// - `offset`: how many results to skip.
-///
-/// # Returns
-///
-/// The matching entities, in relevance order, inside the one list the kind
-/// names.
-///
-/// # Errors
-///
-/// Returns [`LibraryError`] when a query fails.
-pub(crate) async fn search(
-    database: &Database,
-    scope: Scope,
-    text: &str,
-    kind: EntityKind,
-    limit: i64,
-    offset: i64,
-) -> Result<SearchResults, LibraryError> {
-    let mut conn = database.readers().acquire().await?;
-    query::search(&mut conn, scope, text, &[kind], limit, offset).await
-}
-
-/// Reads one artist with its albums, if the scope contains it.
-///
-/// # Parameters
-///
-/// - `database`: the open database.
-/// - `scope`: the scope to filter by.
-/// - `artist_id`: the artist to read.
-///
-/// # Returns
-///
-/// The artist detail, or `None` when the artist does not exist or is outside
-/// the scope.
-///
-/// # Errors
-///
-/// Returns [`LibraryError`] when a query fails.
-pub(crate) async fn artist(
-    database: &Database,
-    scope: Scope,
-    artist_id: EntityId,
-) -> Result<Option<ArtistDetail>, LibraryError> {
-    let mut conn = database.readers().acquire().await?;
-    query::artist_detail(&mut conn, scope, artist_id).await
-}
-
 /// Lists the albums in scope.
 ///
 /// # Parameters
@@ -661,4 +604,398 @@ pub(crate) async fn albums(
 ) -> Result<Vec<Album>, LibraryError> {
     let mut conn = database.readers().acquire().await?;
     query::list_albums(&mut conn, scope, sort, size, offset).await
+}
+
+/// The projection inputs of one tracklist.
+///
+/// A tracklist is read once for the whole page: the track rows with their
+/// preferred files, the caller's annotations, and the stored identifiers. An
+/// album page, a directory, a search answer and a single song are then projected
+/// from the same data, so they cannot disagree about a track.
+pub(crate) struct SongPage {
+    /// The track rows with their files, in playing order.
+    pub(crate) rows: Vec<LoadedTrack>,
+    /// The caller's annotations, keyed by track id.
+    annotations: HashMap<Uuid, Annotation>,
+    /// The stored identifiers, keyed by track id.
+    identifiers: HashMap<Uuid, Vec<ExternalId>>,
+    /// The suffix a remote title carries, when this caller is answered the way a
+    /// third-party client expects.
+    suffix: Option<String>,
+}
+
+impl SongPage {
+    /// Reads the projection inputs of one tracklist.
+    ///
+    /// # Parameters
+    ///
+    /// - `call`: the authenticated call.
+    /// - `ids`: the tracks of the list, in playing order.
+    ///
+    /// # Returns
+    ///
+    /// The inputs; a track that left the database between the view and this read
+    /// is left out.
+    ///
+    /// # Errors
+    ///
+    /// Answers a generic error when a read fails.
+    pub(crate) async fn of(call: &Call, ids: &[EntityId]) -> Result<SongPage, SubsonicError> {
+        if ids.is_empty() {
+            return Ok(SongPage {
+                rows: Vec::new(),
+                annotations: HashMap::new(),
+                identifiers: HashMap::new(),
+                suffix: None,
+            });
+        }
+        let database = call.state().database();
+        let reads: Vec<_> = ids.iter().map(|id| track_any(database, *id)).collect();
+        let loaded = stream::iter(reads)
+            .buffered(READ_PARALLELISM)
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|error| failure("a tracklist", &error))?;
+        let rows: Vec<LoadedTrack> = loaded.into_iter().flatten().collect();
+        let plain: Vec<Uuid> = rows.iter().map(|row| row.view.track.id.uuid()).collect();
+        let annotations = annotations(
+            call.state(),
+            call.principal().user_id.uuid(),
+            EntityKind::Track,
+            &plain,
+        )
+        .await
+        .map_err(|error| failure("a tracklist", &error))?;
+        let identifiers = identifiers(database, EntityKind::Track, &plain)
+            .await
+            .map_err(|error| failure("a tracklist", &error))?;
+        Ok(SongPage {
+            rows,
+            annotations,
+            identifiers,
+            suffix: remote_suffix(call),
+        })
+    }
+
+    /// Returns the identifier of each track, in playing order.
+    ///
+    /// # Returns
+    ///
+    /// The ids the prefetch scheduler records a listing with.
+    pub(crate) fn ids(&self) -> Vec<EntityId> {
+        self.rows.iter().map(|row| row.view.track.id).collect()
+    }
+
+    /// Returns the total length of the tracklist.
+    ///
+    /// # Returns
+    ///
+    /// The playing time in milliseconds, from each file when it has one and from
+    /// the row otherwise.
+    pub(crate) fn duration_ms(&self) -> i64 {
+        self.rows
+            .iter()
+            .map(|row| {
+                row.file
+                    .as_ref()
+                    .and_then(|file| file.duration_ms)
+                    .or(row.view.track.duration_ms)
+                    .unwrap_or(0)
+            })
+            .sum()
+    }
+
+    /// Returns the rows as the query projection reports them.
+    ///
+    /// # Returns
+    ///
+    /// One projection per track, in playing order.
+    pub(crate) fn views(&self) -> Vec<TrackView> {
+        self.rows.iter().map(|row| row.view.clone()).collect()
+    }
+
+    /// Returns the annotation of one track.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the track's raw primary key.
+    pub(crate) fn annotation(&self, id: Uuid) -> Annotation {
+        self.annotations.get(&id).copied().unwrap_or_default()
+    }
+
+    /// Projects one track as a `Child` member.
+    ///
+    /// # Parameters
+    ///
+    /// - `index`: the row's position in the page.
+    ///
+    /// # Returns
+    ///
+    /// The member.
+    pub(crate) fn object(&self, index: usize) -> Object {
+        let row = &self.rows[index];
+        let child = projection::child(
+            &row.view,
+            row.file.as_ref(),
+            &row.album_artists,
+            &self.annotation(row.view.track.id.uuid()),
+            self.identifiers
+                .get(&row.view.track.id.uuid())
+                .map_or(&[], Vec::as_slice),
+        );
+        match (&self.suffix, row.file.is_none()) {
+            (Some(suffix), true) => child.set("title", format!("{}{suffix}", row.view.track.title)),
+            _ => child,
+        }
+    }
+
+    /// Projects the page as `Child` members.
+    ///
+    /// # Returns
+    ///
+    /// One member per track, in playing order.
+    pub(crate) fn objects(&self) -> Vec<Object> {
+        (0..self.rows.len())
+            .map(|index| self.object(index))
+            .collect()
+    }
+}
+
+/// The projection inputs of one album listing.
+pub(crate) struct AlbumPage {
+    /// The albums that are still stored, in the order they were listed.
+    pub(crate) details: Vec<AlbumDetail>,
+    /// The caller's annotations, keyed by album id.
+    annotations: HashMap<Uuid, Annotation>,
+    /// The stored identifiers, keyed by album id.
+    identifiers: HashMap<Uuid, Vec<ExternalId>>,
+    /// The suffix a remote title carries, when this caller is answered the way a
+    /// third-party client expects.
+    suffix: Option<String>,
+}
+
+impl AlbumPage {
+    /// Reads the projection inputs of one album listing.
+    ///
+    /// # Parameters
+    ///
+    /// - `call`: the authenticated call.
+    /// - `ids`: the albums, in the order they are listed.
+    ///
+    /// # Errors
+    ///
+    /// Answers a generic error when a read fails.
+    pub(crate) async fn of(call: &Call, ids: &[EntityId]) -> Result<AlbumPage, SubsonicError> {
+        if ids.is_empty() {
+            return Ok(AlbumPage {
+                details: Vec::new(),
+                annotations: HashMap::new(),
+                identifiers: HashMap::new(),
+                suffix: None,
+            });
+        }
+        let database = call.state().database();
+        let reads: Vec<_> = ids
+            .iter()
+            .map(|id| album_summary_any(database, *id))
+            .collect();
+        let details = stream::iter(reads)
+            .buffered(READ_PARALLELISM)
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|error| failure("an album listing", &error))?;
+        let details: Vec<AlbumDetail> = details.into_iter().flatten().collect();
+        let plain: Vec<Uuid> = details
+            .iter()
+            .map(|detail| detail.album.id.uuid())
+            .collect();
+        let annotations = annotations(
+            call.state(),
+            call.principal().user_id.uuid(),
+            EntityKind::Album,
+            &plain,
+        )
+        .await
+        .map_err(|error| failure("an album listing", &error))?;
+        let identifiers = identifiers(database, EntityKind::Album, &plain)
+            .await
+            .map_err(|error| failure("an album listing", &error))?;
+        Ok(AlbumPage {
+            details,
+            annotations,
+            identifiers,
+            suffix: remote_suffix(call),
+        })
+    }
+
+    /// Returns the annotation of one album.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the album's raw primary key.
+    pub(crate) fn annotation(&self, id: Uuid) -> Annotation {
+        self.annotations.get(&id).copied().unwrap_or_default()
+    }
+
+    /// Projects one album as an `AlbumID3` member.
+    ///
+    /// # Parameters
+    ///
+    /// - `index`: the album's position in the page.
+    ///
+    /// # Returns
+    ///
+    /// The member.
+    pub(crate) fn id3(&self, index: usize) -> Object {
+        let detail = &self.details[index];
+        let album = projection::album_id3(
+            &detail.album,
+            &detail.artists,
+            &detail.tracks,
+            &self.annotation(detail.album.id.uuid()),
+            self.identifiers
+                .get(&detail.album.id.uuid())
+                .map_or(&[], Vec::as_slice),
+        );
+        self.with_suffix(detail, album)
+    }
+
+    /// Projects one album as a directory `Child` member.
+    ///
+    /// # Parameters
+    ///
+    /// - `index`: the album's position in the page.
+    ///
+    /// # Returns
+    ///
+    /// The member.
+    pub(crate) fn dir(&self, index: usize) -> Object {
+        let detail = &self.details[index];
+        let album = projection::album_dir(
+            &detail.album,
+            &detail.artists,
+            &detail.tracks,
+            &self.annotation(detail.album.id.uuid()),
+        );
+        self.with_suffix(detail, album)
+    }
+
+    /// Marks an album that holds no local track with the configured suffix.
+    ///
+    /// # Parameters
+    ///
+    /// - `detail`: the album the member was projected from.
+    /// - `album`: the projected member.
+    ///
+    /// # Returns
+    ///
+    /// The member, named with the suffix when the album is remote and this caller
+    /// is answered the way a third-party client expects.
+    fn with_suffix(&self, detail: &AlbumDetail, album: Object) -> Object {
+        match (
+            &self.suffix,
+            detail.tracks.iter().any(|track| track.file.is_some()),
+        ) {
+            (Some(suffix), false) => album
+                .set("name", format!("{}{suffix}", detail.album.title))
+                .set("title", format!("{}{suffix}", detail.album.title)),
+            _ => album,
+        }
+    }
+}
+
+/// Projects one tracklist as `Child` members.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call, whose state holds the database and the
+///   caller's annotations.
+/// - `ids`: the tracks, in playing order.
+///
+/// # Returns
+///
+/// One member per track that is still stored, in the same order.
+///
+/// # Errors
+///
+/// Answers a generic error when a read fails.
+pub(crate) async fn songs(call: &Call, ids: &[EntityId]) -> Result<Vec<Object>, SubsonicError> {
+    Ok(SongPage::of(call, ids).await?.objects())
+}
+
+/// Projects a list of albums as `AlbumID3` members.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `ids`: the albums, in the order they are listed.
+///
+/// # Returns
+///
+/// One member per album that is still stored, in the same order.
+///
+/// # Errors
+///
+/// Answers a generic error when a read fails.
+pub(crate) async fn albums_id3(
+    call: &Call,
+    ids: &[EntityId],
+) -> Result<Vec<Object>, SubsonicError> {
+    let page = AlbumPage::of(call, ids).await?;
+    Ok((0..page.details.len())
+        .map(|index| page.id3(index))
+        .collect())
+}
+
+/// Projects a list of albums as directory `Child` members.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `ids`: the albums, in the order they are listed.
+///
+/// # Returns
+///
+/// One member per album that is still stored, in the same order.
+///
+/// # Errors
+///
+/// Answers a generic error when a read fails.
+pub(crate) async fn albums_dir(
+    call: &Call,
+    ids: &[EntityId],
+) -> Result<Vec<Object>, SubsonicError> {
+    let page = AlbumPage::of(call, ids).await?;
+    Ok((0..page.details.len())
+        .map(|index| page.dir(index))
+        .collect())
+}
+
+/// Returns the suffix a remote entity's title carries for this request.
+///
+/// A third-party client is answered exactly as a server without the vendor
+/// extension would answer it, and that server marks the entities it stores but
+/// has not downloaded yet, so the client can tell them apart. This server's own
+/// client reads the availability instead.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+///
+/// # Returns
+///
+/// The suffix, or `None` when the caller is this server's own client or the
+/// setting is empty.
+fn remote_suffix(call: &Call) -> Option<String> {
+    if call.params().vendor_enabled() {
+        return None;
+    }
+    match catalog::title_suffix(&call.state().settings_snapshot()) {
+        Ok(suffix) if !suffix.is_empty() => Some(suffix),
+        Ok(_) => None,
+        Err(_) => {
+            tracing::warn!("could not read subsonic.catalog_title_suffix");
+            None
+        }
+    }
 }

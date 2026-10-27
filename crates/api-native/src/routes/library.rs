@@ -11,11 +11,14 @@
 //! Every source is read through the caller's personal library, never the server
 //! scope: `songs` and `liked` mean that caller's library, and a playlist or an
 //! artist outside it answers `not-found`, so one account cannot queue another
-//! account's collection.
+//! account's collection. An artist whose tracks the caller's library does not
+//! hold still queues its stored top tracks, which is what the artist page's Play
+//! button needs for a remote artist.
 
 use axum::Json;
 use axum::extract::State;
-use hearthsound_core::{EntityId, IdPrefix};
+use hearthsound_catalog::views::{TrackRef, Viewer};
+use hearthsound_core::{EntityId, EntityKind, IdPrefix};
 use hearthsound_library::query::{self, QueueCollection, QueueItem, TrackSort};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -25,7 +28,7 @@ use crate::auth::Authed;
 use crate::extract::QueryParams;
 use crate::problem::{self, Problem};
 use crate::state::NativeState;
-use crate::views::parse_id;
+use crate::views::{Facts, entity_facts, parse_id};
 
 /// The source that queues the caller's whole library.
 const SOURCE_SONGS: &str = "songs";
@@ -44,6 +47,9 @@ const SOURCE_ARTIST: &str = "artist";
 
 /// The prefix of the source that queues an artist's top songs only.
 const SOURCE_ARTIST_TOP: &str = "artist-top";
+
+/// The most stored top tracks an artist's queue falls back to.
+const TOP_TRACKS_QUEUE_LIMIT: u32 = 100;
 
 /// The query a queue request carries.
 #[derive(Debug, Clone, Deserialize, ToSchema)]
@@ -137,6 +143,48 @@ impl QueueItemView {
             rating: item.rating,
             liked: item.liked,
             disliked: item.disliked,
+        }
+    }
+
+    /// Builds the view of one stored track a queue falls back to.
+    ///
+    /// # Parameters
+    ///
+    /// - `reference`: the stored track, its credits and its album's title.
+    /// - `facts`: the caller's state for the track.
+    ///
+    /// # Returns
+    ///
+    /// The view, with the duration in whole seconds.
+    fn of_track(reference: &TrackRef, facts: Facts) -> QueueItemView {
+        let artist = reference.track.display_artist.clone().or_else(|| {
+            let names: Vec<&str> = reference
+                .artists
+                .iter()
+                .map(|credited| credited.artist.name.as_str())
+                .collect();
+            (!names.is_empty()).then(|| names.join(", "))
+        });
+        QueueItemView {
+            id: reference.track.id.to_string(),
+            title: reference.track.title.clone(),
+            artist,
+            album_id: reference.track.album_id.map(|id| id.to_string()),
+            artist_id: reference
+                .artists
+                .first()
+                .map(|credited| credited.artist.id.to_string()),
+            album: reference.album_title.clone(),
+            duration: reference.track.duration_ms.map(|millis| millis / 1000),
+            cover_art: reference
+                .track
+                .album_id
+                .unwrap_or(reference.track.id)
+                .to_string(),
+            availability: facts.availability.as_str().to_owned(),
+            rating: facts.rating.map(i64::from),
+            liked: facts.liked,
+            disliked: facts.disliked,
         }
     }
 }
@@ -261,6 +309,48 @@ fn entity(value: &str, prefix: IdPrefix) -> Result<EntityId, Problem> {
     parse_id(value, prefix).map(|uuid| EntityId::from_uuid(prefix, uuid))
 }
 
+/// Reads the stored top tracks an artist's queue falls back to.
+///
+/// # Parameters
+///
+/// - `state`: the shared services.
+/// - `user`: the caller whose library and feedback the items report.
+/// - `artist`: the artist whose stored top tracks are read.
+///
+/// # Returns
+///
+/// The artist's `artist_top_tracks` entries, in their stored order.
+///
+/// # Errors
+///
+/// Answers `internal` when the read fails.
+async fn stored_top_tracks(
+    state: &NativeState,
+    user: Uuid,
+    artist: EntityId,
+) -> Result<Vec<QueueItemView>, Problem> {
+    let refs = state
+        .services()
+        .catalog
+        .views()
+        .artist_top_tracks(
+            artist,
+            TOP_TRACKS_QUEUE_LIMIT,
+            Viewer {
+                user,
+                vendor: false,
+            },
+        )
+        .await
+        .map_err(|error| problem::internal("reading an artist's top tracks", &error))?;
+    let ids: Vec<EntityId> = refs.iter().map(|reference| reference.track.id).collect();
+    let facts = entity_facts(state, user, EntityKind::Track, &ids).await?;
+    Ok(refs
+        .iter()
+        .map(|reference| QueueItemView::of_track(reference, Facts::of(&facts, reference.track.id)))
+        .collect())
+}
+
 /// The problem an unknown source answers with.
 ///
 /// # Parameters
@@ -292,7 +382,7 @@ pub(crate) fn missing(collection: QueueCollection) -> Problem {
             Problem::not_found("No playlist with that id is visible to this account.")
         }
         QueueCollection::Artist(_) | QueueCollection::ArtistTop(_) => {
-            Problem::not_found("No artist with that id is in this account's library.")
+            Problem::not_found("No artist with that id has tracks this account can play.")
         }
         QueueCollection::Songs { .. } | QueueCollection::Liked | QueueCollection::Uploads => {
             Problem::not_found("No collection lives at that source.")
@@ -305,8 +395,10 @@ pub(crate) fn missing(collection: QueueCollection) -> Problem {
 /// One request answers every track of the collection, in the collection's own
 /// order: the requested order for `songs` (by title when the request names
 /// none), the like order for `liked`, the upload order for `uploads`, the
-/// playlist's own order, and the artist's play count order. Nothing is paged
-/// and nothing is truncated.
+/// playlist's own order, and the artist's play count order. An artist whose
+/// tracks the caller's personal library does not hold answers its stored top
+/// tracks instead, which is how a remote artist's Play button is filled.
+/// Nothing is paged and nothing is truncated.
 ///
 /// # Parameters
 ///
@@ -323,10 +415,10 @@ pub(crate) fn missing(collection: QueueCollection) -> Problem {
 /// # Errors
 ///
 /// Answers `unauthenticated` without credentials, `unknown-source` (400) for a
-/// source this server does not offer, `not-found` (404) when the playlist or
-/// artist is unknown or outside the caller's library, `not-in-source`
-/// (404) when `from` is not one of the collection's tracks, and `internal` when
-/// the read fails.
+/// source this server does not offer, `not-found` (404) when the playlist is
+/// unknown or outside the caller's library or the artist names no track at
+/// all, `not-in-source` (404) when `from` is not one of the collection's
+/// tracks, and `internal` when the read fails.
 #[utoipa::path(
     get,
     path = "/api/v1/library/queue",
@@ -368,10 +460,23 @@ pub async fn collection_queue(
             .await
             .map_err(|error| problem::internal("reading a collection queue", &error))?
     };
-    let Some(items) = read else {
-        return Err(missing(collection));
+    let artist = match &collection {
+        QueueCollection::Artist(id) => Some(*id),
+        _ => None,
     };
-    let items: Vec<QueueItemView> = items.into_iter().map(QueueItemView::of).collect();
+    let mut items: Vec<QueueItemView> = match read {
+        Some(items) => items.into_iter().map(QueueItemView::of).collect(),
+        None if artist.is_some() => Vec::new(),
+        None => return Err(missing(collection)),
+    };
+    if items.is_empty()
+        && let Some(artist) = artist
+    {
+        items = stored_top_tracks(&state, authed.user_id(), artist).await?;
+        if items.is_empty() {
+            return Err(missing(collection));
+        }
+    }
     let start_index = match query.from.as_deref() {
         None => 0,
         Some(from) => items

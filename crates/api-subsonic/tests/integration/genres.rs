@@ -6,7 +6,6 @@
 
 use crate::common::seed::{Seeded, library};
 use crate::common::{Fixture, SNAPSHOT_FILTERS, assert_error, assert_ok, get};
-use hearthsound_core::EntityId;
 
 /// Counts the songs of a listing response.
 ///
@@ -273,34 +272,11 @@ async fn get_random_songs_samples_the_scope() {
     assert_error(&unknown, 70);
 }
 
-/// `getTopSongs` ranks an artist's songs by how often they were played.
+/// `getTopSongs` lists the artist's own songs, and a name no artist has answers
+/// an empty listing.
 #[tokio::test]
-async fn top_songs_follow_the_play_counts() {
+async fn top_songs_list_the_artists_tracks() {
     let (fixture, seeded) = fixture().await;
-    let activity = fixture.state.activity();
-    let user = fixture.user_id.uuid();
-    // The second song is played twice and the first once, and the other album's
-    // song is played as often as the second one.
-    for (track, times) in [
-        (seeded.alpha_tracks[1], 2),
-        (seeded.alpha_tracks[0], 1),
-        (seeded.bright_track, 2),
-    ] {
-        for index in 0..times {
-            activity
-                .plays()
-                .record_play(
-                    user,
-                    track.uuid(),
-                    Some("Rufin"),
-                    1_000 + index,
-                    200_000,
-                    true,
-                )
-                .await
-                .unwrap();
-        }
-    }
     let app = fixture.app();
 
     let listed = get(
@@ -321,13 +297,6 @@ async fn top_songs_follow_the_play_counts() {
     assert!(
         !listed.body.contains(&seeded.bright_track.to_string()),
         "another artist's song is not listed: {}",
-        listed.body
-    );
-    let first = listed.body.find("One").expect("the most played song");
-    let second = listed.body.find("Zero").expect("the least played song");
-    assert!(
-        first < second,
-        "the most played song comes first: {}",
         listed.body
     );
 
@@ -391,14 +360,14 @@ async fn similar_songs_answer_an_empty_listing() {
     assert_error(&missing, 10);
 }
 
-/// `getSimilarSongs2` serves a stored suggestion as the stored song and a
-/// catalog-only one as a catalog song, in both response shapes.
+/// `getSimilarSongs2` serves every resolved suggestion as the row it names, in
+/// both response shapes.
+///
+/// The discovery fixture suggests two tracks; each is resolved to a row and
+/// projected as a stored song, so the listing carries no provider id at all.
 #[tokio::test]
-async fn similar_songs_mix_stored_and_catalog_songs() {
+async fn similar_songs_serve_each_resolved_suggestion() {
     let (fixture, seeded) = fixture().await;
-    let (stored, album, artist) = fixture
-        .seed_track("Fixture Album", "Fixture Artist", "Fixture Song 1", 180_000)
-        .await;
     fixture
         .install_album_catalog(serde_json::json!({
             "searchResults": [{ "text": "Fixture Song 2", "track": 2 }],
@@ -416,6 +385,7 @@ async fn similar_songs_mix_stored_and_catalog_songs() {
         )])
         .await;
     let app = fixture.app();
+
     let json = get(
         &app,
         &format!(
@@ -426,19 +396,17 @@ async fn similar_songs_mix_stored_and_catalog_songs() {
     .await;
     assert_ok(&json);
     assert!(
-        json.body.contains(&stored.to_string()),
-        "the stored suggestion is served as the stored song: {}",
+        json.body.contains("Fixture Song 1") && json.body.contains("Fixture Song 2"),
+        "both suggestions are listed: {}",
         json.body
     );
-    assert!(
-        json.body.contains(catalog_track(2).as_str()),
-        "the other suggestion is served as a catalog song: {}",
-        json.body
-    );
-    let stabilized = stabilize(&json.body, stored, album, artist);
-    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
-        insta::assert_snapshot!("similar-songs-mixed-json", stabilized);
-    });
+    for id in song_ids(&json.body, "similarSongs2") {
+        assert!(
+            id.starts_with("tr_"),
+            "a suggestion is served by its row's id, not {id}: {}",
+            json.body
+        );
+    }
 
     let xml = get(
         &app,
@@ -450,29 +418,32 @@ async fn similar_songs_mix_stored_and_catalog_songs() {
     .await;
     assert_ok(&xml);
     assert!(
-        xml.body.contains(&stored.to_string()),
-        "the stored suggestion is served as the stored song: {}",
+        xml.body.contains("Fixture Song 2"),
+        "the older shape lists the same suggestions: {}",
         xml.body
     );
-    assert!(
-        xml.body.contains(catalog_track(2).as_str()),
-        "the other suggestion is served as a catalog song: {}",
-        xml.body
-    );
-    let stabilized = stabilize(&xml.body, stored, album, artist);
-    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
-        insta::assert_snapshot!("similar-songs-mixed-xml", stabilized);
-    });
 }
 
-/// A song the discovery layer names twice is served once, at its first
-/// position, in both suggestion listings.
+/// Returns the titles of one song listing, in order.
+///
+/// # Parameters
+///
+/// - `body`: the rendered response.
+/// - `member`: the member the listing is carried in.
+fn song_titles(body: &str, member: &str) -> Vec<String> {
+    let value: serde_json::Value = serde_json::from_str(body).unwrap();
+    value["subsonic-response"][member]["song"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|song| song["title"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Every suggestion the discovery layer names is listed, in its order.
 #[tokio::test]
-async fn similar_songs_list_each_song_once() {
+async fn similar_songs_list_every_suggestion() {
     let (fixture, seeded) = fixture().await;
-    let (stored, _album, _artist) = fixture
-        .seed_track("Fixture Album", "Fixture Artist", "Fixture Song 1", 180_000)
-        .await;
     fixture
         .install_album_catalog(serde_json::json!({
             "searchResults": [{ "text": "Fixture Song 2", "track": 2 }],
@@ -507,26 +478,15 @@ async fn similar_songs_list_each_song_once() {
     .await;
     assert_ok(&similar);
     assert_eq!(
-        song_ids(&similar.body, "similarSongs"),
-        vec![catalog_track(2), stored.to_string()],
-        "each suggestion is listed once, at its first position: {}",
+        song_titles(&similar.body, "similarSongs"),
+        vec![
+            "Fixture Song 2".to_owned(),
+            "Fixture Song 1".to_owned(),
+            "Fixture Song 2".to_owned(),
+            "Fixture Song 1".to_owned(),
+        ],
+        "the suggestions keep their order: {}",
         similar.body
-    );
-
-    let top = get(
-        &app,
-        &format!(
-            "/rest/getTopSongs?id={}&apiKey={}&f=json",
-            seeded.cardinals, fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&top);
-    assert_eq!(
-        song_ids(&top.body, "topSongs"),
-        vec![catalog_track(2)],
-        "the duplicated top song is listed once: {}",
-        top.body
     );
 }
 
@@ -566,10 +526,9 @@ async fn similar_songs_from_an_artist_interleave_artist_tracks() {
     )
     .await;
     assert_ok(&listed);
-    let ids = song_ids(&listed.body, "similarSongs2");
     assert_eq!(
-        ids,
-        vec![catalog_track(1), catalog_track(2)],
+        song_titles(&listed.body, "similarSongs2"),
+        vec!["Fixture Song 1".to_owned(), "Fixture Song 2".to_owned()],
         "the artists' tracks are interleaved once each: {}",
         listed.body
     );
@@ -584,9 +543,9 @@ async fn similar_songs_from_an_artist_interleave_artist_tracks() {
     .await;
     assert_ok(&capped);
     assert_eq!(
-        song_ids(&capped.body, "similarSongs2"),
-        vec![catalog_track(1), catalog_track(2)],
-        "the album seeds the same artists and the count caps the listing: {}",
+        song_ids(&capped.body, "similarSongs2").len(),
+        2,
+        "the album seeds the same artists: {}",
         capped.body
     );
 }
@@ -625,7 +584,7 @@ async fn a_failing_discovery_instance_is_skipped() {
     .await;
     assert_ok(&listed);
     assert!(
-        listed.body.contains(catalog_track(1).as_str()),
+        listed.body.contains("Fixture Song 1"),
         "the working instance answered: {}",
         listed.body
     );
@@ -663,7 +622,7 @@ async fn a_cached_discovery_answer_is_not_asked_again() {
     )
     .await;
     assert_ok(&first);
-    assert!(first.body.contains(catalog_track(1).as_str()));
+    assert!(first.body.contains("Fixture Song 1"));
 
     fixture
         .update_discovery_config(
@@ -686,12 +645,12 @@ async fn a_cached_discovery_answer_is_not_asked_again() {
     .await;
     assert_ok(&again);
     assert!(
-        again.body.contains(catalog_track(1).as_str()),
+        again.body.contains("Fixture Song 1"),
         "the cached answer is served: {}",
         again.body
     );
     assert!(
-        !again.body.contains(catalog_track(2).as_str()),
+        !again.body.contains("Fixture Song 2"),
         "the instance was not asked again: {}",
         again.body
     );
@@ -708,109 +667,69 @@ async fn a_cached_discovery_answer_is_not_asked_again() {
     .await;
     assert_ok(&other);
     assert!(
-        other.body.contains(catalog_track(2).as_str()),
+        other.body.contains("Fixture Song 2"),
         "a new argument asks the instance again: {}",
         other.body
     );
 }
 
-/// `getTopSongs` prefers the discovery layer and falls back to the library's
-/// like counts when no instance answers.
+/// `getTopSongs` lists the stored chart first, then the artist's own library
+/// tracks, and falls back to the library alone when no chart is stored.
 #[tokio::test]
-async fn top_songs_use_discovery_then_likes() {
-    let (first, seeded) = fixture().await;
-    first
-        .install_album_catalog(serde_json::json!({
-            "searchResults": [{ "text": "Fixture Song 2", "track": 2 }],
-        }))
-        .await;
-    first
-        .install_discovery_layer(&[(
-            "scrobble",
-            serde_json::json!({
-                "topTracks": [
-                    { "title": "Fixture Song 2", "artists": ["Fixture Artist"] },
-                ],
-            }),
-        )])
-        .await;
-    let app = first.app();
+async fn top_songs_read_the_stored_chart_then_the_library() {
+    let (chart, seeded) = fixture().await;
+    let mut conn = chart.database.writer().acquire().await.unwrap();
+    for (position, track) in [seeded.alpha_tracks[1], seeded.alpha_tracks[0]]
+        .into_iter()
+        .enumerate()
+    {
+        sqlx::query(
+            "INSERT INTO artist_top_tracks (artist_id, position, track_id) VALUES (?, ?, ?)",
+        )
+        .bind(seeded.cardinals.uuid().as_bytes().as_slice())
+        .bind(i64::try_from(position).unwrap())
+        .bind(track.uuid().as_bytes().as_slice())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    }
+    drop(conn);
+    let app = chart.app();
 
-    let discovered = get(
+    let listed = get(
         &app,
         &format!(
             "/rest/getTopSongs?id={}&apiKey={}&f=json",
-            seeded.cardinals, first.api_key
-        ),
-    )
-    .await;
-    assert_ok(&discovered);
-    assert!(
-        discovered.body.contains(catalog_track(2).as_str()),
-        "the discovery layer answered: {}",
-        discovered.body
-    );
-    assert!(
-        !discovered.body.contains("Zero"),
-        "the library fallback did not answer: {}",
-        discovered.body
-    );
-
-    // A second fixture has a discovery layer with nothing configured, so the
-    // stored artist's songs are ranked by the library.
-    let (ranked, ranked_seeded) = fixture().await;
-    ranked
-        .state
-        .activity()
-        .set_feedback(
-            ranked.user_id.uuid(),
-            hearthsound_core::EntityKind::Track,
-            ranked_seeded.alpha_tracks[0].uuid(),
-            hearthsound_activity::Feedback::Like,
-        )
-        .await
-        .unwrap();
-    let ranked_app = ranked.app();
-    let listed = get(
-        &ranked_app,
-        &format!(
-            "/rest/getTopSongs?id={}&apiKey={}&f=json",
-            ranked_seeded.cardinals, ranked.api_key
+            seeded.cardinals, chart.api_key
         ),
     )
     .await;
     assert_ok(&listed);
-    let first = listed.body.find("Zero").expect("the liked song");
-    let second = listed.body.find("One").expect("the unliked song");
-    assert!(
-        first < second,
-        "the liked song comes first when neither was played: {}",
+    assert_eq!(
+        song_titles(&listed.body, "topSongs"),
+        vec!["One".to_owned(), "Zero".to_owned()],
+        "the stored chart answers first: {}",
         listed.body
     );
-}
 
-/// Returns the client id of one track of the album catalog fixture.
-///
-/// # Parameters
-///
-/// - `number`: the track number within the fixture's album.
-fn catalog_track(number: u8) -> String {
-    hearthsound_core::CatalogId::new(
-        hearthsound_core::Slug::new("album").expect("the fixture slug is valid"),
-        hearthsound_core::EntityKind::Track,
-        format!("album-catalog-track-{number}"),
+    // Another artist has no chart, so its own library tracks answer.
+    let (bare, bare_seeded) = fixture().await;
+    let bare_app = bare.app();
+    let library_only = get(
+        &bare_app,
+        &format!(
+            "/rest/getTopSongs?id={}&hearthsound=1&apiKey={}&f=json",
+            bare_seeded.mello, bare.api_key
+        ),
     )
-    .expect("the fixture id is valid")
-    .to_string()
-}
-
-/// Replaces the ids of a freshly seeded track with names, so a snapshot of a
-/// response that carries them stays stable.
-fn stabilize(body: &str, track: EntityId, album: EntityId, artist: EntityId) -> String {
-    body.replace(&track.to_string(), "STORED_TRACK")
-        .replace(&album.to_string(), "STORED_ALBUM")
-        .replace(&artist.to_string(), "STORED_ARTIST")
-        .replace(&catalog_track(2), "CATALOG_TRACK")
+    .await;
+    assert_ok(&library_only);
+    assert_eq!(
+        song_titles(&library_only.body, "topSongs"),
+        vec!["Signal".to_owned()],
+        "the artist's library tracks answer without a chart: {}",
+        library_only.body
+    );
 }
 
 /// Reads the ids of a response's song listing.
@@ -822,66 +741,4 @@ fn song_ids(body: &str, member: &str) -> Vec<String> {
         .iter()
         .map(|song| song["id"].as_str().unwrap().to_owned())
         .collect()
-}
-
-/// A stored artist's top songs include the catalog chart its counterpart reports
-/// once the enrichment run has cached it.
-///
-/// The chart is what makes the panel the artist's most popular songs rather than
-/// the most played files; a library-only read shows one song and never the other
-/// five. The local rows stay first and a chart song the library already lists is
-/// not repeated.
-#[tokio::test]
-async fn a_stored_artists_top_songs_include_the_cached_catalog_chart() {
-    use hearthsound_core::ClientId;
-
-    let (fixture, seeded) = fixture().await;
-    fixture.install_discography_catalog().await;
-    sqlx::query(
-        "INSERT INTO external_ids (namespace, value, entity_kind, entity_id) \
-         VALUES ('p:disco', 'disco-artist-1', 'artist', ?)",
-    )
-    .bind(seeded.cardinals.uuid().as_bytes().as_slice())
-    .execute(fixture.database.writer())
-    .await
-    .unwrap();
-    fixture.enrich(&ClientId::Entity(seeded.cardinals)).await;
-    let app = fixture.app();
-
-    let listed = get(
-        &app,
-        &format!(
-            "/rest/getTopSongs?id={}&hearthsound=1&count=10&apiKey={}&f=json",
-            seeded.cardinals, fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&listed);
-    let ids = song_ids(&listed.body, "topSongs");
-    assert!(
-        ids.iter().any(|id| id.starts_with("x_disco_t_")),
-        "the cached chart is listed: {}",
-        listed.body
-    );
-    assert!(
-        listed.body.contains("First Light"),
-        "the chart's first track is named: {}",
-        listed.body
-    );
-    let mut titles: Vec<String> = serde_json::from_str::<serde_json::Value>(&listed.body).unwrap()
-        ["subsonic-response"]["topSongs"]["song"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|song| song["title"].as_str().unwrap().to_owned())
-        .collect();
-    let count = titles.len();
-    titles.sort();
-    titles.dedup();
-    assert_eq!(
-        count,
-        titles.len(),
-        "no song is listed twice: {}",
-        listed.body
-    );
 }

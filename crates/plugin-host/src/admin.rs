@@ -33,6 +33,12 @@ pub enum AdminError {
     /// Installing or removing files failed.
     #[error(transparent)]
     Install(#[from] InstallError),
+    /// The plugin is mandatory, so the write is refused.
+    #[error("`{plugin_id}` is a required plugin and cannot be removed or disabled")]
+    Required {
+        /// The plugin whose mandatory status refused the write.
+        plugin_id: String,
+    },
     /// The plugin database could not be read or written.
     #[error(transparent)]
     Repo(#[from] RepoError),
@@ -240,9 +246,16 @@ impl PluginAdmin {
     ///
     /// # Errors
     ///
-    /// Returns [`AdminError::NotFound`] for an unknown id.
+    /// Returns [`AdminError::NotFound`] for an unknown id, and
+    /// [`AdminError::Required`] when the id names a mandatory plugin and
+    /// `enabled` is false.
     pub async fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), AdminError> {
         self.require(id).await?;
+        if !enabled && self.host.protected().contains(id) {
+            return Err(AdminError::Required {
+                plugin_id: id.to_owned(),
+            });
+        }
         self.repository.set_plugin_enabled(id, enabled).await?;
         let state = if enabled {
             PluginState::Enabled
@@ -265,10 +278,16 @@ impl PluginAdmin {
     ///
     /// # Errors
     ///
-    /// Returns [`AdminError::NotFound`] for an unknown id and the file removal
-    /// error otherwise.
+    /// Returns [`AdminError::NotFound`] for an unknown id,
+    /// [`AdminError::Required`] when the id names a mandatory plugin, and the
+    /// file removal error otherwise.
     pub async fn remove(&self, id: &str) -> Result<PluginRow, AdminError> {
         let row = self.require(id).await?;
+        if self.host.protected().contains(id) {
+            return Err(AdminError::Required {
+                plugin_id: id.to_owned(),
+            });
+        }
         self.repository.delete(id).await?;
         self.host.remove_plugin(id).await?;
         self.publish(id, "removed");

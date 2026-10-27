@@ -10,7 +10,7 @@
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response as HttpResponse};
-use hearthsound_core::{ClientId, IdPrefix};
+use hearthsound_core::{EntityId, IdPrefix};
 use hearthsound_media::TranscodeFormat;
 
 use crate::auth::{BinaryCall, JsonCall};
@@ -209,8 +209,8 @@ async fn source_stream(
     call: &JsonCall,
     value: &str,
 ) -> Result<Option<SourceStream>, SubsonicError> {
-    let track = match ClientId::parse(value) {
-        Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::Track => id,
+    let track = match EntityId::parse(value) {
+        Ok(id) if id.kind() == IdPrefix::Track => id,
         _ => {
             tracing::debug!("a transcode decision named no stored track");
             return Err(SubsonicError::not_found());

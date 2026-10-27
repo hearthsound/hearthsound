@@ -25,8 +25,8 @@
 use std::path::Path;
 
 use hearthsound_config::keys;
-use hearthsound_core::providers::{ExpectedTrack, ExternalId, Fingerprint, Verdict};
-use hearthsound_core::{Layer, Priority};
+use hearthsound_core::providers::{ExpectedTrack, Fingerprint, Verdict};
+use hearthsound_core::{EntityKind, Layer, Priority};
 use hearthsound_library::{Track, placement};
 use hearthsound_media::fingerprint;
 use hearthsound_plugin_host::RegistryInstance;
@@ -72,11 +72,11 @@ impl AcquisitionOrchestrator {
     /// # Returns
     ///
     /// The title, the artists in credit order, the album, the duration and the
-    /// identifiers the library knows for the recording.
+    /// identifiers stored for the track, its album and its credited artists.
     ///
     /// # Errors
     ///
-    /// Returns the library error of the artist or album read.
+    /// Returns the library error of the artist, album or identifier read.
     pub(crate) async fn expected_track(
         &self,
         track: &Track,
@@ -86,32 +86,12 @@ impl AcquisitionOrchestrator {
             Some(album_id) => self.library().get_album(album_id).await?,
             None => None,
         };
-        let mut ids = Vec::new();
-        if let Some(value) = &track.mb_recording_id {
-            ids.push(ExternalId {
-                namespace: "mb-recording".to_owned(),
-                value: value.clone(),
-            });
-        }
-        if let Some(value) = &track.isrc {
-            ids.push(ExternalId {
-                namespace: "isrc".to_owned(),
-                value: value.clone(),
-            });
-        }
-        if let Some(value) = album.as_ref().and_then(|album| album.mb_release_id.clone()) {
-            ids.push(ExternalId {
-                namespace: "mb-release".to_owned(),
-                value,
-            });
+        let mut ids = self.stored_ids(EntityKind::Track, track.id).await?;
+        if let Some(album) = album.as_ref() {
+            ids.extend(self.stored_ids(EntityKind::Album, album.id).await?);
         }
         for credit in &credits {
-            if let Some(value) = &credit.mb_artist_id {
-                ids.push(ExternalId {
-                    namespace: "mb-artist".to_owned(),
-                    value: value.clone(),
-                });
-            }
+            ids.extend(self.stored_ids(EntityKind::Artist, credit.id).await?);
         }
         Ok(ExpectedTrack {
             title: track.title.clone(),

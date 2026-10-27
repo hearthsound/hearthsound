@@ -1,0 +1,206 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, al.album_type, al.edition, al.track_count, al.file_tags, al.fetched_at, al.page_fetched_at, al.deep_indexed_at, al.viewed_at, al.created_at, al.updated_at FROM albums al WHERE (EXISTS (SELECT 1 FROM album_artists aa WHERE aa.album_id = al.id AND aa.artist_id = ?) OR EXISTS (SELECT 1 FROM tracks t JOIN track_artists ta ON ta.track_id = t.id WHERE t.album_id = al.id AND ta.artist_id = ?)) ORDER BY al.year IS NULL, al.year, al.sort_title, al.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "name": "sort_title",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "sort_title"
+          }
+        }
+      },
+      {
+        "name": "display_artist",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "display_artist"
+          }
+        }
+      },
+      {
+        "name": "year",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "year"
+          }
+        }
+      },
+      {
+        "name": "release_date",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "release_date"
+          }
+        }
+      },
+      {
+        "name": "album_type",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "album_type"
+          }
+        }
+      },
+      {
+        "name": "edition",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "edition"
+          }
+        }
+      },
+      {
+        "name": "track_count",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "track_count"
+          }
+        }
+      },
+      {
+        "name": "file_tags",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "file_tags"
+          }
+        }
+      },
+      {
+        "name": "fetched_at",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "fetched_at"
+          }
+        }
+      },
+      {
+        "name": "page_fetched_at",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "page_fetched_at"
+          }
+        }
+      },
+      {
+        "name": "deep_indexed_at",
+        "ordinal": 12,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "deep_indexed_at"
+          }
+        }
+      },
+      {
+        "name": "viewed_at",
+        "ordinal": 13,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "viewed_at"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 14,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 15,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "bd3ca360e162b106f2faddd9e223c01dc3138c2d87fc6c6440871a5d7240b37f"
+}

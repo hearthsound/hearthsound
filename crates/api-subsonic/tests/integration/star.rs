@@ -27,23 +27,6 @@ async fn fixture() -> (Fixture, Seeded) {
     (fixture, seeded)
 }
 
-/// Returns the first id that starts with a marker.
-///
-/// # Parameters
-///
-/// - `body`: the response body.
-/// - `marker`: the prefix of the id.
-///
-/// # Returns
-///
-/// The id, or `None` when the body does not carry one.
-fn id_after(body: &str, marker: &str) -> Option<String> {
-    let start = body.find(marker)?;
-    let rest = &body[start..];
-    let end = rest.find('"').unwrap_or(rest.len());
-    Some(rest[..end].to_owned())
-}
-
 /// `star` records a like that `getStarred2` lists and `unstar` removes.
 #[tokio::test]
 async fn star_and_unstar_change_what_the_listings_show() {
@@ -147,9 +130,9 @@ async fn star_and_unstar_change_what_the_listings_show() {
     );
 }
 
-/// `star` materializes a catalog id, so a search result can be liked.
+/// A search hit is a row, so it can be starred like any stored track.
 #[tokio::test]
-async fn star_materializes_a_catalog_id() {
+async fn star_accepts_a_search_hit() {
     let (fixture, _seeded) = fixture().await;
     fixture.install_hello_catalog().await;
     let app = fixture.app();
@@ -163,7 +146,16 @@ async fn star_materializes_a_catalog_id() {
     )
     .await;
     assert_ok(&found);
-    let track = id_after(&found.body, "x_hello_t_").expect("the search lists a catalog track");
+    assert!(
+        !found.body.contains("x_hello_"),
+        "a provider hit is a row: {}",
+        found.body
+    );
+    let value: serde_json::Value = serde_json::from_str(&found.body).unwrap();
+    let track = value["subsonic-response"]["searchResult3"]["song"][0]["id"]
+        .as_str()
+        .expect("the search lists a track")
+        .to_owned();
 
     let starred = get(
         &app,
@@ -172,8 +164,6 @@ async fn star_materializes_a_catalog_id() {
     .await;
     assert_ok(&starred);
 
-    // The like is recorded against the stored row the catalog id materialized
-    // into, so the listing names a stored id and no catalog one.
     let listed = get(
         &app,
         &format!("/rest/getStarred2?apiKey={}&f=json", fixture.api_key),
@@ -181,13 +171,10 @@ async fn star_materializes_a_catalog_id() {
     .await;
     assert_ok(&listed);
     assert!(
-        listed.body.contains("\"song\":[{"),
-        "the materialized song is listed: {}",
-        listed.body
-    );
-    assert!(
-        !listed.body.contains("x_hello_t_"),
-        "the listing names the stored row: {}",
+        listed
+            .body
+            .contains(&format!("\"song\":[{{\"id\":\"{track}\"")),
+        "the starred song is the row the search answered with: {}",
         listed.body
     );
 }
@@ -362,53 +349,4 @@ async fn set_rating_refuses_unusable_values() {
     )
     .await;
     assert_error(&no_such, 70);
-}
-
-/// `setRating` materializes a catalog id, so a search result can be rated.
-#[tokio::test]
-async fn set_rating_materializes_a_catalog_id() {
-    let (fixture, _seeded) = fixture().await;
-    fixture.install_hello_catalog().await;
-    let app = fixture.app();
-
-    let found = get(
-        &app,
-        &format!(
-            "/rest/search3?query=cardinals&apiKey={}&f=json",
-            fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&found);
-    let track = id_after(&found.body, "x_hello_t_").expect("the search lists a catalog track");
-
-    let rated = get(
-        &app,
-        &format!(
-            "/rest/setRating?id={track}&rating=5&apiKey={}&f=json",
-            fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&rated);
-
-    // The rating is recorded against the stored row the catalog id
-    // materialized into, which the starred listing reports.
-    let starred = get(
-        &app,
-        &format!("/rest/star?id={track}&apiKey={}&f=json", fixture.api_key),
-    )
-    .await;
-    assert_ok(&starred);
-    let listed = get(
-        &app,
-        &format!("/rest/getStarred2?apiKey={}&f=json", fixture.api_key),
-    )
-    .await;
-    assert_ok(&listed);
-    assert!(
-        listed.body.contains("\"userRating\":5"),
-        "the materialized track reports the rating: {}",
-        listed.body
-    );
 }

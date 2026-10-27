@@ -648,7 +648,7 @@ mod tests {
                   "versions": [
                     {{
                       "version": "1.0.0",
-                      "api": "hearthsound:plugin@0.3.0",
+                      "api": "hearthsound:plugin@0.5.0",
                       "url": "https://example.com/com.example.hello-1.0.0.hsplugin",
                       "sha256": "{FIXTURE_SHA256}",
                       "size": 1452032,
@@ -722,7 +722,7 @@ mod tests {
         assert!(plugin.official);
 
         let version = plugin.version("1.0.0").unwrap();
-        assert_eq!(version.api, "hearthsound:plugin@0.3.0");
+        assert_eq!(version.api, "hearthsound:plugin@0.5.0");
         assert_eq!(
             version.url,
             "https://example.com/com.example.hello-1.0.0.hsplugin"
@@ -737,7 +737,9 @@ mod tests {
                 .http
                 .as_ref()
                 .map(|http| http.hosts.clone()),
-            Some(vec!["api.example.com".to_owned()])
+            Some(vec![crate::manifest::HostEntry::Pattern(
+                "api.example.com".to_owned()
+            )])
         );
         assert_eq!(
             version.permissions.kv.as_ref().and_then(|kv| kv.max_bytes),
@@ -1048,23 +1050,23 @@ mod tests {
     #[test]
     fn the_newest_compatible_version_is_selected() {
         let plugin = plugin(vec![
-            version("0.3.1", "hearthsound:plugin@0.3.0"),
-            version("0.4.0", "hearthsound:plugin@0.4.0"),
+            version("0.4.1", "hearthsound:plugin@0.4.0"),
+            version("0.5.0", "hearthsound:plugin@0.5.0"),
         ]);
 
-        assert_eq!(plugin.newest_compatible().unwrap().version, "0.4.0");
+        assert_eq!(plugin.newest_compatible().unwrap().version, "0.5.0");
         assert_eq!(plugin.unavailable(), None);
     }
 
     #[test]
     fn the_previous_minor_stays_compatible() {
         let plugin = plugin(vec![
-            version("not-a-version", "hearthsound:plugin@0.3.0"),
-            version("0.2.0", "hearthsound:plugin@0.3.0"),
-            version("0.2.1", "hearthsound:plugin@0.2.0"),
+            version("not-a-version", "hearthsound:plugin@0.4.0"),
+            version("0.3.0", "hearthsound:plugin@0.4.0"),
+            version("0.3.1", "hearthsound:plugin@0.3.0"),
         ]);
 
-        assert_eq!(plugin.newest_compatible().unwrap().version, "0.2.0");
+        assert_eq!(plugin.newest_compatible().unwrap().version, "0.3.0");
         assert_eq!(plugin.unavailable(), None);
     }
 
@@ -1089,11 +1091,11 @@ mod tests {
         );
         let message = unavailable.to_string();
         assert!(
-            message.contains("hearthsound:plugin@0.4.0"),
+            message.contains("hearthsound:plugin@0.5.0"),
             "message was {message}"
         );
         assert!(
-            message.contains("hearthsound:plugin@0.3.0"),
+            message.contains("hearthsound:plugin@0.4.0"),
             "message was {message}"
         );
         assert!(

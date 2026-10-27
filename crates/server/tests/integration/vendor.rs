@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use hearthsound_acquire::repo::ListFilter;
 use hearthsound_core::events::{EventEnvelope, ServerEvent};
-use hearthsound_core::{Availability, ClientId, EntityId, Priority, StorageClass};
-use hearthsound_library::{LibraryRepository, ManagedMediaFile, Origin, TrackInput};
+use hearthsound_core::{Availability, EntityId, Priority, StorageClass};
+use hearthsound_library::{LibraryRepository, ManagedMediaFile, TrackInput};
 use reqwest::header::AUTHORIZATION;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -26,7 +26,7 @@ use crate::common::{self, Fixture, insert_remote_track};
 use crate::multi_user::create_user;
 use crate::native::bearer;
 use crate::on_demand::{
-    catalog_id, downloads_dir, install_acquisition, install_catalog, place_audio,
+    downloads_dir, install_acquisition, install_catalog, place_audio, resolve_track,
 };
 
 /// How long a test waits for the next event-stream frame before failing.
@@ -48,15 +48,12 @@ const RUNNING_POLLS: u32 = 100;
 ///
 /// Panics when the value is not a client id that names a stored entity.
 fn entity_of(raw: &str) -> EntityId {
-    match ClientId::parse(raw).unwrap() {
-        ClientId::Entity(id) => id,
-        ClientId::Catalog(id) => panic!("expected a stored id, got {id}"),
-    }
+    EntityId::parse(raw).unwrap()
 }
 
 /// Inserts a stored track with one managed library file of known quality.
 ///
-/// The file is what makes the track's availability, origin and `quality` member
+/// The file is what makes the track's availability and `quality` member
 /// real rather than hypothetical: the row carries the format, bitrate, sample
 /// rate, bit depth and losslessness the vendor member reports, the availability
 /// is the one a permanent file gives a track, and the bytes are written where
@@ -74,7 +71,7 @@ async fn stored_file_track(fixture: &Fixture, rel_path: &str) -> EntityId {
     let library = LibraryRepository::new(fixture.services.database());
     let track = library
         .insert_track(
-            &TrackInput::new("Fixture File Song", Origin::Local, Availability::Local),
+            &TrackInput::new("Fixture File Song", Availability::Local),
             &[],
             &[],
         )
@@ -450,8 +447,7 @@ async fn a_stored_track_reports_its_file_state_in_both_encodings() {
     let fixture = Fixture::new().await;
     let track = stored_file_track(&fixture, "vendor/01 - Member Song.flac").await;
 
-    // The save is what puts the track in the account's personal library, which
-    // is the difference between the `library` and the `server` origin.
+    // The save is what puts the track in the account's personal library.
     let saved = rest(
         &fixture,
         "hsSave",
@@ -469,7 +465,7 @@ async fn a_stored_track_reports_its_file_state_in_both_encodings() {
     assert!(
         json_body.contains(
             "\"hearthsound\":{\"availability\":\"local\",\"inLibrary\":true,\"disliked\":false,\
-             \"origin\":\"library\",\"quality\":{\"format\":\"flac\",\"bitrateKbps\":900,\
+             \"quality\":{\"format\":\"flac\",\"bitrateKbps\":900,\
              \"sampleRate\":44100,\"bitDepth\":16,\"lossless\":true}}"
         ),
         "the member reports the file: {json_body}"
@@ -478,8 +474,8 @@ async fn a_stored_track_reports_its_file_state_in_both_encodings() {
     let xml_body = rest(&fixture, "getSong", &format!("hearthsound=1&id={track}")).await;
     assert!(
         xml_body.contains(
-            "<hearthsound availability=\"local\" inLibrary=\"true\" disliked=\"false\" \
-             origin=\"library\"><quality format=\"flac\" bitrateKbps=\"900\" \
+            "<hearthsound availability=\"local\" inLibrary=\"true\" disliked=\"false\">\
+             <quality format=\"flac\" bitrateKbps=\"900\" \
              sampleRate=\"44100\" bitDepth=\"16\" lossless=\"true\"/></hearthsound>"
         ),
         "the XML member reports the same file: {xml_body}"
@@ -656,11 +652,12 @@ async fn the_stream_reports_download_progress_on_a_steady_cadence() {
 
     // The stream opens before anything is requested, so every frame it carries
     // belongs to the acquisition the test starts.
+    let acquired = resolve_track(services.catalog(), 1).await;
     let mut stream = open_stream(&fixture).await;
     let body = rest(
         &fixture,
         "hsAcquire",
-        &format!("hearthsound=1&f=json&id={}", catalog_id(1)),
+        &format!("hearthsound=1&f=json&id={acquired}"),
     )
     .await;
     assert_ok(&body);

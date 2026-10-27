@@ -72,10 +72,6 @@ pub const METADATA_FIXTURE: &str = "com.example.metadata-fixture-0.1.0.hsplugin"
 /// The archive file name of the artwork fixture.
 pub const ARTWORK_FIXTURE: &str = "com.example.artwork-fixture-0.1.0.hsplugin";
 
-/// The archive file name of the artwork fixture whose manifest allows no
-/// caching of its images.
-pub const ARTWORK_NOSTORE_FIXTURE: &str = "com.example.artwork-nostore-fixture-0.1.0.hsplugin";
-
 /// The archive file name of the acquisition fixture.
 pub const ACQUISITION_FIXTURE: &str = "com.example.acquisition-fixture-0.1.0.hsplugin";
 

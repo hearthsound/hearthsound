@@ -4,7 +4,7 @@
 //! membership, and `hsSetFeedback` records a like exactly as `star` does, a
 //! dislike in place of a like, or neither. These tests cover the pins the three
 //! leave behind, the adoption a save and a like perform, the catalog ids they
-//! materialize, and the errors of the vendor gate and of the parameters.
+//! target, and the errors of the vendor gate and of the parameters.
 //!
 //! `hsGetLibraryCounts` reports the size of each list, which is what a client
 //! sizes its placeholders with: the counts are compared with the listings they
@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 
 use hearthsound_activity::{disliked_ids, load_annotations};
-use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, IdPrefix, Slug};
+use hearthsound_core::{EntityId, EntityKind, IdPrefix};
 use hearthsound_library::LibraryRepository;
 use hearthsound_library::query::{personal_album_ids, personal_artist_ids, personal_track_ids};
 
@@ -59,13 +59,6 @@ fn library_counts(body: &str) -> Vec<(String, i64)> {
         .collect()
 }
 
-/// Builds the `x_` id of one hello-catalog entity.
-fn catalog_id(kind: EntityKind, provider_id: &str) -> String {
-    CatalogId::new(Slug::new("hello").unwrap(), kind, provider_id)
-        .unwrap()
-        .to_string()
-}
-
 /// Builds a fixture with one remote album of `tracks` tracks.
 async fn fixture(tracks: usize) -> (Fixture, EntityId, Vec<EntityId>) {
     let fixture = Fixture::new().await;
@@ -98,22 +91,6 @@ async fn is_disliked(fixture: &Fixture, kind: EntityKind, entity: EntityId) -> b
         .await
         .unwrap()
         == HashSet::from([entity.uuid()])
-}
-
-/// Returns the first value that follows a marker in a response body.
-fn id_after(body: &str, marker: &str) -> Option<String> {
-    let start = body.find(marker)?;
-    let rest = &body[start + marker.len()..];
-    let end = rest.find('"').unwrap_or(rest.len());
-    Some(rest[..end].to_owned())
-}
-
-/// Returns the stored entity a client id names.
-fn entity_of(raw: &str) -> EntityId {
-    match ClientId::parse(raw).unwrap() {
-        ClientId::Entity(id) => id,
-        ClientId::Catalog(id) => panic!("expected a stored id, got {id}"),
-    }
 }
 
 /// Returns whether an entity is in the account's personal library.
@@ -352,70 +329,6 @@ async fn clearing_feedback_removes_the_row_and_the_pin() {
     assert!(!is_liked(&fixture, EntityKind::Track, tracks[0]).await);
     assert!(!is_disliked(&fixture, EntityKind::Track, tracks[0]).await);
     assert!(!is_pinned(&fixture, tracks[0]).await);
-}
-
-#[tokio::test]
-async fn saving_and_liking_a_catalog_track_materializes_and_adopts_it() {
-    let mut fixture = Fixture::new().await;
-    fixture.install_hello_catalog().await;
-    fixture.add_acquisition_layer().await;
-    let app = fixture.app();
-    let id = catalog_id(EntityKind::Track, "hello-track-1");
-
-    let probe = get(
-        &app,
-        &format!(
-            "/rest/hsSetFeedback?apiKey={}&hearthsound=1&f=json&id={id}&value=like",
-            fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&probe);
-
-    // A like materializes the catalog track and adopts it, and the acquisition
-    // ledger names the stored track the adoption targeted.
-    let listed = get(
-        &app,
-        &format!(
-            "/rest/hsGetAcquisitions?apiKey={}&hearthsound=1&f=json",
-            fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&listed);
-    let stored = entity_of(&id_after(&listed.body, "\"targetId\":\"").unwrap());
-    assert_eq!(stored.kind(), IdPrefix::Track);
-    assert!(
-        is_pinned(&fixture, stored).await,
-        "the like pinned the materialized track"
-    );
-    assert!(is_liked(&fixture, EntityKind::Track, stored).await);
-    assert!(in_personal_library(&fixture, EntityKind::Track, stored).await);
-
-    let saved = catalog_id(EntityKind::Album, "hello-album-1");
-    let probe = get(
-        &app,
-        &format!(
-            "/rest/hsSave?apiKey={}&hearthsound=1&f=json&id={saved}",
-            fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&probe);
-    let album = get(
-        &app,
-        &format!(
-            "/rest/getAlbum?id={saved}&apiKey={}&f=json&hearthsound=1",
-            fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&album);
-    assert!(
-        album.body.contains("\"inLibrary\":true"),
-        "the saved catalog album is in the personal library: {}",
-        album.body
-    );
 }
 
 #[tokio::test]

@@ -11,7 +11,7 @@ use hearthsound_acquire::repo::{self, AcquisitionRow, NewAcquisition};
 use hearthsound_core::{Availability, EntityId, FailureReason, Granularity, Priority};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_library::query::MAX_IDS_PER_QUERY;
-use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, Origin, TrackInput};
+use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, TrackInput};
 use uuid::Uuid;
 
 async fn migrated(dir: &Path) -> Database {
@@ -22,11 +22,7 @@ async fn migrated(dir: &Path) -> Database {
 
 /// Inserts a catalog track in `album` and returns its id.
 async fn make_track(library: &LibraryRepository, album: EntityId, number: i64) -> EntityId {
-    let mut input = TrackInput::new(
-        format!("Track {number}"),
-        Origin::Catalog,
-        Availability::Remote,
-    );
+    let mut input = TrackInput::new(format!("Track {number}"), Availability::Remote);
     input.album_id = Some(album);
     input.track_number = Some(number);
     library
@@ -91,7 +87,7 @@ async fn active_keeps_only_non_terminal_rows_and_latest_keeps_any_state() {
     let library = LibraryRepository::new(&db);
     let album = library
         .upsert_album(
-            &AlbumInput::new("Batch Album", Origin::Catalog),
+            &AlbumInput::new("Batch Album"),
             &[ArtistCredit::new("Batch Artist", "main")],
         )
         .await
@@ -130,7 +126,7 @@ async fn an_older_active_row_survives_a_newer_terminal_one() {
     let library = LibraryRepository::new(&db);
     let album = library
         .upsert_album(
-            &AlbumInput::new("Batch Album", Origin::Catalog),
+            &AlbumInput::new("Batch Album"),
             &[ArtistCredit::new("Batch Artist", "main")],
         )
         .await
@@ -156,7 +152,7 @@ async fn batch_lookups_read_past_the_chunk_boundary() {
     let library = LibraryRepository::new(&db);
     let album = library
         .upsert_album(
-            &AlbumInput::new("Batch Album", Origin::Catalog),
+            &AlbumInput::new("Batch Album"),
             &[ArtistCredit::new("Batch Artist", "main")],
         )
         .await

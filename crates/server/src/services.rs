@@ -60,7 +60,7 @@ use hearthsound_activity::{
 use hearthsound_api_native::{NativeServices, NativeState};
 use hearthsound_api_subsonic::{PendingSource, SubsonicState};
 use hearthsound_auth::{Authenticator, Sessions, SetupGate, TrustedProxies, Users};
-use hearthsound_catalog::{CatalogService, DiscoveryService, ENRICH_JOB_KIND, LinkedUserContexts};
+use hearthsound_catalog::{CatalogService, DiscoveryService, LinkedUserContexts};
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_config::keys;
 use hearthsound_config::secret::{SecretBox, SecretKey};
@@ -73,8 +73,6 @@ use hearthsound_jobs::{
     SchedulerOptions, Shutdown,
 };
 use hearthsound_library::StorageRoots;
-use hearthsound_library::editions::{EDITIONS_JOB_KIND, EditionsJobHandler};
-use hearthsound_library::identity::{REIDENTITY_JOB_KIND, ReidentityJobHandler};
 use hearthsound_library::locks::FolderLocks;
 use hearthsound_library::maintenance::{
     MAINTENANCE_JOB_KIND, MAINTENANCE_SCHEDULE, MaintenanceJobHandler, MaintenanceSignal,
@@ -87,16 +85,20 @@ use hearthsound_library::watch::LibraryWatcher;
 use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::instances::InstanceService;
 use hearthsound_plugin_host::{
-    IndexClient, PluginAdmin, PluginHost, PluginInstaller, PluginRepository, ProviderRegistry,
-    UPDATE_CHECK_JOB_KIND, UPDATE_CHECK_SCHEDULE, UpdateCheckJobHandler, UpdateChecker,
-    UserConfigService,
+    IndexClient, PluginAdmin, PluginHost, PluginInstaller, PluginRepository, ProtectedPlugins,
+    ProviderRegistry, UPDATE_CHECK_JOB_KIND, UPDATE_CHECK_SCHEDULE, UpdateCheckJobHandler,
+    UpdateChecker, UserConfigService,
 };
 use tower_http::cors::CorsLayer;
 
 use crate::error::ServerError;
+use crate::index_jobs::{
+    INDEX_PRUNE_CRON, INDEX_PRUNE_JOB_KIND, INDEX_RECOMPUTE_JOB_KIND, INDEX_SWEEP_CRON,
+    INDEX_SWEEP_JOB_KIND, IndexPruneJobHandler, IndexRecomputeJobHandler, IndexSweepJobHandler,
+};
 use crate::jobs::{
-    EnrichJobHandler, KvSweepJobHandler, PLUGIN_HEALTH_JOB_KIND, PLUGIN_HEALTH_SCHEDULE,
-    PLUGIN_KV_SWEEP_CRON, PLUGIN_KV_SWEEP_JOB_KIND, PluginHealthJobHandler,
+    KvSweepJobHandler, PLUGIN_HEALTH_JOB_KIND, PLUGIN_HEALTH_SCHEDULE, PLUGIN_KV_SWEEP_CRON,
+    PLUGIN_KV_SWEEP_JOB_KIND, PluginHealthJobHandler,
 };
 use crate::web::WebAssets;
 
@@ -310,7 +312,10 @@ impl Services {
                 Arc::clone(&database),
             )?
             .with_event_bus(Arc::clone(&events))
-            .with_live_settings(settings.clone()),
+            .with_live_settings(settings.clone())
+            .with_protected_plugins(ProtectedPlugins::new(
+                crate::bundled::MANDATORY_PLUGIN_IDS.iter().copied(),
+            )),
         );
 
         let repository = PluginRepository::new(&database);
@@ -319,8 +324,6 @@ impl Services {
             repository.clone(),
             secrets.clone(),
         ));
-        log_rebuild(&registry.rebuild().await?);
-
         let instances =
             InstanceService::new(Arc::clone(&plugins), repository.clone(), secrets.clone());
 
@@ -337,6 +340,11 @@ impl Services {
             repository.clone(),
             Some(Arc::clone(&events)),
         ));
+        // The required plugins are installed, enabled and assigned before the
+        // first rebuild, so this process serves them without a restart.
+        crate::bundled::ensure_mandatory_plugins(&admin, &instances, &events, &config.paths.data)
+            .await?;
+        log_rebuild(&registry.rebuild().await?);
         let installer = Arc::new(PluginInstaller::new(
             Arc::clone(&admin),
             repository.clone(),
@@ -352,22 +360,18 @@ impl Services {
                 .with_registry(Arc::clone(&registry)),
         );
 
-        let catalog = Arc::new(CatalogService::new(
+        let ffmpeg = Arc::new(FfmpegRunner::new(
+            None,
+            max_concurrent_transcodes(&snapshot)?,
+        ));
+        let catalog = CatalogService::new(
             Arc::clone(&registry),
             Arc::clone(&database),
             settings.clone(),
+            Arc::clone(&events),
             config.paths.artwork.clone(),
-        ));
-
-        // An alias whose row is gone would name a row a lookup cannot read, so the
-        // table is repaired once before anything serves the catalog.
-        match catalog.repair_aliases().await {
-            Ok(deleted) if deleted > 0 => {
-                tracing::warn!(deleted, "repaired dangling provider aliases")
-            }
-            Ok(_) => {}
-            Err(error) => tracing::warn!(%error, "the provider aliases could not be repaired"),
-        }
+            Arc::clone(&ffmpeg),
+        );
 
         // The listener's per-instance configuration comes from the stored
         // provider links; an instance the listener has not linked is asked
@@ -375,13 +379,9 @@ impl Services {
         let user_configs = UserConfigService::new(&database, secrets.clone());
         let discovery = Arc::new(DiscoveryService::new(
             Arc::clone(&registry),
-            Arc::clone(&catalog),
+            Arc::clone(&database),
             Arc::new(LinkedUserContexts::new(user_configs.clone())),
-        ));
-
-        let ffmpeg = Arc::new(FfmpegRunner::new(
-            None,
-            max_concurrent_transcodes(&snapshot)?,
+            catalog.resolver().clone(),
         ));
         // The thumbs directory sits inside the artwork directory the catalog
         // layer writes its cached images to, so one storage policy covers both.
@@ -454,25 +454,33 @@ impl Services {
         .with_signal(maintenance.clone());
 
         let queue = Arc::new(JobQueue::new(&database, QueueOptions::default()));
+        catalog.attach_queue(Arc::clone(&queue));
         let mut runner = JobRunner::new(Arc::clone(&queue), JobRunnerOptions::default());
         runner.register(
             SCAN_JOB_KIND,
             Arc::new(ScanJobHandler::new(Arc::clone(&scanner))),
         );
         runner.register(
-            REIDENTITY_JOB_KIND,
-            Arc::new(ReidentityJobHandler::new(
-                Arc::clone(&scanner),
+            PLUGIN_KV_SWEEP_JOB_KIND,
+            Arc::new(KvSweepJobHandler::new(Arc::clone(&database))),
+        );
+        runner.register(
+            INDEX_SWEEP_JOB_KIND,
+            Arc::new(IndexSweepJobHandler::new(
                 Arc::clone(&database),
+                Arc::clone(&catalog),
             )),
         );
         runner.register(
-            EDITIONS_JOB_KIND,
-            Arc::new(EditionsJobHandler::new(Arc::clone(&database))),
+            INDEX_PRUNE_JOB_KIND,
+            Arc::new(IndexPruneJobHandler::new(
+                Arc::clone(&database),
+                Arc::clone(&catalog),
+            )),
         );
         runner.register(
-            PLUGIN_KV_SWEEP_JOB_KIND,
-            Arc::new(KvSweepJobHandler::new(
+            INDEX_RECOMPUTE_JOB_KIND,
+            Arc::new(IndexRecomputeJobHandler::new(
                 Arc::clone(&database),
                 Arc::clone(&catalog),
             )),
@@ -493,7 +501,6 @@ impl Services {
         );
         let discovery_sync = Arc::new(DiscoverySyncJobHandler::new(
             Arc::clone(&discovery),
-            Arc::clone(&catalog),
             Arc::clone(&registry),
             user_configs,
             activity.playlists().clone(),
@@ -507,14 +514,6 @@ impl Services {
             Arc::new(PluginHealthJobHandler::new(
                 Arc::clone(&registry),
                 settings.clone(),
-            )),
-        );
-        runner.register(
-            ENRICH_JOB_KIND,
-            Arc::new(EnrichJobHandler::new(
-                Arc::clone(&catalog),
-                Arc::clone(&discovery),
-                Arc::clone(&events),
             )),
         );
         let runner = Arc::new(runner);
@@ -569,6 +568,12 @@ impl Services {
                 PLUGIN_HEALTH_JOB_KIND,
                 PLUGIN_HEALTH_SCHEDULE,
             ))
+            .await?;
+        scheduler
+            .upsert(ScheduleSpec::system(INDEX_SWEEP_JOB_KIND, INDEX_SWEEP_CRON))
+            .await?;
+        scheduler
+            .upsert(ScheduleSpec::system(INDEX_PRUNE_JOB_KIND, INDEX_PRUNE_CRON))
             .await?;
 
         // The first check of a process runs here rather than on the next tick,
@@ -939,7 +944,6 @@ impl Services {
         .with_registry(Arc::clone(&self.registry))
         .with_trusted_proxies(self.trusted_proxies.clone())
         .with_scanner(Arc::clone(&self.scanner), Arc::clone(&self.queue))
-        .with_thumbnails(Arc::clone(&self.thumbnails))
         .with_discovery(Arc::clone(&self.discovery))
     }
 

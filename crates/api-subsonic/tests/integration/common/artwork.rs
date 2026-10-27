@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use hearthsound_core::{Availability, EntityId, Layer};
 use hearthsound_library::{
-    AlbumInput, ArtistCredit, LibraryRepository, Origin, ScannedMediaFile, TrackInput,
+    AlbumInput, ArtistCredit, LibraryRepository, ScannedMediaFile, TrackInput,
 };
 use hearthsound_plugin_host::{InstanceService, InstanceSpec, PluginSource};
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
@@ -93,7 +93,7 @@ pub async fn seed_album(fixture: &Fixture, title: &str, files: &[Art]) -> Seeded
         .await
         .unwrap();
     let artist_name = format!("{title} Artist");
-    let mut album_input = AlbumInput::new(title, Origin::Local);
+    let mut album_input = AlbumInput::new(title);
     album_input.display_artist = Some(artist_name.clone());
     let album = library
         .upsert_album(
@@ -132,11 +132,7 @@ pub async fn seed_album(fixture: &Fixture, title: &str, files: &[Art]) -> Seeded
             std::fs::write(directory.join("cover.jpg"), bytes).unwrap();
         }
 
-        let mut input = TrackInput::new(
-            format!("{title} {number}"),
-            Origin::Local,
-            Availability::Local,
-        );
+        let mut input = TrackInput::new(format!("{title} {number}"), Availability::Local);
         input.album_id = Some(album);
         input.display_artist = Some(artist_name.clone());
         input.track_number = Some(number as i64);

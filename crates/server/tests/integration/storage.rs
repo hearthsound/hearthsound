@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use hearthsound_core::{Availability, EntityId, EntityKind, StorageClass};
-use hearthsound_library::{LibraryRepository, ManagedMediaFile, Origin, TrackInput};
+use hearthsound_library::{LibraryRepository, ManagedMediaFile, TrackInput};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -31,11 +31,7 @@ pub(crate) async fn managed_track(
     };
     let library = LibraryRepository::new(fixture.services.database());
     let track = library
-        .insert_track(
-            &TrackInput::new("Song", Origin::Local, availability),
-            &[],
-            &[],
-        )
+        .insert_track(&TrackInput::new("Song", availability), &[], &[])
         .await
         .unwrap();
     library

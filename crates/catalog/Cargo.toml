@@ -14,7 +14,10 @@ workspace = true
 hearthsound-config = { path = "../config" }
 hearthsound-core = { path = "../core" }
 hearthsound-db = { path = "../db" }
+data-encoding.workspace = true
 hearthsound-library = { path = "../library" }
+hearthsound-media = { path = "../media" }
+hearthsound-jobs = { path = "../jobs" }
 hearthsound-plugin-host = { path = "../plugin-host" }
 async-trait.workspace = true
 futures-util.workspace = true

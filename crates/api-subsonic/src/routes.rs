@@ -176,7 +176,6 @@ pub fn routes() -> Router<SubsonicState> {
         endpoints::hs_cancel_acquisition,
     );
     let router = register(router, "hsSetQueue", endpoints::hs_set_queue);
-    let router = register(router, "hsResolve", endpoints::hs_resolve);
     let router = register(router, "hsSave", endpoints::hs_save);
     let router = register(router, "hsUnsave", endpoints::hs_unsave);
     let router = register(router, "hsSetFeedback", endpoints::hs_set_feedback);

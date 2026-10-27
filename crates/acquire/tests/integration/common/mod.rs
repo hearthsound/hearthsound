@@ -20,11 +20,16 @@ use hearthsound_config::secret::{SecretBox, SecretKey};
 use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingSources, SettingsRegistry};
 use hearthsound_core::events::{EventBus, EventEnvelope, ServerEvent};
-use hearthsound_core::{AcquisitionState, Availability, EntityId, Granularity, Layer, Priority};
+use hearthsound_core::providers::ExternalId;
+use hearthsound_core::{
+    AcquisitionState, Availability, EntityId, EntityKind, Granularity, IdPrefix, Layer, Priority,
+    Slug,
+};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_library::locks::FolderLocks;
 use hearthsound_library::{
-    AlbumInput, ArtistCredit, LibraryRepository, Origin, StorageRoots, Track, TrackInput, tracks,
+    AlbumInput, ArtistCredit, LibraryRepository, StorageRoots, Track, TrackInput, external_ids,
+    tracks,
 };
 use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::{
@@ -340,12 +345,14 @@ impl Env {
 
         let events = Arc::new(EventBus::new());
         let library = LibraryRepository::new(&database);
-        let catalog = Arc::new(CatalogService::new(
+        let catalog = CatalogService::new(
             Arc::clone(&registry),
             Arc::clone(&database),
             settings.clone(),
+            Arc::clone(&events),
             root.join("artwork"),
-        ));
+            Arc::new(FfmpegRunner::new(None, 8)),
+        );
         let downloads = root.join("downloads");
         let staging = root.join("storage/staging");
         let library_root = root.join("storage/library");
@@ -740,13 +747,10 @@ impl Env {
     pub async fn add_track_without_album_artist(&self, title: &str, artist: &str) -> EntityId {
         let album = self
             .library
-            .upsert_album(
-                &AlbumInput::new(format!("{title} album"), Origin::Catalog),
-                &[],
-            )
+            .upsert_album(&AlbumInput::new(format!("{title} album")), &[])
             .await
             .unwrap();
-        let mut input = TrackInput::new(title, Origin::Catalog, Availability::Remote);
+        let mut input = TrackInput::new(title, Availability::Remote);
         input.album_id = Some(album);
         input.display_artist = Some(artist.to_owned());
         input.track_number = Some(1);
@@ -777,23 +781,29 @@ impl Env {
         artist: &str,
         tracks: usize,
     ) -> (EntityId, Vec<EntityId>) {
-        let mut album_input = AlbumInput::new(title, Origin::Catalog);
+        let mut album_input = AlbumInput::new(title);
         album_input.display_artist = Some(artist.to_owned());
         album_input.year = Some(1993);
-        album_input.mb_release_group_id = Some("b84e3b1c-6a0b-4f56-9a63-1e3f6b0a8f21".to_owned());
-        album_input.mb_release_id = Some("0c9a2c0f-7d5e-4a2b-8f3d-5b1e9a7c6d40".to_owned());
+        album_input.ids = vec![
+            ExternalId {
+                namespace: "mb-release-group".to_owned(),
+                value: "b84e3b1c-6a0b-4f56-9a63-1e3f6b0a8f21".to_owned(),
+            },
+            ExternalId {
+                namespace: "mb-release".to_owned(),
+                value: "0c9a2c0f-7d5e-4a2b-8f3d-5b1e9a7c6d40".to_owned(),
+            },
+        ];
         let album = self
             .library
             .upsert_album(&album_input, &[ArtistCredit::new(artist, "main")])
             .await
             .unwrap();
+        self.attach_ids(EntityKind::Album, album, &album_input.ids)
+            .await;
         let mut ids = Vec::with_capacity(tracks);
         for number in 1..=tracks {
-            let mut input = TrackInput::new(
-                format!("{title} {number}"),
-                Origin::Catalog,
-                Availability::Remote,
-            );
+            let mut input = TrackInput::new(format!("{title} {number}"), Availability::Remote);
             input.album_id = Some(album);
             input.display_artist = Some(artist.to_owned());
             input.disc_number = Some(1);
@@ -966,6 +976,74 @@ impl Env {
         self.counter(slug, "counter:cancel").await
     }
 
+    /// Resolves the album fixture's `number`-th track into a row.
+    ///
+    /// The record is fetched from the fixture and enters the database through
+    /// the resolver, which is the only way a provider record becomes a row.
+    ///
+    /// # Parameters
+    ///
+    /// - `number`: the track number inside the fixture's album.
+    ///
+    /// # Returns
+    ///
+    /// The stored track.
+    pub async fn resolved_catalog_track(&self, number: u8) -> EntityId {
+        let instance = self
+            .registry
+            .instance(CATALOG_INSTANCE)
+            .expect("the catalog instance is registered");
+        let provider = instance
+            .catalog()
+            .expect("the catalog fixture exports the catalog interface");
+        let record = provider
+            .track(&format!("album-catalog-track-{number}"))
+            .await
+            .unwrap();
+        let slug = Slug::new(CATALOG_INSTANCE).unwrap();
+        let mut connection = self.database.writer().acquire().await.unwrap();
+        let row = self
+            .catalog
+            .resolver()
+            .track(&mut connection, instance.id(), &slug, &record)
+            .await
+            .unwrap();
+        EntityId::from_uuid(IdPrefix::Track, row)
+    }
+
+    /// Returns the identifiers stored for a row.
+    ///
+    /// # Parameters
+    ///
+    /// - `kind`: the entity kind.
+    /// - `id`: the row.
+    pub async fn ids(&self, kind: EntityKind, id: EntityId) -> Vec<ExternalId> {
+        let mut connection = self.database.readers().acquire().await.unwrap();
+        external_ids::ids_of(&mut connection, kind, id.uuid())
+            .await
+            .unwrap()
+    }
+
+    /// Attaches identifiers to a stored row.
+    ///
+    /// The writers store the row first and the identity afterwards, so a test
+    /// that wants a row to carry an ISRC or a release id attaches it here.
+    ///
+    /// # Parameters
+    ///
+    /// - `kind`: the entity kind.
+    /// - `id`: the row.
+    /// - `ids`: the identifiers to attach.
+    pub async fn attach_ids(&self, kind: EntityKind, id: EntityId, ids: &[ExternalId]) {
+        if ids.is_empty() {
+            return;
+        }
+        let mut connection = self.database.writer().acquire().await.unwrap();
+        external_ids::attach(&mut connection, kind, id.uuid(), ids)
+            .await
+            .unwrap();
+    }
+
     /// Inserts an album and one track of it.
     ///
     /// # Parameters
@@ -981,7 +1059,7 @@ impl Env {
         availability: Availability,
         unavailable_until: Option<i64>,
     ) -> EntityId {
-        let mut album_input = AlbumInput::new(format!("{title} album"), Origin::Catalog);
+        let mut album_input = AlbumInput::new(format!("{title} album"));
         album_input.year = Some(1993);
         album_input.display_artist = Some(artist.to_owned());
         let album = self
@@ -989,18 +1067,24 @@ impl Env {
             .upsert_album(&album_input, &[ArtistCredit::new(artist, "main")])
             .await
             .unwrap();
-        let mut input = TrackInput::new(title, Origin::Catalog, availability);
+        let mut input = TrackInput::new(title, availability);
         input.album_id = Some(album);
         input.display_artist = Some(artist.to_owned());
         input.disc_number = Some(1);
         input.track_number = Some(1);
         input.duration_ms = Some(200);
-        input.isrc = Some("USHW12600001".to_owned());
+        input.ids = vec![ExternalId {
+            namespace: "isrc".to_owned(),
+            value: "USHW12600001".to_owned(),
+        }];
         input.unavailable_until = unavailable_until;
-        self.library
+        let track = self
+            .library
             .insert_track(&input, &[ArtistCredit::new(artist, "main")], &[])
             .await
-            .unwrap()
+            .unwrap();
+        self.attach_ids(EntityKind::Track, track, &input.ids).await;
+        track
     }
 
     /// Inserts a track that is catalog-only, the usual starting point.

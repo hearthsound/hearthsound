@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, bail};
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_config::keys;
-use hearthsound_core::{ClientId, EntityId, IdPrefix};
+use hearthsound_core::{EntityId, IdPrefix};
 use hearthsound_plugin_host::index::OFFICIAL_INDEX_URL;
 use hearthsound_plugin_host::{
     AvailablePlugin, IndexError, InstallError, Manifest, PluginRegistration, PluginRepository,
@@ -457,10 +457,8 @@ async fn repository_urls(context: &Context) -> anyhow::Result<BTreeMap<Uuid, Str
 ///
 /// Returns an error when the text is a client id of another kind.
 fn repository_reference(text: &str) -> anyhow::Result<RepositoryRef> {
-    match ClientId::parse(text) {
-        Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::PluginRepository => {
-            Ok(RepositoryRef::Id(id.uuid()))
-        }
+    match EntityId::parse(text) {
+        Ok(id) if id.kind() == IdPrefix::PluginRepository => Ok(RepositoryRef::Id(id.uuid())),
         Ok(_) => bail!("`{text}` is not a repository id; it must be a URL or a `pr_` id"),
         Err(_) => Ok(RepositoryRef::Url(text.to_owned())),
     }
@@ -482,7 +480,7 @@ fn repository_reference(text: &str) -> anyhow::Result<RepositoryRef> {
 /// Returns an error when no repository has the URL or the id, or when the row
 /// cannot be read.
 async fn find_repository(context: &Context, text: &str) -> anyhow::Result<RepositoryRow> {
-    if let Ok(ClientId::Entity(id)) = ClientId::parse(text)
+    if let Ok(id) = EntityId::parse(text)
         && id.kind() == IdPrefix::PluginRepository
     {
         return repository(context)

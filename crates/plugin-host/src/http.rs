@@ -129,6 +129,8 @@ enum HostRule {
 #[derive(Debug, Clone)]
 pub struct HttpGrant {
     rules: Vec<HostRule>,
+    /// One slot per rule: the limit that rule declared for its own host.
+    host_rates: Vec<Option<(NonZeroU32, NonZeroU32)>>,
     rate_limit: Option<(NonZeroU32, NonZeroU32)>,
     max_body_bytes: u64,
 }
@@ -148,6 +150,7 @@ impl HttpGrant {
         let Some(permission) = permission else {
             return HttpGrant {
                 rules: Vec::new(),
+                host_rates: Vec::new(),
                 rate_limit: None,
                 max_body_bytes: DEFAULT_BODY_BYTES,
             };
@@ -158,18 +161,30 @@ impl HttpGrant {
         let rules = permission
             .hosts
             .iter()
-            .map(|host| match host.strip_prefix("$config:") {
+            .map(|entry| match entry.host().strip_prefix("$config:") {
                 Some(field) => HostRule::Config {
                     field: field.to_owned(),
                     host: config_host(&config, field),
                 },
-                None => match host.strip_prefix("*.") {
+                None => match entry.host().strip_prefix("*.") {
                     Some(domain) => HostRule::Wildcard(domain.to_ascii_lowercase()),
-                    None => HostRule::Literal(host.to_ascii_lowercase()),
+                    None => HostRule::Literal(entry.host().to_ascii_lowercase()),
                 },
             })
             .collect();
 
+        let host_rates = permission
+            .hosts
+            .iter()
+            .map(|entry| {
+                entry.rate_limit().map(|limit| {
+                    (
+                        NonZeroU32::new(limit.per_second).unwrap_or(NonZeroU32::MIN),
+                        NonZeroU32::new(limit.burst).unwrap_or(NonZeroU32::MIN),
+                    )
+                })
+            })
+            .collect();
         let rate_limit = permission.rate_limit.map(|limit| {
             (
                 NonZeroU32::new(limit.per_second).unwrap_or(NonZeroU32::MIN),
@@ -183,9 +198,24 @@ impl HttpGrant {
 
         HttpGrant {
             rules,
+            host_rates,
             rate_limit,
             max_body_bytes,
         }
+    }
+
+    /// Returns the index of the first allowlist rule that matches `host`.
+    fn matched(&self, host: &str) -> Option<usize> {
+        self.rules.iter().position(|rule| match rule {
+            HostRule::Literal(literal) => literal == host,
+            HostRule::Wildcard(domain) => host
+                .strip_suffix(domain)
+                .is_some_and(|prefix| prefix.ends_with('.')),
+            HostRule::Config {
+                host: Some(config), ..
+            } => config == host,
+            HostRule::Config { host: None, .. } => false,
+        })
     }
 
     /// Returns whether the grant approves no host at all.
@@ -270,8 +300,35 @@ pub struct HttpClient {
     slug: Slug,
     grant: HttpGrant,
     client: Client,
-    rate: Option<DefaultDirectRateLimiter>,
+    rates: RateLimiters,
     pins: Arc<Mutex<HashMap<String, Vec<SocketAddr>>>>,
+}
+
+/// The rate limiters of one instance.
+///
+/// The instance-wide limiter holds every host whose allowlist entry declares no
+/// limit of its own; a host whose entry does is held to that entry's limiter
+/// alone, so one slow service cannot spend the budget of the rest.
+pub(crate) struct RateLimiters {
+    instance: Option<DefaultDirectRateLimiter>,
+    /// One slot per allowlist rule, for the rules that declared a limit.
+    hosts: Vec<Option<DefaultDirectRateLimiter>>,
+}
+
+impl RateLimiters {
+    /// Returns the limiter `host` waits on, when it waits on one at all.
+    ///
+    /// # Parameters
+    ///
+    /// - `grant`: the grant the request was checked against.
+    /// - `host`: the lowercased host of the hop.
+    fn for_host(&self, grant: &HttpGrant, host: &str) -> Option<&DefaultDirectRateLimiter> {
+        grant
+            .matched(host)
+            .and_then(|index| self.hosts.get(index))
+            .and_then(Option::as_ref)
+            .or(self.instance.as_ref())
+    }
 }
 
 impl HttpClient {
@@ -303,15 +360,23 @@ impl HttpClient {
         );
         let client = pinned_client(Arc::clone(&pins), user_agent, Some(slug.clone()))?;
 
-        let rate = grant.rate_limit.map(|(per_second, burst)| {
+        let limiter = |(per_second, burst): (NonZeroU32, NonZeroU32)| {
             RateLimiter::direct(Quota::per_second(per_second).allow_burst(burst))
-        });
+        };
+        let rates = RateLimiters {
+            instance: grant.rate_limit.map(limiter),
+            hosts: grant
+                .host_rates
+                .iter()
+                .map(|rate| rate.map(limiter))
+                .collect(),
+        };
 
         Ok(HttpClient {
             slug,
             grant,
             client,
-            rate,
+            rates,
             pins,
         })
     }
@@ -364,7 +429,7 @@ impl HttpClient {
                 grant: Some(&self.grant),
                 pins: &self.pins,
                 allow_anywhere: false,
-                rate: self.rate.as_ref(),
+                rate: Some(&self.rates),
             },
             self.grant.max_body_bytes,
         )
@@ -394,8 +459,8 @@ pub(crate) struct HopPolicy<'a> {
     pub pins: &'a Mutex<HashMap<String, Vec<SocketAddr>>>,
     /// Whether every host may resolve to non-public addresses.
     pub allow_anywhere: bool,
-    /// The instance's rate limiter, when it has one.
-    pub rate: Option<&'a DefaultDirectRateLimiter>,
+    /// The instance's rate limiters, when the request runs under a grant.
+    pub rate: Option<&'a RateLimiters>,
 }
 
 /// Performs one request and its redirects under a policy.
@@ -459,10 +524,13 @@ pub(crate) async fn send_with_hops(
         // A literal address is never resolved, so it needs no pin; only a name
         // is looked up by name by the connector.
         if literal_host(&url).is_none() {
-            lock(policy.pins).insert(host, addresses);
+            lock(policy.pins).insert(host.clone(), addresses);
         }
 
-        if let Some(limiter) = policy.rate {
+        if let Some(rates) = policy.rate
+            && let Some(grant) = policy.grant
+            && let Some(limiter) = rates.for_host(grant, &host)
+        {
             wait_for_token(limiter, deadline).await?;
         }
 
@@ -901,10 +969,14 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::HostEntry;
 
     fn grant(hosts: &[&str], config: &str) -> HttpGrant {
         let permission = HttpPermission {
-            hosts: hosts.iter().map(|host| (*host).to_owned()).collect(),
+            hosts: hosts
+                .iter()
+                .map(|host| HostEntry::Pattern((*host).to_owned()))
+                .collect(),
             rate_limit: None,
             max_body_bytes: None,
         };
@@ -1071,7 +1143,7 @@ mod tests {
     #[test]
     fn clamps_the_body_cap() {
         let permission = HttpPermission {
-            hosts: vec!["example.com".to_owned()],
+            hosts: vec![HostEntry::Pattern("example.com".to_owned())],
             rate_limit: None,
             max_body_bytes: Some(u64::MAX),
         };
@@ -1080,7 +1152,7 @@ mod tests {
             MAX_BODY_BYTES
         );
         let permission = HttpPermission {
-            hosts: vec!["example.com".to_owned()],
+            hosts: vec![HostEntry::Pattern("example.com".to_owned())],
             rate_limit: None,
             max_body_bytes: None,
         };
@@ -1105,6 +1177,7 @@ mod enforcement {
     use crate::files::FileAccess;
     use crate::kv::KvStore;
     use crate::log::LogSink;
+    use crate::manifest::HostEntry;
     use crate::state::{InstanceServices, InstanceState};
 
     /// Builds the state of one instance, as the pool would.
@@ -1141,7 +1214,7 @@ mod enforcement {
     /// The permission that reaches a local test server through `$config:baseUrl`.
     fn config_permission(max_body_bytes: Option<u64>) -> HttpPermission {
         HttpPermission {
-            hosts: vec!["$config:baseUrl".to_owned()],
+            hosts: vec![HostEntry::Pattern("$config:baseUrl".to_owned())],
             rate_limit: None,
             max_body_bytes,
         }
@@ -1187,7 +1260,7 @@ mod enforcement {
     #[tokio::test]
     async fn denies_a_literal_host_that_resolves_to_loopback() {
         let permission = HttpPermission {
-            hosts: vec!["localhost".to_owned()],
+            hosts: vec![HostEntry::Pattern("localhost".to_owned())],
             rate_limit: None,
             max_body_bytes: None,
         };
@@ -1205,7 +1278,7 @@ mod enforcement {
     async fn denies_a_host_outside_the_allowlist() {
         let server = MockServer::start().await;
         let permission = HttpPermission {
-            hosts: vec!["api.example.com".to_owned()],
+            hosts: vec![HostEntry::Pattern("api.example.com".to_owned())],
             rate_limit: None,
             max_body_bytes: None,
         };
@@ -1427,7 +1500,7 @@ mod enforcement {
             .await;
 
         let permission = HttpPermission {
-            hosts: vec!["$config:baseUrl".to_owned()],
+            hosts: vec![HostEntry::Pattern("$config:baseUrl".to_owned())],
             rate_limit: Some(crate::manifest::RateLimit {
                 per_second: 1,
                 burst: 1,
@@ -1452,6 +1525,57 @@ mod enforcement {
     }
 
     #[tokio::test]
+    async fn a_hosts_own_rate_limit_does_not_throttle_another_host() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/tick"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let permission = HttpPermission {
+            hosts: vec![
+                HostEntry::Limited {
+                    host: "$config:slowUrl".to_owned(),
+                    rate_limit: crate::manifest::RateLimit {
+                        per_second: 1,
+                        burst: 1,
+                    },
+                },
+                HostEntry::Pattern("$config:fastUrl".to_owned()),
+            ],
+            rate_limit: None,
+            max_body_bytes: None,
+        };
+        // Two names for the same test server, so each request matches its own
+        // allowlist rule instead of the first rule that names the host.
+        let slow = server.uri();
+        let fast = format!("http://localhost:{}/", server.address().port());
+        let config = format!(r#"{{"slowUrl":"{slow}","fastUrl":"{fast}"}}"#);
+        let mut state = state(&config, Some(permission));
+
+        let throttled = Instant::now();
+        get(&mut state, &format!("{slow}/tick")).await.unwrap();
+        get(&mut state, &format!("{slow}/tick")).await.unwrap();
+        assert!(
+            throttled.elapsed() >= Duration::from_millis(900),
+            "the limited host should have waited a token, took {:?}",
+            throttled.elapsed()
+        );
+
+        // The unlimited host shares no limiter with the limited one, and the
+        // instance declares none, so neither request waits.
+        let free = Instant::now();
+        get(&mut state, &format!("{fast}tick")).await.unwrap();
+        get(&mut state, &format!("{fast}tick")).await.unwrap();
+        assert!(
+            free.elapsed() < Duration::from_millis(500),
+            "the unlimited host should not wait, took {:?}",
+            free.elapsed()
+        );
+    }
+
+    #[tokio::test]
     async fn rate_limit_wait_does_not_outlive_the_call_deadline() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -1461,7 +1585,7 @@ mod enforcement {
             .await;
 
         let permission = HttpPermission {
-            hosts: vec!["$config:baseUrl".to_owned()],
+            hosts: vec![HostEntry::Pattern("$config:baseUrl".to_owned())],
             rate_limit: Some(crate::manifest::RateLimit {
                 per_second: 1,
                 burst: 1,

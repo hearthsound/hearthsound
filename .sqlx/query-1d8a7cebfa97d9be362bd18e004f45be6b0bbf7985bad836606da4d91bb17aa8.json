@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT e.namespace AS namespace, e.value AS value\n             FROM track_artists ta JOIN external_ids e ON e.entity_id = ta.artist_id\n             WHERE ta.track_id = ? AND e.entity_kind = 'artist' AND e.namespace = 'mb-artist'\n             ORDER BY ta.position",
+  "describe": {
+    "columns": [
+      {
+        "name": "namespace",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "external_ids",
+            "name": "namespace"
+          }
+        }
+      },
+      {
+        "name": "value",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "external_ids",
+            "name": "value"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "1d8a7cebfa97d9be362bd18e004f45be6b0bbf7985bad836606da4d91bb17aa8"
+}

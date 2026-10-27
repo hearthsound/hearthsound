@@ -36,7 +36,7 @@ const PLUGIN_ID: &str = "com.example.metadata-fixture";
 const VERSION: &str = "0.1.0";
 
 /// The plugin API version this server hosts.
-const API: &str = "hearthsound:plugin@0.4.0";
+const API: &str = "hearthsound:plugin@0.5.0";
 
 /// The path an index document is served at.
 const INDEX_PATH: &str = "/v1/index.json";
@@ -787,7 +787,7 @@ async fn an_upload_installs_and_the_sideload_gate_refuses_it() {
 /// The upload route installs a plugin built for the previous plugin API.
 ///
 /// The host loads both hosted versions, so an archive whose manifest declares
-/// `hearthsound:plugin@0.3.0` installs, reports its own version, and is served.
+/// `hearthsound:plugin@0.4.0` installs, reports its own version, and is served.
 #[tokio::test]
 async fn an_upload_installs_a_plugin_built_for_the_previous_api() {
     let fixture = Fixture::new().await;
@@ -798,7 +798,7 @@ async fn an_upload_installs_a_plugin_built_for_the_previous_api() {
     let view = json(response).await;
     assert_eq!(status, StatusCode::CREATED, "{view}");
     assert_eq!(view["id"], "com.example.legacy-catalog");
-    assert_eq!(view["api"], "hearthsound:plugin@0.3.0");
+    assert_eq!(view["api"], "hearthsound:plugin@0.4.0");
     assert_eq!(view["source"], "sideload");
     assert_eq!(view["state"], "enabled");
 
@@ -877,4 +877,100 @@ async fn an_inspection_refuses_a_file_that_is_not_an_archive() {
     let problem = assert_problem(refused, StatusCode::UNPROCESSABLE_ENTITY, "invalid-plugin").await;
     assert!(problem["detail"].is_string(), "{problem}");
     assert_untouched(&fixture, "com.example.http-catalog").await;
+}
+
+/// The plugin id the server installs by itself.
+const MANDATORY_ID: &str = "app.hearthsound.musicbrainz";
+
+/// The instance slug startup gives the mandatory plugin.
+const MANDATORY_SLUG: &str = "musicbrainz";
+
+/// A plugin the server installs by itself cannot be removed, and the refusal
+/// leaves it installed and assigned to every layer it provides.
+#[tokio::test]
+async fn a_mandatory_plugin_cannot_be_removed_and_stays_assigned() {
+    let fixture = Fixture::with_bundled_plugins().await;
+    let listed = json(
+        admin(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/admin/plugins",
+            None,
+        )
+        .await,
+    )
+    .await;
+    let installed = listed["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|plugin| plugin["id"] == MANDATORY_ID);
+    if !installed {
+        // A build whose `target/bundled-plugins` holds no MusicBrainz archive
+        // embeds none, so startup installed nothing this test could protect.
+        // The refusal itself is covered against the services in
+        // `crates/plugin-host/tests/integration/protection.rs`.
+        eprintln!("no embedded {MANDATORY_ID} archive in this build; nothing to protect");
+        fixture.stop().await;
+        return;
+    }
+
+    let refused = admin(
+        &fixture,
+        reqwest::Method::DELETE,
+        &format!("/api/v1/admin/plugins/{MANDATORY_ID}"),
+        None,
+    )
+    .await;
+    assert_problem(refused, StatusCode::CONFLICT, "plugin-required").await;
+
+    let listed = json(
+        admin(
+            &fixture,
+            reqwest::Method::GET,
+            "/api/v1/admin/plugins",
+            None,
+        )
+        .await,
+    )
+    .await;
+    let plugin = listed["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plugin| plugin["id"] == MANDATORY_ID)
+        .unwrap_or_else(|| panic!("the refused delete kept the plugin: {listed}"));
+    assert_eq!(plugin["enabled"], true, "{plugin}");
+    assert_eq!(plugin["state"], "enabled", "{plugin}");
+
+    let layers =
+        json(admin(&fixture, reqwest::Method::GET, "/api/v1/admin/layers", None).await).await;
+    for name in ["catalog", "metadata", "artwork"] {
+        let layer = layers["layers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|layer| layer["layer"] == name)
+            .unwrap_or_else(|| panic!("the layer listing names {name}: {layers}"));
+        assert!(
+            layer["instances"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|slug| slug == MANDATORY_SLUG),
+            "the refused delete kept the instance in {name}: {layers}"
+        );
+    }
+
+    // Switching it off is refused the same way.
+    let refused = admin(
+        &fixture,
+        reqwest::Method::POST,
+        &format!("/api/v1/admin/plugins/{MANDATORY_ID}/disable"),
+        None,
+    )
+    .await;
+    assert_problem(refused, StatusCode::CONFLICT, "plugin-required").await;
+
+    fixture.stop().await;
 }

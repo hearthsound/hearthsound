@@ -228,6 +228,15 @@ impl CatalogProvider for WasmCatalogProvider {
             .map(|tracks| tracks.into_iter().map(to_core_track).collect())
             .map_err(|error| self.map_error(error))
     }
+
+    /// A 0.4.0 plugin cannot look an album up by canonical id, so this answers
+    /// with no albums and never calls the guest.
+    async fn lookup_album(
+        &self,
+        _ids: &[ExternalId],
+    ) -> Result<Vec<CatalogAlbumRef>, ProviderError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Converts a core query into the plugin's query record.
@@ -283,6 +292,10 @@ fn to_core_album_ref(album: wit::AlbumRef) -> CatalogAlbumRef {
         artists: album.artists.into_iter().map(to_core_credit).collect(),
         year: album.year,
         images: album.images.into_iter().map(to_core_image).collect(),
+        album_type: None,
+        edition: None,
+        track_count: None,
+        ids: Vec::new(),
     }
 }
 
@@ -299,6 +312,7 @@ pub(crate) fn to_core_album(album: wit::Album) -> CatalogAlbum {
         images: album.images.into_iter().map(to_core_image).collect(),
         tracks: album.tracks.into_iter().map(to_core_track).collect(),
         ids: album.ids.into_iter().map(to_core_id).collect(),
+        edition: None,
     }
 }
 

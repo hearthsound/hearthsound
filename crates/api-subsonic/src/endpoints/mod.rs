@@ -20,7 +20,6 @@ pub mod hs_acquisitions;
 pub mod hs_discovery;
 pub mod hs_library;
 pub mod hs_queue;
-pub mod hs_resolve;
 pub mod hs_server;
 pub mod info;
 pub mod now_playing;
@@ -55,7 +54,6 @@ pub use hs_library::{
     hs_get_library_counts, hs_save, hs_set_feedback, hs_set_playlist_lifetime, hs_unsave,
 };
 pub use hs_queue::hs_set_queue;
-pub use hs_resolve::hs_resolve;
 pub use hs_server::hs_get_server_info;
 pub use info::{get_album_info, get_album_info_2, get_artist_info, get_artist_info_2};
 pub use now_playing::get_now_playing;

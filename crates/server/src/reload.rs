@@ -97,6 +97,10 @@ impl Services {
                     }
                     self.apply_cached_settings();
                     self.reconcile_watchers().await;
+                    // A precedence change reorders the stored fields of every
+                    // entity that holds provider answers, which is a database
+                    // pass and not a provider call.
+                    self.enqueue_recompute().await;
                 }
                 received = disabled.recv() => {
                     match received {
@@ -126,6 +130,24 @@ impl Services {
         }
 
         watcher.shutdown().await;
+    }
+
+    /// Queues the field recomputation a settings or layer change needs.
+    ///
+    /// # Errors
+    ///
+    /// A queue that refuses the job is logged: the next change queues it again,
+    /// and the stored fields are still correct for the previous precedence.
+    pub async fn enqueue_recompute(&self) {
+        if let Err(error) = self
+            .queue()
+            .enqueue(hearthsound_jobs::NewJob::new(
+                crate::index_jobs::INDEX_RECOMPUTE_JOB_KIND,
+            ))
+            .await
+        {
+            tracing::warn!(%error, "could not queue the field recomputation");
+        }
     }
 
     /// Reloads the settings and rebuilds the provider registry.

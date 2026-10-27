@@ -1212,6 +1212,7 @@ fn admin_problem(error: &AdminError) -> Problem {
     match error {
         AdminError::NotFound(_) => Problem::not_found(error.to_string()),
         AdminError::NoUpgradeStaged(_) => Problem::conflict(error.to_string()),
+        AdminError::Required { .. } => Problem::plugin_required(error.to_string()),
         AdminError::Install(error) => install_problem(error),
         AdminError::Repo(_) => problem::internal("the plugin admin path", error),
     }
@@ -1222,6 +1223,24 @@ mod tests {
     use super::*;
     use hearthsound_plugin_host::{PluginSource, Risk};
     use utoipa::openapi::RefOr;
+
+    #[test]
+    fn a_required_plugin_refusal_is_a_409_with_its_own_code() {
+        let problem = admin_problem(&AdminError::Required {
+            plugin_id: "app.hearthsound.musicbrainz".to_owned(),
+        });
+
+        assert_eq!(problem.status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(problem.code, "plugin-required");
+        assert!(
+            problem
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("app.hearthsound.musicbrainz")),
+            "{:?}",
+            problem.detail
+        );
+    }
 
     #[test]
     fn the_document_describes_the_plugin_routes() {

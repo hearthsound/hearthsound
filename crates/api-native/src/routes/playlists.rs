@@ -16,12 +16,11 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use hearthsound_acquire::playlist_add::acquire_playlist_additions;
 use hearthsound_activity::{ActivityError, PlaylistUpdate};
-use hearthsound_catalog::{CatalogError, PageDepth};
+use hearthsound_catalog::CatalogError;
 use hearthsound_core::EntityId;
 use hearthsound_core::IdPrefix;
 use hearthsound_core::events::{Audience, PlaylistChanged, ServerEvent};
-use hearthsound_core::{ClientId, EntityKind};
-use hearthsound_library::query::{self, QueueCollection, Scope, TrackSort};
+use hearthsound_library::query::{self, QueueCollection, TrackSort};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -31,7 +30,7 @@ use crate::extract::JsonBody;
 use crate::problem::{self, Problem};
 use crate::routes::library;
 use crate::state::NativeState;
-use crate::views::parse_id;
+use crate::views::{entity_id, parse_id};
 
 /// The new order of a playlist's entries.
 #[derive(Debug, Clone, Deserialize, ToSchema)]
@@ -123,8 +122,8 @@ pub async fn reorder_playlist(
 #[serde(rename_all = "camelCase")]
 pub struct AddTracksRequest {
     /// The collection to append: `album:<id>`, `playlist:<id>` or
-    /// `artist:<id>`. An album id may be a stored album or a catalog album
-    /// (`x_<slug>_a_<id>`), which is stored first.
+    /// `artist:<id>`. Any album id the server accepts is an album row id; a
+    /// merged-away id is answered the surviving row.
     pub source: String,
 }
 
@@ -141,9 +140,9 @@ pub struct AddTracksView {
 /// Appends a whole album, playlist or artist to a playlist.
 ///
 /// The source is resolved exactly as `GET /api/v1/library/queue` resolves it:
-/// through the caller's personal library, in the collection's own order. A
-/// catalog album id is materialized first, which is what an album result of a
-/// search carries, and its whole tracklist is appended in provider order.
+/// through the caller's personal library, in the collection's own order. An
+/// album's stored tracklist is completed from the catalog first, so an album the
+/// server holds a page for adds its whole tracklist.
 ///
 /// The edit applies the same playlist pin and the same
 /// `library.acquire_on_playlist_add` step as an edit through `updatePlaylist`,
@@ -166,7 +165,7 @@ pub struct AddTracksView {
 /// Answers `unauthenticated` without credentials, `not-found` (404) when the
 /// playlist, album, playlist source or artist is unknown or outside the
 /// caller's library, `unknown-source` (400) for a source this route does not
-/// accept, and `internal` when a read, materialization or write fails.
+/// accept, and `internal` when a read, an index walk or a write fails.
 #[utoipa::path(
     post,
     path = "/api/v1/playlists/{id}/tracks",
@@ -199,7 +198,7 @@ pub async fn add_playlist_tracks(
     if playlist.owner_user_id != user {
         return Err(missing());
     }
-    let tracks = source_tracks(&state, user, authed.principal.is_admin, &body.source).await?;
+    let tracks = source_tracks(&state, user, &body.source).await?;
     let playlist = playlists
         .update(
             id,
@@ -237,16 +236,12 @@ pub async fn add_playlist_tracks(
 ///
 /// - `state`: the shared services.
 /// - `user`: the account whose personal library the collection is read from.
-/// - `is_admin`: whether the account may read the server-wide view, which holds
-///   every stored track.
 /// - `source`: the source the request named.
 ///
 /// # Returns
 ///
 /// The tracks, in the collection's own order. An album source is the album's
-/// whole tracklist, with the catalog's tracks stored before their ids are
-/// reported, so an album added by its stored id adds no fewer tracks than the
-/// same album added by its catalog id.
+/// stored tracklist after the catalog completed its page.
 ///
 /// # Errors
 ///
@@ -256,11 +251,10 @@ pub async fn add_playlist_tracks(
 async fn source_tracks(
     state: &NativeState,
     user: Uuid,
-    is_admin: bool,
     source: &str,
 ) -> Result<Vec<EntityId>, Problem> {
     if let Some(value) = source.strip_prefix("album:") {
-        return album_tracks(state, user, is_admin, value).await;
+        return album_tracks(state, value).await;
     }
     let collection = library::collection_of(
         source,
@@ -292,55 +286,38 @@ async fn source_tracks(
     }
 }
 
-/// Reads the whole tracklist of an album, whichever id form the source names.
-///
-/// The album is read through the page builder, so a stored album the caller's
-/// library holds is completed from the catalog and an album the library does not
-/// hold is read through the catalog. Every catalog track is stored before its id
-/// is returned.
+/// Reads an album's stored tracklist, completing its page from the catalog first.
 ///
 /// # Parameters
 ///
 /// - `state`: the shared services.
-/// - `user`: the account whose library the album is read from.
-/// - `is_admin`: whether the account may read the server-wide view.
 /// - `value`: the album id the source named.
 ///
 /// # Returns
 ///
-/// The album's tracks, in playing order.
+/// The album's tracks, in disc and track order.
 ///
 /// # Errors
 ///
-/// Answers `not-found` (404) when the value is not an album id or names an album
-/// neither the caller's library nor the catalog can produce, and `internal` when
-/// a read or a materialization fails.
-async fn album_tracks(
-    state: &NativeState,
-    user: Uuid,
-    is_admin: bool,
-    value: &str,
-) -> Result<Vec<EntityId>, Problem> {
-    let not_found = || Problem::not_found("No album with that id is known to this account.");
-    let id = match ClientId::parse(value) {
-        Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::Album => ClientId::Entity(id),
-        Ok(ClientId::Catalog(id)) if id.kind() == EntityKind::Album => ClientId::Catalog(id),
-        _ => return Err(not_found()),
-    };
-    let mut scopes = vec![Scope::Personal { user_id: user }];
-    if is_admin {
-        scopes.push(Scope::server_for_principal(true));
-    }
-    let catalog = state.services().orchestrator.catalog();
-    let page = catalog
-        .album_page(&id, &scopes, PageDepth::Full)
-        .await
-        .map_err(|error| catalog_problem(&error))?
-        .ok_or_else(not_found)?;
+/// Answers `not-found` (404) when the value is not an album id or names no
+/// stored album, and `internal` when a read or an index walk fails.
+async fn album_tracks(state: &NativeState, value: &str) -> Result<Vec<EntityId>, Problem> {
+    let catalog = state.services().catalog.as_ref();
+    let id = entity_id(catalog, value, IdPrefix::Album).await?;
     catalog
-        .album_page_tracks(&page)
+        .ensure_album_page(id, std::time::Duration::from_secs(10))
         .await
-        .map_err(|error| catalog_problem(&error))
+        .map_err(|error| catalog_problem(&error))?;
+    let mut conn = state
+        .database()
+        .readers()
+        .acquire()
+        .await
+        .map_err(|error| problem::internal("acquiring a reader for an album", &error))?;
+    let tracks = hearthsound_library::tracks::list_tracks_for_album(&mut conn, id)
+        .await
+        .map_err(|error| problem::internal("reading an album's tracks", &error))?;
+    Ok(tracks.into_iter().map(|track| track.id).collect())
 }
 
 /// Maps a catalog failure onto the problem document the route answers.
@@ -351,14 +328,12 @@ async fn album_tracks(
 ///
 /// # Returns
 ///
-/// `not-found` when the id names no entity the catalog knows, and `internal`
-/// for anything else.
+/// `not-found` when the album vanished between the redirect lookup and the walk,
+/// and `internal` for anything else.
 fn catalog_problem(error: &CatalogError) -> Problem {
     match error {
-        CatalogError::NotFound => {
-            Problem::not_found("No album with that id is known to the catalog.")
-        }
-        other => problem::internal("materializing a catalog album", other),
+        CatalogError::NotFound => Problem::not_found("No album with that id is stored."),
+        other => problem::internal("completing an album's page", other),
     }
 }
 

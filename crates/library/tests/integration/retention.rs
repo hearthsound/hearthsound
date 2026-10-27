@@ -12,7 +12,7 @@ use hearthsound_library::retention::{
     set_pin_reasons, track_is_pinned,
 };
 use hearthsound_library::{
-    LibraryRepository, ManagedMediaFile, Origin, ScannedMediaFile, StorageRoots, TrackInput,
+    LibraryRepository, ManagedMediaFile, ScannedMediaFile, StorageRoots, TrackInput,
 };
 
 async fn migrated(dir: &Path) -> Database {
@@ -38,11 +38,7 @@ async fn insert_user(db: &Database) -> uuid::Uuid {
 /// Inserts a track with the given starting availability.
 async fn insert_track(library: &LibraryRepository, availability: Availability) -> EntityId {
     library
-        .insert_track(
-            &TrackInput::new("Cafe del Mar", Origin::Local, availability),
-            &[],
-            &[],
-        )
+        .insert_track(&TrackInput::new("Cafe del Mar", availability), &[], &[])
         .await
         .unwrap()
 }

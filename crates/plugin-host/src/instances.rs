@@ -198,6 +198,12 @@ pub enum InstanceError {
     /// The plugin provides no layer this server can drive.
     #[error("plugin `{0}` provides no layer this server can drive")]
     NoHostedLayer(String),
+    /// The write would leave a mandatory plugin without the instance it needs.
+    #[error("`{plugin_id}` is a required plugin, so this change is refused")]
+    Required {
+        /// The mandatory plugin the write would have unhooked.
+        plugin_id: String,
+    },
 }
 
 /// Configures provider instances and the layers they are assigned to.
@@ -405,13 +411,18 @@ impl InstanceService {
     ///
     /// # Errors
     ///
-    /// Returns [`InstanceError::UnknownInstance`] when no instance has the slug.
+    /// Returns [`InstanceError::UnknownInstance`] when no instance has the slug,
+    /// and [`InstanceError::Required`] when disabling it would leave a
+    /// mandatory plugin with no enabled instance.
     pub async fn set_enabled(
         &self,
         slug: &str,
         enabled: bool,
     ) -> Result<InstanceView, InstanceError> {
         let row = self.instance_row(slug).await?;
+        if !enabled {
+            self.require_last_instance(row.id, &row.plugin_id).await?;
+        }
         self.repository
             .set_instance_enabled(row.id, enabled, now_millis())
             .await?;
@@ -436,9 +447,12 @@ impl InstanceService {
     ///
     /// # Errors
     ///
-    /// Returns [`InstanceError::UnknownInstance`] when no instance has the slug.
+    /// Returns [`InstanceError::UnknownInstance`] when no instance has the slug,
+    /// and [`InstanceError::Required`] when it is the last instance of a
+    /// mandatory plugin.
     pub async fn delete(&self, slug: &str) -> Result<(), InstanceError> {
         let row = self.instance_row(slug).await?;
+        self.require_last_instance(row.id, &row.plugin_id).await?;
         self.repository.delete_instance(row.id).await?;
         Ok(())
     }
@@ -483,7 +497,79 @@ impl InstanceService {
             ids.push(row.id);
         }
 
+        self.require_protected_member(layer, &ids).await?;
         self.repository.set_layer_assignments(layer, &ids).await?;
+        Ok(())
+    }
+
+    /// Refuses to remove an instance that is the last enabled one of a
+    /// mandatory plugin.
+    ///
+    /// # Parameters
+    ///
+    /// - `instance_id`: the instance about to be disabled or deleted.
+    /// - `plugin_id`: the plugin the instance is configured from.
+    async fn require_last_instance(
+        &self,
+        instance_id: Uuid,
+        plugin_id: &str,
+    ) -> Result<(), InstanceError> {
+        if !self.host.protected().contains(plugin_id) {
+            return Ok(());
+        }
+        let others = self
+            .repository
+            .instances()
+            .await?
+            .into_iter()
+            .filter(|row| row.plugin_id == plugin_id && row.id != instance_id && row.enabled)
+            .count();
+        if others == 0 {
+            return Err(InstanceError::Required {
+                plugin_id: plugin_id.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Refuses a layer write that leaves a mandatory plugin out of a layer one
+    /// of its enabled instances provides.
+    ///
+    /// Reordering is allowed: only the absence of every instance of a mandatory
+    /// plugin is refused.
+    ///
+    /// # Parameters
+    ///
+    /// - `layer`: the layer being written.
+    /// - `ids`: the instances that will make up the layer, in order.
+    async fn require_protected_member(
+        &self,
+        layer: Layer,
+        ids: &[Uuid],
+    ) -> Result<(), InstanceError> {
+        if self.host.protected().is_empty() {
+            return Ok(());
+        }
+        let mut instances = self.repository.instances().await?;
+        instances.retain(|row| row.enabled);
+        for row in &instances {
+            if !self.host.protected().contains(&row.plugin_id) {
+                continue;
+            }
+            let manifest = self
+                .repository
+                .plugin(&row.plugin_id)
+                .await?
+                .ok_or_else(|| InstanceError::UnknownPlugin(row.plugin_id.clone()))?;
+            if !stored_provides(&manifest.id, &manifest.manifest)?.contains(&layer) {
+                continue;
+            }
+            if !ids.contains(&row.id) {
+                return Err(InstanceError::Required {
+                    plugin_id: row.plugin_id.clone(),
+                });
+            }
+        }
         Ok(())
     }
 

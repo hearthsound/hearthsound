@@ -128,9 +128,9 @@ async fn a_bookmark_round_trip() {
     assert!(listed.body.contains("\"bookmark\":[]"), "{}", listed.body);
 }
 
-/// A catalog track is materialized before it is bookmarked.
+/// A provider hit is a stored row, so it can be bookmarked straight away.
 #[tokio::test]
-async fn a_bookmark_materializes_a_catalog_track() {
+async fn a_search_hit_is_bookmarked_as_its_row() {
     let (fixture, _seeded) = fixture().await;
     fixture.install_hello_catalog().await;
     let app = fixture.app();
@@ -144,17 +144,22 @@ async fn a_bookmark_materializes_a_catalog_track() {
     )
     .await;
     assert_ok(&found);
+    assert!(
+        !found.body.contains("x_hello_"),
+        "a provider hit is a row: {}",
+        found.body
+    );
     let start = found
         .body
-        .find("x_hello_t_")
-        .expect("the search lists a track");
-    let rest = &found.body[start..];
-    let catalog_song = &rest[..rest.find('"').unwrap()];
+        .find("\"song\":[{\"id\":\"tr_")
+        .expect("the search lists a stored track");
+    let rest = &found.body[start + "\"song\":[{\"id\":\"".len()..];
+    let song = &rest[..rest.find('"').unwrap()];
 
     let created = get(
         &app,
         &format!(
-            "/rest/createBookmark?id={catalog_song}&position=1000&apiKey={}&f=json",
+            "/rest/createBookmark?id={song}&position=1000&apiKey={}&f=json",
             fixture.api_key
         ),
     )
@@ -168,8 +173,10 @@ async fn a_bookmark_materializes_a_catalog_track() {
     .await;
     assert_ok(&listed);
     assert!(
-        listed.body.contains("\"entry\":{\"id\":\"tr_"),
-        "the bookmark carries the stored row: {}",
+        listed
+            .body
+            .contains(&format!("\"entry\":{{\"id\":\"{song}\"")),
+        "the bookmark carries the row the search answered with: {}",
         listed.body
     );
 }

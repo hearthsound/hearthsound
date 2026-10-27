@@ -15,7 +15,7 @@ use hearthsound_acquire::orchestrator::AcquireRequest;
 use hearthsound_acquire::prefetch::PrefetchScheduler;
 use hearthsound_acquire::repo::{AcquisitionRow, ListFilter};
 use hearthsound_core::events::{Audience, QueuePrefetch, ServerEvent};
-use hearthsound_core::{AcquisitionState, Availability, ClientId, EntityId, PinReason, Priority};
+use hearthsound_core::{AcquisitionState, Availability, EntityId, PinReason, Priority};
 
 /// Inserts `count` catalog-only tracks and returns their ids.
 ///
@@ -34,13 +34,13 @@ async fn remote_tracks(env: &Env, count: usize) -> Vec<EntityId> {
     tracks
 }
 
-/// Returns the client ids of a track list, the way a listing names them.
+/// Returns the ids of a track list, the way a listing names them.
 ///
 /// # Parameters
 ///
 /// - `tracks`: the stored tracks.
-fn listing_of(tracks: &[EntityId]) -> Vec<ClientId> {
-    tracks.iter().copied().map(ClientId::Entity).collect()
+fn listing_of(tracks: &[EntityId]) -> Vec<EntityId> {
+    tracks.to_vec()
 }
 
 /// Returns the acquisition the ledger holds for one track.
@@ -520,7 +520,7 @@ async fn a_track_outside_the_listing_infers_nothing() {
 
     scheduler.record_listing(user, "symfonium", listing.clone());
     scheduler
-        .note_stream(user, "symfonium", &ClientId::Entity(outside), true)
+        .note_stream(user, "symfonium", &outside, true)
         .await;
 
     for track in &tracks {

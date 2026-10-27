@@ -15,12 +15,15 @@
 //! inside its own transaction; the pool-level convenience is on
 //! [`crate::LibraryRepository`].
 
-use hearthsound_core::{Availability, EntityId, IdPrefix, new_uuid_v7};
+use hearthsound_core::providers::{ExternalId, MB_ARTIST, MB_RECORDING};
+use hearthsound_core::{Availability, EntityId, EntityKind, IdPrefix, new_uuid_v7};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::artists::upsert_artist;
+use crate::entities;
 use crate::error::LibraryError;
+use crate::external_ids;
 use crate::model::{
     ArtistCredit, Credit, Genre, Track, TrackInput, decode_entity, entity_key, sort_key,
 };
@@ -37,10 +40,10 @@ pub(crate) struct TrackRow {
     pub(crate) disc_number: Option<i64>,
     pub(crate) track_number: Option<i64>,
     pub(crate) duration_ms: Option<i64>,
-    pub(crate) isrc: Option<String>,
-    pub(crate) mb_recording_id: Option<String>,
     pub(crate) explicit: Option<i64>,
-    pub(crate) origin: String,
+    pub(crate) file_tags: Option<String>,
+    pub(crate) fetched_at: Option<i64>,
+    pub(crate) deep_indexed_at: Option<i64>,
     pub(crate) availability: String,
     pub(crate) unavailable_until: Option<i64>,
     pub(crate) created_at: i64,
@@ -53,8 +56,7 @@ impl TrackRow {
     /// # Errors
     ///
     /// Returns [`LibraryError::CorruptId`] when a primary key is not 16 bytes,
-    /// [`LibraryError::Origin`] when the `origin` column is unknown, and
-    /// [`LibraryError::UnknownLiteral`] when `availability` is unknown.
+    /// and [`LibraryError::UnknownLiteral`] when `availability` is unknown.
     pub(crate) fn into_track(self) -> Result<Track, LibraryError> {
         let album_id = match self.album_id.as_deref() {
             Some(bytes) => Some(decode_entity(IdPrefix::Album, bytes)?),
@@ -75,10 +77,10 @@ impl TrackRow {
             disc_number: self.disc_number,
             track_number: self.track_number,
             duration_ms: self.duration_ms,
-            isrc: self.isrc,
-            mb_recording_id: self.mb_recording_id,
             explicit: self.explicit.map(|value| value != 0),
-            origin: self.origin.parse()?,
+            file_tags: self.file_tags,
+            fetched_at: self.fetched_at,
+            deep_indexed_at: self.deep_indexed_at,
             availability,
             unavailable_until: self.unavailable_until,
             created_at: self.created_at,
@@ -116,15 +118,14 @@ pub async fn insert_track(
         .clone()
         .unwrap_or_else(|| sort_key(&track.title));
     let id = new_uuid_v7();
-    let origin = track.origin.as_str();
     let availability = track.availability.as_str();
     let album_id = track.album_id.map(|album| album.uuid());
 
     sqlx::query!(
         "INSERT INTO tracks (id, album_id, title, sort_title, display_artist, disc_number, \
-                             track_number, duration_ms, isrc, mb_recording_id, explicit, origin, \
-                             availability, unavailable_until, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                             track_number, duration_ms, explicit, file_tags, availability, \
+                             unavailable_until, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         id.as_bytes().as_slice(),
         album_id.map(|album| album.as_bytes().to_vec()),
         track.title,
@@ -133,10 +134,8 @@ pub async fn insert_track(
         track.disc_number,
         track.track_number,
         track.duration_ms,
-        track.isrc,
-        track.mb_recording_id,
         track.explicit,
-        origin,
+        track.file_tags.as_ref().map(serde_json::Value::to_string),
         availability,
         track.unavailable_until,
         now,
@@ -153,7 +152,7 @@ pub async fn insert_track(
 
 /// Refreshes a track's mutable fields, credits, and genres.
 ///
-/// The identity columns (`id`, `origin`, `created_at`) and the availability
+/// The identity columns (`id`, `created_at`) and the availability
 /// columns are left alone; availability is written by
 /// [`set_track_availability`] so a rescan of a changed file does not undo a
 /// pin-driven transition.
@@ -194,8 +193,8 @@ pub async fn update_track(
 
     let affected = sqlx::query!(
         "UPDATE tracks SET album_id = ?, title = ?, sort_title = ?, display_artist = ?, \
-                          disc_number = ?, track_number = ?, duration_ms = ?, isrc = ?, \
-                          mb_recording_id = ?, explicit = ?, updated_at = ? WHERE id = ?",
+                          disc_number = ?, track_number = ?, duration_ms = ?, explicit = ?, \
+                          file_tags = COALESCE(?, file_tags), updated_at = ? WHERE id = ?",
         album_id.map(|album| album.as_bytes().to_vec()),
         track.title,
         sort_title,
@@ -203,9 +202,8 @@ pub async fn update_track(
         track.disc_number,
         track.track_number,
         track.duration_ms,
-        track.isrc,
-        track.mb_recording_id,
         track.explicit,
+        track.file_tags.as_ref().map(serde_json::Value::to_string),
         now,
         entity_key(track_id),
     )
@@ -253,10 +251,9 @@ async fn kept_credits(
     track_id: EntityId,
     credits: &[ArtistCredit],
 ) -> Result<Vec<ArtistCredit>, LibraryError> {
-    if credits
-        .iter()
-        .all(|credit| credit.artist.row.is_some() || credit.artist.mb_artist_id.is_some())
-    {
+    if credits.iter().all(|credit| {
+        credit.artist.row.is_some() || credit.artist.ids.iter().any(|id| id.namespace == MB_ARTIST)
+    }) {
         return Ok(credits.to_vec());
     }
     let rows = sqlx::query!(
@@ -278,7 +275,9 @@ async fn kept_credits(
         .iter()
         .enumerate()
         .map(|(position, credit)| {
-            if credit.artist.row.is_some() || credit.artist.mb_artist_id.is_some() {
+            if credit.artist.row.is_some()
+                || credit.artist.ids.iter().any(|id| id.namespace == MB_ARTIST)
+            {
                 return credit.clone();
             }
             let folded = sort_key(&credit.artist.name);
@@ -447,7 +446,7 @@ pub async fn get_track(
     let row = sqlx::query_as!(
         TrackRow,
         "SELECT id, album_id, title, sort_title, display_artist, disc_number, track_number, \
-                duration_ms, isrc, mb_recording_id, explicit, origin, availability, \
+                duration_ms, explicit, file_tags, fetched_at, deep_indexed_at, availability, \
                 unavailable_until, created_at, updated_at FROM tracks WHERE id = ?",
         entity_key(id),
     )
@@ -477,9 +476,11 @@ pub async fn find_track_by_mb_recording_id(
     let row = sqlx::query_as!(
         TrackRow,
         "SELECT id, album_id, title, sort_title, display_artist, disc_number, track_number, \
-                duration_ms, isrc, mb_recording_id, explicit, origin, availability, \
+                duration_ms, explicit, file_tags, fetched_at, deep_indexed_at, availability, \
                 unavailable_until, created_at, updated_at FROM tracks \
-         WHERE mb_recording_id = ? LIMIT 1",
+         WHERE id = (SELECT entity_id FROM external_ids \
+                     WHERE entity_kind = 'track' AND namespace = 'mb-recording' \
+                       AND value = ? LIMIT 1)",
         mbid,
     )
     .fetch_optional(&mut *conn)
@@ -508,9 +509,11 @@ pub async fn find_track_by_isrc(
     let row = sqlx::query_as!(
         TrackRow,
         "SELECT id, album_id, title, sort_title, display_artist, disc_number, track_number, \
-                duration_ms, isrc, mb_recording_id, explicit, origin, availability, \
+                duration_ms, explicit, file_tags, fetched_at, deep_indexed_at, availability, \
                 unavailable_until, created_at, updated_at FROM tracks \
-         WHERE isrc = ? LIMIT 1",
+         WHERE id = (SELECT entity_id FROM external_ids \
+                     WHERE entity_kind = 'track' AND namespace = 'isrc' \
+                       AND value = ? LIMIT 1)",
         isrc,
     )
     .fetch_optional(&mut *conn)
@@ -555,8 +558,9 @@ pub async fn find_tracks_by_sort_title(
 ) -> Result<Vec<TrackCandidate>, LibraryError> {
     let rows = sqlx::query!(
         "SELECT t.id, t.album_id, t.title, t.sort_title, t.display_artist, t.disc_number, \
-                t.track_number, t.duration_ms, t.isrc, t.mb_recording_id, t.explicit, \
-                t.origin, t.availability, t.unavailable_until, t.created_at, t.updated_at, \
+                t.track_number, t.duration_ms, t.explicit, t.file_tags, \
+                t.fetched_at, t.deep_indexed_at, t.availability, \
+                t.unavailable_until, t.created_at, t.updated_at, \
                 a.title AS album_title \
          FROM tracks t LEFT JOIN albums a ON a.id = t.album_id \
          WHERE t.sort_title = ? ORDER BY t.created_at, t.id",
@@ -575,10 +579,10 @@ pub async fn find_tracks_by_sort_title(
             disc_number: row.disc_number,
             track_number: row.track_number,
             duration_ms: row.duration_ms,
-            isrc: row.isrc,
-            mb_recording_id: row.mb_recording_id,
             explicit: row.explicit,
-            origin: row.origin,
+            file_tags: row.file_tags,
+            fetched_at: row.fetched_at,
+            deep_indexed_at: row.deep_indexed_at,
             availability: row.availability,
             unavailable_until: row.unavailable_until,
             created_at: row.created_at,
@@ -614,7 +618,7 @@ pub async fn list_tracks_for_album(
     let rows = sqlx::query_as!(
         TrackRow,
         "SELECT id, album_id, title, sort_title, display_artist, disc_number, track_number, \
-                duration_ms, isrc, mb_recording_id, explicit, origin, availability, \
+                duration_ms, explicit, file_tags, fetched_at, deep_indexed_at, availability, \
                 unavailable_until, created_at, updated_at FROM tracks WHERE album_id = ? \
          ORDER BY disc_number IS NULL, disc_number, track_number IS NULL, track_number, \
                   sort_title, id",
@@ -755,17 +759,141 @@ pub async fn set_track_mb_recording_id(
     track_id: EntityId,
     mbid: &str,
 ) -> Result<bool, LibraryError> {
-    let now = now_millis();
-    let affected = sqlx::query!(
-        "UPDATE tracks SET mb_recording_id = ?, updated_at = ? WHERE id = ?",
-        mbid,
-        now,
-        entity_key(track_id),
+    let id = ExternalId {
+        namespace: MB_RECORDING.to_owned(),
+        value: mbid.to_owned(),
+    };
+    let conflicts = external_ids::attach(
+        conn,
+        EntityKind::Track,
+        track_id.uuid(),
+        std::slice::from_ref(&id),
     )
+    .await?;
+    let mut survivor = track_id.uuid();
+    for conflict in conflicts {
+        survivor = entities::merge(conn, EntityKind::Track, survivor, conflict.owner).await?;
+    }
+    let now = now_millis();
+    sqlx::query("UPDATE tracks SET updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(survivor.as_bytes().as_slice())
+        .execute(&mut *conn)
+        .await?;
+    Ok(true)
+}
+
+/// Merges one track row into another, moving everything that names it.
+///
+/// The survivor takes the loser's files, retention reasons, credits, genres,
+/// acquisitions, saved items, likes, ratings, provider answers, images and
+/// playlist positions; a playlist that would then hold the same track twice
+/// keeps one entry, and a draft queue whose saved ids named the loser is
+/// rewritten to the survivor. Availability is recomputed from the surviving
+/// files, and the loser row is deleted.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to write on.
+/// - `from`: the row that goes away.
+/// - `into`: the row that survives.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::Database`] when a statement fails.
+pub(crate) async fn merge_track(
+    conn: &mut SqliteConnection,
+    from: Uuid,
+    into: Uuid,
+) -> Result<(), LibraryError> {
+    let from_key = from.as_bytes().to_vec();
+    let into_key = into.as_bytes().to_vec();
+    for (insert, delete) in [
+        (
+            "INSERT OR IGNORE INTO user_feedback (user_id, entity_kind, entity_id, value, at) \
+             SELECT user_id, entity_kind, ?, value, at FROM user_feedback \
+             WHERE entity_kind = 'track' AND entity_id = ?",
+            "DELETE FROM user_feedback WHERE entity_kind = 'track' AND entity_id = ?",
+        ),
+        (
+            "INSERT OR IGNORE INTO user_library (user_id, entity_kind, entity_id, origin, added_at) \
+             SELECT user_id, entity_kind, ?, origin, added_at FROM user_library \
+             WHERE entity_kind = 'track' AND entity_id = ?",
+            "DELETE FROM user_library WHERE entity_kind = 'track' AND entity_id = ?",
+        ),
+        (
+            "INSERT OR IGNORE INTO user_ratings (user_id, entity_kind, entity_id, rating, at) \
+             SELECT user_id, entity_kind, ?, rating, at FROM user_ratings \
+             WHERE entity_kind = 'track' AND entity_id = ?",
+            "DELETE FROM user_ratings WHERE entity_kind = 'track' AND entity_id = ?",
+        ),
+    ] {
+        sqlx::query(insert)
+            .bind(into_key.as_slice())
+            .bind(from_key.as_slice())
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query(delete)
+            .bind(from_key.as_slice())
+            .execute(&mut *conn)
+            .await?;
+    }
+    for statement in [
+        "UPDATE external_ids SET entity_id = ? WHERE entity_kind = 'track' AND entity_id = ?",
+        "UPDATE entity_sources SET entity_id = ? WHERE entity_kind = 'track' AND entity_id = ?",
+        "UPDATE entity_images SET entity_id = ? WHERE entity_kind = 'track' AND entity_id = ?",
+        "UPDATE index_queue SET entity_id = ? WHERE entity_kind = 'track' AND entity_id = ?",
+        "UPDATE media_files SET track_id = ? WHERE track_id = ?",
+        "UPDATE track_genres SET track_id = ? WHERE track_id = ? AND genre_id NOT IN (\
+             SELECT genre_id FROM track_genres WHERE track_id = ?)",
+        "UPDATE acquisitions SET track_id = ? WHERE track_id = ?",
+        "UPDATE bookmarks SET track_id = ? WHERE track_id = ? AND track_id NOT IN (\
+             SELECT track_id FROM bookmarks WHERE user_id = bookmarks.user_id AND track_id = ?)",
+        "UPDATE plays SET track_id = ? WHERE track_id = ?",
+        "UPDATE listen_sessions SET track_id = ? WHERE track_id = ?",
+        "UPDATE playlist_tracks SET track_id = ? WHERE track_id = ?",
+        "UPDATE artist_top_tracks SET track_id = ? WHERE track_id = ?",
+    ] {
+        if statement.contains("track_genres") || statement.contains("bookmarks") {
+            sqlx::query(statement)
+                .bind(into_key.as_slice())
+                .bind(from_key.as_slice())
+                .bind(into_key.as_slice())
+                .execute(&mut *conn)
+                .await?;
+            continue;
+        }
+        sqlx::query(statement)
+            .bind(into_key.as_slice())
+            .bind(from_key.as_slice())
+            .execute(&mut *conn)
+            .await?;
+    }
+    // Credits move to free positions on the survivor; a duplicate of one it
+    // already credits is dropped.
+    crate::entities::move_track_credits(conn, from, into).await?;
+    sqlx::query(
+        "DELETE FROM playlist_tracks WHERE track_id = ? AND rowid NOT IN (\
+             SELECT MIN(rowid) FROM playlist_tracks WHERE track_id = ? GROUP BY playlist_id)",
+    )
+    .bind(into_key.as_slice())
+    .bind(into_key.as_slice())
     .execute(&mut *conn)
-    .await?
-    .rows_affected();
-    Ok(affected > 0)
+    .await?;
+    sqlx::query("UPDATE OR IGNORE track_retention SET track_id = ? WHERE track_id = ?")
+        .bind(into_key.as_slice())
+        .bind(from_key.as_slice())
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("DELETE FROM track_retention WHERE track_id = ?")
+        .bind(from_key.as_slice())
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("DELETE FROM tracks WHERE id = ?")
+        .bind(from_key.as_slice())
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
 }
 
 /// Deletes a track and everything that hangs off it.
@@ -829,7 +957,8 @@ pub async fn removal_impact(
     let row = sqlx::query!(
         "WITH doomed AS ( \
              SELECT t.id FROM tracks t \
-              WHERE t.origin = 'local' \
+              WHERE NOT EXISTS (SELECT 1 FROM external_ids e \
+                                 WHERE e.entity_kind = 'track' AND e.entity_id = t.id) \
                 AND EXISTS (SELECT 1 FROM media_files mf \
                              WHERE mf.track_id = t.id AND mf.folder_id = ?) \
                 AND NOT EXISTS (SELECT 1 FROM media_files mf \

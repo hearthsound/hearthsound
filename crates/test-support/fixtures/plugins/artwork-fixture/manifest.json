@@ -4,14 +4,20 @@
   "name": "Artwork fixture",
   "version": "0.1.0",
   "description": "An artwork plugin that answers images for the albums and artists an administrator configured.",
-  "authors": ["Hearthsound contributors"],
+  "authors": [
+    "Hearthsound contributors"
+  ],
   "license": "MIT OR Apache-2.0",
   "homepage": "https://github.com/hearthsound/hearthsound",
-  "api": "hearthsound:plugin@0.4.0",
-  "provides": ["artwork"],
+  "api": "hearthsound:plugin@0.5.0",
+  "provides": [
+    "artwork"
+  ],
   "permissions": {
     "http": {
-      "hosts": ["$config:imageUrl"],
+      "hosts": [
+        "$config:imageUrl"
+      ],
       "maxBodyBytes": 1048576
     }
   },
@@ -20,7 +26,9 @@
       "schema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
-        "required": ["imageUrl"],
+        "required": [
+          "imageUrl"
+        ],
         "properties": {
           "imageUrl": {
             "type": "string",
@@ -33,18 +41,31 @@
             "title": "Albums",
             "items": {
               "type": "object",
-              "required": ["title"],
+              "required": [
+                "title"
+              ],
               "properties": {
-                "title": { "type": "string", "title": "Title" },
+                "title": {
+                  "type": "string",
+                  "title": "Title"
+                },
                 "images": {
                   "type": "array",
                   "title": "Images",
                   "items": {
                     "type": "object",
-                    "required": ["path"],
+                    "required": [
+                      "path"
+                    ],
                     "properties": {
-                      "path": { "type": "string", "title": "Path" },
-                      "width": { "type": "integer", "title": "Width" }
+                      "path": {
+                        "type": "string",
+                        "title": "Path"
+                      },
+                      "width": {
+                        "type": "integer",
+                        "title": "Width"
+                      }
                     }
                   }
                 }
@@ -56,18 +77,31 @@
             "title": "Artists",
             "items": {
               "type": "object",
-              "required": ["title"],
+              "required": [
+                "title"
+              ],
               "properties": {
-                "title": { "type": "string", "title": "Name" },
+                "title": {
+                  "type": "string",
+                  "title": "Name"
+                },
                 "images": {
                   "type": "array",
                   "title": "Images",
                   "items": {
                     "type": "object",
-                    "required": ["path"],
+                    "required": [
+                      "path"
+                    ],
                     "properties": {
-                      "path": { "type": "string", "title": "Path" },
-                      "width": { "type": "integer", "title": "Width" }
+                      "path": {
+                        "type": "string",
+                        "title": "Path"
+                      },
+                      "width": {
+                        "type": "integer",
+                        "title": "Width"
+                      }
                     }
                   }
                 }
@@ -79,13 +113,26 @@
       "uiSchema": {
         "type": "VerticalLayout",
         "elements": [
-          { "type": "Control", "scope": "#/properties/imageUrl" },
-          { "type": "Control", "scope": "#/properties/albums" },
-          { "type": "Control", "scope": "#/properties/artists" }
+          {
+            "type": "Control",
+            "scope": "#/properties/imageUrl"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/albums"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/artists"
+          }
         ]
       }
     },
     "user": null
   },
-  "resources": { "memoryMb": 64, "callTimeoutMs": 5000, "maxInstances": 2 }
+  "resources": {
+    "memoryMb": 64,
+    "callTimeoutMs": 5000,
+    "maxInstances": 2
+  }
 }

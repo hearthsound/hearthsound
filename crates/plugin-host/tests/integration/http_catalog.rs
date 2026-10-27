@@ -14,7 +14,7 @@ use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore};
 use hearthsound_core::providers::{CatalogProvider, CatalogQuery};
 use hearthsound_core::{EntityKind, ProviderError, Slug};
 use hearthsound_db::{Database, MIGRATOR};
-use hearthsound_plugin_host::manifest::{HttpPermission, Permissions};
+use hearthsound_plugin_host::manifest::{HostEntry, HttpPermission, Permissions};
 use hearthsound_plugin_host::{InstanceConfig, PluginHost};
 use hearthsound_test_support::{HTTP_CATALOG, fixture_plugin};
 use wiremock::matchers::{method, path, query_param};
@@ -37,7 +37,10 @@ async fn database(dir: &Path) -> Arc<Database> {
 fn http_permission(hosts: &[&str]) -> Permissions {
     Permissions {
         http: Some(HttpPermission {
-            hosts: hosts.iter().map(|host| (*host).to_owned()).collect(),
+            hosts: hosts
+                .iter()
+                .map(|host| HostEntry::Pattern((*host).to_owned()))
+                .collect(),
             rate_limit: None,
             max_body_bytes: None,
         }),

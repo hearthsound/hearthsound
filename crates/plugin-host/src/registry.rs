@@ -26,7 +26,7 @@ use crate::host::{InstalledPlugin, PluginHost, instance_http_client};
 use crate::http::{HttpClient, HttpError, HttpRequest};
 use crate::instance::{InstanceConfig, InstanceHostConfig};
 use crate::instances::open_server_config;
-use crate::manifest::{ImageCachePolicy, Manifest, Permissions};
+use crate::manifest::{Manifest, Permissions};
 use crate::repo::{InstanceRow, PluginRepository, PluginRow, RepoError, now_millis};
 
 /// One configured instance, as the layers see it.
@@ -82,17 +82,6 @@ impl RegistryInstance {
     /// Returns the host-level settings the administrator chose.
     pub fn host_config(&self) -> &InstanceHostConfig {
         &self.host_config
-    }
-
-    /// Returns how the host treats cover images this instance returns.
-    ///
-    /// A plugin that declares no catalog section - one that is not a catalog
-    /// provider - keeps the default policy.
-    pub fn image_cache_policy(&self) -> ImageCachePolicy {
-        self.manifest
-            .catalog
-            .map(|catalog| catalog.image_cache_policy)
-            .unwrap_or_default()
     }
 
     /// Returns the catalog provider of this instance, when it provides catalog.
@@ -156,8 +145,7 @@ impl RegistryInstance {
     /// plugin.
     ///
     /// The response is returned as it arrived, including a status the caller may
-    /// want to treat as an error. Whether it may be stored is the caller's
-    /// decision, made from [`RegistryInstance::image_cache_policy`].
+    /// want to treat as an error; the server stores every image it serves.
     ///
     /// # Parameters
     ///
@@ -165,8 +153,7 @@ impl RegistryInstance {
     ///
     /// # Returns
     ///
-    /// The status, the `Content-Type` when the server sent one, the body, and
-    /// the instance's image cache policy.
+    /// The status, the `Content-Type` when the server sent one, and the body.
     ///
     /// # Errors
     ///
@@ -190,15 +177,13 @@ impl RegistryInstance {
             status: response.status,
             content_type: header(&response.headers, "content-type"),
             bytes: response.body,
-            cache_policy: self.image_cache_policy(),
         })
     }
 }
 
 /// One image fetched on an instance's behalf.
 ///
-/// The bytes are the server's copy of the image, not the plugin's: nothing is
-/// stored until the caller decides the instance's policy allows it.
+/// The bytes are the server's copy of the image, not the plugin's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchedImage {
     /// The HTTP status code.
@@ -207,8 +192,6 @@ pub struct FetchedImage {
     pub content_type: Option<String>,
     /// The response body.
     pub bytes: Vec<u8>,
-    /// How the issuing instance's manifest says the image may be stored.
-    pub cache_policy: ImageCachePolicy,
 }
 
 /// Why an image could not be fetched.

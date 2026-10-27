@@ -29,9 +29,8 @@ use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_jobs::{JobQueue, QueueOptions};
 use hearthsound_library::locks::FolderLocks;
 use hearthsound_library::scan::LibraryScanner;
-use hearthsound_library::thumbnails::ThumbnailCache;
 use hearthsound_library::{
-    AlbumInput, ArtistCredit, LibraryRepository, Origin, ScannedMediaFile, StorageRoots, TrackInput,
+    AlbumInput, ArtistCredit, LibraryRepository, ScannedMediaFile, StorageRoots, TrackInput,
 };
 use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::{
@@ -39,8 +38,8 @@ use hearthsound_plugin_host::{
     UserConfigService,
 };
 use hearthsound_test_support::{
-    ALBUM_CATALOG, ARTWORK_FIXTURE, ARTWORK_NOSTORE_FIXTURE, DISCOGRAPHY_CATALOG, HELLO_CATALOG,
-    METADATA_FIXTURE, SCROBBLE_FIXTURE, fixture_plugin,
+    ALBUM_CATALOG, ARTWORK_FIXTURE, DISCOGRAPHY_CATALOG, HELLO_CATALOG, METADATA_FIXTURE,
+    SCROBBLE_FIXTURE, fixture_plugin,
 };
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -101,10 +100,8 @@ pub struct Fixture {
     pub roots: StorageRoots,
     /// The ffmpeg runner the state transcodes and verifies through.
     ffmpeg: Arc<FfmpegRunner>,
-    /// The artwork cache directory catalog cover art is written to.
+    /// The artwork directory the stored images are written to.
     artwork: PathBuf,
-    /// The scaled local cover cache `/rest/getCoverArt` serves sizes from.
-    thumbnails: Arc<ThumbnailCache>,
     /// The plugin host a fixture plugin is installed into.
     host: Arc<PluginHost>,
     /// The plugin tables an instance is configured in.
@@ -195,25 +192,28 @@ impl Fixture {
             secret_box.clone(),
         ));
         let artwork = dir.path().join("artwork");
-        let catalog = Arc::new(CatalogService::new(
-            Arc::clone(&registry),
-            Arc::clone(&database),
-            settings.clone(),
-            artwork.clone(),
-        ));
-        let user_configs = UserConfigService::new(&database, secret_box.clone());
-        let discovery = Arc::new(DiscoveryService::new(
-            Arc::clone(&registry),
-            Arc::clone(&catalog),
-            Arc::new(LinkedUserContexts::new(user_configs.clone())),
-        ));
-        let activity = Arc::new(ActivityService::new(&database));
         let roots = StorageRoots::new(dir.path().join("library"), dir.path().join("cache"));
         std::fs::create_dir_all(roots.library.as_path()).unwrap();
         std::fs::create_dir_all(roots.cache.as_path()).unwrap();
         std::fs::create_dir_all(dir.path().join("artwork")).unwrap();
         let ffmpeg = Arc::new(FfmpegRunner::new(None, 2));
         let events = Arc::new(EventBus::new());
+        let catalog = CatalogService::new(
+            Arc::clone(&registry),
+            Arc::clone(&database),
+            settings.clone(),
+            Arc::clone(&events),
+            artwork.clone(),
+            Arc::clone(&ffmpeg),
+        );
+        let user_configs = UserConfigService::new(&database, secret_box.clone());
+        let discovery = Arc::new(DiscoveryService::new(
+            Arc::clone(&registry),
+            Arc::clone(&database),
+            Arc::new(LinkedUserContexts::new(user_configs.clone())),
+            catalog.resolver().clone(),
+        ));
+        let activity = Arc::new(ActivityService::new(&database));
         let state = SubsonicState::new(
             Arc::clone(&database),
             hearthsound_auth::Sessions::new(&database),
@@ -241,14 +241,6 @@ impl Fixture {
         ));
         let jobs = Arc::new(JobQueue::new(&database, QueueOptions::default()));
         let state = state.with_scanner(Arc::clone(&scanner), Arc::clone(&jobs));
-        // Local covers are scaled through the same runner, over the thumbs
-        // directory inside the artwork directory, exactly as the server wires
-        // them.
-        let thumbnails = Arc::new(ThumbnailCache::new(
-            artwork.join("thumbs"),
-            Arc::clone(&ffmpeg),
-        ));
-        let state = state.with_thumbnails(Arc::clone(&thumbnails));
 
         Fixture {
             _dir: dir,
@@ -264,7 +256,6 @@ impl Fixture {
             roots,
             ffmpeg,
             artwork,
-            thumbnails,
             host,
             repository,
             secrets: secret_box,
@@ -561,13 +552,13 @@ impl Fixture {
             .unwrap();
         let album_id = library
             .upsert_album(
-                &AlbumInput::new(album, Origin::Local),
+                &AlbumInput::new(album),
                 &[ArtistCredit::new(artist, "main")],
             )
             .await
             .unwrap();
         let artist_id = library.list_album_artists(album_id).await.unwrap()[0].id;
-        let mut input = TrackInput::new(title, Origin::Local, Availability::Local);
+        let mut input = TrackInput::new(title, Availability::Local);
         input.album_id = Some(album_id);
         input.display_artist = Some(artist.to_owned());
         input.track_number = Some(1);
@@ -632,13 +623,13 @@ impl Fixture {
             .unwrap();
         let album_id = library
             .upsert_album(
-                &AlbumInput::new(album, Origin::Local),
+                &AlbumInput::new(album),
                 &[ArtistCredit::new(artist, "main")],
             )
             .await
             .unwrap();
         let artist_id = library.list_album_artists(album_id).await.unwrap()[0].id;
-        let mut input = TrackInput::new(title, Origin::Local, Availability::Local);
+        let mut input = TrackInput::new(title, Availability::Local);
         input.album_id = Some(album_id);
         input.display_artist = Some(artist.to_owned());
         input.track_number = Some(1);
@@ -673,7 +664,6 @@ impl Fixture {
         (track_id, album_id, artist_id)
     }
 
-    /// Stores an album and a track in a folder no account owns, leaving the
     /// album itself uncredited.
     ///
     /// This is the shape a materialization used to leave behind when a
@@ -703,10 +693,10 @@ impl Fixture {
             .await
             .unwrap();
         let album_id = library
-            .upsert_album(&AlbumInput::new(album, Origin::Local), &[])
+            .upsert_album(&AlbumInput::new(album), &[])
             .await
             .unwrap();
-        let mut input = TrackInput::new(title, Origin::Local, Availability::Local);
+        let mut input = TrackInput::new(title, Availability::Local);
         input.album_id = Some(album_id);
         input.display_artist = Some(artist.to_owned());
         input.track_number = Some(1);
@@ -791,29 +781,6 @@ impl Fixture {
             .await
     }
 
-    /// Installs the artwork fixture whose manifest allows no caching as the
-    /// artwork layer.
-    ///
-    /// The mock server that answers the image lives as long as the fixture's
-    /// runtime, exactly as [`Fixture::install_artwork_layer`]'s does.
-    ///
-    /// # Parameters
-    ///
-    /// - `path`: the image path the fixture configures.
-    /// - `artists`: the artist names the fixture answers a portrait for.
-    ///
-    /// # Returns
-    ///
-    /// The bytes [`ARTWORK_IMAGE`] holds, which is what a 200 answer serves.
-    pub async fn install_no_store_artwork_layer(&self, path: &str, artists: &[&str]) -> Vec<u8> {
-        let server = artwork_server(path, 200).await;
-        let served = self
-            .install_artwork_layer_from(ARTWORK_NOSTORE_FIXTURE, &server, path, artists)
-            .await;
-        std::mem::forget(server);
-        served
-    }
-
     /// Installs one artwork fixture archive as the artwork layer.
     ///
     /// # Parameters
@@ -890,20 +857,6 @@ impl Fixture {
     /// # Panics
     ///
     /// Panics when no built instance carries the slug.
-    /// Primes the catalog cache for one entity, as a background enrichment run
-    /// does.
-    ///
-    /// A vendor page read answers from the library and the cached catalog data
-    /// only, so a test that asserts the merged page primes the cache first and
-    /// then reads. A cold read is asserted on its own, without this call.
-    ///
-    /// # Parameters
-    ///
-    /// - `id`: the stored or catalog id of the entity.
-    pub async fn enrich(&self, id: &hearthsound_core::ClientId) {
-        self.catalog.enrich(id).await.unwrap();
-    }
-
     pub fn instance_id(&self, slug: &str) -> uuid::Uuid {
         self.registry
             .instance(slug)
@@ -1122,7 +1075,7 @@ impl Fixture {
     pub async fn remote_album(&self, title: &str, tracks: usize) -> (EntityId, Vec<EntityId>) {
         let library = LibraryRepository::new(&self.database);
         let artist = "The Faraway";
-        let mut input = AlbumInput::new(title, Origin::Catalog);
+        let mut input = AlbumInput::new(title);
         input.display_artist = Some(artist.to_owned());
         let album = library
             .upsert_album(&input, &[ArtistCredit::new(artist, "main")])
@@ -1130,11 +1083,7 @@ impl Fixture {
             .unwrap();
         let mut ids = Vec::with_capacity(tracks);
         for number in 1..=tracks {
-            let mut track = TrackInput::new(
-                format!("{title} {number}"),
-                Origin::Catalog,
-                Availability::Remote,
-            );
+            let mut track = TrackInput::new(format!("{title} {number}"), Availability::Remote);
             track.album_id = Some(album);
             track.display_artist = Some(artist.to_owned());
             track.track_number = Some(i64::try_from(number).unwrap());

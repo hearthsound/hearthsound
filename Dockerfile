@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 
 # The Hearthsound server image: the `hearthsound` binary with its embedded web
-# client, its bundled first-party plugins, and the media tools it shells out
-# to, running as a non-root user.
+# client and the mandatory first-party plugins compiled into it, and the media
+# tools it shells out to, running as a non-root user.
 #
 # Bootstrap keys are not baked in. Point the image at the container paths with
 # environment variables (`HEARTHSOUND__PATHS__DATA=/data`,
@@ -33,11 +33,13 @@ COPY bundled-plugins.lock web-client.lock ./
 # before extracting it into `target/web-client/`, which the server crate embeds.
 RUN cargo xtask fetch-web-client
 
-RUN cargo build --release --locked -p hearthsound
+# Downloads the pinned first-party plugins into `target/bundled-plugins/` and
+# verifies each digest before it is written. The server crate's build script
+# embeds every archive `bundled-plugins.lock` marks `mandatory = true`, so this
+# has to run before `cargo build`.
+RUN cargo xtask fetch-plugins
 
-# Downloads the pinned first-party plugins and verifies each digest before it is
-# written; the runtime stage copies the result.
-RUN cargo xtask fetch-plugins --out /out/plugins
+RUN cargo build --release --locked -p hearthsound
 
 
 # ffmpeg carries ffprobe, which the server shells out to for probing, tagging
@@ -54,12 +56,9 @@ RUN groupadd --gid 1000 hearthsound \
     && useradd --uid 1000 --gid 1000 --home-dir /home/hearthsound --create-home --shell /usr/sbin/nologin hearthsound
 
 COPY --from=builder /build/target/release/hearthsound /usr/local/bin/hearthsound
-COPY --from=builder /out/plugins/ /usr/share/hearthsound/plugins/
 
-# The fetched archives are readable by the service account but not writable, and
-# the two managed trees are owned by it.
-RUN chmod 0644 /usr/share/hearthsound/plugins/*.hsplugin \
-    && mkdir --parents /data /storage \
+# The two managed trees are owned by the service account.
+RUN mkdir --parents /data /storage \
     && chown hearthsound:hearthsound /data /storage
 
 USER hearthsound

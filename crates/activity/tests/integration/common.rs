@@ -12,7 +12,7 @@ use std::path::Path;
 
 use hearthsound_core::{Availability, EntityId, IdPrefix};
 use hearthsound_db::Database;
-use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, Origin, TrackInput};
+use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, TrackInput};
 use uuid::Uuid;
 
 /// Opens a fresh temporary database with the server schema applied.
@@ -65,7 +65,7 @@ pub async fn insert_user(database: &Database) -> Uuid {
 ///
 /// The album's id and the ids of its two tracks.
 pub async fn insert_album(library: &LibraryRepository) -> (Uuid, Vec<Uuid>) {
-    let mut album = AlbumInput::new("Remote Album", Origin::Catalog);
+    let mut album = AlbumInput::new("Remote Album");
     album.display_artist = Some("Remote Artist".to_owned());
     let album_id = library
         .upsert_album(&album, &[ArtistCredit::new("Remote Artist", "main")])
@@ -73,7 +73,7 @@ pub async fn insert_album(library: &LibraryRepository) -> (Uuid, Vec<Uuid>) {
         .unwrap();
     let mut tracks = Vec::new();
     for (index, title) in ["First", "Second"].iter().enumerate() {
-        let mut input = TrackInput::new(*title, Origin::Catalog, Availability::Remote);
+        let mut input = TrackInput::new(*title, Availability::Remote);
         input.album_id = Some(album_id);
         input.track_number = Some(index as i64 + 1);
         let track = library
@@ -112,7 +112,7 @@ pub async fn insert_track(
     title: &str,
     number: i64,
 ) -> Uuid {
-    let mut input = TrackInput::new(title, Origin::Catalog, Availability::Remote);
+    let mut input = TrackInput::new(title, Availability::Remote);
     input.album_id = Some(EntityId::from_uuid(IdPrefix::Album, album));
     input.track_number = Some(number);
     library

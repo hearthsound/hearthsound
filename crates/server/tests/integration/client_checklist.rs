@@ -224,10 +224,7 @@ fn find_named(value: &Value, name: &str) -> Option<String> {
 ///
 /// The entity id.
 fn parse_id(value: &str) -> EntityId {
-    match hearthsound_core::ClientId::parse(value).unwrap() {
-        hearthsound_core::ClientId::Entity(id) => id,
-        hearthsound_core::ClientId::Catalog(id) => panic!("expected a stored id, got {id}"),
-    }
+    EntityId::parse(value).unwrap()
 }
 
 /// The token a client computes for the salted-token login.

@@ -390,9 +390,9 @@ async fn create_playlist_replaces_an_owned_one() {
     );
 }
 
-/// A catalog song id is materialized into a stored entry.
+/// A provider hit is a stored row, so it can be added to a playlist directly.
 #[tokio::test]
-async fn a_catalog_song_id_becomes_a_stored_entry() {
+async fn a_search_hit_becomes_a_playlist_entry() {
     let (fixture, _seeded) = fixture().await;
     fixture.install_hello_catalog().await;
     let app = fixture.app();
@@ -406,18 +406,22 @@ async fn a_catalog_song_id_becomes_a_stored_entry() {
     )
     .await;
     assert_ok(&found);
+    assert!(
+        !found.body.contains("x_hello_"),
+        "a provider hit is a row: {}",
+        found.body
+    );
     let start = found
         .body
-        .find("x_hello_t_")
-        .expect("the search lists a track");
-    let rest = &found.body[start..];
-    let end = rest.find('"').unwrap();
-    let catalog_song = &rest[..end];
+        .find("\"song\":[{\"id\":\"tr_")
+        .expect("the search lists a stored track");
+    let rest = &found.body[start + "\"song\":[{\"id\":\"".len()..];
+    let song = &rest[..rest.find('"').unwrap()];
 
     let created = get(
         &app,
         &format!(
-            "/rest/createPlaylist?name=Later&songId={catalog_song}&apiKey={}&f=json",
+            "/rest/createPlaylist?name=Later&songId={song}&apiKey={}&f=json",
             fixture.api_key
         ),
     )
@@ -425,12 +429,12 @@ async fn a_catalog_song_id_becomes_a_stored_entry() {
     assert_ok(&created);
     assert!(
         created.body.contains("\"songCount\":1"),
-        "the catalog song is stored and added: {}",
+        "the song is added: {}",
         created.body
     );
     assert!(
-        !created.body.contains("x_hello_t_"),
-        "the entry names the stored row: {}",
+        created.body.contains(&format!("\"id\":\"{song}\"")),
+        "the entry names the row: {}",
         created.body
     );
 }
@@ -603,6 +607,22 @@ async fn a_playlist_answers_with_the_art_of_its_first_entry() {
     .await;
     assert_ok(&created);
     let id = playlist_id(&created.body).expect("the response carries the playlist id");
+    let store = hearthsound_library::images::ImageStore::new(fixture.artwork_dir());
+    let mut conn = fixture.database.writer().acquire().await.unwrap();
+    let hash = store
+        .store(&mut conn, seeded.embedded.as_ref().unwrap(), "image/png")
+        .await
+        .unwrap();
+    hearthsound_library::images::set_file_image(
+        &mut conn,
+        hearthsound_core::EntityKind::Album,
+        seeded.album.uuid(),
+        "cover",
+        &hash,
+    )
+    .await
+    .unwrap();
+    drop(conn);
 
     let response = app
         .clone()

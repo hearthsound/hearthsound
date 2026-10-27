@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT title, duration_ms, track_number, album_id FROM tracks WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "title",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tracks",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "name": "duration_ms",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tracks",
+            "name": "duration_ms"
+          }
+        }
+      },
+      {
+        "name": "track_number",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tracks",
+            "name": "track_number"
+          }
+        }
+      },
+      {
+        "name": "album_id",
+        "ordinal": 3,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "tracks",
+            "name": "album_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "c321371ee6bc107b9cbe03eb4be711f326b7c300786dfe96bb0c3b2f3cea0093"
+}

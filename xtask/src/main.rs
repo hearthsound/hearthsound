@@ -156,6 +156,40 @@ fn sync_wit(args: SyncWitArgs) -> Result<()> {
     if !since.is_empty() {
         write_since(&wit_dir, &since)?;
     }
+    prune_legacy_dirs(&root, &wit_dir, &since)?;
+    Ok(())
+}
+
+/// Removes every `wit/since_v*` directory that `wit/SINCE` does not name.
+///
+/// A legacy package left behind would be exported by every WIT consumer in the
+/// workspace and keep a dropped API alive, so a sync that drops a minor removes
+/// its directory instead of only forgetting it. `--check` reports such a
+/// directory as unexpected, so this keeps a sync the only way to change `wit/`.
+fn prune_legacy_dirs(root: &Path, wit_dir: &Path, since: &[String]) -> Result<()> {
+    let mut listed = Vec::with_capacity(since.len());
+    for version in since {
+        listed.push(legacy_dir(wit_dir, version)?);
+    }
+
+    let entries = fs::read_dir(wit_dir)
+        .with_context(|| format!("reading directory {}", wit_dir.display()))?;
+    let mut unlisted = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading directory {}", wit_dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() && !listed.contains(&path) {
+            unlisted.push(path);
+        }
+    }
+
+    for path in unlisted {
+        fs::remove_dir_all(&path).with_context(|| format!("removing {}", path.display()))?;
+        println!(
+            "{}/ removed: no longer named by {WIT_SINCE}",
+            report_label(root, &path)
+        );
+    }
     Ok(())
 }
 
@@ -1021,6 +1055,28 @@ mod tests {
             "# Previous plugin API minors the host still loads, one `X.Y.Z` version per\n\
              # line. The directory is wit/since_v0.<minor>/.\n\
              0.3.0\n"
+        );
+    }
+
+    #[test]
+    fn a_legacy_directory_the_since_file_does_not_name_is_removed() {
+        let wit = tempfile::tempdir().unwrap();
+        fs::create_dir_all(wit.path().join("since_v0.3")).unwrap();
+        fs::write(wit.path().join("since_v0.3/host.wit"), "old").unwrap();
+        fs::create_dir_all(wit.path().join("since_v0.4")).unwrap();
+        fs::write(wit.path().join("since_v0.4/host.wit"), "older").unwrap();
+        fs::write(wit.path().join("host.wit"), "current").unwrap();
+
+        prune_legacy_dirs(Path::new("."), wit.path(), &["0.4.0".to_owned()]).unwrap();
+
+        assert!(!wit.path().join("since_v0.3").exists());
+        assert_eq!(
+            fs::read_to_string(wit.path().join("since_v0.4/host.wit")).unwrap(),
+            "older"
+        );
+        assert_eq!(
+            fs::read_to_string(wit.path().join("host.wit")).unwrap(),
+            "current"
         );
     }
 

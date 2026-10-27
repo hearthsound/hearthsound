@@ -47,6 +47,7 @@ pub mod log;
 pub mod manifest;
 mod pool;
 mod process;
+mod protected;
 pub mod registry;
 mod repo;
 mod state;
@@ -76,6 +77,7 @@ pub use instances::{
 pub use kv::KvStore;
 pub use log::{GuestOutput, LogSink};
 pub use manifest::{Manifest, ManifestError};
+pub use protected::ProtectedPlugins;
 pub use registry::{
     FetchError, FetchedImage, HealthOutcome, ProviderRegistry, RegistryInstance, RegistryReport,
     SkippedInstance,

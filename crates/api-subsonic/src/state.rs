@@ -23,7 +23,6 @@ use hearthsound_db::Database;
 use hearthsound_jobs::JobQueue;
 use hearthsound_library::StorageRoots;
 use hearthsound_library::scan::LibraryScanner;
-use hearthsound_library::thumbnails::ThumbnailCache;
 use hearthsound_media::FfmpegRunner;
 use hearthsound_plugin_host::ProviderRegistry;
 
@@ -71,8 +70,6 @@ struct Inner {
     scanner: Option<Arc<LibraryScanner>>,
     /// The job queue, when the composition root has one.
     jobs: Option<Arc<JobQueue>>,
-    /// The scaled local cover cache, when the composition root has one.
-    thumbnails: Option<Arc<ThumbnailCache>>,
     /// The discovery layer, when the composition root has one.
     ///
     /// The similar-songs and artist-information endpoints ask it for
@@ -89,7 +86,7 @@ impl std::fmt::Debug for Inner {
             .field("database", &self.database)
             .field("settings", &self.settings)
             .field("user_settings", &self.user_settings)
-            .field("catalog", &self.catalog)
+            .field("catalog", &"CatalogService")
             .field("activity", &self.activity)
             .field("stream", &self.stream)
             .field("ffmpeg", &self.ffmpeg)
@@ -109,7 +106,6 @@ impl std::fmt::Debug for Inner {
             .field("trusted_proxies", &self.trusted_proxies)
             .field("scanner", &self.scanner)
             .field("jobs", &self.jobs)
-            .field("thumbnails", &self.thumbnails)
             .field(
                 "discovery",
                 &self.discovery.as_ref().map(|_| "DiscoveryService"),
@@ -162,7 +158,6 @@ impl SubsonicState {
         let stream = StreamService::new(
             Arc::clone(&database),
             settings.clone(),
-            Arc::clone(&catalog),
             roots,
             Arc::clone(&ffmpeg),
             activity.sessions().clone(),
@@ -185,7 +180,6 @@ impl SubsonicState {
                 trusted_proxies: Arc::new(TrustedProxies::default()),
                 scanner: None,
                 jobs: None,
-                thumbnails: None,
                 discovery: None,
             }),
         }
@@ -220,7 +214,6 @@ impl SubsonicState {
                 trusted_proxies: Arc::new(trusted_proxies),
                 scanner: self.inner.scanner.clone(),
                 jobs: self.inner.jobs.clone(),
-                thumbnails: self.inner.thumbnails.clone(),
                 discovery: self.inner.discovery.clone(),
             }),
         }
@@ -255,7 +248,6 @@ impl SubsonicState {
                 trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
                 scanner: self.inner.scanner.clone(),
                 jobs: self.inner.jobs.clone(),
-                thumbnails: self.inner.thumbnails.clone(),
                 discovery: self.inner.discovery.clone(),
             }),
         }
@@ -294,7 +286,6 @@ impl SubsonicState {
                 trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
                 scanner: self.inner.scanner.clone(),
                 jobs: self.inner.jobs.clone(),
-                thumbnails: self.inner.thumbnails.clone(),
                 discovery: self.inner.discovery.clone(),
             }),
         }
@@ -332,7 +323,6 @@ impl SubsonicState {
                 trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
                 scanner: self.inner.scanner.clone(),
                 jobs: self.inner.jobs.clone(),
-                thumbnails: self.inner.thumbnails.clone(),
                 discovery: self.inner.discovery.clone(),
             }),
         }
@@ -367,45 +357,6 @@ impl SubsonicState {
                 trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
                 scanner: self.inner.scanner.clone(),
                 jobs: self.inner.jobs.clone(),
-                thumbnails: self.inner.thumbnails.clone(),
-                discovery: self.inner.discovery.clone(),
-            }),
-        }
-    }
-
-    /// Adds the scaled local cover cache.
-    ///
-    /// `getCoverArt` serves a local cover at the size the client asks for
-    /// through it: the bytes of the cover are scaled once per size and the
-    /// result is read from disk afterwards.
-    ///
-    /// # Parameters
-    ///
-    /// - `thumbnails`: the cache, over `<data>/artwork/thumbs` and the same
-    ///   ffmpeg runner this state transcodes through.
-    ///
-    /// # Returns
-    ///
-    /// The state, sharing everything else with the state it was called on.
-    pub fn with_thumbnails(self, thumbnails: Arc<ThumbnailCache>) -> SubsonicState {
-        SubsonicState {
-            inner: Arc::new(Inner {
-                database: Arc::clone(&self.inner.database),
-                sessions: self.inner.sessions.clone(),
-                settings: self.inner.settings.clone(),
-                user_settings: self.inner.user_settings.clone(),
-                catalog: Arc::clone(&self.inner.catalog),
-                activity: Arc::clone(&self.inner.activity),
-                stream: self.inner.stream.clone(),
-                ffmpeg: Arc::clone(&self.inner.ffmpeg),
-                authenticator: Arc::clone(&self.inner.authenticator),
-                prefetch: self.inner.prefetch.clone(),
-                acquisitions: self.inner.acquisitions.clone(),
-                registry: self.inner.registry.clone(),
-                trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
-                scanner: self.inner.scanner.clone(),
-                jobs: self.inner.jobs.clone(),
-                thumbnails: Some(thumbnails),
                 discovery: self.inner.discovery.clone(),
             }),
         }
@@ -440,7 +391,6 @@ impl SubsonicState {
                 trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
                 scanner: self.inner.scanner.clone(),
                 jobs: self.inner.jobs.clone(),
-                thumbnails: self.inner.thumbnails.clone(),
                 discovery: Some(discovery),
             }),
         }
@@ -538,7 +488,6 @@ impl SubsonicState {
                 trusted_proxies: Arc::clone(&self.inner.trusted_proxies),
                 scanner: Some(scanner),
                 jobs: Some(jobs),
-                thumbnails: self.inner.thumbnails.clone(),
                 discovery: self.inner.discovery.clone(),
             }),
         }
@@ -551,17 +500,6 @@ impl SubsonicState {
     /// The scanner, or `None` in a process that does not scan.
     pub fn scanner(&self) -> Option<&Arc<LibraryScanner>> {
         self.inner.scanner.as_ref()
-    }
-
-    /// Returns the scaled local cover cache, when the composition root added
-    /// one.
-    ///
-    /// # Returns
-    ///
-    /// The cache, or `None` in a process that serves no local cover art, in
-    /// which case `getCoverArt` answers with the bytes on disk.
-    pub(crate) fn thumbnails(&self) -> Option<&ThumbnailCache> {
-        self.inner.thumbnails.as_deref()
     }
 
     /// Returns the job queue, when the composition root added one.
@@ -580,17 +518,18 @@ impl SubsonicState {
 
     /// Returns the catalog layer.
     ///
-    /// `search3` searches it for catalog results and the browse endpoints
-    /// resolve an unmaterialized `x_` id through it.
+    /// `search3` searches it, the browse endpoints compose their pages from its
+    /// views, `getCoverArt` serves its images, and an id a client sends resolves
+    /// through its redirects.
     pub fn catalog(&self) -> &CatalogService {
         &self.inner.catalog
     }
 
     /// Returns the discovery layer, when the composition root has one.
     ///
-    /// `getSimilarSongs`, `getArtistInfo` and `getTopSongs` ask it for
-    /// suggestions. Without one they answer from the library alone, which is
-    /// what a server with no discovery instance serves.
+    /// `getSimilarSongs` asks it for suggestions. `getArtistInfo` and
+    /// `getTopSongs` answer from the stored similar artists and top tracks, so a
+    /// server with no discovery instance still shows what the indexer stored.
     pub fn discovery(&self) -> Option<&DiscoveryService> {
         self.inner.discovery.as_deref()
     }

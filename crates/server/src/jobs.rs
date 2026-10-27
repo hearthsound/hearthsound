@@ -12,13 +12,8 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
-use hearthsound_catalog::{
-    CatalogService, DiscoveryService, EnrichJobPayload, TOP_TRACKS_CACHE_LIMIT,
-};
 use hearthsound_config::keys;
 use hearthsound_config::settings::Settings;
-use hearthsound_core::events::{Audience, CatalogEnriched, EventBus, ServerEvent};
-use hearthsound_core::{ClientId, Layer};
 use hearthsound_db::Database;
 use hearthsound_jobs::{Job, JobError, JobHandler};
 use hearthsound_plugin_host::ProviderRegistry;
@@ -45,104 +40,6 @@ pub const PLUGIN_HEALTH_JOB_KIND: &str = "plugin.health";
 /// setting of an hour simply skips three ticks.
 pub const PLUGIN_HEALTH_SCHEDULE: &str = "*/15 * * * *";
 
-/// Fetches one entity's missing catalog extras and announces that they arrived.
-///
-/// The job is request-driven: a page read enqueues it when it answers from the
-/// library and the cache alone, and nothing schedules it. A run is one
-/// [`CatalogService::enrich`] call, an optional discovery top-tracks warm-up for
-/// the artist it established, and one `catalog.enriched` event for the listener
-/// whose page asked.
-pub struct EnrichJobHandler {
-    /// The catalog layer that does the provider work.
-    catalog: Arc<CatalogService>,
-    /// The discovery layer a personal top-tracks warm-up uses.
-    discovery: Arc<DiscoveryService>,
-    /// The bus the completion is published on.
-    events: Arc<EventBus>,
-}
-
-impl EnrichJobHandler {
-    /// Builds the handler over the layers it drives.
-    ///
-    /// # Parameters
-    ///
-    /// - `catalog`: the catalog layer.
-    /// - `discovery`: the discovery layer, warmed when an artist was resolved.
-    /// - `events`: the event bus.
-    pub fn new(
-        catalog: Arc<CatalogService>,
-        discovery: Arc<DiscoveryService>,
-        events: Arc<EventBus>,
-    ) -> EnrichJobHandler {
-        EnrichJobHandler {
-            catalog,
-            discovery,
-            events,
-        }
-    }
-}
-
-#[async_trait]
-impl JobHandler for EnrichJobHandler {
-    /// Fetches what the payload names and publishes the completion.
-    ///
-    /// A missing or malformed payload and an id that names no entity are
-    /// permanent failures: the runner retires the job instead of retrying it. A
-    /// provider failure is returned so the run is retried on its schedule.
-    ///
-    /// # Parameters
-    ///
-    /// - `job`: the claimed job, whose payload names the entity and the listener.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`JobError`] when the payload is unusable and when the catalog
-    /// work failed.
-    async fn handle(&self, job: Job) -> Result<(), JobError> {
-        let payload: EnrichJobPayload = job
-            .payload_json::<EnrichJobPayload>()
-            .map_err(|error| JobError::new(format!("catalog.enrich payload: {error}")))?
-            .ok_or_else(|| JobError::new("catalog.enrich carries no payload"))?;
-        let id = ClientId::parse(&payload.entity_id)
-            .map_err(|error| JobError::new(format!("catalog.enrich entity id: {error}")))?;
-        let report = self
-            .catalog
-            .enrich(&id)
-            .await
-            .map_err(|error| JobError::new(error.to_string()))?;
-        if let Some(seed) = &report.artist
-            && !self.catalog.registry().layers(Layer::Discovery).is_empty()
-        {
-            self.discovery
-                .artist_top_tracks(payload.user_id, seed, TOP_TRACKS_CACHE_LIMIT)
-                .await
-                .map(|_| ())
-                .unwrap_or_else(|error| {
-                    tracing::warn!(
-                        %error,
-                        entity = %payload.entity_id,
-                        "a discovery instance could not warm an artist's top tracks"
-                    )
-                });
-        }
-        self.catalog.finish_enrichment(&id, payload.user_id).await;
-        self.events.publish_for(
-            Audience::User(payload.user_id),
-            ServerEvent::CatalogEnriched(CatalogEnriched {
-                entity_id: payload.entity_id.clone(),
-                kind: payload.kind,
-            }),
-        );
-        tracing::debug!(
-            kind = %job.kind,
-            entity = %payload.entity_id,
-            enriched = report.enriched,
-            "enriched a catalog entity"
-        );
-        Ok(())
-    }
-}
-
 /// Deletes the `plugin_kv` rows whose time to live has passed.
 ///
 /// The handler runs the sweep on the writer pool, so it can never delete a row
@@ -150,8 +47,6 @@ impl JobHandler for EnrichJobHandler {
 pub struct KvSweepJobHandler {
     /// The database the expired rows are deleted from.
     database: Arc<Database>,
-    /// The catalog layer, whose cached answers and images are swept here too.
-    catalog: Arc<CatalogService>,
 }
 
 impl KvSweepJobHandler {
@@ -160,8 +55,8 @@ impl KvSweepJobHandler {
     /// # Parameters
     ///
     /// - `database`: the open database whose `plugin_kv` rows are swept.
-    pub fn new(database: Arc<Database>, catalog: Arc<CatalogService>) -> Self {
-        Self { database, catalog }
+    pub fn new(database: Arc<Database>) -> Self {
+        Self { database }
     }
 }
 
@@ -183,20 +78,6 @@ impl JobHandler for KvSweepJobHandler {
                 tracing::debug!(kind = %job.kind, swept, "swept expired plugin key-value rows");
             }
             Err(error) => return Err(JobError::new(error.to_string())),
-        }
-        // The same hourly tick is what keeps the two catalog caches from growing
-        // without bound: expired answers, and images older than the retention.
-        match self.catalog.sweep_expired_cache().await {
-            Ok(swept) => tracing::debug!(kind = %job.kind, swept, "swept expired catalog answers"),
-            Err(error) => tracing::warn!(%error, "the catalog cache could not be swept"),
-        }
-        match self
-            .catalog
-            .sweep_artwork_cache(hearthsound_catalog::artwork::ARTWORK_CACHE_RETENTION)
-            .await
-        {
-            Ok(swept) => tracing::debug!(kind = %job.kind, swept, "swept old cover images"),
-            Err(error) => tracing::warn!(%error, "the cover cache could not be swept"),
         }
         Ok(())
     }

@@ -26,9 +26,9 @@ async fn search(pool: &SqlitePool, query: &str) -> Vec<(String, Vec<u8>)> {
 
 async fn insert_track(pool: &SqlitePool, id: &[u8], title: &str, artist: &str) {
     sqlx::query(
-        "INSERT INTO tracks (id, title, sort_title, display_artist, origin, availability,
+        "INSERT INTO tracks (id, title, sort_title, display_artist, availability,
                              created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'local', 'local', 0, 0)",
+         VALUES (?, ?, ?, ?, 'local', 0, 0)",
     )
     .bind(id)
     .bind(title)
@@ -110,15 +110,15 @@ async fn entity_kinds_with_equal_rowids_do_not_collide() {
     // The first row of each table gets rowid 1 in its own table.
     insert_track(pool, &[1], "Harmony", "Nobody").await;
     sqlx::query(
-        "INSERT INTO albums (id, title, sort_title, display_artist, origin, created_at, updated_at)
-         VALUES (x'02', 'Harmony', 'harmony', 'Nobody', 'local', 0, 0)",
+        "INSERT INTO albums (id, title, sort_title, display_artist, created_at, updated_at)
+         VALUES (x'02', 'Harmony', 'harmony', 'Nobody', 0, 0)",
     )
     .execute(pool)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO artists (id, name, sort_name, origin, created_at, updated_at)
-         VALUES (x'03', 'Harmony', 'harmony', 'local', 0, 0)",
+        "INSERT INTO artists (id, name, sort_name, created_at, updated_at)
+         VALUES (x'03', 'Harmony', 'harmony', 0, 0)",
     )
     .execute(pool)
     .await

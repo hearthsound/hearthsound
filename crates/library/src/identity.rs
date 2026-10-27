@@ -313,16 +313,9 @@ async fn merge_artist_group(
     let mut alive: Vec<Uuid> = group.iter().map(|row| row.id).collect();
     let mut merged = 0_u64;
 
-    // Every identifier is a key that links the rows holding it. The MusicBrainz
-    // column is one key per row, and every alias row is another.
+    // Every stored identifier is a key that links the rows holding it.
     let mut by_code: HashMap<(String, String), Vec<Uuid>> = HashMap::new();
     for row in &group {
-        if let Some(mbid) = &row.mb_artist_id {
-            by_code
-                .entry(("mb-artist".to_owned(), mbid.clone()))
-                .or_default()
-                .push(row.id);
-        }
         let aliases: Vec<(String, String)> = sqlx::query_as(
             "SELECT namespace, value FROM external_ids \
              WHERE entity_kind = 'artist' AND entity_id = ?",
@@ -464,7 +457,7 @@ async fn merge_album_group(
 ) -> Result<u64, LibraryError> {
     let mut identified: HashSet<Uuid> = group
         .iter()
-        .filter(|row| row.mb_release_id.is_some())
+        .filter(|row| row.identified)
         .map(|row| row.id)
         .collect();
     let mut alive: Vec<Uuid> = group.iter().map(|row| row.id).collect();
@@ -472,8 +465,15 @@ async fn merge_album_group(
 
     let mut by_release: HashMap<String, Vec<Uuid>> = HashMap::new();
     for row in &group {
-        if let Some(release) = &row.mb_release_id {
-            by_release.entry(release.clone()).or_default().push(row.id);
+        let releases: Vec<String> = sqlx::query_scalar(
+            "SELECT value FROM external_ids \
+             WHERE entity_kind = 'album' AND entity_id = ? AND namespace = 'mb-release'",
+        )
+        .bind(row.id.as_bytes().as_slice())
+        .fetch_all(&mut *conn)
+        .await?;
+        for release in releases {
+            by_release.entry(release).or_default().push(row.id);
         }
     }
     for rows in by_release.values() {

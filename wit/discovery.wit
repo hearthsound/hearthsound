@@ -1,4 +1,4 @@
-package hearthsound:plugin@0.4.0;
+package hearthsound:plugin@0.5.0;
 
 /// Suggestions: similar tracks and artists, popular tracks, recommendations and generated playlists.
 interface discovery {

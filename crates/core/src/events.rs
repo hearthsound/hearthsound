@@ -85,9 +85,13 @@ pub enum ServerEvent {
     /// The server has something to tell the client that no other event covers.
     #[serde(rename = "system.notice")]
     SystemNotice(SystemNotice),
-    /// Catalog extras for an entity were fetched and cached.
-    #[serde(rename = "catalog.enriched")]
-    CatalogEnriched(CatalogEnriched),
+    /// An entity's stored provider data changed, so a page showing it can
+    /// refetch and show what was missing.
+    #[serde(rename = "entity.updated")]
+    EntityUpdated(EntityUpdated),
+    /// The index queue gained or finished work.
+    #[serde(rename = "index.progress")]
+    IndexProgress(IndexProgress),
 }
 
 impl ServerEvent {
@@ -121,7 +125,8 @@ impl ServerEvent {
             ServerEvent::PluginStatus(_) => "plugin.status",
             ServerEvent::QueuePrefetch(_) => "queue.prefetch",
             ServerEvent::SystemNotice(_) => "system.notice",
-            ServerEvent::CatalogEnriched(_) => "catalog.enriched",
+            ServerEvent::EntityUpdated(_) => "entity.updated",
+            ServerEvent::IndexProgress(_) => "index.progress",
         }
     }
 }
@@ -132,8 +137,7 @@ impl ServerEvent {
 pub struct AcquisitionUpdated {
     /// The acquisition's client id.
     pub acquisition_id: String,
-    /// The client id of the track or album being acquired, which is an `x_`
-    /// catalog id while the target is not materialized.
+    /// The id of the track or album being acquired.
     pub target_id: String,
     /// The acquisition's current state.
     pub state: AcquisitionState,
@@ -320,19 +324,36 @@ pub struct SystemNotice {
     pub code: Option<String>,
 }
 
-/// The payload of a `catalog.enriched` event.
+/// The payload of an `entity.updated` event.
 ///
-/// The event is published when a `catalog.enrich` job has fetched an entity's
-/// missing catalog extras, so the page that asked can refetch without a reload.
-/// It reaches the listener whose page asked (administrators receive it under the
-/// existing audience rule).
+/// The event is published when the indexer stored something new about an entity:
+/// a page that asked for it and got a partial answer refetches once, and a page
+/// already showing it can refresh. It reaches every connection, because the data
+/// it announces is shared.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CatalogEnriched {
-    /// The entity's client id, exactly as the page that asked named it.
-    pub entity_id: String,
-    /// The entity kind: `artist` or `album`.
+pub struct EntityUpdated {
+    /// The entity's id, as every surface names it.
+    pub id: String,
+    /// The entity kind: `track`, `album` or `artist`.
     pub kind: EntityKind,
+}
+
+/// The payload of an `index.progress` event.
+///
+/// One event per second while the queue is busy, and one when it drains, so the
+/// admin overview can show a progress card without polling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexProgress {
+    /// Items waiting to be processed.
+    pub pending: u64,
+    /// Items whose last attempt failed and wait for a retry.
+    pub failed: u64,
+    /// Items processed since the queue was last empty.
+    pub done: u64,
+    /// Items claimed since the queue was last empty, plus what is pending.
+    pub total: u64,
 }
 
 /// Who may receive an event over the event stream.

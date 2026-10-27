@@ -14,13 +14,13 @@
 //! entry no instance answers is dropped at save time rather than on read. A
 //! negative position is refused.
 
-use hearthsound_catalog::aliases::provider_namespace;
-use hearthsound_core::{ClientId, EntityKind, IdPrefix};
+use hearthsound_core::providers::ExternalId;
+use hearthsound_core::{EntityId, EntityKind, IdPrefix};
 
 use crate::auth::Call;
 use crate::response::{Encoded, Response, SubsonicError, codes};
 use crate::value::{Array, Object};
-use crate::{browse, catalog, projection};
+use crate::{browse, projection};
 
 /// Answers `savePlayQueue`: stores the queue the client is playing.
 ///
@@ -235,7 +235,7 @@ async fn store(call: &Call, kept: &[QueuedId], current: usize, position: i64) ->
         .or_else(|| kept.iter().position(|entry| entry.request_index > current))
         .unwrap_or(kept.len().saturating_sub(1));
     let values: Vec<String> = kept.iter().map(|entry| entry.raw.clone()).collect();
-    let queue: Vec<ClientId> = kept.iter().map(|entry| entry.id.clone()).collect();
+    let queue: Vec<EntityId> = kept.iter().map(|entry| entry.id).collect();
     let index = if values.is_empty() { 0 } else { index };
     match call
         .state()
@@ -296,14 +296,14 @@ fn ids(call: &Call) -> Vec<String> {
 fn parse(values: &[String]) -> Result<Vec<QueuedId>, SubsonicError> {
     let mut queue = Vec::with_capacity(values.len());
     for (index, value) in values.iter().enumerate() {
-        match ClientId::parse(value) {
+        match EntityId::parse(value) {
             Ok(id) => queue.push(QueuedId {
                 request_index: index,
                 raw: value.clone(),
                 id,
             }),
             Err(error) => {
-                tracing::debug!(%error, "a play queue named an id that is not a client id");
+                tracing::debug!(%error, "a play queue named an id that is not an entity id");
                 return Err(SubsonicError::not_found());
             }
         }
@@ -318,17 +318,17 @@ struct QueuedId {
     request_index: usize,
     /// The value as the client wrote it.
     raw: String,
-    /// The parsed client id.
-    id: ClientId,
+    /// The parsed track id.
+    id: EntityId,
 }
 
 /// Drops the ids that no longer resolve.
 ///
 /// A queue entry that names a deleted track, an entity that is not a track, or a
-/// catalog track no instance can answer cannot be served, and storing it would
-/// only make the queue read back shorter than it was saved. Such an entry is
-/// logged and dropped; the request itself still succeeds, because a stale queue
-/// is the client's state, not an error.
+/// track the server does not store cannot be served, and storing it would only
+/// make the queue read back shorter than it was saved. Such an entry is logged
+/// and dropped; the request itself still succeeds, because a stale queue is the
+/// client's state, not an error.
 ///
 /// The check is the read the queue projection itself does, so what is stored is
 /// exactly what reads back.
@@ -336,13 +336,13 @@ struct QueuedId {
 /// # Parameters
 ///
 /// - `call`: the authenticated call, whose state reads the tracks and the
-///   catalog.
+///   catalog layer's redirects.
 /// - `queue`: the parsed ids, in queue order.
 ///
 /// # Returns
 ///
-/// The entries that resolve, in queue order. Duplicates are kept: a queue may
-/// play a track twice.
+/// The entries that resolve, in queue order, with each id replaced by the row
+/// that stands for it now. Duplicates are kept: a queue may play a track twice.
 ///
 /// # Errors
 ///
@@ -350,81 +350,44 @@ struct QueuedId {
 async fn resolvable(call: &Call, queue: Vec<QueuedId>) -> Result<Vec<QueuedId>, SubsonicError> {
     let database = call.state().database();
     let mut kept = Vec::with_capacity(queue.len());
-    for entry in queue {
-        let served = match &entry.id {
-            ClientId::Entity(id) => {
-                if id.kind() != IdPrefix::Track {
-                    tracing::debug!(
-                        id = %id,
-                        "a saved play queue named an entity that is not a track; it was dropped"
-                    );
-                    continue;
-                }
-                browse::track_any(database, *id)
-                    .await
-                    .map_err(|error| browse::failure("a saved play queue", &error))?
-                    .is_some()
-            }
-            ClientId::Catalog(id) => {
-                if id.kind() != EntityKind::Track {
-                    tracing::debug!(
-                        id = %id,
-                        "a saved play queue named a catalog entity that is not a track; it was dropped"
-                    );
-                    continue;
-                }
-                catalog_track_resolves(call, id).await?
-            }
-        };
-        if served {
-            kept.push(entry);
-        } else {
+    for mut entry in queue {
+        if entry.id.kind() != IdPrefix::Track {
+            tracing::debug!(
+                id = %entry.raw,
+                "a saved play queue named an entity that is not a track; it was dropped"
+            );
+            continue;
+        }
+        let Some(row) = (match call
+            .state()
+            .catalog()
+            .canonical(EntityKind::Track, entry.id)
+            .await
+        {
+            Ok(row) => row,
+            Err(error) => return Err(crate::catalog::failure(&error)),
+        }) else {
             tracing::debug!(
                 id = %entry.raw,
                 "a saved play queue named an id that no longer resolves; it was dropped"
             );
+            continue;
+        };
+        match browse::track_any(database, row).await {
+            Ok(Some(_)) => {
+                entry.id = row;
+                kept.push(entry);
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    id = %entry.raw,
+                    "a saved play queue named an id that no longer resolves; it was dropped"
+                );
+            }
+            Err(error) => return Err(browse::failure("a saved play queue", &error)),
         }
     }
     Ok(kept)
-}
-
-/// Reports whether a catalog track id can still be served.
-///
-/// A catalog track is servable when the catalog has materialized it (its alias
-/// names a stored row) or when a catalog instance still answers for it.
-///
-/// # Parameters
-///
-/// - `call`: the authenticated call, whose catalog layer answers.
-/// - `id`: the catalog track id.
-///
-/// # Errors
-///
-/// Answers a generic error when the alias lookup fails.
-async fn catalog_track_resolves(
-    call: &Call,
-    id: &hearthsound_core::CatalogId,
-) -> Result<bool, SubsonicError> {
-    let catalog = call.state().catalog();
-    let namespace = provider_namespace(id.slug());
-    match catalog
-        .entity_by_alias(&namespace, EntityKind::Track, id.provider_id())
-        .await
-    {
-        Ok(Some(stored)) => {
-            let database = call.state().database();
-            return browse::track_any(database, stored)
-                .await
-                .map(|loaded| loaded.is_some())
-                .map_err(|error| browse::failure("a saved play queue", &error));
-        }
-        Ok(None) => {}
-        Err(error) => {
-            tracing::debug!(%error, "could not resolve a queue entry's alias");
-            return Ok(false);
-        }
-    }
-    Ok(catalog.track(id).await.is_ok())
 }
 
 /// Reads the `position` parameter.
@@ -465,90 +428,68 @@ fn position(call: &Call) -> Result<i64, SubsonicError> {
 /// # Returns
 ///
 /// One `Child` per entry that resolves, in queue order. An entry that names
-/// something other than a track, and a catalog entry no instance can answer, is
-/// left out.
+/// something other than a stored track is left out.
 ///
 /// # Errors
 ///
-/// Answers a generic error when a read fails or a catalog title suffix cannot be
-/// read.
+/// Answers a generic error when a read fails.
 async fn entries(call: &Call, values: &[String]) -> Result<Vec<Object>, SubsonicError> {
-    let suffix = catalog::title_suffix(&call.state().settings_snapshot())?;
     let database = call.state().database();
-    let mut entries = Vec::with_capacity(values.len());
+    let user = call.principal().user_id.uuid();
+    let mut rows = Vec::with_capacity(values.len());
     for value in values {
-        match ClientId::parse(value) {
-            Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::Track => {
-                match browse::track_any(database, id).await {
-                    Ok(Some(loaded)) => {
-                        let annotation = match browse::annotation(
-                            call.state(),
-                            call.principal().user_id.uuid(),
-                            EntityKind::Track,
-                            id.uuid(),
-                        )
-                        .await
-                        {
-                            Ok(annotation) => annotation,
-                            Err(error) => {
-                                return Err(browse::failure("a play queue entry", &error));
-                            }
-                        };
-                        entries.push(projection::child(
-                            &loaded.view,
-                            loaded.file.as_ref(),
-                            &loaded.album_artists,
-                            &annotation,
-                        ));
-                    }
-                    Ok(None) => {}
-                    Err(error) => return Err(browse::failure("a play queue entry", &error)),
-                }
-            }
-            Ok(ClientId::Catalog(id)) if id.kind() == EntityKind::Track => {
-                let catalog = call.state().catalog();
-                let namespace = provider_namespace(id.slug());
-                let stored = match catalog
-                    .entity_by_alias(&namespace, EntityKind::Track, id.provider_id())
-                    .await
-                {
-                    Ok(stored) => stored,
-                    Err(error) => {
-                        tracing::debug!(%error, "could not resolve a queue entry's alias");
-                        None
-                    }
-                };
-                match stored {
-                    Some(stored) => match browse::track_any(database, stored).await {
-                        Ok(Some(loaded)) => entries.push(projection::child(
-                            &loaded.view,
-                            loaded.file.as_ref(),
-                            &loaded.album_artists,
-                            &hearthsound_activity::Annotation::default(),
-                        )),
-                        Ok(None) => {}
-                        Err(error) => return Err(browse::failure("a play queue entry", &error)),
-                    },
-                    None => match catalog.track(&id).await {
-                        Ok(track) => entries.push(projection::catalog_child(
-                            &track.id,
-                            &track.track,
-                            &suffix,
-                        )),
-                        Err(error) => {
-                            tracing::debug!(
-                                %error,
-                                "a play queue entry names a catalog track no instance answers"
-                            );
-                        }
-                    },
-                }
-            }
-            Ok(_) => {}
+        let Ok(id) = EntityId::parse(value) else {
+            tracing::debug!(%value, "a saved play queue holds an id that is not an entity id");
+            continue;
+        };
+        if id.kind() != IdPrefix::Track {
+            continue;
+        }
+        let Some(row) = (match call
+            .state()
+            .catalog()
+            .canonical(EntityKind::Track, id)
+            .await
+        {
+            Ok(row) => row,
             Err(error) => {
-                tracing::debug!(%error, "a saved play queue holds an id that is not a client id");
+                tracing::debug!(%error, "could not resolve a queue entry");
+                continue;
             }
+        }) else {
+            continue;
+        };
+        match browse::track_any(database, row).await {
+            Ok(Some(loaded)) => rows.push(loaded),
+            Ok(None) => {}
+            Err(error) => return Err(browse::failure("a play queue entry", &error)),
         }
     }
-    Ok(entries)
+    let ids: Vec<uuid::Uuid> = rows
+        .iter()
+        .map(|loaded| loaded.view.track.id.uuid())
+        .collect();
+    let annotations = browse::annotations(call.state(), user, EntityKind::Track, &ids)
+        .await
+        .map_err(|error| browse::failure("a play queue entry", &error))?;
+    let identifiers: std::collections::HashMap<uuid::Uuid, Vec<ExternalId>> =
+        browse::identifiers(database, EntityKind::Track, &ids)
+            .await
+            .map_err(|error| browse::failure("a play queue entry", &error))?;
+    Ok(rows
+        .iter()
+        .map(|loaded| {
+            projection::child(
+                &loaded.view,
+                loaded.file.as_ref(),
+                &loaded.album_artists,
+                annotations
+                    .get(&loaded.view.track.id.uuid())
+                    .unwrap_or(&hearthsound_activity::Annotation::default()),
+                identifiers
+                    .get(&loaded.view.track.id.uuid())
+                    .map_or(&[], Vec::as_slice),
+            )
+        })
+        .collect())
 }

@@ -191,9 +191,9 @@ async fn seed_rows(db: &Database, folder: uuid::Uuid, count: usize, prefix: &str
     for index in 0..count {
         let track = uuid::Uuid::now_v7();
         sqlx::query(
-            "INSERT INTO tracks (id, title, sort_title, display_artist, origin, availability, \
+            "INSERT INTO tracks (id, title, sort_title, display_artist, availability, \
                                  created_at, updated_at) \
-             VALUES (?, ?, ?, 'Seeded Artist', 'local', 'local', 0, 0)",
+             VALUES (?, ?, ?, 'Seeded Artist', 'local', 0, 0)",
         )
         .bind(track.as_bytes().as_slice())
         .bind(format!("Track {index}"))

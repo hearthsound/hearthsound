@@ -6,6 +6,8 @@
 
 mod batch;
 mod editions;
+mod entities;
+mod entity_facts;
 mod identity;
 mod large_library;
 mod maintenance;

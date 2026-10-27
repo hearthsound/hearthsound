@@ -10,12 +10,9 @@ use std::sync::Arc;
 
 use crate::common::{Env, InstanceLimits, config, has_availability_event, one_candidate};
 use hearthsound_acquire::orchestrator::{AcquireRequest, AcquisitionHandle};
-use hearthsound_catalog::IdentityRequest;
 use hearthsound_core::events::{LibraryChange, ServerEvent};
-use hearthsound_core::providers::RecordingHint;
 use hearthsound_core::{
-    AcquisitionState, Availability, CatalogId, EntityId, EntityKind, FailureReason, PinReason,
-    Priority, Slug, StorageClass,
+    AcquisitionState, Availability, EntityId, FailureReason, PinReason, Priority, StorageClass,
 };
 use hearthsound_library::locks::FolderLocks;
 use hearthsound_library::scan::LibraryScanner;
@@ -383,20 +380,6 @@ async fn a_name_collision_does_not_overwrite_another_file() {
 /// The number the catalog fixture's album holds.
 const CATALOG_ALBUM_TRACKS: u8 = 5;
 
-/// Returns the catalog id of one track of the album catalog fixture.
-///
-/// # Parameters
-///
-/// - `number`: the track number within the album, one-based.
-fn catalog_track(number: u8) -> CatalogId {
-    CatalogId::new(
-        Slug::new(crate::common::CATALOG_INSTANCE).unwrap(),
-        EntityKind::Track,
-        format!("album-catalog-track-{number}"),
-    )
-    .unwrap()
-}
-
 /// The candidate the acquisition fixture serves for the fixture's third track.
 fn catalog_candidate() -> serde_json::Value {
     serde_json::json!([{
@@ -438,11 +421,7 @@ async fn a_lone_catalog_track_is_tagged_with_its_album_total() {
         .write_into(&env.downloads)
         .await
         .unwrap();
-    let track = env
-        .catalog
-        .materialize_track(&catalog_track(3))
-        .await
-        .unwrap();
+    let track = env.resolved_catalog_track(3).await;
     let id = request(&env, track, Priority::Play).await.id;
 
     env.start();
@@ -825,7 +804,7 @@ async fn a_saved_import_writes_the_musicbrainz_ids_of_its_rows() {
     place_catalog_download(&env).await;
     let user = env.add_user().await;
     let folder = env.save_folder(user, "music").await;
-    let track = materialized_catalog_track(&env).await;
+    let track = env.resolved_catalog_track(3).await;
 
     let id = request_save(&env, track, user).await.id;
     env.start();
@@ -870,7 +849,7 @@ async fn a_rescan_of_a_saved_file_keeps_one_artist_and_one_album_row() {
     place_catalog_download(&env).await;
     let user = env.add_user().await;
     let folder = env.save_folder(user, "music").await;
-    let track = materialized_catalog_track(&env).await;
+    let track = env.resolved_catalog_track(3).await;
 
     let id = request_save(&env, track, user).await.id;
     env.start();
@@ -976,43 +955,6 @@ async fn place_catalog_download(env: &Env) {
         .write_into(&env.downloads)
         .await
         .unwrap();
-}
-
-/// Materializes the album fixture's third track and applies its identity.
-///
-/// The resolution is applied here rather than left to the pipeline, because a
-/// `play`-priority acquisition spawns it and a test that read the tags would
-/// race it; the pipeline then sees a track that carries its recording id, which
-/// is the state an import into a folder starts from.
-///
-/// # Parameters
-///
-/// - `env`: the test environment.
-///
-/// # Returns
-///
-/// The stored track.
-async fn materialized_catalog_track(env: &Env) -> EntityId {
-    let track = env
-        .catalog
-        .materialize_track(&catalog_track(3))
-        .await
-        .unwrap();
-    env.catalog
-        .resolve_track_identity(
-            track,
-            &IdentityRequest::Hint(RecordingHint {
-                title: "Fixture Song 3".to_owned(),
-                artists: vec!["Fixture Artist".to_owned()],
-                album: Some("Fixture Album".to_owned()),
-                duration_ms: Some(180_000),
-                isrc: None,
-            }),
-        )
-        .await
-        .unwrap()
-        .expect("the metadata fixture knows the recording");
-    track
 }
 
 /// The artist ids a track credits, in credit order.

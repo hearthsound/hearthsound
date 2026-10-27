@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use crate::common::{Env, InstanceLimits, config, one_candidate};
 use hearthsound_acquire::orchestrator::{AcquireRequest, AcquisitionHandle};
-use hearthsound_core::{AcquisitionState, EntityId, Priority};
+use hearthsound_core::{AcquisitionState, EntityId, EntityKind, Priority};
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
 use serde_json::json;
 
@@ -44,12 +44,26 @@ async fn place(env: &Env) {
 async fn wait_for_recording_id(env: &Env, track: EntityId) -> Option<String> {
     let deadline = Instant::now() + crate::common::WAIT_TIMEOUT;
     while Instant::now() < deadline {
-        if let Some(id) = env.track(track).await.mb_recording_id {
+        if let Some(id) = recording_id(env, track).await {
             return Some(id);
         }
         tokio::time::sleep(crate::common::WAIT_POLL_INTERVAL).await;
     }
-    env.track(track).await.mb_recording_id
+    recording_id(env, track).await
+}
+
+/// Returns the MusicBrainz recording id stored for a track, when it has one.
+///
+/// # Parameters
+///
+/// - `env`: the test environment.
+/// - `track`: the track to read.
+async fn recording_id(env: &Env, track: EntityId) -> Option<String> {
+    env.ids(EntityKind::Track, track)
+        .await
+        .into_iter()
+        .find(|id| id.namespace == "mb-recording")
+        .map(|id| id.value)
 }
 
 #[tokio::test]
@@ -127,7 +141,7 @@ async fn an_unmatched_recording_leaves_the_track_and_the_acquisition_alone() {
 
     env.start();
     env.wait_for_state(id, AcquisitionState::Completed).await;
-    assert_eq!(env.track(track).await.mb_recording_id, None);
+    assert_eq!(recording_id(&env, track).await, None);
     let row = env.acquisition(id).await;
     assert_eq!(row.state, AcquisitionState::Completed);
     assert_eq!(row.failure_reason, None);

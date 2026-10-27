@@ -18,7 +18,7 @@ use hearthsound_auth::{ApiKeys, AppPasswords, NewUser, Users};
 use hearthsound_config::bootstrap::BootstrapConfig;
 use hearthsound_config::secret::SecretKey;
 use hearthsound_core::{Availability, EntityId, Layer};
-use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, Origin, TrackInput};
+use hearthsound_library::{AlbumInput, ArtistCredit, LibraryRepository, TrackInput};
 use hearthsound_plugin_host::{InstanceSpec, PluginRepository, PluginSource};
 use hearthsound_server::{Server, Services};
 use hearthsound_test_support::{ACQUISITION_FIXTURE, fixture_plugin};
@@ -67,6 +67,17 @@ impl Fixture {
     ///   before the services are built from it.
     pub async fn with_config(adjust: impl FnOnce(&mut BootstrapConfig)) -> Fixture {
         Fixture::build(adjust, true).await
+    }
+
+    /// Builds a server that keeps the mandatory plugins startup installed.
+    ///
+    /// Every other fixture deletes the bundled rows so a test starts with only
+    /// the plugins it installs itself. This one leaves them installed and
+    /// assigned, which is the state an administrator finds on a real server and
+    /// the only way the protection of a mandatory plugin can be driven over the
+    /// API.
+    pub async fn with_bundled_plugins() -> Fixture {
+        Fixture::build_with_env(|_| {}, true, false, BTreeMap::new(), true).await
     }
 
     /// Builds a server whose users table is empty.
@@ -122,12 +133,12 @@ impl Fixture {
         adjust: impl FnOnce(&mut BootstrapConfig),
         env: BTreeMap<String, String>,
     ) -> Fixture {
-        Fixture::build_with_env(adjust, true, false, env).await
+        Fixture::build_with_env(adjust, true, false, env, false).await
     }
 
     /// Builds a server, creating the test account unless `account` is false.
     async fn build(adjust: impl FnOnce(&mut BootstrapConfig), account: bool) -> Fixture {
-        Fixture::build_with(adjust, account, false).await
+        Fixture::build_with_env(adjust, account, false, BTreeMap::new(), false).await
     }
 
     /// Builds a server, over either an ephemeral loopback port or the
@@ -137,7 +148,7 @@ impl Fixture {
         account: bool,
         configured_address: bool,
     ) -> Fixture {
-        Fixture::build_with_env(adjust, account, configured_address, BTreeMap::new()).await
+        Fixture::build_with_env(adjust, account, configured_address, BTreeMap::new(), false).await
     }
 
     /// Builds a server over an environment map and either an ephemeral loopback
@@ -147,6 +158,7 @@ impl Fixture {
         account: bool,
         configured_address: bool,
         env: BTreeMap<String, String>,
+        keep_bundled: bool,
     ) -> Fixture {
         install_crypto_provider();
         let dir = tempfile::tempdir().unwrap();
@@ -154,6 +166,19 @@ impl Fixture {
         adjust(&mut config);
         let secret_key = SecretKey::load(&config.secrets.key_file, &env).unwrap();
         let services = Services::build(config, &env).await.unwrap();
+        // The release build embeds the mandatory plugins, and the composition
+        // root installs them before it rebuilds the registry. A test server
+        // starts with only the fixtures its own test installs, so their rows,
+        // their instances and their layer assignments go - with the cascade
+        // that follows from deleting the plugin row itself. A test that drives
+        // their protection keeps them.
+        if !keep_bundled {
+            sqlx::query("DELETE FROM plugins WHERE source = 'bundled'")
+                .execute(services.database().writer())
+                .await
+                .unwrap();
+        }
+        services.registry().rebuild().await.unwrap();
         let (user_id, api_key, app_password) = if account {
             let user = Users::new(services.database())
                 .create(
@@ -463,14 +488,14 @@ pub async fn install_acquisition_with(
 ///
 /// - `library`: the library tables of the running server's database.
 pub async fn insert_remote_track(library: &LibraryRepository) -> EntityId {
-    let mut album_input = AlbumInput::new("Reload Album", Origin::Catalog);
+    let mut album_input = AlbumInput::new("Reload Album");
     album_input.year = Some(1993);
     album_input.display_artist = Some("Reload Artist".to_owned());
     let album = library
         .upsert_album(&album_input, &[ArtistCredit::new("Reload Artist", "main")])
         .await
         .unwrap();
-    let mut input = TrackInput::new("Reload Song", Origin::Catalog, Availability::Remote);
+    let mut input = TrackInput::new("Reload Song", Availability::Remote);
     input.album_id = Some(album);
     input.display_artist = Some("Reload Artist".to_owned());
     input.track_number = Some(1);

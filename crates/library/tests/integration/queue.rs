@@ -11,8 +11,7 @@ use hearthsound_core::{Availability, EntityId, IdPrefix, StorageClass};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_library::query::{QueueCollection, QueueItem, TrackSort, queue};
 use hearthsound_library::{
-    AlbumInput, ArtistCredit, LibraryRepository, ManagedMediaFile, Origin, ScannedMediaFile,
-    TrackInput,
+    AlbumInput, ArtistCredit, LibraryRepository, ManagedMediaFile, ScannedMediaFile, TrackInput,
 };
 use uuid::Uuid;
 
@@ -51,7 +50,7 @@ async fn make_album(
     artist: &str,
     title: &str,
 ) -> (EntityId, EntityId) {
-    let album = AlbumInput::new(title, Origin::Local);
+    let album = AlbumInput::new(title);
     let credits = [ArtistCredit::new(artist, "main")];
     let album_id = library.upsert_album(&album, &credits).await.unwrap();
     let artist_id = library.list_album_artists(album_id).await.unwrap()[0].id;
@@ -66,7 +65,7 @@ async fn make_track(
     title: &str,
     track_number: Option<i64>,
 ) -> EntityId {
-    let mut input = TrackInput::new(title, Origin::Local, Availability::Local);
+    let mut input = TrackInput::new(title, Availability::Local);
     input.album_id = album;
     input.display_artist = Some(artist.to_owned());
     input.track_number = track_number;
@@ -222,6 +221,16 @@ async fn own_in_folder(
 
 /// Adds a managed library file to a track, so the row projects a file.
 async fn attach_managed(library: &LibraryRepository, track: EntityId, rel_path: &str) {
+    attach_managed_as(library, track, rel_path, None).await;
+}
+
+/// Adds a managed library file the given account uploaded.
+async fn attach_managed_as(
+    library: &LibraryRepository,
+    track: EntityId,
+    rel_path: &str,
+    uploaded_by: Option<Uuid>,
+) {
     library
         .insert_managed_media_file(&ManagedMediaFile {
             track_id: track,
@@ -240,7 +249,7 @@ async fn attach_managed(library: &LibraryRepository, track: EntityId, rel_path: 
             quality_tier: None,
             replaygain: None,
             has_embedded_art: Some(false),
-            uploaded_by: None,
+            uploaded_by,
             acquisition_id: None,
         })
         .await
@@ -322,8 +331,8 @@ async fn seed(dir: &Path) -> Seeded {
         Some(1),
     )
     .await;
-    attach_managed(&library, upload_one, "uploads/one.flac").await;
-    attach_managed(&library, upload_two, "uploads/two.flac").await;
+    attach_managed_as(&library, upload_one, "uploads/one.flac", Some(user)).await;
+    attach_managed_as(&library, upload_two, "uploads/two.flac", Some(user)).await;
     upload(&db, user, upload_one, 7).await;
     upload(&db, user, upload_two, 9).await;
 
@@ -610,7 +619,7 @@ async fn a_six_thousand_track_library_queues_in_order() {
     let mut tracks = Vec::with_capacity(GENERATED);
     for index in (0..GENERATED).rev() {
         let title = format!("Bulk Track {index:05}");
-        let mut input = TrackInput::new(&title, Origin::Local, Availability::Local);
+        let mut input = TrackInput::new(&title, Availability::Local);
         input.album_id = Some(album);
         input.display_artist = Some("Bulk Artist".to_owned());
         input.track_number = Some(i64::try_from(index).unwrap());

@@ -1,9 +1,9 @@
 //! Integration test for a plugin built for the previous plugin API.
 //!
-//! The host loads `hearthsound:plugin@0.4.0` and `hearthsound:plugin@0.3.0` at
-//! the same time. This test drives the frozen 0.3.0 path end to end: the plugin
+//! The host loads `hearthsound:plugin@0.5.0` and `hearthsound:plugin@0.4.0` at
+//! the same time. This test drives the frozen 0.4.0 path end to end: the plugin
 //! installs, the registry builds it into a catalog provider, and a search
-//! crosses the boundary through the `v3` adapters.
+//! crosses the boundary through the `v4` adapters.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -56,7 +56,7 @@ async fn a_legacy_plugin_serves_a_catalog_search() {
     let installed = host.install(&fixture_plugin(LEGACY_CATALOG)).await.unwrap();
     assert_eq!(
         installed.api(),
-        ApiVersion::V0_3,
+        ApiVersion::V0_4,
         "the fixture is built for the frozen API"
     );
     assert_eq!(installed.manifest().id, LEGACY_ID);
@@ -65,7 +65,7 @@ async fn a_legacy_plugin_serves_a_catalog_search() {
         .register(&installed, PluginSource::Sideload)
         .await
         .unwrap();
-    assert_eq!(registration.api, "hearthsound:plugin@0.3.0");
+    assert_eq!(registration.api, "hearthsound:plugin@0.4.0");
 
     let service = InstanceService::new(Arc::clone(&host), repository.clone(), secrets.clone());
     service

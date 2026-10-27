@@ -79,8 +79,8 @@ async fn insert_track(database: &Database, id: Uuid) {
     let now = now_millis();
     sqlx::query(
         "INSERT INTO tracks (
-             id, title, sort_title, origin, availability, created_at, updated_at
-         ) VALUES (?, ?, ?, 'catalog', 'remote', ?, ?)",
+             id, title, sort_title, availability, created_at, updated_at
+         ) VALUES (?, ?, ?, 'remote', ?, ?)",
     )
     .bind(id.as_bytes().as_slice())
     .bind("Test Track")

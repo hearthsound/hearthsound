@@ -12,7 +12,7 @@
 //! A request that can be answered with the stored file is served straight from
 //! disk. The bytes come from tower-http's `ServeFile`, which opens the file,
 //! answers a single range with `206`, answers an unsatisfiable range with
-//! `416`, and never materializes the whole file in memory. Everything that is
+//! `416`, and never holds the whole file in memory. Everything that is
 //! not a plain range - the validators and the conditional requests built on
 //! them - is decided here, because the `ETag` is derived from the stored media
 //! file (its size, its modification time, and its id) rather than from the path
@@ -29,11 +29,10 @@
 //!
 //! # Pending streams
 //!
-//! A request for a track the server has not stored yet - an unmaterialized
-//! catalog id, or a stored track without a file - is not answered with an error
-//! while the track can still be acquired. The service resolves the target, asks
-//! the acquisition layer for it through [`PendingSource`], and answers
-//! according to `stream.pending.mode`:
+//! A request for a track the server has not stored yet - a stored track without
+//! a file - is not answered with an error while the track can still be
+//! acquired. The service asks the acquisition layer for it through
+//! [`PendingSource`], and answers according to `stream.pending.mode`:
 //!
 //! - `hold`, the default, sends nothing until the file is ready or
 //!   `stream.pending.max_wait_secs` elapses, then serves the file normally;
@@ -88,10 +87,9 @@ use hearthsound_acquire::orchestrator::{
     AcquireOutcome, AcquireRequest, AcquisitionHandle, AcquisitionOrchestrator, AcquisitionProgress,
 };
 use hearthsound_activity::{AudioDelivered, StreamSessions};
-use hearthsound_catalog::{CatalogError, CatalogService};
 use hearthsound_config::settings::Settings;
 use hearthsound_config::{SettingKey, SettingType, SettingsStore, keys};
-use hearthsound_core::{ClientId, EntityId, FailureReason, IdPrefix, Priority};
+use hearthsound_core::{EntityId, FailureReason, IdPrefix, Priority};
 use hearthsound_db::Database;
 use hearthsound_library::query::{self, PreferredFile};
 use hearthsound_library::{LibraryError, MediaFile, StorageRoots, tracks};
@@ -245,7 +243,6 @@ impl StreamError {
 /// use std::sync::Arc;
 ///
 /// use hearthsound_activity::StreamSessions;
-/// use hearthsound_catalog::CatalogService;
 /// use hearthsound_config::settings::Settings;
 /// use hearthsound_db::Database;
 /// use hearthsound_library::StorageRoots;
@@ -254,13 +251,11 @@ impl StreamError {
 /// # async fn example(
 /// #     database: Arc<Database>,
 /// #     settings: Settings,
-/// #     catalog: Arc<CatalogService>,
 /// #     ffmpeg: Arc<FfmpegRunner>,
 /// # ) {
 /// let service = hearthsound_api_subsonic::StreamService::new(
 ///     database,
 ///     settings,
-///     catalog,
 ///     StorageRoots::new(Path::new("/srv/library"), Path::new("/srv/cache")),
 ///     ffmpeg,
 ///     StreamSessions::new(),
@@ -276,8 +271,6 @@ pub struct StreamService {
     /// The settings service the pending-stream mode and its wait bounds are read
     /// from, once per pending request.
     settings: Settings,
-    /// The catalog layer an unmaterialized `x_` id is resolved through.
-    catalog: Arc<CatalogService>,
     /// The managed storage roots a file's path resolves against.
     roots: StorageRoots,
     /// The ffmpeg runner a transcode and a pending stream run through.
@@ -311,8 +304,6 @@ impl StreamService {
     /// - `settings`: the settings service, read for `stream.pending.mode` and
     ///   the `stream.hold`/`stream.pending` wait bounds when a request reaches a
     ///   track without a file.
-    /// - `catalog`: the catalog layer, which resolves an unmaterialized `x_` id
-    ///   to the track row an acquisition is requested for.
     /// - `roots`: the managed storage roots a `library` or `cache` file
     ///   resolves against; a file inside a library folder resolves against the
     ///   folder's own path.
@@ -328,7 +319,6 @@ impl StreamService {
     pub fn new(
         database: Arc<Database>,
         settings: Settings,
-        catalog: Arc<CatalogService>,
         roots: StorageRoots,
         ffmpeg: Arc<FfmpegRunner>,
         sessions: StreamSessions,
@@ -337,7 +327,6 @@ impl StreamService {
         StreamService {
             database,
             settings,
-            catalog,
             roots,
             ffmpeg,
             sessions,
@@ -388,30 +377,20 @@ impl StreamService {
     /// library, the file, or the acquisition layer cannot be read. The caller
     /// answers with [`StreamError::status`], never with a Subsonic envelope.
     pub async fn serve(&self, request: &StreamRequest) -> Result<Response, StreamError> {
-        let track = match ClientId::parse(&request.id) {
-            Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::Track => id,
-            Ok(ClientId::Entity(id)) => {
-                tracing::debug!(
-                    id = %id,
-                    "a stream request named a stored entity that is not a track"
-                );
-                return Err(StreamError::NotFound);
-            }
-            // A catalog id names an entity the server has not stored; it is the
-            // pending-stream case, not a malformed id.
-            Ok(ClientId::Catalog(id)) => {
-                tracing::debug!(id = %id, "a stream request named an unmaterialized catalog track");
-                return self.pending(request).await;
-            }
-            Err(error) => {
-                tracing::debug!(id = %request.id, %error, "a stream request named a malformed id");
-                return Err(StreamError::NotFound);
-            }
+        let Ok(id) = EntityId::parse(&request.id) else {
+            tracing::debug!(id = %request.id, "a stream request named a malformed id");
+            return Err(StreamError::NotFound);
         };
-
-        match self.stored(request, track).await? {
+        if id.kind() != IdPrefix::Track {
+            tracing::debug!(
+                id = %id,
+                "a stream request named an entity that is not a track"
+            );
+            return Err(StreamError::NotFound);
+        }
+        match self.stored(request, id).await? {
             Some(response) => Ok(response),
-            None => self.pending(request).await,
+            None => self.pending(request, id).await,
         }
     }
 
@@ -420,9 +399,9 @@ impl StreamService {
     /// A download is not playback: the file is served with the range and
     /// validator handling a stream has, and no stream session is registered and
     /// no access is recorded, so the activity guard and the prefetch scheduler
-    /// never see it. Only a stored track with a preferred file is served: a
-    /// catalog id is not materialized, because downloading a track the server
-    /// does not have is not something a client can ask for.
+    /// never see it. Only a stored track with a preferred file is served, because
+    /// downloading a track the server does not have is not something a client can
+    /// ask for.
     ///
     /// # Parameters
     ///
@@ -440,8 +419,8 @@ impl StreamService {
     /// when the track has no file, and when the file is missing from disk, and
     /// a server-side error when the library or the file cannot be read.
     pub async fn download(&self, request: &StreamRequest) -> Result<Response, StreamError> {
-        let track = match ClientId::parse(&request.id) {
-            Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::Track => id,
+        let track = match EntityId::parse(&request.id) {
+            Ok(id) if id.kind() == IdPrefix::Track => id,
             _ => {
                 tracing::debug!(id = %request.id, "a download named no stored track");
                 return Err(StreamError::NotFound);
@@ -523,10 +502,8 @@ impl StreamService {
 
     /// Answers a request for a track the server has no file to serve yet.
     ///
-    /// The target is resolved first - an unmaterialized `x_` id through the
-    /// catalog layer, a stored track as it is - and requested from the
-    /// acquisition layer at priority [`Priority::Play`]. What the acquisition
-    /// answers decides the response:
+    /// The track is requested from the acquisition layer at priority
+    /// [`Priority::Play`]. What the acquisition answers decides the response:
     ///
     /// - an available track is served by [`StreamService::stored`], so a
     ///   request that raced an import still gets its bytes;
@@ -540,13 +517,18 @@ impl StreamService {
     /// # Parameters
     ///
     /// - `request`: the request that could not be resolved to a stored file.
+    /// - `track`: the track row the request named.
     ///
     /// # Errors
     ///
-    /// Returns [`StreamError::NotFound`] when there is no acquisition layer,
-    /// when the id names no track, and when the track cannot be acquired now,
-    /// and [`StreamError::Forbidden`] when the requester may not acquire.
-    async fn pending(&self, request: &StreamRequest) -> Result<Response, StreamError> {
+    /// Returns [`StreamError::NotFound`] when there is no acquisition layer and
+    /// when the track cannot be acquired now, and [`StreamError::Forbidden`] when
+    /// the requester may not acquire.
+    async fn pending(
+        &self,
+        request: &StreamRequest,
+        track: EntityId,
+    ) -> Result<Response, StreamError> {
         let Some(source) = &self.pending else {
             tracing::debug!(
                 id = %request.id,
@@ -555,9 +537,8 @@ impl StreamService {
             return Err(StreamError::NotFound);
         };
 
-        // The permission is checked before the id is resolved: resolving an
-        // `x_` id materializes a catalog entity into a stored row, and an
-        // account that may not acquire must not write one.
+        // The permission is checked before anything is requested: an account that
+        // may not acquire must not start one.
         if !request.can_acquire {
             tracing::debug!(
                 id = %request.id,
@@ -566,8 +547,6 @@ impl StreamService {
             );
             return Err(StreamError::Forbidden);
         }
-
-        let track = self.resolve_target(&request.id).await?;
 
         let outcome = source
             .request(
@@ -603,53 +582,6 @@ impl StreamService {
                 Err(StreamError::Forbidden)
             }
             PendingOutcome::Pending(handle) => self.serve_pending(request, track, handle).await,
-        }
-    }
-
-    /// Resolves a pending request's id to the track row to acquire.
-    ///
-    /// # Parameters
-    ///
-    /// - `id`: the request's `id` parameter.
-    ///
-    /// # Returns
-    ///
-    /// The materialized track: the id itself for a stored track, and the row the
-    /// catalog layer stores for an `x_` id.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StreamError::NotFound`] for an id that names no track, an `x_`
-    /// id whose instance knows no such entity, and an id that names an album,
-    /// artist, or playlist instead, and a server-side error when the catalog
-    /// lookup itself could not complete.
-    async fn resolve_target(&self, id: &str) -> Result<EntityId, StreamError> {
-        match ClientId::parse(id) {
-            Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::Track => Ok(id),
-            Ok(ClientId::Catalog(id)) => {
-                self.catalog.materialize_track(&id).await.map_err(|error| {
-                    if matches!(error, CatalogError::NotFound) {
-                        tracing::debug!(
-                            id = %id,
-                            "a stream request named a catalog entity its instance does not know"
-                        );
-                        StreamError::NotFound
-                    } else {
-                        internal(error)
-                    }
-                })
-            }
-            Ok(ClientId::Entity(id)) => {
-                tracing::debug!(
-                    id = %id,
-                    "a stream request named a stored entity that is not a track"
-                );
-                Err(StreamError::NotFound)
-            }
-            Err(error) => {
-                tracing::debug!(id = %id, %error, "a stream request named a malformed id");
-                Err(StreamError::NotFound)
-            }
         }
     }
 
@@ -1036,7 +968,7 @@ pub trait PendingSource: Send + Sync {
     ///
     /// # Parameters
     ///
-    /// - `track`: the materialized track to acquire.
+    /// - `track`: the track to acquire.
     /// - `priority`: how urgent the acquisition is; a stream asks at
     ///   [`Priority::Play`].
     /// - `requested_by`: the user whose request created the acquisition.

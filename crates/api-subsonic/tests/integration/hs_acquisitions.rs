@@ -12,22 +12,33 @@
 use std::collections::HashMap;
 
 use hearthsound_acquire::orchestrator::{AcquireOutcome, AcquireRequest};
-use hearthsound_core::{
-    Availability, CatalogId, EntityId, EntityKind, FailureReason, IdPrefix, Priority, Slug,
-};
+use hearthsound_core::{Availability, EntityId, FailureReason, IdPrefix, Priority};
 use hearthsound_library::tracks;
 
 use crate::common::seed::{Seeded, library};
 use crate::common::{Fixture, SNAPSHOT_FILTERS, assert_error, assert_ok, get};
 
-/// The number of characters in a materialized client id's payload.
+/// The number of characters in a client id's payload.
 const PAYLOAD: usize = 26;
 
-/// Builds the `x_` id of one hello-catalog entity.
-fn catalog_id(kind: EntityKind, provider_id: &str) -> String {
-    CatalogId::new(Slug::new("hello").unwrap(), kind, provider_id)
-        .unwrap()
-        .to_string()
+/// Builds a fixture with the seeded library, the acquisition layer, and one
+/// remote album of two tracks.
+///
+/// # Returns
+///
+/// The fixture, the seeded ids, and the remote album with its tracks.
+async fn fixture() -> (Fixture, Seeded, EntityId, Vec<EntityId>) {
+    let mut fixture = Fixture::new().await;
+    fixture.add_acquisition_layer().await;
+    let seeded = library(
+        &fixture.database,
+        &fixture.subdir("owned"),
+        &fixture.subdir("generic"),
+        fixture.user_id,
+    )
+    .await;
+    let (album, tracks) = fixture.remote_album("Faraway", 2).await;
+    (fixture, seeded, album, tracks)
 }
 
 /// Replaces each acquisition id in `body` with a marker.
@@ -66,41 +77,6 @@ fn number_acquisitions(body: &str) -> String {
     }
     out.push_str(rest);
     out
-}
-
-/// Builds a fixture with the seeded library, the acquisition layer, and one
-/// remote album of two tracks.
-///
-/// # Returns
-///
-/// The fixture, the seeded ids, and the remote album with its tracks.
-async fn fixture() -> (Fixture, Seeded, EntityId, Vec<EntityId>) {
-    let mut fixture = Fixture::new().await;
-    fixture.add_acquisition_layer().await;
-    let seeded = library(
-        &fixture.database,
-        &fixture.subdir("owned"),
-        &fixture.subdir("generic"),
-        fixture.user_id,
-    )
-    .await;
-    let (album, tracks) = fixture.remote_album("Faraway", 2).await;
-    (fixture, seeded, album, tracks)
-}
-
-/// Builds a fixture with the hello catalog installed and the acquisition layer.
-async fn catalog_fixture() -> (Fixture, Seeded) {
-    let mut fixture = Fixture::new().await;
-    fixture.install_hello_catalog().await;
-    fixture.add_acquisition_layer().await;
-    let seeded = library(
-        &fixture.database,
-        &fixture.subdir("owned"),
-        &fixture.subdir("generic"),
-        fixture.user_id,
-    )
-    .await;
-    (fixture, seeded)
 }
 
 /// Admits an acquisition for `track` on behalf of the fixture's account.
@@ -238,34 +214,6 @@ async fn an_unknown_stored_id_is_left_out() {
         "{}",
         probe.body
     );
-}
-
-#[tokio::test]
-async fn a_catalog_id_is_answered_from_what_the_catalog_knows() {
-    let (fixture, _seeded) = catalog_fixture().await;
-    let app = fixture.app();
-    let known = catalog_id(EntityKind::Track, "hello-track-1");
-    let unknown = catalog_id(EntityKind::Track, "hello-track-9");
-
-    let probe = get(
-        &app,
-        &format!(
-            "/rest/hsGetAvailability?apiKey={}&hearthsound=1&f=json&id={known}&id={unknown}",
-            fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&probe);
-    assert_eq!(
-        probe.body.matches("\"state\":\"remote\"").count(),
-        2,
-        "{}",
-        probe.body
-    );
-    assert!(probe.body.contains("\"inLibrary\":false"), "{}", probe.body);
-    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
-        insta::assert_snapshot!("hs-availability-catalog-json", number_acquisitions(&probe.body));
-    });
 }
 
 #[tokio::test]

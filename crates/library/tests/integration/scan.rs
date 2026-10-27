@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use hearthsound_config::{SettingSources, SettingsRegistry, SettingsStore, settings::Settings};
 use hearthsound_core::events::EventBus;
-use hearthsound_core::{Availability, StorageClass};
+use hearthsound_core::{Availability, EntityKind, StorageClass};
 use hearthsound_db::{Database, MIGRATOR};
 use hearthsound_jobs::{JobQueue, JobRunner, JobRunnerOptions, JobState, QueueOptions, Shutdown};
 use hearthsound_library::artwork::{CoverArt, cover_for_file, track_cover};
@@ -18,7 +18,7 @@ use hearthsound_library::scan::{
     LibraryScanner, SCAN_JOB_KIND, ScanJobHandler, ScanRequest, ScanStatus,
 };
 use hearthsound_library::{
-    LibraryRepository, MediaFileInput, Origin, ReplayGain, StorageRoots, TrackInput,
+    LibraryRepository, MediaFileInput, ReplayGain, StorageRoots, TrackInput,
 };
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
 
@@ -26,6 +26,18 @@ async fn migrated(dir: &Path) -> Database {
     let db = Database::open(&dir.join("hearthsound.db")).await.unwrap();
     db.migrate(&MIGRATOR, &dir.join("backups")).await.unwrap();
     db
+}
+
+/// Returns every identifier stored for one entity.
+async fn ids_of(
+    db: &Database,
+    kind: EntityKind,
+    id: hearthsound_core::EntityId,
+) -> Vec<hearthsound_core::providers::ExternalId> {
+    let mut conn = db.readers().acquire().await.unwrap();
+    hearthsound_library::external_ids::ids_of(&mut conn, kind, id.uuid())
+        .await
+        .unwrap()
 }
 
 /// Builds a scanner over a database, with the built-in settings.
@@ -179,7 +191,10 @@ async fn scan_indexes_every_audio_file_and_skips_unchanged_ones() {
 
     let track = only_track(&library, "Energy 52").await;
     let stored = library.get_track(track).await.unwrap().unwrap();
-    assert_eq!(stored.origin, Origin::Local);
+    let file_tags: serde_json::Value =
+        serde_json::from_str(stored.file_tags.as_deref().unwrap()).unwrap();
+    assert_eq!(file_tags["title"], "Cafe del Mar");
+    assert_eq!(file_tags["trackNumber"], 1);
     assert_eq!(stored.availability, Availability::Local);
     assert!(stored.duration_ms.unwrap() > 0);
     assert_eq!(stored.track_number, Some(1));
@@ -614,6 +629,89 @@ async fn cover_art_comes_from_the_embedded_picture_or_a_sidecar() {
     }
 }
 
+/// A scan stores the cover it reads as the album's file image.
+///
+/// The album's cover comes from an embedded picture; a track without an album
+/// carries the sidecar image of its own directory instead.
+#[tokio::test]
+async fn a_scan_stores_the_cover_art_it_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+
+    AudioFixture::new(AudioFormat::Flac)
+        .seconds(0.3)
+        .file_name("Cafe del Mar.flac")
+        .tags(
+            TrackTags::new("Cafe del Mar", "Energy 52")
+                .album("Cafe del Mar")
+                .album_artist("Energy 52"),
+        )
+        .cover_png(8, 0x336699)
+        .write_into(&music)
+        .await
+        .unwrap();
+    AudioFixture::new(AudioFormat::Flac)
+        .seconds(0.3)
+        .file_name("Loose.flac")
+        .tags(TrackTags::new("Loose", "Solo Act"))
+        .write_into(&music)
+        .await
+        .unwrap();
+    std::fs::write(music.join("cover.jpg"), b"jpeg-bytes").unwrap();
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(folder.id).await.unwrap();
+
+    let artists = library.list_artists().await.unwrap();
+    let energy = artists
+        .iter()
+        .find(|artist| artist.name == "Energy 52")
+        .unwrap();
+    let album = library
+        .list_albums_for_artist(energy.id)
+        .await
+        .unwrap()
+        .remove(0);
+    let mut conn = db.readers().acquire().await.unwrap();
+    let images = hearthsound_library::images::images_of(
+        &mut conn,
+        EntityKind::Album,
+        album.id.uuid(),
+        "cover",
+    )
+    .await
+    .unwrap();
+    assert_eq!(images.len(), 1, "the album has its file image");
+    let stored = &images[0];
+    assert!(stored.instance_id.is_none(), "the image is a file image");
+    let hash = stored.blob_hash.expect("the blob is stored");
+    let relative = hearthsound_library::images::blob_path(
+        &hash,
+        stored.content_type.as_deref().unwrap_or("image/png"),
+    );
+    let bytes = std::fs::read(dir.path().join("artwork").join(relative)).unwrap();
+    assert_eq!(
+        bytes.get(..8),
+        Some(b"\x89PNG\r\n\x1a\n".as_slice()),
+        "the embedded picture was stored"
+    );
+
+    let loose = only_track_named(&db, "Loose").await;
+    let images =
+        hearthsound_library::images::images_of(&mut conn, EntityKind::Track, loose.uuid(), "cover")
+            .await
+            .unwrap();
+    assert_eq!(
+        images.len(),
+        1,
+        "the album-less track carries its own cover"
+    );
+}
+
 #[tokio::test]
 async fn a_scan_stores_replay_gain_and_artist_music_brainz_ids() {
     let dir = tempfile::tempdir().unwrap();
@@ -661,14 +759,14 @@ async fn a_scan_stores_replay_gain_and_artist_music_brainz_ids() {
     );
 
     let artists = library.list_artists().await.unwrap();
-    let mbid = |name: &str| {
-        artists
-            .iter()
-            .find(|artist| artist.name == name)
-            .and_then(|artist| artist.mb_artist_id.clone())
-    };
-    assert_eq!(mbid("Nova Reyes").as_deref(), Some("mb-nova"));
-    assert_eq!(mbid("Ida Frost").as_deref(), Some("mb-ida"));
+    let mut mbids: Vec<(String, String)> = Vec::new();
+    for artist in &artists {
+        for id in ids_of(&db, EntityKind::Artist, artist.id).await {
+            mbids.push((artist.name.clone(), id.value));
+        }
+    }
+    assert!(mbids.contains(&("Nova Reyes".to_owned(), "mb-nova".to_owned())));
+    assert!(mbids.contains(&("Ida Frost".to_owned(), "mb-ida".to_owned())));
 }
 
 #[tokio::test]
@@ -1715,7 +1813,7 @@ async fn a_nested_folder_scan_removes_a_duplicate_track_for_the_same_file() {
     let nested = library.add_library_folder(&inner, None).await.unwrap();
     let duplicate = library
         .insert_track(
-            &TrackInput::new("Cafe del Mar", Origin::Local, Availability::Local),
+            &TrackInput::new("Cafe del Mar", Availability::Local),
             &[],
             &[],
         )
@@ -1932,10 +2030,13 @@ async fn an_untagged_artist_beside_two_tagged_namesakes_gets_its_own_row() {
 
     let artists = library.list_artists().await.unwrap();
     assert_eq!(artists.len(), 3, "two acts and one untagged row");
-    let untagged = artists
-        .iter()
-        .find(|artist| artist.mb_artist_id.is_none())
-        .expect("the untagged file has a row of its own");
+    let mut untagged = None;
+    for artist in &artists {
+        if ids_of(&db, EntityKind::Artist, artist.id).await.is_empty() {
+            untagged = Some(artist);
+        }
+    }
+    let untagged = untagged.expect("the untagged file has a row of its own");
     let track = only_track_named(&db, "Song three").await;
     let credits = library.list_track_artists(track).await.unwrap();
     assert_eq!(credits[0].id, untagged.id);
@@ -2046,7 +2147,12 @@ async fn a_re_tagged_file_keeps_its_album() {
 
     let albums = library.list_albums_for_artist(artist.id).await.unwrap();
     assert_eq!(albums.len(), 1, "the album adopted the release id");
-    assert_eq!(albums[0].mb_release_id.as_deref(), Some("mb-release-cafe"));
+    let album_ids = ids_of(&db, EntityKind::Album, albums[0].id).await;
+    assert!(
+        album_ids
+            .iter()
+            .any(|id| { id.namespace == "mb-release" && id.value == "mb-release-cafe" })
+    );
     assert_eq!(albums[0].year, Some(1993), "the first year stayed");
 }
 

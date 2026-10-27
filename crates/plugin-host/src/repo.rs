@@ -1365,6 +1365,7 @@ pub(crate) struct InstanceDisabler {
     instance_id: Uuid,
     plugin: String,
     slug: Slug,
+    protected: bool,
     disabled: tokio::sync::broadcast::Sender<Slug>,
 }
 
@@ -1378,6 +1379,8 @@ impl InstanceDisabler {
     /// - `instance_id`: the instance id to disable.
     /// - `plugin`: the plugin id, for the event payload.
     /// - `slug`: the instance slug, for the event payload.
+    /// - `protected`: whether the instance's plugin is mandatory, in which case
+    ///   the instance is reported degraded instead of being switched off.
     /// - `disabled`: the host's signal that an instance was switched off.
     pub(crate) fn new(
         database: &Database,
@@ -1385,6 +1388,7 @@ impl InstanceDisabler {
         instance_id: Uuid,
         plugin: String,
         slug: Slug,
+        protected: bool,
         disabled: tokio::sync::broadcast::Sender<Slug>,
     ) -> InstanceDisabler {
         InstanceDisabler {
@@ -1393,6 +1397,7 @@ impl InstanceDisabler {
             instance_id,
             plugin,
             slug,
+            protected,
             disabled,
         }
     }
@@ -1409,6 +1414,26 @@ impl InstanceDisabler {
     ///
     /// - `detail`: the reason, carried by the event.
     pub(crate) async fn disable(&self, detail: &str) {
+        if self.protected {
+            tracing::warn!(
+                target: "hearthsound::plugin",
+                plugin = %self.plugin,
+                instance = %self.slug,
+                detail,
+                "a required plugin's instance kept trapping; reporting it degraded instead of switching it off",
+            );
+            self.events.publish_for(
+                Audience::Admins,
+                ServerEvent::PluginStatus(PluginStatus {
+                    plugin_id: self.plugin.clone(),
+                    slug: Some(self.slug.to_string()),
+                    state: "degraded".to_owned(),
+                    detail: Some(detail.to_owned()),
+                }),
+            );
+            return;
+        }
+
         let now = now_millis();
         let result = sqlx::query!(
             "UPDATE provider_instances SET enabled = 0, updated_at = ? WHERE id = ? AND enabled != 0",

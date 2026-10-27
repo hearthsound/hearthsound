@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use hearthsound_auth::Sessions;
 use hearthsound_core::{Availability, EntityId, StorageClass};
-use hearthsound_library::{LibraryRepository, ManagedMediaFile, Origin, TrackInput};
+use hearthsound_library::{LibraryRepository, ManagedMediaFile, TrackInput};
 use reqwest::StatusCode;
 use reqwest::header::{CONTENT_TYPE, COOKIE};
 use serde_json::Value;
@@ -66,7 +66,7 @@ async fn stored_file_track(fixture: &Fixture, rel_path: &str) -> EntityId {
     let library = LibraryRepository::new(fixture.services.database());
     let track = library
         .insert_track(
-            &TrackInput::new("Session Song", Origin::Local, Availability::Local),
+            &TrackInput::new("Session Song", Availability::Local),
             &[],
             &[],
         )

@@ -36,6 +36,9 @@ struct Config {
     /// The artists the plugin knows information about.
     #[serde(default)]
     artists: Vec<ConfiguredArtist>,
+    /// How long a release answer waits before it is returned, in milliseconds.
+    #[serde(default)]
+    delay_ms: i64,
 }
 
 /// One artist and what the plugin knows about them.
@@ -114,6 +117,25 @@ fn default_score() -> f32 {
 /// Loads the plugin's server-scoped configuration.
 fn config() -> Result<Config, ProviderError> {
     hearthsound_plugin::config::server_config()
+}
+
+/// Waits `milliseconds` on the monotonic clock before an answer.
+///
+/// A bounded spin is all a test fixture needs; the guest has WASI clocks but no
+/// sleep, and the host's call timeout still bounds the wait.
+///
+/// # Parameters
+///
+/// - `milliseconds`: how long to wait; zero or negative returns at once.
+fn spin_for(milliseconds: i64) {
+    if milliseconds <= 0 {
+        return;
+    }
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(milliseconds as u64);
+    while std::time::Instant::now() < deadline {
+        core::hint::spin_loop();
+    }
 }
 
 /// Returns whether a recording answers the hint.
@@ -259,6 +281,7 @@ impl metadata::Guest for MetadataFixture {
 
     fn get_release(ids: Vec<IdPair>) -> Result<Album, ProviderError> {
         let config = config()?;
+        spin_for(config.delay_ms);
         for recording in config.recordings {
             for release in &recording.releases {
                 let known = ids.iter().any(|id| {
@@ -294,6 +317,7 @@ impl metadata::Guest for MetadataFixture {
                         namespace: RELEASE_NAMESPACE.to_string(),
                         value: release.mbid.clone(),
                     }],
+                    edition: None,
                 });
             }
         }

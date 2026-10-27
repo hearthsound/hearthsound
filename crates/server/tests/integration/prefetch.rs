@@ -16,8 +16,7 @@ use std::time::Duration;
 
 use hearthsound_acquire::orchestrator::AcquisitionOrchestrator;
 use hearthsound_acquire::repo::{AcquisitionRow, ListFilter};
-use hearthsound_catalog::CatalogService;
-use hearthsound_core::{CatalogId, EntityId, EntityKind, Layer, Priority, Slug};
+use hearthsound_core::{EntityId, Layer, Priority};
 use hearthsound_plugin_host::{InstanceSpec, PluginRepository, PluginSource};
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
 use hearthsound_test_support::{ACQUISITION_FIXTURE, ALBUM_CATALOG, fixture_plugin};
@@ -29,9 +28,6 @@ const ALBUM_ID: &str = "com.example.album-catalog";
 
 /// The acquisition fixture's manifest id.
 const ACQ_ID: &str = "com.example.acquisition-fixture";
-
-/// The provider id of the fixture's album.
-const ALBUM_PROVIDER_ID: &str = "album-catalog-album-1";
 
 /// How many tracks the fixture's album holds.
 const ALBUM_TRACKS: u8 = 5;
@@ -164,43 +160,6 @@ async fn place_audio(downloads: &Path) {
         .unwrap();
 }
 
-/// Returns the catalog id of one track of the fixture's album.
-///
-/// # Parameters
-///
-/// - `number`: the track number within the album, one-based.
-fn catalog_track(number: u8) -> CatalogId {
-    CatalogId::new(
-        Slug::new("album").unwrap(),
-        EntityKind::Track,
-        format!("album-catalog-track-{number}"),
-    )
-    .unwrap()
-}
-
-/// Returns the catalog id of the fixture's album.
-fn catalog_album() -> CatalogId {
-    CatalogId::new(
-        Slug::new("album").unwrap(),
-        EntityKind::Album,
-        ALBUM_PROVIDER_ID,
-    )
-    .unwrap()
-}
-
-/// Resolves one track of the fixture's album to its stored row.
-///
-/// # Parameters
-///
-/// - `catalog`: the running catalog layer.
-/// - `number`: the track number within the album, one-based.
-async fn stored_track(catalog: &CatalogService, number: u8) -> EntityId {
-    catalog
-        .materialize_track(&catalog_track(number))
-        .await
-        .unwrap()
-}
-
 /// Returns the ledger rows of one track.
 ///
 /// # Parameters
@@ -265,39 +224,35 @@ async fn a_catalog_stream_prefetches_the_tracks_after_it() {
     place_audio(&downloads).await;
 
     let api_key = &fixture.api_key;
-    let album = catalog_album();
+    let first = crate::on_demand::resolve_track(services.catalog(), 1).await;
+    let album = crate::on_demand::catalog_album(services.catalog()).await;
 
     // The client reads the album, which is the listing the queue is inferred
     // from, and then plays its first track.
     let listed = fixture
         .get(&format!(
-            "/rest/getAlbum?id={album}&c=symfonium&apiKey={api_key}&f=json"
+            "/rest/getAlbum?id={album}&c=symfonium&hearthsound=1&apiKey={api_key}&f=json"
         ))
         .await;
     assert_eq!(listed.status(), StatusCode::OK);
     let body = listed.text().await.unwrap();
     assert!(
-        body.contains(&catalog_track(1).to_string()),
+        body.contains(&first.to_string()),
         "the listing names the album's tracks: {body}"
     );
 
     let streamed = fixture
         .get(&format!(
-            "/rest/stream?id={}&c=symfonium&apiKey={api_key}",
-            catalog_track(1)
+            "/rest/stream?id={first}&c=symfonium&apiKey={api_key}"
         ))
         .await;
     assert_eq!(streamed.status(), StatusCode::OK);
     drop(streamed);
 
-    let tracks: Vec<EntityId> = {
-        let catalog = services.catalog();
-        let mut tracks = Vec::new();
-        for number in 1..=ALBUM_TRACKS {
-            tracks.push(stored_track(catalog, number).await);
-        }
-        tracks
-    };
+    let mut tracks: Vec<EntityId> = vec![first];
+    for number in 2..=ALBUM_TRACKS {
+        tracks.push(crate::on_demand::resolve_track(services.catalog(), number).await);
+    }
 
     let orchestrator = Arc::clone(services.orchestrator());
     let prefetched = tracks[1..4].to_vec();

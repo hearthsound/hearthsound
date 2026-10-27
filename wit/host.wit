@@ -1,4 +1,4 @@
-package hearthsound:plugin@0.4.0;
+package hearthsound:plugin@0.5.0;
 
 interface host-log {
   enum level { trace, debug, info, warn, error }

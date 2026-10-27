@@ -19,11 +19,12 @@
 
 use std::path::Path;
 
-use hearthsound_core::{Availability, EntityId, StorageClass};
+use hearthsound_core::providers::{ExternalId, ISRC};
+use hearthsound_core::{Availability, EntityId, EntityKind, StorageClass};
 use hearthsound_db::Database;
 use hearthsound_library::{
-    AlbumInput, ArtistCredit, LibraryFolder, LibraryRepository, ManagedMediaFile, Origin,
-    ReplayGain, ScannedMediaFile, TrackInput,
+    AlbumInput, ArtistCredit, LibraryFolder, LibraryRepository, ManagedMediaFile, ReplayGain,
+    ScannedMediaFile, TrackInput,
 };
 
 /// The ids of the seeded entities.
@@ -78,6 +79,7 @@ pub async fn library(database: &Database, owned: &Path, generic: &Path, owner: E
     let alpha = album(&library, "Alpha", 1999, "The Cardinals", "album").await;
     let cardinals = artist_of(&library, alpha).await;
     let zero = track(
+        database,
         &library,
         alpha,
         &TrackSpec::new("Zero", 1, 180_000)
@@ -87,6 +89,7 @@ pub async fn library(database: &Database, owned: &Path, generic: &Path, owner: E
     )
     .await;
     let one = track(
+        database,
         &library,
         alpha,
         &TrackSpec::new("One", 2, 200_000)
@@ -114,6 +117,7 @@ pub async fn library(database: &Database, owned: &Path, generic: &Path, owner: E
     let bright = album(&library, "Bright", 2001, "2 Mello", "album").await;
     let mello = artist_of(&library, bright).await;
     let signal = track(
+        database,
         &library,
         bright,
         &TrackSpec::new("Signal", 1, 210_000).genres(&["Electronic"]),
@@ -131,6 +135,7 @@ pub async fn library(database: &Database, owned: &Path, generic: &Path, owner: E
     let cache_album = album(&library, "Cache", 2010, "Charlotte", "album").await;
     let charlotte = artist_of(&library, cache_album).await;
     let gone = track(
+        database,
         &library,
         cache_album,
         &TrackSpec::new("Gone", 1, 240_000).cached(),
@@ -147,6 +152,7 @@ pub async fn library(database: &Database, owned: &Path, generic: &Path, owner: E
     let delta = album(&library, "Delta", 2005, "El Mar", "compilation").await;
     let elmar = artist_of(&library, delta).await;
     let ocean = track(
+        database,
         &library,
         delta,
         &TrackSpec::new("Ocean", 1, 300_000).genres(&["Ambient"]),
@@ -232,7 +238,7 @@ async fn album(
     artist: &str,
     album_type: &str,
 ) -> EntityId {
-    let mut input = AlbumInput::new(title, Origin::Local);
+    let mut input = AlbumInput::new(title);
     input.year = Some(year);
     input.album_type = Some(album_type.to_owned());
     input.display_artist = Some(artist.to_owned());
@@ -248,30 +254,49 @@ async fn artist_of(library: &LibraryRepository, album: EntityId) -> EntityId {
 }
 
 /// Inserts a track and returns its id.
-async fn track(library: &LibraryRepository, album: EntityId, spec: &TrackSpec) -> EntityId {
+async fn track(
+    database: &Database,
+    library: &LibraryRepository,
+    album: EntityId,
+    spec: &TrackSpec,
+) -> EntityId {
     let credit = ArtistCredit::new(
         library.list_album_artists(album).await.unwrap()[0]
             .name
             .clone(),
         "main",
     );
-    let mut input = TrackInput::new(spec.title, Origin::Local, spec.availability);
+    let mut input = TrackInput::new(spec.title, spec.availability);
     input.album_id = Some(album);
     input.display_artist = Some(credit.artist.name.clone());
     input.track_number = Some(spec.number);
     input.disc_number = Some(1);
     input.duration_ms = Some(spec.duration_ms);
-    input.isrc = spec.isrc.map(str::to_owned);
     input.explicit = spec.explicit;
     let genres: Vec<String> = spec
         .genres
         .iter()
         .map(|genre| (*genre).to_owned())
         .collect();
-    library
+    let id = library
         .insert_track(&input, &[credit], &genres)
         .await
-        .unwrap()
+        .unwrap();
+    // The identifiers a scan records beside the row; a writer that inserts a
+    // row directly has to attach them itself.
+    let ids: Vec<ExternalId> = spec
+        .isrc
+        .map(|isrc| ExternalId {
+            namespace: ISRC.to_owned(),
+            value: isrc.to_owned(),
+        })
+        .into_iter()
+        .collect();
+    let mut conn = database.writer().acquire().await.unwrap();
+    hearthsound_library::external_ids::attach(&mut conn, EntityKind::Track, id.uuid(), &ids)
+        .await
+        .unwrap();
+    id
 }
 
 /// Attaches a scanned folder file to a track.

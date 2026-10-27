@@ -24,7 +24,7 @@ use hearthsound_acquire::orchestrator::{
 use hearthsound_acquire::repo::{
     AcquisitionRow, LedgerQuery, LedgerWindow, active_for_tracks, latest_for_tracks,
 };
-use hearthsound_core::{ClientId, EntityId, EntityKind, FailureReason, IdPrefix, Layer, Priority};
+use hearthsound_core::{EntityId, EntityKind, FailureReason, IdPrefix, Layer, Priority};
 use uuid::Uuid;
 
 use crate::auth::Call;
@@ -70,14 +70,12 @@ const MAX_COUNT: u32 = 500;
 /// One entry is answered per requested id, in request order: the entity's
 /// availability state and whether the requesting account's personal library holds
 /// it, plus the acquisition in flight for a track, if there is one. An album's
-/// entry aggregates its member tracks and carries no acquisition fields, and an
-/// `x_` catalog id is reported from the stored row it resolved to, or as
-/// `remote` when nothing has materialized it.
+/// entry aggregates its member tracks and carries no acquisition fields.
 ///
 /// # Parameters
 ///
 /// - `call`: the authenticated call. `id` may be repeated and names tracks and
-///   albums, stored or catalog ids; the request must carry `hearthsound=1`.
+///   albums; the request must carry `hearthsound=1`.
 ///
 /// # Returns
 ///
@@ -153,8 +151,26 @@ async fn availabilities(call: &Call, ids: &[String]) -> Result<Vec<Object>, Subs
     let tracks: Vec<EntityId> = subjects
         .values()
         .filter(|subject| subject.kind == EntityKind::Track)
-        .filter_map(|subject| subject.entity)
+        .map(|subject| EntityId::from_uuid(IdPrefix::Track, subject.entity))
         .collect();
+    let albums: Vec<EntityId> = subjects
+        .values()
+        .filter(|subject| subject.kind == EntityKind::Album)
+        .map(|subject| EntityId::from_uuid(IdPrefix::Album, subject.entity))
+        .collect();
+    // An album's state aggregates its member tracks, so an album that holds none
+    // says nothing and is left out the way an unknown id is.
+    let members = {
+        let mut conn = state
+            .database()
+            .readers()
+            .acquire()
+            .await
+            .map_err(|error| failure(AVAILABILITY_OPERATION, &error))?;
+        hearthsound_library::query::album_member_tracks(&mut conn, &albums)
+            .await
+            .map_err(|error| failure(AVAILABILITY_OPERATION, &error))?
+    };
     let active = {
         let mut conn = state
             .database()
@@ -185,7 +201,8 @@ async fn availabilities(call: &Call, ids: &[String]) -> Result<Vec<Object>, Subs
             .set("state", standing.availability.as_str())
             .set("inLibrary", standing.in_library);
         if subject.kind == EntityKind::Track {
-            if let Some(row) = standing.entity.and_then(|track| active.get(&track)) {
+            let track = EntityId::from_uuid(IdPrefix::Track, standing.entity);
+            if let Some(row) = active.get(&track) {
                 entry = entry.set("acquisitionId", acquisition_id(row.id));
                 if let Some(percent) = row.percent() {
                     entry = entry.set("percent", i64::from(percent));
@@ -198,11 +215,7 @@ async fn availabilities(call: &Call, ids: &[String]) -> Result<Vec<Object>, Subs
                     entry = entry.set("parkReason", reason.as_str());
                 }
             }
-        } else if standing.members.is_empty() && standing.entity.is_some() {
-            // An album's state aggregates its member tracks, so an album that
-            // holds none says nothing: an unmaterialized catalog album is
-            // answered as `remote` above, and a stored album with no tracks is
-            // left out the way an unknown stored id is.
+        } else if !members.contains_key(&EntityId::from_uuid(IdPrefix::Album, standing.entity)) {
             continue;
         }
         entries.push(entry);
@@ -212,9 +225,10 @@ async fn availabilities(call: &Call, ids: &[String]) -> Result<Vec<Object>, Subs
 
 /// Answers `hsAcquire`: asks the acquisition layer for the named entities.
 ///
-/// A track is requested on its own, an album is requested track by track, and an
-/// `x_` catalog id is materialized first, so the acquisition has a stored target
-/// to import into. Every row of the answer is the acquisition the request
+/// A track is requested on its own and an album is requested track by track, and
+/// every id resolves through the catalog layer's redirects first, so the
+/// acquisition always has the row that stands for the entity now. Every row of
+/// the answer is the acquisition the request
 /// admitted, the acquisition it attached to, or - for a track that already has a
 /// file or is cooling down - the last acquisition the track has; an id with no
 /// such row is left out.
@@ -222,7 +236,7 @@ async fn availabilities(call: &Call, ids: &[String]) -> Result<Vec<Object>, Subs
 /// # Parameters
 ///
 /// - `call`: the authenticated call. `id` may be repeated and names tracks and
-///   albums, stored or catalog ids; `priority` is `play`, `next`, `queue` or
+///   albums; `priority` is `play`, `next`, `queue` or
 ///   `background` and defaults to `queue`; `retry` (`1`, `true` or `yes`) makes
 ///   the request ignore a track's cooldown and start a fresh attempt. The request
 ///   must carry `hearthsound=1`, and the account must hold `can_acquire`.
@@ -368,50 +382,25 @@ async fn acquire(
     priority: Priority,
     retry: bool,
 ) -> Result<Vec<AcquireOutcome>, SubsonicError> {
-    let Ok(client) = ClientId::parse(raw) else {
+    let Ok(id) = EntityId::parse(raw) else {
         return Err(SubsonicError::not_found());
     };
-    match client {
-        ClientId::Entity(id) => match id.kind().entity_kind() {
-            Some(EntityKind::Track) => {
-                request_track(orchestrator, user, can_acquire, id, priority, retry)
-                    .await
-                    .map(|outcome| vec![outcome])
-            }
-            Some(EntityKind::Album) => {
-                request_album(orchestrator, user, can_acquire, id, priority, retry).await
-            }
-            _ => Err(SubsonicError::not_found()),
-        },
-        ClientId::Catalog(id) => match id.kind() {
-            EntityKind::Track => {
-                let track = state
-                    .catalog()
-                    .materialize_track(&id)
-                    .await
-                    .map_err(|error| catalog::failure(&error))?;
-                request_track(orchestrator, user, can_acquire, track, priority, retry)
-                    .await
-                    .map(|outcome| vec![outcome])
-            }
-            EntityKind::Album => {
-                let album = state
-                    .catalog()
-                    .materialize_album(&id)
-                    .await
-                    .map_err(|error| catalog::failure(&error))?;
-                request_album(
-                    orchestrator,
-                    user,
-                    can_acquire,
-                    album.album,
-                    priority,
-                    retry,
-                )
-                .await
-            }
-            _ => Err(SubsonicError::not_found()),
-        },
+    let kind = match id.kind() {
+        IdPrefix::Track => EntityKind::Track,
+        IdPrefix::Album => EntityKind::Album,
+        _ => return Err(SubsonicError::not_found()),
+    };
+    let Some(row) = (match state.catalog().canonical(kind, id).await {
+        Ok(row) => row,
+        Err(error) => return Err(catalog::failure(&error)),
+    }) else {
+        return Err(SubsonicError::not_found());
+    };
+    match kind {
+        EntityKind::Track => request_track(orchestrator, user, can_acquire, row, priority, retry)
+            .await
+            .map(|outcome| vec![outcome]),
+        _ => request_album(orchestrator, user, can_acquire, row, priority, retry).await,
     }
 }
 
@@ -816,8 +805,8 @@ fn page(call: &Call, window: LedgerWindow) -> Result<LedgerQuery, SubsonicError>
 ///
 /// The acquisition's id, or `None` when the value is not an `ac_` client id.
 fn acquisition_of(raw: &str) -> Option<Uuid> {
-    match ClientId::parse(raw) {
-        Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::Acquisition => Some(id.uuid()),
+    match EntityId::parse(raw) {
+        Ok(id) if id.kind() == IdPrefix::Acquisition => Some(id.uuid()),
         _ => None,
     }
 }

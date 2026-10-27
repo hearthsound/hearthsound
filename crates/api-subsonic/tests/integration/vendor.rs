@@ -1,10 +1,9 @@
 //! Integration tests for the `hearthsound` member: what the vendor flag adds to
-//! track, album and artist objects in both encodings, what a catalog id is
-//! answered with, and that a request without the flag carries no member.
+//! track, album and artist objects in both encodings, how an album's availability
+//! aggregates over its tracks, and that a request without the flag carries no
+//! member.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-
-use hearthsound_core::{CatalogId, EntityKind, Slug};
 
 use crate::common::seed::{Seeded, library};
 use crate::common::{Fixture, SNAPSHOT_FILTERS, assert_ok, get};
@@ -24,20 +23,6 @@ async fn fixture() -> (Fixture, Seeded) {
     )
     .await;
     (fixture, seeded)
-}
-
-/// Builds a fixture with the hello catalog installed.
-async fn catalog_fixture() -> Fixture {
-    let fixture = Fixture::new().await;
-    fixture.install_hello_catalog().await;
-    fixture
-}
-
-/// Builds the `x_` id of one hello-catalog entity.
-fn catalog_id(kind: EntityKind, provider_id: &str) -> String {
-    CatalogId::new(Slug::new("hello").unwrap(), kind, provider_id)
-        .unwrap()
-        .to_string()
 }
 
 #[tokio::test]
@@ -173,39 +158,6 @@ async fn get_artist_carries_the_hearthsound_member_in_both_encodings() {
     assert!(xml.body.contains("<hearthsound"), "{}", xml.body);
     insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
         insta::assert_snapshot!("vendor-artist-xml", seeded.stabilize(&xml.body));
-    });
-}
-
-#[tokio::test]
-async fn a_catalog_song_is_answered_as_remote_from_the_catalog() {
-    let fixture = catalog_fixture().await;
-    let app = fixture.app();
-    let id = catalog_id(EntityKind::Track, "hello-track-1");
-
-    let json = get(
-        &app,
-        &format!(
-            "/rest/getSong?id={id}&apiKey={}&f=json&hearthsound=1",
-            fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&json);
-    assert!(
-        json.body.contains("\"availability\":\"remote\""),
-        "{}",
-        json.body
-    );
-    assert!(
-        json.body.contains("\"origin\":\"catalog\""),
-        "{}",
-        json.body
-    );
-    assert!(json.body.contains("\"inLibrary\":false"), "{}", json.body);
-    assert!(!json.body.contains("acquisitionId"), "{}", json.body);
-    assert!(!json.body.contains("\"quality\""), "{}", json.body);
-    insta::with_settings!({filters => SNAPSHOT_FILTERS.to_vec()}, {
-        insta::assert_snapshot!("vendor-catalog-song-json", &json.body);
     });
 }
 

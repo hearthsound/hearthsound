@@ -1266,43 +1266,6 @@ async fn get_music_directory_browses_an_artist_and_an_album() {
 }
 
 #[tokio::test]
-async fn a_catalog_album_shows_a_stored_recording_as_the_stored_track() {
-    let fixture = Fixture::new().await;
-    fixture.install_album_catalog(serde_json::json!({})).await;
-    let (track, _album, _artist) = fixture
-        .seed_track("Fixture Album", "Fixture Artist", "Fixture Song 1", 180_000)
-        .await;
-    let album_id = hearthsound_core::CatalogId::new(
-        hearthsound_core::Slug::new("album").unwrap(),
-        hearthsound_core::EntityKind::Album,
-        "album-catalog-album-1",
-    )
-    .unwrap();
-
-    fixture
-        .enrich(&hearthsound_core::ClientId::Catalog(album_id.clone()))
-        .await;
-    let answer = get(
-        &fixture.app(),
-        &format!(
-            "/rest/getAlbum?id={album_id}&apiKey={}&f=json&hearthsound=1",
-            fixture.api_key
-        ),
-    )
-    .await;
-
-    assert_ok(&answer);
-    let value: serde_json::Value = serde_json::from_str(&answer.body).unwrap();
-    let song = &value["subsonic-response"]["album"]["song"][0];
-    assert_eq!(song["id"], track.to_string(), "{}", answer.body);
-    assert_eq!(
-        song["hearthsound"]["availability"], "local",
-        "{}",
-        answer.body
-    );
-}
-
-#[tokio::test]
 async fn an_artist_outside_the_personal_library_opens_for_an_administrator() {
     let fixture = Fixture::new().await;
     let (_track, _album, artist) = fixture
@@ -1322,8 +1285,9 @@ async fn an_artist_outside_the_personal_library_opens_for_an_administrator() {
     assert!(answer.body.contains("Server Artist"), "{}", answer.body);
 }
 
+/// An artist outside the caller's scope answers its row with no content.
 #[tokio::test]
-async fn an_artist_outside_the_personal_library_stays_closed_for_others() {
+async fn an_artist_outside_the_personal_library_lists_no_albums_for_others() {
     let fixture = Fixture::new().await;
     let (_track, _album, artist) = fixture
         .seed_server_track("Server Album", "Server Artist", "Server Song", 180_000)
@@ -1336,19 +1300,23 @@ async fn an_artist_outside_the_personal_library_stays_closed_for_others() {
     )
     .await;
 
-    assert_error(&answer, 70);
+    assert_ok(&answer);
+    let value: serde_json::Value = serde_json::from_str(&answer.body).unwrap();
+    let albums = &value["subsonic-response"]["artist"]["album"];
+    assert_eq!(
+        albums.as_array().map_or(0, Vec::len),
+        0,
+        "a third-party caller sees only what its scopes hold: {}",
+        answer.body
+    );
 }
 
+/// An artist lists the album it is credited on, whatever folder holds its files.
 #[tokio::test]
-async fn an_artist_lists_an_album_whose_tracks_credit_it() {
+async fn an_artist_lists_the_album_it_is_credited_on() {
     let fixture = Fixture::new().await;
     let (_track, album, artist) = fixture
-        .seed_server_track_with_bare_album(
-            "Uncredited Album",
-            "Server Artist",
-            "Server Song",
-            180_000,
-        )
+        .seed_server_track("Server Album", "Server Artist", "Server Song", 180_000)
         .await;
     let app = fixture.app();
 

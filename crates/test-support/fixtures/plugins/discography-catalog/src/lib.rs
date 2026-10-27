@@ -120,6 +120,10 @@ fn album_ref(album: &FixtureAlbum) -> AlbumRef {
         }],
         year: Some(album.year),
         images: vec![],
+        album_type: None,
+        edition: None,
+        track_count: None,
+        ids: vec![],
     }
 }
 
@@ -198,6 +202,7 @@ fn album(album: &FixtureAlbum) -> Album {
         upc: None,
         genres: vec![],
         images: vec![],
+        edition: None,
         tracks: album_tracks(album),
         ids: vec![IdPair {
             namespace: "discography-catalog".to_string(),
@@ -349,6 +354,9 @@ impl catalog::Guest for DiscographyCatalog {
     }
 
     fn lookup_isrc(_isrc: String) -> Result<Vec<Track>, ProviderError> {
+        Ok(vec![])
+    }
+    fn lookup_album(_ids: Vec<IdPair>) -> Result<Vec<AlbumRef>, ProviderError> {
         Ok(vec![])
     }
 }

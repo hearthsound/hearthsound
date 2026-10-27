@@ -432,7 +432,7 @@ async fn a_plugin_built_for_the_previous_api_installs_from_the_index() {
         true,
         &[version(
             "0.1.0",
-            "hearthsound:plugin@0.3.0",
+            "hearthsound:plugin@0.4.0",
             &archive_url,
             &bytes,
             json!({}),
@@ -447,13 +447,13 @@ async fn a_plugin_built_for_the_previous_api_installs_from_the_index() {
         .unwrap();
 
     assert_eq!(registration.id, LEGACY_ID);
-    assert_eq!(registration.api, "hearthsound:plugin@0.3.0");
+    assert_eq!(registration.api, "hearthsound:plugin@0.4.0");
     let installed = env
         .host
         .load(LEGACY_ID, &semver::Version::new(0, 1, 0))
         .await
         .unwrap();
-    assert_eq!(installed.api(), ApiVersion::V0_3);
+    assert_eq!(installed.api(), ApiVersion::V0_4);
     assert_no_downloads(&env);
 }
 

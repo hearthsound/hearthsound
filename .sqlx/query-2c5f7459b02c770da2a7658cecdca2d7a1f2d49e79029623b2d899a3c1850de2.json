@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT ul.entity_id AS track_id, t.title AS title, t.display_artist AS artist, t.album_id AS album_id, al.title AS album, t.duration_ms AS duration_ms, ul.added_at AS added_at FROM user_library ul JOIN tracks t ON t.id = ul.entity_id LEFT JOIN albums al ON al.id = t.album_id WHERE ul.user_id = ? AND ul.entity_kind = 'track' AND EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = ul.entity_id AND mf.uploaded_by = ul.user_id) ORDER BY ul.added_at DESC, ul.entity_id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "track_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "user_library",
+            "name": "entity_id"
+          }
+        }
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tracks",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "name": "artist",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "tracks",
+            "name": "display_artist"
+          }
+        }
+      },
+      {
+        "name": "album_id",
+        "ordinal": 3,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "tracks",
+            "name": "album_id"
+          }
+        }
+      },
+      {
+        "name": "album",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "name": "duration_ms",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "tracks",
+            "name": "duration_ms"
+          }
+        }
+      },
+      {
+        "name": "added_at",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "user_library",
+            "name": "added_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "2c5f7459b02c770da2a7658cecdca2d7a1f2d49e79029623b2d899a3c1850de2"
+}

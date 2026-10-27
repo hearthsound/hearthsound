@@ -7,7 +7,7 @@
 //!
 //! The state itself carries no plugin API version: it holds no generated type.
 //! The imports a guest can call live in one tree per hosted version
-//! ([`crate::api::v4::state`] and [`crate::api::v3::state`]), and each tree
+//! ([`crate::api::v5::state`] and [`crate::api::v4::state`]), and each tree
 //! reaches the same services through this module, so permissions are enforced
 //! identically for every version.
 //!

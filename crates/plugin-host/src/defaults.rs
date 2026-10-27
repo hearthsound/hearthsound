@@ -73,11 +73,12 @@ mod tests {
         let ids = default_plugin_ids();
         for id in [
             "app.hearthsound.deezer",
+            "app.hearthsound.listenbrainz",
             "app.hearthsound.musicbrainz",
             "app.hearthsound.slskd",
         ] {
             assert!(ids.contains(&id.to_owned()), "{id} is pinned: {ids:?}");
         }
-        assert_eq!(ids.len(), 3, "the lock file pins three plugins: {ids:?}");
+        assert_eq!(ids.len(), 4, "the lock file pins four plugins: {ids:?}");
     }
 }

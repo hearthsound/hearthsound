@@ -45,16 +45,14 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use hearthsound_auth::UserSettings;
 use hearthsound_catalog::CatalogService;
 use hearthsound_config::keys;
 use hearthsound_config::settings::Settings;
 use hearthsound_core::events::{Audience, EventBus, ServerEvent, SystemNotice};
-use hearthsound_core::providers::CatalogAlbum;
-use hearthsound_core::{
-    Availability, CatalogId, ClientId, EntityId, EntityKind, IdPrefix, PinReason, StorageClass,
-};
+use hearthsound_core::{Availability, EntityId, EntityKind, IdPrefix, PinReason, StorageClass};
 use hearthsound_db::Database;
 use hearthsound_library::locks::FolderLocks;
 use hearthsound_library::naming::{NamingContext, NamingTemplate};
@@ -639,8 +637,8 @@ enum MoveOutcome {
 ///
 /// The folder's row id, or `None` when the value names no folder.
 fn folder_id_of(value: &str) -> Option<Uuid> {
-    match ClientId::parse(value) {
-        Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::LibraryFolder => Some(id.uuid()),
+    match EntityId::parse(value) {
+        Ok(id) if id.kind() == IdPrefix::LibraryFolder => Some(id.uuid()),
         _ => Uuid::parse_str(value).ok(),
     }
 }
@@ -716,10 +714,8 @@ impl NamingFacts {
 pub(crate) struct NamingInputs<'a> {
     /// The track's album row, when it has one.
     pub(crate) album: Option<&'a Album>,
-    /// The album's stored track rows.
-    pub(crate) album_tracks: &'a [Track],
-    /// What the album's issuing catalog instance contributes.
-    pub(crate) issued: &'a IssuedAlbum,
+    /// The disc and track totals the stored rows imply.
+    pub(crate) totals: AlbumTotals,
     /// The artists the track is credited to.
     pub(crate) artists: &'a [hearthsound_library::Artist],
     /// The artists the album is credited to.
@@ -746,21 +742,17 @@ pub(crate) struct NamingInputs<'a> {
 /// # Errors
 ///
 /// Returns [`AcquireError::Library`] when one of the album or artist reads
-/// fails; the catalog read degrades to [`IssuedAlbum::Unavailable`] instead, so a
-/// save never fails on a provider.
+/// fails; a page that cannot be fetched leaves the totals to the stored rows, so
+/// a save never fails on a provider.
 pub(crate) async fn load_naming_facts(
     library: &LibraryRepository,
     catalog: &CatalogService,
     track: &Track,
     album: Option<Album>,
 ) -> Result<NamingFacts, AcquireError> {
-    let album_tracks = match track.album_id {
-        Some(album_id) => library.list_tracks_for_album(album_id).await?,
-        None => Vec::new(),
-    };
-    let issued = match track.album_id {
-        Some(album_id) => issued_album(catalog, album_id, track.disc_number).await,
-        None => IssuedAlbum::Local,
+    let totals = match track.album_id {
+        Some(album_id) => issued_album(catalog, library, album_id, track.disc_number).await,
+        None => AlbumTotals::default(),
     };
     let artists = library.list_track_artists(track.id).await?;
     let album_artists = match track.album_id {
@@ -771,8 +763,7 @@ pub(crate) async fn load_naming_facts(
         track,
         NamingInputs {
             album: album.as_ref(),
-            album_tracks: &album_tracks,
-            issued: &issued,
+            totals,
             artists: &artists,
             album_artists: &album_artists,
         },
@@ -782,10 +773,8 @@ pub(crate) async fn load_naming_facts(
 /// Picks the facts the naming template renders one track from.
 ///
 /// The album artist comes from the sources the import already trusts: the stored
-/// album row, the album's first credit, the issuing catalog instance's credit,
-/// and finally the track's own artist. The disc and track totals come from the
-/// issuing catalog instance's album when one issued the album, and from the
-/// stored rows otherwise.
+/// album row, the album's first credit, and finally the track's own artist. The
+/// disc and track totals come from the album's stored rows.
 ///
 /// # Parameters
 ///
@@ -804,7 +793,6 @@ pub(crate) fn naming_facts(track: &Track, inputs: NamingInputs<'_>) -> NamingFac
             .album_artists
             .first()
             .map(|artist| artist.name.as_str()),
-        catalog_credit: inputs.issued.album_artist(),
         track: track.display_artist.as_deref(),
         track_credit: inputs.artists.first().map(|artist| artist.name.as_str()),
     }
@@ -812,11 +800,7 @@ pub(crate) fn naming_facts(track: &Track, inputs: NamingInputs<'_>) -> NamingFac
     let AlbumTotals {
         disc_total,
         track_total,
-    } = match inputs.issued {
-        IssuedAlbum::Catalog { totals, .. } => *totals,
-        IssuedAlbum::Local => totals_of_stored_rows(inputs.album_tracks),
-        IssuedAlbum::Unavailable => AlbumTotals::default(),
-    };
+    } = inputs.totals;
     NamingFacts {
         album_artist,
         album: inputs.album.map(|album| album.title.clone()),
@@ -831,112 +815,61 @@ pub(crate) fn naming_facts(track: &Track, inputs: NamingInputs<'_>) -> NamingFac
     }
 }
 
-/// What an album row's issuing catalog instance contributes to a name.
+/// How long an import waits for an album's page before naming the file.
 ///
-/// A materialized catalog track can be the only stored row of its album, so the
-/// album row says nothing about how many tracks or discs the release has; the
-/// album its issuing instance lists is then the source. An album nothing issued
-/// is local, and its stored rows are all of it.
-pub(crate) enum IssuedAlbum {
-    /// The album the issuing catalog instance lists: the artist it credits the
-    /// album with, when it credits one, and the totals its tracklist implies for
-    /// the imported track.
-    Catalog {
-        /// The first artist the album credits.
-        album_artist: Option<String>,
-        /// The disc and track totals the tracklist implies.
-        totals: AlbumTotals,
-    },
-    /// No catalog instance issued the album, so its stored rows are all of it.
-    Local,
-    /// A catalog instance issued the album but its album could not be read.
-    Unavailable,
-}
+/// The tracklist, the disc and track totals and the release details come from
+/// the album's stored rows, so a page the server has never fetched is walked
+/// inline once. Ten seconds is long enough for the two provider calls a page
+/// needs and short enough that a slow instance does not hold the import; the
+/// stored rows name the file either way.
+const ALBUM_PAGE_DEADLINE: Duration = Duration::from_secs(10);
 
-impl IssuedAlbum {
-    /// Returns the artist the issuing catalog instance credits the album with.
-    ///
-    /// # Returns
-    ///
-    /// The credit's display name, or `None` for anything but a catalog album
-    /// that credits an artist. A provider whose track-embedded album carries no
-    /// artist - Deezer's, for example - leaves the caller to fall back to the
-    /// track's own artist, which is the only album artist such an album has.
-    fn album_artist(&self) -> Option<&str> {
-        match self {
-            IssuedAlbum::Catalog { album_artist, .. } => album_artist.as_deref(),
-            IssuedAlbum::Local | IssuedAlbum::Unavailable => None,
-        }
-    }
-}
-
-/// Reads the album an album row's issuing catalog instance lists.
+/// Fetches an album's page and returns the totals its stored rows imply.
 ///
-/// The album is found through the `p:<slug>` alias the materialization wrote, and
-/// read through the catalog cache, so a listing an album page just fetched costs
-/// no second provider call.
+/// A catalog track whose album was only ever seen through a track-embedded
+/// reference can be the album's only stored row, so the page is walked inline
+/// first: that is what fills the album's tracklist, its release details and its
+/// identifiers, and the totals are counted from the rows it leaves behind.
 ///
 /// # Parameters
 ///
 /// - `catalog`: the catalog service.
-/// - `album_id`: the stored album row to resolve.
+/// - `library`: the library tables the rows are read from.
+/// - `album_id`: the album row to read.
 /// - `disc_number`: the track's disc number, which selects the disc a multi-disc
 ///   album's track total counts.
 ///
 /// # Returns
 ///
-/// [`IssuedAlbum::Catalog`] for an album a catalog instance issued,
-/// [`IssuedAlbum::Local`] for one nothing issued, and
-/// [`IssuedAlbum::Unavailable`] when the alias exists but its album could not be
-/// read. A failure is logged at debug and never propagates: a save that cannot
-/// reach its catalog instance still writes the file.
+/// The disc and track totals, or [`AlbumTotals::default`] when the rows cannot
+/// be read. A page that cannot be fetched is logged at debug and never
+/// propagates: a save that cannot reach its catalog instance still writes the
+/// file.
 pub(crate) async fn issued_album(
     catalog: &CatalogService,
+    library: &LibraryRepository,
     album_id: EntityId,
     disc_number: Option<i64>,
-) -> IssuedAlbum {
-    let alias = match catalog.provider_aliases(album_id).await {
-        Ok(aliases) => match aliases.into_iter().next() {
-            Some(alias) => alias,
-            None => return IssuedAlbum::Local,
-        },
+) -> AlbumTotals {
+    if let Err(error) = catalog
+        .ensure_album_page(album_id, ALBUM_PAGE_DEADLINE)
+        .await
+    {
+        tracing::debug!(
+            album = %album_id,
+            %error,
+            "the page of an album row could not be fetched"
+        );
+    }
+    match library.list_tracks_for_album(album_id).await {
+        Ok(rows) => totals_of_stored_rows(&rows, disc_number),
         Err(error) => {
             tracing::debug!(
                 album = %album_id,
                 %error,
-                "the provider alias of an album could not be read"
+                "the stored rows of an album row could not be read"
             );
-            return IssuedAlbum::Unavailable;
-        }
-    };
-    let id = match CatalogId::new(alias.slug, EntityKind::Album, alias.provider_id) {
-        Ok(id) => id,
-        Err(error) => {
-            tracing::debug!(
-                album = %album_id,
-                %error,
-                "the provider alias of an album does not name an album"
-            );
-            return IssuedAlbum::Unavailable;
-        }
-    };
-    match catalog.album(&id).await {
-        Ok(result) => IssuedAlbum::Catalog {
-            album_artist: result
-                .album
-                .artists
-                .first()
-                .map(|credit| credit.name.clone()),
-            totals: totals_of_catalog_album(&result.album, disc_number),
-        },
-        Err(error) => {
-            tracing::debug!(
-                album = %album_id,
-                instance = id.slug().as_str(),
-                %error,
-                "the catalog album of an album row could not be read"
-            );
-            IssuedAlbum::Unavailable
+            AlbumTotals::default()
         }
     }
 }
@@ -944,18 +877,15 @@ pub(crate) async fn issued_album(
 /// The sources the album artist is picked from, in order of reliability.
 ///
 /// The stored album row comes first because it is what the rest of the library
-/// shows. The issuing catalog instance's own album comes next, because the album
-/// reference a lone materialized track carries may omit the artist - Deezer's
-/// does - while its full album lists one. The track's own artist is the last
-/// resort: an album nobody credited still has to produce a file whose path and
-/// `albumartist` tag name an artist.
+/// shows. The album's first stored credit comes next, which is where a provider's
+/// album credit lands. The track's own artist is the last resort: an album nobody
+/// credited still has to produce a file whose path and `albumartist` tag name an
+/// artist.
 struct AlbumArtistSources<'a> {
     /// The album row's display artist.
     stored: Option<&'a str>,
     /// The first artist the album stored a credit for.
     stored_credit: Option<&'a str>,
-    /// The first artist the issuing catalog instance credits the album with.
-    catalog_credit: Option<&'a str>,
     /// The track's display artist.
     track: Option<&'a str>,
     /// The first artist the track is credited to.
@@ -971,7 +901,6 @@ impl AlbumArtistSources<'_> {
     fn pick(&self) -> Option<String> {
         self.stored
             .or(self.stored_credit)
-            .or(self.catalog_credit)
             .or(self.track)
             .or(self.track_credit)
             .map(str::to_owned)
@@ -990,7 +919,7 @@ pub(crate) struct AlbumTotals {
     pub(crate) track_total: Option<u32>,
 }
 
-/// Counts the totals a catalog album's tracklist implies.
+/// Counts the totals an album's stored rows imply.
 ///
 /// A multi-disc release counts only the tracks it holds on the imported track's
 /// own disc, which is what a `TRACKTOTAL` tag on such a release means, and a
@@ -999,61 +928,32 @@ pub(crate) struct AlbumTotals {
 ///
 /// # Parameters
 ///
-/// - `album`: the album the issuing instance lists.
+/// - `rows`: the album's stored track rows.
 /// - `disc_number`: the imported track's disc number.
 ///
 /// # Returns
 ///
 /// The release's disc count and the imported disc's track count.
-pub(crate) fn totals_of_catalog_album(
-    album: &CatalogAlbum,
-    disc_number: Option<i64>,
-) -> AlbumTotals {
-    let disc_total = album
-        .tracks
-        .iter()
-        .filter_map(|track| track.disc_number)
-        .max()
-        .filter(|disc| *disc > 1)
-        .map(u32::from);
-    let track_total = match disc_total {
-        Some(_) => disc_number
-            .and_then(|disc| u16::try_from(disc).ok())
-            .and_then(|disc| {
-                let count = album
-                    .tracks
-                    .iter()
-                    .filter(|track| track.disc_number == Some(disc))
-                    .count();
-                u32::try_from(count).ok()
-            }),
-        None => u32::try_from(album.tracks.len()).ok(),
-    }
-    .filter(|count| *count > 0);
-    AlbumTotals {
-        disc_total,
-        track_total,
-    }
-}
-
-/// Counts the totals a local album's stored rows imply.
-///
-/// # Parameters
-///
-/// - `rows`: the album's stored track rows.
-///
-/// # Returns
-///
-/// The highest disc number the rows carry, when they carry more than one, and
-/// how many rows the album has.
-pub(crate) fn totals_of_stored_rows(rows: &[Track]) -> AlbumTotals {
+pub(crate) fn totals_of_stored_rows(rows: &[Track], disc_number: Option<i64>) -> AlbumTotals {
     let disc_total = rows
         .iter()
         .filter_map(|track| track.disc_number)
         .max()
         .and_then(|disc| u32::try_from(disc).ok())
         .filter(|disc| *disc > 1);
-    let track_total = u32::try_from(rows.len()).ok().filter(|count| *count > 0);
+    let track_total = match disc_total {
+        Some(_) => disc_number
+            .and_then(|disc| u32::try_from(disc).ok())
+            .and_then(|disc| {
+                let count = rows
+                    .iter()
+                    .filter(|row| row.disc_number == Some(i64::from(disc)))
+                    .count();
+                u32::try_from(count).ok()
+            }),
+        None => u32::try_from(rows.len()).ok(),
+    }
+    .filter(|count| *count > 0);
     AlbumTotals {
         disc_total,
         track_total,
@@ -1063,49 +963,9 @@ pub(crate) fn totals_of_stored_rows(rows: &[Track]) -> AlbumTotals {
 #[cfg(test)]
 mod tests {
     use hearthsound_core::IdPrefix;
-    use hearthsound_core::providers::CatalogTrack;
-    use hearthsound_library::Origin;
     use uuid::Uuid;
 
     use super::*;
-
-    /// Builds a catalog album holding `discs[i]` tracks on disc `i + 1`.
-    ///
-    /// # Parameters
-    ///
-    /// - `discs`: the track count of each disc, disc 1 first.
-    fn album(discs: &[u16]) -> CatalogAlbum {
-        let mut tracks = Vec::new();
-        for (index, count) in discs.iter().enumerate() {
-            let disc = u16::try_from(index + 1).unwrap();
-            for number in 1..=*count {
-                tracks.push(CatalogTrack {
-                    id: format!("track-{disc}-{number}"),
-                    title: format!("Song {disc}-{number}"),
-                    artists: Vec::new(),
-                    album: None,
-                    duration_ms: None,
-                    disc_number: Some(disc),
-                    track_number: Some(number),
-                    isrc: None,
-                    explicit: None,
-                    ids: Vec::new(),
-                });
-            }
-        }
-        CatalogAlbum {
-            id: "album-1".to_owned(),
-            title: "Album".to_owned(),
-            artists: Vec::new(),
-            release_date: None,
-            album_type: None,
-            upc: None,
-            genres: Vec::new(),
-            images: Vec::new(),
-            tracks,
-            ids: Vec::new(),
-        }
-    }
 
     /// Builds a stored track row on the given disc.
     ///
@@ -1122,10 +982,10 @@ mod tests {
             disc_number,
             track_number: None,
             duration_ms: None,
-            isrc: None,
-            mb_recording_id: None,
             explicit: None,
-            origin: Origin::Catalog,
+            file_tags: None,
+            fetched_at: None,
+            deep_indexed_at: None,
             availability: Availability::Remote,
             unavailable_until: None,
             created_at: 0,
@@ -1133,12 +993,27 @@ mod tests {
         }
     }
 
+    /// Builds an album's rows: `discs[i]` tracks on disc `i + 1`.
+    ///
+    /// # Parameters
+    ///
+    /// - `discs`: the track count of each disc, disc 1 first.
+    fn rows(discs: &[i64]) -> Vec<Track> {
+        let mut rows = Vec::new();
+        for (index, count) in discs.iter().enumerate() {
+            let disc = i64::try_from(index + 1).unwrap();
+            for _ in 1..=*count {
+                rows.push(row(Some(disc)));
+            }
+        }
+        rows
+    }
+
     #[test]
     fn the_album_artist_comes_from_the_first_source_that_names_one() {
         let all = AlbumArtistSources {
             stored: Some("Stored"),
             stored_credit: Some("Stored Credit"),
-            catalog_credit: Some("Catalog Credit"),
             track: Some("Track Artist"),
             track_credit: Some("Track Credit"),
         };
@@ -1150,15 +1025,9 @@ mod tests {
         };
         assert_eq!(without_stored.pick().as_deref(), Some("Stored Credit"));
 
-        let catalog_only = AlbumArtistSources {
+        let track_only = AlbumArtistSources {
             stored_credit: None,
             ..without_stored
-        };
-        assert_eq!(catalog_only.pick().as_deref(), Some("Catalog Credit"));
-
-        let track_only = AlbumArtistSources {
-            catalog_credit: None,
-            ..catalog_only
         };
         assert_eq!(track_only.pick().as_deref(), Some("Track Artist"));
 
@@ -1178,7 +1047,7 @@ mod tests {
     #[test]
     fn a_single_disc_album_counts_all_of_its_tracks() {
         assert_eq!(
-            totals_of_catalog_album(&album(&[5]), Some(1)),
+            totals_of_stored_rows(&rows(&[5]), Some(1)),
             AlbumTotals {
                 disc_total: None,
                 track_total: Some(5),
@@ -1188,16 +1057,16 @@ mod tests {
 
     #[test]
     fn a_multi_disc_album_counts_the_tracks_of_the_imported_disc() {
-        let album = album(&[4, 3]);
+        let album = rows(&[4, 3]);
         assert_eq!(
-            totals_of_catalog_album(&album, Some(2)),
+            totals_of_stored_rows(&album, Some(2)),
             AlbumTotals {
                 disc_total: Some(2),
                 track_total: Some(3),
             }
         );
         assert_eq!(
-            totals_of_catalog_album(&album, Some(1)),
+            totals_of_stored_rows(&album, Some(1)),
             AlbumTotals {
                 disc_total: Some(2),
                 track_total: Some(4),
@@ -1208,7 +1077,7 @@ mod tests {
     #[test]
     fn a_multi_disc_album_without_a_disc_number_writes_no_track_total() {
         assert_eq!(
-            totals_of_catalog_album(&album(&[4, 3]), None),
+            totals_of_stored_rows(&rows(&[4, 3]), None),
             AlbumTotals {
                 disc_total: Some(2),
                 track_total: None,
@@ -1218,24 +1087,13 @@ mod tests {
 
     #[test]
     fn an_album_without_tracks_writes_no_total() {
-        assert_eq!(
-            totals_of_catalog_album(&album(&[]), Some(1)),
-            AlbumTotals::default()
-        );
-        assert_eq!(totals_of_stored_rows(&[]), AlbumTotals::default());
+        assert_eq!(totals_of_stored_rows(&[], Some(1)), AlbumTotals::default());
     }
 
     #[test]
-    fn stored_rows_count_toward_a_local_album() {
+    fn rows_without_disc_numbers_count_as_one_disc() {
         assert_eq!(
-            totals_of_stored_rows(&[row(Some(1)), row(Some(1)), row(Some(2))]),
-            AlbumTotals {
-                disc_total: Some(2),
-                track_total: Some(3),
-            }
-        );
-        assert_eq!(
-            totals_of_stored_rows(&[row(Some(1)), row(None)]),
+            totals_of_stored_rows(&[row(None), row(None)], Some(1)),
             AlbumTotals {
                 disc_total: None,
                 track_total: Some(2),

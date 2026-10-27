@@ -19,8 +19,8 @@ use uuid::Uuid;
 use crate::common::Fixture;
 use crate::native::{albums_in, bearer, json as read_json};
 use crate::on_demand::{
-    FIRST_ISRC, catalog_album_id, catalog_id, downloads_dir, eventual, give_track_isrc,
-    install_acquisition, install_catalog, ledger_rows, materialize, place_audio, play_stream, star,
+    FIRST_ISRC, catalog_album_id, downloads_dir, eventual, give_track_isrc, install_acquisition,
+    install_catalog, ledger_rows, place_audio, play_stream, resolve_track, star,
 };
 use crate::storage::managed_track;
 
@@ -154,9 +154,9 @@ async fn a_user_without_acquire_gets_403_for_a_remote_stream() {
     services.registry().rebuild().await.unwrap();
     place_audio(&downloads).await;
 
-    let track = materialize(services.catalog(), 1).await;
+    let track = resolve_track(services.catalog(), 1).await;
     give_track_isrc(&services, track, FIRST_ISRC).await;
-    let id = catalog_id(1);
+    let id = track.to_string();
 
     let (_, listener_key) = create_user(&fixture, "listener", false).await;
     let refused = fixture
@@ -193,7 +193,7 @@ async fn a_liked_catalog_album_is_streamed_by_others_without_entering_their_libr
 
     let mut tracks = Vec::new();
     for number in 1..=5 {
-        tracks.push(materialize(services.catalog(), number).await);
+        tracks.push(resolve_track(services.catalog(), number).await);
     }
     let library = LibraryRepository::new(services.database());
     let mut imported = None;
@@ -263,7 +263,7 @@ async fn an_ad_hoc_remote_play_lands_in_the_cache() {
     place_audio(&downloads).await;
     let roots = services.storage_roots().clone();
 
-    let track = materialize(services.catalog(), 1).await;
+    let track = resolve_track(services.catalog(), 1).await;
     give_track_isrc(&services, track, FIRST_ISRC).await;
     let (_, listener_key) = create_user(&fixture, "listener", true).await;
 
@@ -272,7 +272,7 @@ async fn an_ad_hoc_remote_play_lands_in_the_cache() {
         .get(format!(
             "{}/rest/stream?id={}&apiKey={listener_key}",
             fixture.base_url(),
-            catalog_id(1)
+            track
         ))
         .send()
         .await

@@ -1,4 +1,4 @@
-//! The edition label of a local album, and the one-time pass that fills it in.
+//! The edition label of an album, and the one-time pass that fills it in.
 //!
 //! Two releases of one title by one artist are two albums: the standard release
 //! and the deluxe edition share their title, so nothing in a grid tells them
@@ -252,7 +252,7 @@ struct AlbumFiles {
     preferred: PathBuf,
 }
 
-/// Fills in the edition label of every local album a library already holds.
+/// Fills in the edition label of every album a library already holds.
 ///
 /// The scanner derives the label for every file it probes, so a library that is
 /// scanned from now on needs nothing. Rows that existed before the label did are
@@ -286,7 +286,6 @@ async fn backfill(database: &Database) -> Result<u64, LibraryError> {
                JOIN tracks t ON t.album_id = a.id \
                JOIN media_files mf ON mf.track_id = t.id AND mf.storage = 'folder' \
                JOIN library_folders f ON f.id = mf.folder_id \
-              WHERE a.origin = 'local' \
               ORDER BY a.id, mf.is_preferred DESC, mf.added_at, mf.rel_path",
         )
         .fetch_all(&mut *read)

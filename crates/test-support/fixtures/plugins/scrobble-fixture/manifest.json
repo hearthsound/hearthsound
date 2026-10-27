@@ -4,14 +4,21 @@
   "name": "Scrobble fixture",
   "version": "0.1.0",
   "description": "A plugin that scrobbles to a mock service, answers configured suggestions and links listener accounts.",
-  "authors": ["Hearthsound contributors"],
+  "authors": [
+    "Hearthsound contributors"
+  ],
   "license": "MIT OR Apache-2.0",
   "homepage": "https://github.com/hearthsound/hearthsound",
-  "api": "hearthsound:plugin@0.4.0",
-  "provides": ["scrobble", "discovery"],
+  "api": "hearthsound:plugin@0.5.0",
+  "provides": [
+    "scrobble",
+    "discovery"
+  ],
   "permissions": {
     "http": {
-      "hosts": ["$config:endpoint"],
+      "hosts": [
+        "$config:endpoint"
+      ],
       "maxBodyBytes": 1048576
     }
   },
@@ -20,7 +27,9 @@
       "schema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
-        "required": ["endpoint"],
+        "required": [
+          "endpoint"
+        ],
         "properties": {
           "endpoint": {
             "type": "string",
@@ -30,13 +39,30 @@
           },
           "linkMethod": {
             "type": "string",
-            "enum": ["config", "browser"],
+            "enum": [
+              "config",
+              "browser"
+            ],
             "default": "config",
             "title": "Link method"
           },
-          "maxBatch": { "type": "integer", "minimum": 1, "default": 50, "title": "Maximum batch size" },
-          "minIntervalMs": { "type": "integer", "minimum": 0, "default": 0, "title": "Minimum interval in milliseconds" },
-          "feedback": { "type": "boolean", "default": true, "title": "Send feedback" },
+          "maxBatch": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 50,
+            "title": "Maximum batch size"
+          },
+          "minIntervalMs": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "title": "Minimum interval in milliseconds"
+          },
+          "feedback": {
+            "type": "boolean",
+            "default": true,
+            "title": "Send feedback"
+          },
           "failDiscovery": {
             "type": "boolean",
             "default": false,
@@ -48,10 +74,21 @@
             "title": "Similar tracks",
             "items": {
               "type": "object",
-              "required": ["title"],
+              "required": [
+                "title"
+              ],
               "properties": {
-                "title": { "type": "string", "title": "Title" },
-                "artists": { "type": "array", "items": { "type": "string" }, "title": "Artists" }
+                "title": {
+                  "type": "string",
+                  "title": "Title"
+                },
+                "artists": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "title": "Artists"
+                }
               }
             }
           },
@@ -60,8 +97,15 @@
             "title": "Similar artists",
             "items": {
               "type": "object",
-              "required": ["name"],
-              "properties": { "name": { "type": "string", "title": "Name" } }
+              "required": [
+                "name"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "title": "Name"
+                }
+              }
             }
           },
           "topTracks": {
@@ -69,10 +113,21 @@
             "title": "Popular tracks",
             "items": {
               "type": "object",
-              "required": ["title"],
+              "required": [
+                "title"
+              ],
               "properties": {
-                "title": { "type": "string", "title": "Title" },
-                "artists": { "type": "array", "items": { "type": "string" }, "title": "Artists" }
+                "title": {
+                  "type": "string",
+                  "title": "Title"
+                },
+                "artists": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "title": "Artists"
+                }
               }
             }
           },
@@ -81,10 +136,21 @@
             "title": "Recommended tracks",
             "items": {
               "type": "object",
-              "required": ["title"],
+              "required": [
+                "title"
+              ],
               "properties": {
-                "title": { "type": "string", "title": "Title" },
-                "artists": { "type": "array", "items": { "type": "string" }, "title": "Artists" }
+                "title": {
+                  "type": "string",
+                  "title": "Title"
+                },
+                "artists": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "title": "Artists"
+                }
               }
             }
           },
@@ -93,20 +159,43 @@
             "title": "Generated playlists",
             "items": {
               "type": "object",
-              "required": ["reference", "name"],
+              "required": [
+                "reference",
+                "name"
+              ],
               "properties": {
-                "reference": { "type": "string", "title": "Reference" },
-                "name": { "type": "string", "title": "Name" },
-                "expiresAt": { "type": "integer", "title": "Expires at" },
+                "reference": {
+                  "type": "string",
+                  "title": "Reference"
+                },
+                "name": {
+                  "type": "string",
+                  "title": "Name"
+                },
+                "expiresAt": {
+                  "type": "integer",
+                  "title": "Expires at"
+                },
                 "tracks": {
                   "type": "array",
                   "title": "Tracks",
                   "items": {
                     "type": "object",
-                    "required": ["title"],
+                    "required": [
+                      "title"
+                    ],
                     "properties": {
-                      "title": { "type": "string", "title": "Title" },
-                      "artists": { "type": "array", "items": { "type": "string" }, "title": "Artists" }
+                      "title": {
+                        "type": "string",
+                        "title": "Title"
+                      },
+                      "artists": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        },
+                        "title": "Artists"
+                      }
                     }
                   }
                 }
@@ -118,17 +207,50 @@
       "uiSchema": {
         "type": "VerticalLayout",
         "elements": [
-          { "type": "Control", "scope": "#/properties/endpoint" },
-          { "type": "Control", "scope": "#/properties/linkMethod" },
-          { "type": "Control", "scope": "#/properties/maxBatch" },
-          { "type": "Control", "scope": "#/properties/minIntervalMs" },
-          { "type": "Control", "scope": "#/properties/feedback" },
-          { "type": "Control", "scope": "#/properties/failDiscovery" },
-          { "type": "Control", "scope": "#/properties/similarTracks" },
-          { "type": "Control", "scope": "#/properties/similarArtists" },
-          { "type": "Control", "scope": "#/properties/topTracks" },
-          { "type": "Control", "scope": "#/properties/recommended" },
-          { "type": "Control", "scope": "#/properties/playlists" }
+          {
+            "type": "Control",
+            "scope": "#/properties/endpoint"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/linkMethod"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/maxBatch"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/minIntervalMs"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/feedback"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/failDiscovery"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/similarTracks"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/similarArtists"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/topTracks"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/recommended"
+          },
+          {
+            "type": "Control",
+            "scope": "#/properties/playlists"
+          }
         ]
       }
     },
@@ -136,7 +258,9 @@
       "schema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
-        "required": ["token"],
+        "required": [
+          "token"
+        ],
         "properties": {
           "token": {
             "type": "string",
@@ -147,9 +271,18 @@
       },
       "uiSchema": {
         "type": "VerticalLayout",
-        "elements": [{ "type": "Control", "scope": "#/properties/token" }]
+        "elements": [
+          {
+            "type": "Control",
+            "scope": "#/properties/token"
+          }
+        ]
       }
     }
   },
-  "resources": { "memoryMb": 64, "callTimeoutMs": 5000, "maxInstances": 2 }
+  "resources": {
+    "memoryMb": 64,
+    "callTimeoutMs": 5000,
+    "maxInstances": 2
+  }
 }

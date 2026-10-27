@@ -13,7 +13,7 @@ use hearthsound_core::events::{EventBus, EventEnvelope, ServerEvent};
 use hearthsound_core::providers::CatalogQuery;
 use hearthsound_core::{EntityKind, Layer, ProviderError};
 use hearthsound_db::{Database, MIGRATOR};
-use hearthsound_plugin_host::manifest::{ImageCachePolicy, Permissions};
+use hearthsound_plugin_host::manifest::Permissions;
 use hearthsound_plugin_host::{
     InstanceError, InstanceService, InstanceSpec, InstanceView, PluginHost, PluginRepository,
     PluginSource, ProviderRegistry, Risk, SECRET_PLACEHOLDER,
@@ -154,7 +154,7 @@ async fn registering_an_installed_plugin_records_its_manifest_and_permissions() 
 
     assert_eq!(registration.id, HTTP_CATALOG_ID);
     assert_eq!(registration.version, "0.1.0");
-    assert_eq!(registration.api, "hearthsound:plugin@0.4.0");
+    assert_eq!(registration.api, "hearthsound:plugin@0.5.0");
     assert_eq!(registration.source, PluginSource::Sideload);
     assert_eq!(registration.provides, vec![Layer::Catalog]);
 
@@ -395,7 +395,6 @@ async fn the_registry_serves_enabled_instances_in_the_assigned_order() {
     assert_eq!(first.id(), row(&env, "meta2").await.id);
     assert!(first.metadata().is_some());
     assert!(first.catalog().is_none());
-    assert_eq!(first.image_cache_policy(), ImageCachePolicy::Cache);
     assert!(registry.layers(Layer::Catalog).is_empty());
 
     // A disabled instance keeps its assignment but is not served.

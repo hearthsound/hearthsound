@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE albums SET title = ?, sort_title = ?, display_artist = COALESCE(?, display_artist), year = COALESCE(year, ?), release_date = COALESCE(release_date, ?), album_type = COALESCE(?, album_type), track_count = COALESCE(?, track_count), file_tags = COALESCE(?, file_tags), edition = CASE WHEN ? THEN ? ELSE edition END, updated_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "d0ce06f7530290454c9e759bfdb402d548c723c6e1758ce812969ce31fc48fba"
+}

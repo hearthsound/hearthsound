@@ -161,6 +161,10 @@ fn album_ref() -> AlbumRef {
         }],
         year: Some(2026),
         images: vec![],
+        album_type: None,
+        edition: None,
+        track_count: None,
+        ids: vec![],
     }
 }
 
@@ -224,6 +228,7 @@ fn album() -> Album {
         upc: Some("0099999999999".to_string()),
         genres: vec![],
         images: vec![],
+        edition: None,
         tracks: (1..=TRACKS).map(track).collect(),
         ids: if config().canonical_ids {
             vec![IdPair {
@@ -339,6 +344,9 @@ impl catalog::Guest for AlbumCatalog {
     }
 
     fn lookup_isrc(_isrc: String) -> Result<Vec<Track>, ProviderError> {
+        Ok(vec![])
+    }
+    fn lookup_album(_ids: Vec<IdPair>) -> Result<Vec<AlbumRef>, ProviderError> {
         Ok(vec![])
     }
 }

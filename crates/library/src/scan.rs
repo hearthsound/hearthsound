@@ -10,8 +10,11 @@
 //! stored media file is skipped without probing, a file whose size or
 //! modification time changed has its probe columns and its track refreshed, and
 //! a file that disappeared has its media file row removed. A track left with no
-//! files at all is deleted when it was created by scanning and demoted to
-//! `remote` when it came from the catalog.
+//! files at all keeps its row as a `remote` track when a provider ever
+//! identified it, and is deleted otherwise.
+//!
+//! Scanning also stores the cover art of every album and album-less track a
+//! batch writes, and queues the new and changed tracks for the deep index.
 //!
 //! Overlapping folders are allowed, and each file belongs to the deepest folder
 //! that contains it. A folder's walk skips the roots of the folders inside it,
@@ -43,24 +46,30 @@ use hearthsound_config::settings::Settings;
 use hearthsound_core::events::{
     Audience, EventBus, LibraryChange, LibraryChanged, ScanProgress, ServerEvent,
 };
+use hearthsound_core::providers::{
+    ExternalId, ISRC, MB_ARTIST, MB_RECORDING, MB_RELEASE, MB_RELEASE_GROUP,
+};
 use hearthsound_core::{Availability, EntityId, EntityKind, PinReason};
 use hearthsound_db::Database;
 use hearthsound_jobs::{Job, JobError, JobHandler, JobQueue, NewJob};
 use hearthsound_media::ProbeResult;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use crate::artists_split::split_artists;
+use crate::artwork::{CoverArt, cover_for_file};
 use crate::error::LibraryError;
+use crate::images::{ImageStore, set_file_image};
 use crate::locks::FolderLocks;
 use crate::model::{
-    AlbumInput, ArtistCredit, ArtistInput, EditionInput, LibraryFolder, Origin, ReplayGain,
+    AlbumInput, ArtistCredit, ArtistInput, EditionInput, LibraryFolder, ReplayGain,
     ScannedMediaFile, TrackInput,
 };
 use crate::{
-    DELETE_BATCH, READ_THEN_WRITE, albums, editions, folders, media_files, now_millis, retention,
-    tracks,
+    DELETE_BATCH, READ_THEN_WRITE, albums, editions, entities, external_ids, folders, index_queue,
+    media_files, now_millis, retention, tracks,
 };
 
 /// The job kind a library scan is enqueued under.
@@ -319,6 +328,19 @@ struct PendingFile {
     track_id: Option<EntityId>,
 }
 
+/// An entity whose cover art a scan batch is about to store.
+#[derive(Debug, Clone)]
+struct CoverTarget {
+    /// The entity kind the image belongs to.
+    kind: EntityKind,
+    /// The entity the image belongs to.
+    entity: EntityId,
+    /// The absolute path of the file to read the cover from.
+    path: PathBuf,
+    /// Whether the probe found an embedded picture.
+    has_embedded_art: bool,
+}
+
 /// The track, album, credits, and genres a probe implies.
 #[derive(Debug)]
 pub(crate) struct IndexedTags {
@@ -377,6 +399,8 @@ pub struct LibraryScanner {
     /// One lock per folder, shared with every other writer into the folder, so
     /// a scan and a save never overlap.
     folder_locks: Arc<FolderLocks>,
+    /// The store cover art read from a file is written to.
+    images: ImageStore,
     /// The counters [`LibraryScanner::status`] reports.
     counters: Arc<ScanCounters>,
 }
@@ -416,8 +440,27 @@ impl LibraryScanner {
             events,
             settings,
             folder_locks,
+            images: ImageStore::new(artwork_root(db)),
             counters: Arc::new(ScanCounters::default()),
         }
+    }
+
+    /// Sets the image store scanned cover art is written to.
+    ///
+    /// The default store is rooted at `artwork` beside the database file,
+    /// which is the data directory's layout; a caller that keeps the artwork
+    /// elsewhere passes its own store.
+    ///
+    /// # Parameters
+    ///
+    /// - `images`: the store to write covers to.
+    ///
+    /// # Returns
+    ///
+    /// The scanner, for chaining.
+    pub fn with_image_store(mut self, images: ImageStore) -> LibraryScanner {
+        self.images = images;
+        self
     }
 
     /// Returns what the scanner is doing right now.
@@ -878,7 +921,6 @@ impl LibraryScanner {
         // writes, so the transaction starts as a write; see
         // [`READ_THEN_WRITE`].
         let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
-        let mut added: Vec<EntityId> = Vec::new();
         // The edition label of an album is derived from every file of the batch
         // that belongs to it, because the folder rule needs the whole album's
         // set of parent directories, not one file's.
@@ -890,39 +932,69 @@ impl LibraryScanner {
             })
             .collect();
         let editions = album_editions(&indexed);
+        let mut added: Vec<EntityId> = Vec::new();
+        let mut touched: Vec<EntityId> = Vec::new();
+        let mut covers: Vec<CoverTarget> = Vec::new();
+        let mut covered: HashSet<EntityId> = HashSet::new();
         for (file, mut tags) in indexed.drain(..) {
             if let Some(album) = tags.album.as_mut() {
                 let key = album_key(album);
                 if let Some(edition) = editions.get(&key) {
                     album.edition = edition.clone();
                 }
+                album.file_tags = Some(album_file_tags(album));
             }
             let album_id = match &tags.album {
                 Some(album) => {
-                    Some(albums::upsert_album(&mut tx, album, &tags.album_credits).await?)
+                    let id = albums::upsert_album(&mut tx, album, &tags.album_credits).await?;
+                    Some(attach_entity_ids(&mut tx, EntityKind::Album, id, &album.ids).await?)
                 }
                 None => None,
             };
             let mut track_input = tags.track;
             track_input.album_id = album_id;
-            let refreshed = match file.track_id {
-                Some(id) => {
-                    tracks::update_track(&mut tx, id, &track_input, &tags.credits, &tags.genres)
-                        .await?
+            let (track_id, inserted) = match file.track_id {
+                Some(id)
+                    if tracks::update_track(
+                        &mut tx,
+                        id,
+                        &track_input,
+                        &tags.credits,
+                        &tags.genres,
+                    )
+                    .await? =>
+                {
+                    (id, false)
                 }
-                None => false,
+                _ => (
+                    tracks::insert_track(&mut tx, &track_input, &tags.credits, &tags.genres)
+                        .await?,
+                    true,
+                ),
             };
-            let track_id = match file.track_id {
-                Some(id) if refreshed => id,
-                _ => {
-                    let id =
-                        tracks::insert_track(&mut tx, &track_input, &tags.credits, &tags.genres)
-                            .await?;
-                    added.push(id);
-                    id
-                }
-            };
+            let track_id_before_attach = track_id;
+            let track_id =
+                attach_entity_ids(&mut tx, EntityKind::Track, track_id, &track_input.ids).await?;
+            if inserted && track_id == track_id_before_attach {
+                added.push(track_id);
+            }
             tracks::set_track_availability(&mut tx, track_id, Availability::Local, None).await?;
+            touched.push(track_id);
+            // A cover is stored once per touched entity: an album's files share
+            // one, and an album-less track carries its own.
+            let cover = CoverTarget {
+                kind: if album_id.is_some() {
+                    EntityKind::Album
+                } else {
+                    EntityKind::Track
+                },
+                entity: album_id.unwrap_or(track_id),
+                path: file.found.absolute.clone(),
+                has_embedded_art: file.probe.has_embedded_art,
+            };
+            if covered.insert(cover.entity) {
+                covers.push(cover);
+            }
             media_files::upsert_folder_media_file(
                 &mut tx,
                 track_id,
@@ -935,10 +1007,130 @@ impl LibraryScanner {
             report.files_indexed += 1;
         }
         tx.commit().await?;
+        self.store_covers(covers).await;
+        self.enqueue_index(touched).await;
         for track_id in added {
             self.publish_track_change(track_id, LibraryChange::Added);
         }
         Ok(())
+    }
+
+    /// Stores the cover art of the entities a batch wrote.
+    ///
+    /// The cover is read after the batch has committed, so no file is read while
+    /// the writer is held. A file that cannot be read, or that carries no
+    /// artwork, is a log line: the rows the batch wrote stand either way.
+    ///
+    /// # Parameters
+    ///
+    /// - `covers`: one entry per entity the batch wrote.
+    async fn store_covers(&self, covers: Vec<CoverTarget>) {
+        if covers.is_empty() {
+            return;
+        }
+        let cover_filename = match self.settings.current().get(keys::LIBRARY_COVER_FILENAME) {
+            Ok(name) => name,
+            Err(error) => {
+                tracing::warn!(%error, "could not read the configured cover filename");
+                return;
+            }
+        };
+        for target in covers {
+            if let Err(error) = self.store_cover(&target, &cover_filename).await {
+                tracing::warn!(
+                    path = %target.path.display(),
+                    entity = %target.entity,
+                    %error,
+                    "could not store the cover art of a scanned file"
+                );
+            }
+        }
+    }
+
+    /// Stores one entity's cover art and records it as its file image.
+    ///
+    /// # Parameters
+    ///
+    /// - `target`: the entity and the file to read the cover from.
+    /// - `cover_filename`: the configured `library.cover_filename`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LibraryError`] when the image cannot be read or written, or the
+    /// image rows cannot be stored.
+    async fn store_cover(
+        &self,
+        target: &CoverTarget,
+        cover_filename: &str,
+    ) -> Result<(), LibraryError> {
+        let Some(cover) =
+            cover_for_file(&target.path, Some(target.has_embedded_art), cover_filename).await?
+        else {
+            return Ok(());
+        };
+        let (bytes, content_type) = match cover {
+            CoverArt::Embedded { mime_type, data } => (data, mime_type),
+            CoverArt::Sidecar { path, mime_type } => {
+                let data = tokio::fs::read(&path)
+                    .await
+                    .map_err(|source| LibraryError::Io { path, source })?;
+                (data, mime_type)
+            }
+        };
+        let hash = self.images.store_bytes(&bytes, &content_type).await?;
+        // A rescan that reads the cover it already stored writes nothing.
+        let stored = {
+            let mut read = self.readers.acquire().await?;
+            crate::images::images_of(&mut read, target.kind, target.entity.uuid(), "cover").await?
+        };
+        if stored
+            .iter()
+            .any(|image| image.instance_id.is_none() && image.blob_hash == Some(hash))
+        {
+            return Ok(());
+        }
+        let mut tx = self.writer.begin_with(READ_THEN_WRITE).await?;
+        self.images
+            .record_blob(&mut tx, &hash, &bytes, &content_type)
+            .await?;
+        set_file_image(&mut tx, target.kind, target.entity.uuid(), "cover", &hash).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Queues the tracks a batch wrote for the deep index.
+    ///
+    /// A queue write that fails is logged rather than reported: the rows are
+    /// committed, and the periodic sweep queues a library track whose deep index
+    /// is missing anyway.
+    ///
+    /// # Parameters
+    ///
+    /// - `tracks`: the new and changed tracks of the batch.
+    async fn enqueue_index(&self, tracks: Vec<EntityId>) {
+        if tracks.is_empty() {
+            return;
+        }
+        // One transaction for the batch: the queue rows are derived work, but a
+        // commit per track would make a first scan of a large folder fsync once
+        // per file.
+        let mut tx = match self.writer.begin_with(READ_THEN_WRITE).await {
+            Ok(tx) => tx,
+            Err(error) => {
+                tracing::warn!(%error, "could not queue scanned tracks for indexing");
+                return;
+            }
+        };
+        for track in tracks {
+            if let Err(error) =
+                index_queue::enqueue_library(&mut tx, EntityKind::Track, track.uuid()).await
+            {
+                tracing::warn!(%error, track = %track, "could not queue a scanned track for indexing");
+            }
+        }
+        if let Err(error) = tx.commit().await {
+            tracing::warn!(%error, "could not commit the scanned tracks' index queue rows");
+        }
     }
 
     /// Takes over the rows an enclosing folder holds under this folder's root.
@@ -1048,9 +1240,9 @@ impl LibraryScanner {
     /// Removes one media file row and the track it leaves with no files.
     ///
     /// The row is re-read first, because a folder removal may have taken it
-    /// while the scan was walking. A track left with no files is deleted when
-    /// it was created by scanning and demoted to `remote` when it came from the
-    /// catalog.
+    /// while the scan was walking. A track left with no files keeps its row as
+    /// a `remote` track when a provider ever identified it, and is deleted
+    /// otherwise.
     ///
     /// # Parameters
     ///
@@ -1082,12 +1274,14 @@ impl LibraryScanner {
             return Ok(());
         }
         match tracks::get_track(&mut *tx, state.track_id).await? {
-            Some(track) if track.origin == Origin::Local => {
-                tracks::delete_track(&mut *tx, state.track_id).await?;
-                report.tracks_removed += 1;
-                removed.push(state.track_id);
-            }
-            Some(_) => {
+            Some(_)
+                if external_ids::is_identified(
+                    &mut *tx,
+                    EntityKind::Track,
+                    state.track_id.uuid(),
+                )
+                .await? =>
+            {
                 tracks::set_track_availability(
                     &mut *tx,
                     state.track_id,
@@ -1095,6 +1289,11 @@ impl LibraryScanner {
                     None,
                 )
                 .await?;
+            }
+            Some(_) => {
+                tracks::delete_track(&mut *tx, state.track_id).await?;
+                report.tracks_removed += 1;
+                removed.push(state.track_id);
             }
             None => {}
         }
@@ -1303,17 +1502,26 @@ impl IndexedTags {
             .as_deref()
             .filter(|album| !album.trim().is_empty())
             .map(|album_title| {
-                let mut album = AlbumInput::new(album_title, Origin::Local);
+                let mut album = AlbumInput::new(album_title);
                 album.display_artist = join_credit(&album_artists);
                 album.year = tags.year().map(i64::from);
                 album.release_date = tags.date.clone();
-                album.mb_release_id = tags.mb_release_id.clone();
-                album.mb_release_group_id = tags.mb_release_group_id.clone();
                 album.album_type = compilation.then(|| COMPILATION_ALBUM_TYPE.to_owned());
                 // A stored file lands in the server's own naming template, so
                 // only its own comment can state an edition; a scan derives the
                 // label from every file of the album and overwrites this.
                 album.edition = editions::comment_input(probe.release_comment.as_deref());
+                album.ids = tag_ids(&[
+                    (MB_RELEASE, tags.mb_release_id.as_deref()),
+                    (MB_RELEASE_GROUP, tags.mb_release_group_id.as_deref()),
+                ]);
+                album
+            })
+            .map(|mut album| {
+                // The batch overwrites this once it derives the album's edition
+                // label from all of its files; a caller that writes one file at
+                // a time keeps what the file itself stated.
+                album.file_tags = Some(album_file_tags(&album));
                 album
             });
         let album_credits = match album {
@@ -1321,13 +1529,23 @@ impl IndexedTags {
             None => Vec::new(),
         };
 
-        let mut track = TrackInput::new(title, Origin::Local, Availability::Local);
+        let duration_ms = probe.duration_ms as i64;
+        let mut track = TrackInput::new(title, Availability::Local);
         track.display_artist = display_artist;
         track.disc_number = tags.disc_number.map(i64::from);
         track.track_number = tags.track_number.map(i64::from);
-        track.duration_ms = Some(probe.duration_ms as i64);
-        track.isrc = tags.isrc.clone();
-        track.mb_recording_id = tags.mb_recording_id.clone();
+        track.duration_ms = Some(duration_ms);
+        track.ids = tag_ids(&[
+            (ISRC, tags.isrc.as_deref()),
+            (MB_RECORDING, tags.mb_recording_id.as_deref()),
+        ]);
+        track.file_tags = Some(track_file_tags(
+            &track.title,
+            &artists,
+            track.disc_number,
+            track.track_number,
+            duration_ms,
+        ));
 
         IndexedTags {
             album,
@@ -1337,6 +1555,27 @@ impl IndexedTags {
             genres,
         }
     }
+}
+
+/// Returns the artwork directory beside a database file.
+///
+/// A server keeps the database and the artwork directory inside one data
+/// directory, so the directory is derived from the database path when the
+/// caller has no configured one to pass.
+///
+/// # Parameters
+///
+/// - `db`: the open database.
+///
+/// # Returns
+///
+/// `<database directory>/artwork`, or `artwork` when the database path has no
+/// directory component.
+fn artwork_root(db: &Database) -> PathBuf {
+    db.path()
+        .parent()
+        .map(|parent| parent.join("artwork"))
+        .unwrap_or_else(|| PathBuf::from("artwork"))
 }
 
 /// The identity a scan batch groups an album's files by.
@@ -1358,11 +1597,16 @@ type AlbumKey = (String, Option<String>, Option<i64>, Option<String>);
 ///
 /// The key that names the album the file belongs to.
 fn album_key(album: &AlbumInput) -> AlbumKey {
+    let release = album
+        .ids
+        .iter()
+        .find(|id| id.namespace == MB_RELEASE)
+        .map(|id| id.value.clone());
     (
         crate::model::sort_key(&album.title),
         album.display_artist.clone(),
         album.year,
-        album.mb_release_id.clone(),
+        release,
     )
 }
 
@@ -1499,13 +1743,168 @@ fn join_credit(artists: &[String]) -> Option<String> {
 /// The credit to write.
 fn credit(name: &str, role: &str, mbid: Option<String>) -> ArtistCredit {
     let mut artist = ArtistInput::new(name);
+    artist.file_tags = Some(Value::Object(Map::from_iter([(
+        "name".to_owned(),
+        Value::String(name.to_owned()),
+    )])));
     if let Some(mbid) = mbid {
-        artist = artist.mb_artist_id(mbid);
+        artist.ids.push(external_id(MB_ARTIST, &mbid));
     }
     ArtistCredit {
         artist,
         role: role.to_owned(),
     }
+}
+
+/// Builds one identifier from a tag value.
+///
+/// # Parameters
+///
+/// - `namespace`: the identifier's namespace.
+/// - `value`: the tag value.
+///
+/// # Returns
+///
+/// The identifier.
+fn external_id(namespace: &str, value: &str) -> ExternalId {
+    ExternalId {
+        namespace: namespace.to_owned(),
+        value: value.to_owned(),
+    }
+}
+
+/// Builds the identifiers a probe's tags name.
+///
+/// A tag that carries no value names no identifier, so it is left out rather
+/// than recorded as an empty one.
+///
+/// # Parameters
+///
+/// - `tags`: the namespace and optional value of each identifier.
+///
+/// # Returns
+///
+/// The identifiers the tags name, in order.
+fn tag_ids(tags: &[(&str, Option<&str>)]) -> Vec<ExternalId> {
+    tags.iter()
+        .filter_map(|(namespace, value)| Some(external_id(namespace, (*value)?)))
+        .collect()
+}
+
+/// Builds the `file_tags` value of a scanned track.
+///
+/// The members are the tag values the scan read, spelled as the stored JSON
+/// names them; a member the file did not carry is left out.
+///
+/// # Parameters
+///
+/// - `title`: the track title.
+/// - `artists`: the credited artists, in order.
+/// - `disc_number`: the disc number, when the file carries one.
+/// - `track_number`: the track number, when the file carries one.
+/// - `duration_ms`: the probed duration.
+///
+/// # Returns
+///
+/// The JSON object stored in `tracks.file_tags`.
+fn track_file_tags(
+    title: &str,
+    artists: &[String],
+    disc_number: Option<i64>,
+    track_number: Option<i64>,
+    duration_ms: i64,
+) -> Value {
+    let mut tags = Map::new();
+    tags.insert("title".to_owned(), Value::String(title.to_owned()));
+    if !artists.is_empty() {
+        tags.insert(
+            "artists".to_owned(),
+            Value::Array(artists.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    if let Some(disc) = disc_number {
+        tags.insert("discNumber".to_owned(), Value::from(disc));
+    }
+    if let Some(number) = track_number {
+        tags.insert("trackNumber".to_owned(), Value::from(number));
+    }
+    tags.insert("durationMs".to_owned(), Value::from(duration_ms));
+    Value::Object(tags)
+}
+
+/// Builds the `file_tags` value of a scanned album.
+///
+/// The members are the tag values the scan read, with the edition label the
+/// batch derived; a member the files did not carry is left out.
+///
+/// # Parameters
+///
+/// - `album`: the album input with its final edition label.
+///
+/// # Returns
+///
+/// The JSON object stored in `albums.file_tags`.
+fn album_file_tags(album: &AlbumInput) -> Value {
+    let mut tags = Map::new();
+    tags.insert("title".to_owned(), Value::String(album.title.clone()));
+    if let Some(artist) = &album.display_artist {
+        tags.insert("displayArtist".to_owned(), Value::String(artist.clone()));
+    }
+    if let Some(date) = &album.release_date {
+        tags.insert("releaseDate".to_owned(), Value::String(date.clone()));
+    }
+    if let Some(year) = album.year {
+        tags.insert("year".to_owned(), Value::from(year));
+    }
+    if let Some(edition) = album.edition.label() {
+        tags.insert("edition".to_owned(), Value::String(edition.to_owned()));
+    }
+    if let Some(kind) = &album.album_type {
+        tags.insert("albumType".to_owned(), Value::String(kind.clone()));
+    }
+    Value::Object(tags)
+}
+
+/// Attaches every identifier of a written row and merges what they already name.
+///
+/// An identifier another row owns means the two rows are one item: the rows are
+/// merged, and the write continues on the survivor. Every later statement of the
+/// batch uses the returned id.
+///
+/// # Parameters
+///
+/// - `conn`: the transaction the batch writes on.
+/// - `kind`: the entity kind.
+/// - `entity`: the row the upsert returned.
+/// - `ids`: every identifier the file tags named for the row.
+///
+/// # Returns
+///
+/// The row that stands for the entity after the merges.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a statement fails.
+async fn attach_entity_ids(
+    conn: &mut SqliteConnection,
+    kind: EntityKind,
+    entity: EntityId,
+    ids: &[ExternalId],
+) -> Result<EntityId, LibraryError> {
+    if ids.is_empty() {
+        return Ok(entity);
+    }
+    let mut survivor = entity.uuid();
+    for conflict in external_ids::attach(conn, kind, survivor, ids).await? {
+        // A release group groups editions; it never makes two releases one row.
+        if kind == EntityKind::Album
+            && conflict.namespace == hearthsound_core::providers::MB_RELEASE_GROUP
+        {
+            continue;
+        }
+        survivor = entities::merge(conn, kind, survivor, conflict.owner).await?;
+    }
+    Ok(EntityId::from_uuid(entity.kind(), survivor))
 }
 
 /// Picks the MusicBrainz id that belongs to one credit position.

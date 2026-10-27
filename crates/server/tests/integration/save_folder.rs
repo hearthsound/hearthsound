@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use hearthsound_auth::{ApiKeys, NewUser, Users};
 use hearthsound_core::{Availability, EntityId, IdPrefix, StorageClass};
 use hearthsound_library::{
-    ArtistCredit, LibraryFolder, LibraryRepository, ManagedMediaFile, Origin, TrackInput,
+    ArtistCredit, LibraryFolder, LibraryRepository, ManagedMediaFile, TrackInput,
 };
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat, TrackTags};
 use reqwest::Method;
@@ -220,7 +220,7 @@ async fn saved_track(fixture: &Fixture, rel_path: &str) -> EntityId {
         .unwrap();
     let metadata = std::fs::metadata(&audio).unwrap();
     let library = LibraryRepository::new(fixture.services.database());
-    let mut input = TrackInput::new("Hello Song", Origin::Catalog, Availability::Cached);
+    let mut input = TrackInput::new("Hello Song", Availability::Cached);
     input.display_artist = Some("Hello Artist".to_owned());
     let track = library
         .insert_track(&input, &[ArtistCredit::new("Hello Artist", "main")], &[])
@@ -595,7 +595,9 @@ async fn saving_a_catalog_track_downloads_it_into_the_owners_folder() {
     let folder = folder(&fixture, "music", Some(fixture.user_id)).await;
     point_at(&fixture, fixture.user_id, &folder).await;
 
-    let id = crate::on_demand::catalog_id(1);
+    let id = crate::on_demand::resolve_track(services.catalog(), 1)
+        .await
+        .to_string();
     let response = fixture
         .get(&format!(
             "/rest/star?id={id}&apiKey={}&f=json",

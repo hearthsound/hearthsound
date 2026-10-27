@@ -205,7 +205,7 @@ async fn only_a_stored_track_is_downloaded() {
     assert_eq!(
         catalog.status,
         StatusCode::NOT_FOUND,
-        "an unmaterialized catalog track has no file to download"
+        "a provider id names no track, so there is no file to download"
     );
     let malformed = request(
         &app,

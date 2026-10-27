@@ -5,8 +5,8 @@
 //! the listener's own temporary playlists. This module is the job that reads
 //! them: for one listener or for every listener with a link, it asks the
 //! discovery layer for the generated playlists, resolves the suggested tracks
-//! through the catalog, materializes each resolved entity into a stored row,
-//! and writes the playlist into the slot its (owner, instance, reference) names.
+//! into stored rows through the catalog, and writes the playlist into the slot
+//! its (owner, instance, reference) names.
 //!
 //! Three rules follow from the design:
 //!
@@ -35,7 +35,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use hearthsound_catalog::{CatalogService, DiscoveryService, materialize_entity};
+use hearthsound_catalog::DiscoveryService;
 use hearthsound_core::Layer;
 use hearthsound_core::events::{Audience, EventBus, PlaylistChanged, ServerEvent};
 use hearthsound_jobs::{Job, JobError, JobHandler};
@@ -100,14 +100,12 @@ pub struct SyncReport {
 /// The generated-playlist sync.
 ///
 /// One handler is built by the composition root and registered for the job
-/// kind; it shares the discovery layer, the catalog layer, the provider
-/// registry and the playlist repository with the rest of the process.
+/// kind; it shares the discovery layer, the provider registry and the playlist
+/// repository with the rest of the process.
 #[derive(Clone)]
 pub struct DiscoverySyncJobHandler {
     /// The discovery layer the generated playlists come from.
     discovery: Arc<DiscoveryService>,
-    /// The catalog layer a suggested entity is materialized through.
-    catalog: Arc<CatalogService>,
     /// The provider registry the linked listeners are read from.
     registry: Arc<ProviderRegistry>,
     /// The stored per-user links.
@@ -132,8 +130,6 @@ impl DiscoverySyncJobHandler {
     /// # Parameters
     ///
     /// - `discovery`: the discovery layer the generated playlists come from.
-    /// - `catalog`: the catalog layer a suggested track is materialized
-    ///   through.
     /// - `registry`: the provider registry, whose discovery layer decides
     ///   which instances have linked listeners.
     /// - `user_configs`: the stored per-user links.
@@ -145,7 +141,6 @@ impl DiscoverySyncJobHandler {
     /// The handler.
     pub fn new(
         discovery: Arc<DiscoveryService>,
-        catalog: Arc<CatalogService>,
         registry: Arc<ProviderRegistry>,
         user_configs: UserConfigService,
         playlists: Playlists,
@@ -153,7 +148,6 @@ impl DiscoverySyncJobHandler {
     ) -> DiscoverySyncJobHandler {
         DiscoverySyncJobHandler {
             discovery,
-            catalog,
             registry,
             user_configs,
             playlists,
@@ -225,9 +219,8 @@ impl DiscoverySyncJobHandler {
     /// is skipped, so a service that keeps listing a retired playlist does not
     /// recreate it after the expiry job removed it. A suggested track no
     /// catalog can name is dropped, and the rest of the playlist is written; a
-    /// catalog search that fails, or a resolved entity this server cannot store,
-    /// skips the whole playlist instead, because writing the shorter list would
-    /// delete the entries the failure merely hid.
+    /// catalog search that fails skips the whole playlist instead, because
+    /// writing the shorter list would delete the entries the failure merely hid.
     ///
     /// # Parameters
     ///
@@ -247,6 +240,20 @@ impl DiscoverySyncJobHandler {
         let mut written = 0;
         for instance_playlist in generated {
             let summary = instance_playlist.playlist.summary;
+            // The playlist's slot names the instance by its row, and the
+            // discovery layer answers with its slug: an instance that left the
+            // registry while the pass ran has no slot to write any more.
+            let Some(source_instance_id) = self
+                .registry
+                .instance(instance_playlist.instance.as_str())
+                .map(|instance| instance.id())
+            else {
+                tracing::debug!(
+                    instance = instance_playlist.instance.as_str(),
+                    "skipped a generated playlist of an instance that is gone"
+                );
+                continue;
+            };
             // A service keeps listing a playlist for a while after it retires
             // it. Writing such a slot would store a playlist the expiry job
             // deletes again, and every sync would repeat that cycle, so a
@@ -279,39 +286,16 @@ impl DiscoverySyncJobHandler {
                     continue;
                 }
             };
-            let mut tracks = Vec::with_capacity(resolved.len());
-            let mut stored_every = true;
-            for result in resolved {
-                // A suggestion no catalog names is dropped, which is the
-                // documented behaviour; one the catalog named but this server
-                // could not store fails the write for the same reason a search
-                // failure does.
-                let Some(result) = result else {
-                    continue;
-                };
-                match materialize_entity(&self.catalog, &result.id).await {
-                    Ok(track) => tracks.push(track),
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            playlist = summary.reference.as_str(),
-                            "kept a generated playlist because a suggested track could not be stored"
-                        );
-                        stored_every = false;
-                        break;
-                    }
-                }
-            }
-            if !stored_every {
-                continue;
-            }
+            // The resolver stored every row it named, so a suggested track no
+            // catalog could name is the only thing dropped here.
+            let tracks: Vec<_> = resolved.into_iter().flatten().collect();
             let expires_at = summary
                 .expires_at
                 .map(|ms| i64::try_from(ms).unwrap_or(i64::MAX))
                 .unwrap_or(now + DEFAULT_PLAYLIST_LIFETIME_MS);
             let write = SyncedPlaylist {
                 owner_user_id: user,
-                source_instance_id: instance_playlist.instance,
+                source_instance_id,
                 source_ref: &summary.reference,
                 name: &summary.name,
                 comment: summary.description.as_deref(),
@@ -347,8 +331,8 @@ impl DiscoverySyncJobHandler {
         }
         // Warm the Home shelf with the work the endpoint would do anyway. The
         // sync runs in the background and on link, so a listener's first Home
-        // read finds the resolution cache populated instead of waiting on a
-        // throttled catalog.
+        // read finds the albums already resolved and stored instead of waiting
+        // on a throttled catalog.
         if let Err(error) = self.discovery.recommended_albums(user, WARM_ALBUMS).await {
             tracing::debug!(
                 %error,

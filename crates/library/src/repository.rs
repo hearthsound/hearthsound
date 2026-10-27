@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use hearthsound_core::{Availability, EntityId, PinReason};
+use hearthsound_core::{Availability, EntityId, EntityKind, PinReason};
 use hearthsound_db::Database;
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -23,10 +23,11 @@ use crate::error::LibraryError;
 use crate::media_files::StoredFileState;
 use crate::model::{
     Album, AlbumInput, Artist, ArtistCredit, ArtistInput, Credit, Genre, LibraryFolder,
-    ManagedMediaFile, MediaFile, MediaFileInput, Origin, ScannedMediaFile, Track, TrackInput,
+    ManagedMediaFile, MediaFile, MediaFileInput, ScannedMediaFile, Track, TrackInput,
 };
 use crate::{
-    DELETE_BATCH, READ_THEN_WRITE, albums, artists, folders, media_files, retention, tracks,
+    DELETE_BATCH, READ_THEN_WRITE, albums, artists, external_ids, folders, media_files, retention,
+    tracks,
 };
 
 /// The library tables, read and written over a database's two pools.
@@ -236,9 +237,10 @@ impl LibraryRepository {
     /// in batches.
     ///
     /// A track that still has a file in the library or the cache keeps its row;
-    /// a local track whose last file this folder held is deleted, exactly as the
-    /// scanner's pruning does, and the caller publishes the change. Nothing
-    /// inside the folder on disk is removed or moved.
+    /// a track whose last file this folder held keeps its row as a `remote`
+    /// track when a provider ever identified it and is deleted otherwise,
+    /// exactly as the scanner's pruning does, and the caller publishes the
+    /// change. Nothing inside the folder on disk is removed or moved.
     ///
     /// The unpinning, the removals and the folder row are separate short
     /// transactions, and the removals commit per [`DELETE_BATCH`] files, so a
@@ -285,11 +287,14 @@ impl LibraryRepository {
                     continue;
                 }
                 match tracks::get_track(&mut tx, state.track_id).await? {
-                    Some(track) if track.origin == Origin::Local => {
-                        tracks::delete_track(&mut tx, state.track_id).await?;
-                        removed.push(state.track_id);
-                    }
-                    Some(_) => {
+                    Some(_)
+                        if external_ids::is_identified(
+                            &mut tx,
+                            EntityKind::Track,
+                            state.track_id.uuid(),
+                        )
+                        .await? =>
+                    {
                         tracks::set_track_availability(
                             &mut tx,
                             state.track_id,
@@ -297,6 +302,10 @@ impl LibraryRepository {
                             None,
                         )
                         .await?;
+                    }
+                    Some(_) => {
+                        tracks::delete_track(&mut tx, state.track_id).await?;
+                        removed.push(state.track_id);
                     }
                     None => {}
                 }

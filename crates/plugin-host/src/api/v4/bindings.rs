@@ -19,7 +19,7 @@
 /// provider world needs its own `add_to_linker`.
 pub(crate) mod imports {
     wasmtime::component::bindgen!({
-        path: "../../wit",
+        path: "../../wit/since_v0.4",
         inline: "
             package hearthsound:host@0.4.0;
 
@@ -41,7 +41,7 @@ pub(crate) mod imports {
 /// The catalog provider world.
 pub(crate) mod catalog {
     wasmtime::component::bindgen!({
-        path: "../../wit",
+        path: "../../wit/since_v0.4",
         world: "hearthsound:plugin/catalog-provider",
         imports: { default: async | trappable },
         exports: { default: async },
@@ -58,7 +58,7 @@ pub(crate) mod catalog {
 /// The metadata provider world.
 pub(crate) mod metadata {
     wasmtime::component::bindgen!({
-        path: "../../wit",
+        path: "../../wit/since_v0.4",
         world: "hearthsound:plugin/metadata-provider",
         imports: { default: async | trappable },
         exports: { default: async },
@@ -75,7 +75,7 @@ pub(crate) mod metadata {
 /// The artwork provider world.
 pub(crate) mod artwork {
     wasmtime::component::bindgen!({
-        path: "../../wit",
+        path: "../../wit/since_v0.4",
         world: "hearthsound:plugin/artwork-provider",
         imports: { default: async | trappable },
         exports: { default: async },
@@ -92,7 +92,7 @@ pub(crate) mod artwork {
 /// The acquisition provider world.
 pub(crate) mod acquisition {
     wasmtime::component::bindgen!({
-        path: "../../wit",
+        path: "../../wit/since_v0.4",
         world: "hearthsound:plugin/acquisition-provider",
         imports: { default: async | trappable },
         exports: { default: async },
@@ -110,7 +110,7 @@ pub(crate) mod acquisition {
 /// The verification provider world.
 pub(crate) mod verification {
     wasmtime::component::bindgen!({
-        path: "../../wit",
+        path: "../../wit/since_v0.4",
         world: "hearthsound:plugin/verification-provider",
         imports: { default: async | trappable },
         exports: { default: async },
@@ -127,7 +127,7 @@ pub(crate) mod verification {
 /// The scrobble provider world.
 pub(crate) mod scrobble {
     wasmtime::component::bindgen!({
-        path: "../../wit",
+        path: "../../wit/since_v0.4",
         world: "hearthsound:plugin/scrobble-provider",
         imports: { default: async | trappable },
         exports: { default: async },
@@ -144,7 +144,7 @@ pub(crate) mod scrobble {
 /// The discovery provider world.
 pub(crate) mod discovery {
     wasmtime::component::bindgen!({
-        path: "../../wit",
+        path: "../../wit/since_v0.4",
         world: "hearthsound:plugin/discovery-provider",
         imports: { default: async | trappable },
         exports: { default: async },
@@ -161,7 +161,7 @@ pub(crate) mod discovery {
 /// The account-link provider world.
 pub(crate) mod account_link {
     wasmtime::component::bindgen!({
-        path: "../../wit",
+        path: "../../wit/since_v0.4",
         world: "hearthsound:plugin/account-link-provider",
         imports: { default: async | trappable },
         exports: { default: async },

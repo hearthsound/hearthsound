@@ -755,8 +755,7 @@ impl ScrobbleOutbox {
         listened_at: i64,
     ) -> Result<Option<Listen>, ActivityError> {
         let Some(track) = sqlx::query!(
-            "SELECT title, duration_ms, track_number, mb_recording_id, isrc, album_id
-             FROM tracks WHERE id = ?",
+            "SELECT title, duration_ms, track_number, album_id FROM tracks WHERE id = ?",
             track_id.as_bytes().as_slice(),
         )
         .fetch_optional(&self.readers)
@@ -765,7 +764,7 @@ impl ScrobbleOutbox {
             return Ok(None);
         };
         let credits = sqlx::query!(
-            "SELECT a.name AS name, a.mb_artist_id AS mb_artist_id
+            "SELECT a.name AS name
              FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
              WHERE ta.track_id = ? ORDER BY ta.position",
             track_id.as_bytes().as_slice(),
@@ -775,24 +774,29 @@ impl ScrobbleOutbox {
         let mut ids = Vec::new();
         let mut artists = Vec::with_capacity(credits.len());
         for credit in credits {
-            push_id(&mut ids, "mb-artist", credit.mb_artist_id);
             artists.push(credit.name);
         }
-        push_id(&mut ids, "mb-recording", track.mb_recording_id.clone());
-        push_id(&mut ids, "isrc", track.isrc.clone());
+        let artist_aliases = sqlx::query!(
+            "SELECT e.namespace AS namespace, e.value AS value
+             FROM track_artists ta JOIN external_ids e ON e.entity_id = ta.artist_id
+             WHERE ta.track_id = ? AND e.entity_kind = 'artist' AND e.namespace = 'mb-artist'
+             ORDER BY ta.position",
+            track_id.as_bytes().as_slice(),
+        )
+        .fetch_all(&self.readers)
+        .await?;
+        for alias in artist_aliases {
+            push_id(&mut ids, &alias.namespace, Some(alias.value));
+        }
 
         let mut album = None;
         let mut album_artist = None;
         if let Some(album_id) = track.album_id.as_deref() {
-            let album_row = sqlx::query!(
-                "SELECT title, mb_release_id FROM albums WHERE id = ?",
-                album_id,
-            )
-            .fetch_optional(&self.readers)
-            .await?;
+            let album_row = sqlx::query!("SELECT title FROM albums WHERE id = ?", album_id,)
+                .fetch_optional(&self.readers)
+                .await?;
             if let Some(album_row) = album_row {
                 album = Some(album_row.title);
-                push_id(&mut ids, "mb-release", album_row.mb_release_id);
             }
             album_artist = sqlx::query_scalar!(
                 "SELECT a.name FROM album_artists aa JOIN artists a ON a.id = aa.artist_id

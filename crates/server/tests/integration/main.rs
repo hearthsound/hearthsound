@@ -11,6 +11,7 @@ mod cors;
 mod discovery_sync;
 mod events;
 mod health;
+mod images;
 mod me_providers;
 mod multi_user;
 mod native;

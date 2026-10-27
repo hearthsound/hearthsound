@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use hearthsound_auth::{AuthError, validate_password, verify_password};
 use hearthsound_config::SettingValue;
 use hearthsound_config::keys;
-use hearthsound_core::{ClientId, IdPrefix};
+use hearthsound_core::{EntityId, IdPrefix};
 use hearthsound_library::LibraryRepository;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -658,8 +658,8 @@ pub async fn list_my_folders(
 /// Answers `invalid-request` when the value is not the client id of a scanned
 /// folder.
 fn save_folder_id(value: &str) -> Result<uuid::Uuid, Problem> {
-    match ClientId::parse(value) {
-        Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::LibraryFolder => Ok(id.uuid()),
+    match EntityId::parse(value) {
+        Ok(id) if id.kind() == IdPrefix::LibraryFolder => Ok(id.uuid()),
         _ => Err(save_folder_problem()),
     }
 }

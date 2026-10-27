@@ -4,18 +4,32 @@
   "name": "Process fixture",
   "version": "0.1.0",
   "description": "An acquisition plugin that downloads through the yt-dlp tool.",
-  "authors": ["Hearthsound contributors"],
+  "authors": [
+    "Hearthsound contributors"
+  ],
   "license": "MIT OR Apache-2.0",
   "homepage": "https://github.com/hearthsound/hearthsound",
-  "api": "hearthsound:plugin@0.4.0",
-  "provides": ["acquisition"],
+  "api": "hearthsound:plugin@0.5.0",
+  "provides": [
+    "acquisition"
+  ],
   "permissions": {
-    "kv": { "maxBytes": 1048576 },
-    "process": { "tools": ["yt-dlp"] }
+    "kv": {
+      "maxBytes": 1048576
+    },
+    "process": {
+      "tools": [
+        "yt-dlp"
+      ]
+    }
   },
   "config": {
     "server": null,
     "user": null
   },
-  "resources": { "memoryMb": 64, "callTimeoutMs": 30000, "maxInstances": 2 }
+  "resources": {
+    "memoryMb": 64,
+    "callTimeoutMs": 30000,
+    "maxInstances": 2
+  }
 }

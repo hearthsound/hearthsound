@@ -21,11 +21,14 @@
 use std::collections::{HashMap, HashSet};
 
 use hearthsound_core::{Availability, EntityId, EntityKind, IdPrefix, StorageClass};
+use hearthsound_db::Database;
 use sqlx::{QueryBuilder, Sqlite, SqliteConnection};
 use uuid::Uuid;
 
 use crate::error::LibraryError;
-use crate::model::{Album, Artist, MediaFile, StorageRoots, Track, decode_entity, entity_key};
+use crate::model::{
+    Album, Artist, MediaFile, StorageRoots, Track, decode_entity, decode_uuid, entity_key,
+};
 use crate::{albums, artists, folders, media_files, tracks};
 
 /// Which slice of the library a browse or a search reads.
@@ -547,8 +550,9 @@ pub async fn most_recent_played_artist(
 ) -> Result<Option<Artist>, LibraryError> {
     let row = sqlx::query_as!(
         artists::ArtistRow,
-        "SELECT ar.id, ar.name, ar.sort_name, ar.mb_artist_id, ar.origin, ar.created_at, \
-                ar.updated_at \
+        "SELECT ar.id, ar.name, ar.sort_name, ar.biography, ar.links, ar.album_count, \
+                ar.file_tags, ar.fetched_at, ar.page_fetched_at, ar.deep_indexed_at, \
+                ar.viewed_at, ar.created_at, ar.updated_at \
          FROM plays p \
          JOIN track_artists ta ON ta.track_id = p.track_id AND ta.position = 0 \
          JOIN artists ar ON ar.id = ta.artist_id \
@@ -656,12 +660,13 @@ pub async fn list_artists(
     let mut builder = QueryBuilder::<Sqlite>::new("");
     push_scope_tracks(&mut builder, scope);
     builder.push(
-        "SELECT ar.id, ar.name, ar.sort_name, ar.mb_artist_id, ar.origin, ar.created_at, \
-                ar.updated_at, \
+        "SELECT ar.id, ar.name, ar.sort_name, ar.biography, ar.links, ar.album_count, \
+                ar.file_tags, ar.fetched_at, ar.page_fetched_at, ar.deep_indexed_at, \
+                ar.viewed_at, ar.created_at, ar.updated_at, \
                 (SELECT COUNT(DISTINCT al.id) FROM albums al \
                    JOIN album_artists aa ON aa.album_id = al.id AND aa.artist_id = ar.id \
                    JOIN tracks t ON t.album_id = al.id \
-                   JOIN scope_tracks st ON st.track_id = t.id) AS album_count \
+                   JOIN scope_tracks st ON st.track_id = t.id) AS album_count_in_scope \
          FROM artists ar \
          WHERE ar.id IN (SELECT ta.artist_id FROM track_artists ta \
                            JOIN scope_tracks st ON st.track_id = ta.track_id) \
@@ -691,7 +696,7 @@ pub async fn list_artists(
         .await?;
     rows.into_iter()
         .map(|row| {
-            let album_count = row.album_count;
+            let album_count = row.album_count_in_scope;
             Ok(ArtistSummary {
                 artist: row.into_artist()?,
                 album_count,
@@ -837,8 +842,8 @@ pub async fn list_albums(
     push_album_scope(&mut builder, scope);
     builder.push(
         "SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
-         al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.edition, al.origin, \
-         al.created_at, al.updated_at \
+         al.album_type, al.edition, al.track_count, al.file_tags, al.fetched_at, \
+         al.page_fetched_at, al.deep_indexed_at, al.viewed_at, al.created_at, al.updated_at \
          FROM albums al \
          WHERE ",
     );
@@ -1395,7 +1400,8 @@ pub async fn find_artist_by_name(
 ) -> Result<Option<Artist>, LibraryError> {
     let row = sqlx::query_as!(
         artists::ArtistRow,
-        "SELECT id, name, sort_name, mb_artist_id, origin, created_at, updated_at \
+        "SELECT id, name, sort_name, biography, links, album_count, file_tags, fetched_at, \
+                page_fetched_at, deep_indexed_at, viewed_at, created_at, updated_at \
          FROM artists WHERE sort_name = ? ORDER BY sort_name, id LIMIT 1",
         crate::sort_key(name),
     )
@@ -1710,8 +1716,9 @@ pub async fn list_albums_for_artist(
                              AND value = 'like') \
                  ) \
                  SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
-                        al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.edition, \
-                        al.origin, al.created_at, al.updated_at \
+                        al.album_type, al.edition, al.track_count, al.file_tags, al.fetched_at, \
+                        al.page_fetched_at, al.deep_indexed_at, al.viewed_at, al.created_at, \
+                        al.updated_at \
                  FROM albums al \
                  WHERE (EXISTS (SELECT 1 FROM album_artists aa \
                                 WHERE aa.album_id = al.id AND aa.artist_id = ?) \
@@ -1745,8 +1752,9 @@ pub async fn list_albums_for_artist(
                 albums::AlbumRow,
                 "WITH scope_tracks(track_id) AS (SELECT id FROM tracks WHERE availability IN (?, ?)) \
                  SELECT al.id, al.title, al.sort_title, al.display_artist, al.year, al.release_date, \
-                        al.album_type, al.mb_release_id, al.mb_release_group_id, al.upc, al.edition, \
-                        al.origin, al.created_at, al.updated_at \
+                        al.album_type, al.edition, al.track_count, al.file_tags, al.fetched_at, \
+                        al.page_fetched_at, al.deep_indexed_at, al.viewed_at, al.created_at, \
+                        al.updated_at \
                  FROM albums al \
                  WHERE (EXISTS (SELECT 1 FROM album_artists aa \
                                 WHERE aa.album_id = al.id AND aa.artist_id = ?) \
@@ -2139,7 +2147,9 @@ pub async fn queue(
                 )
                 .push_bind(user.clone())
                 .push(
-                    " AND ul.entity_kind = 'track' AND ul.origin = 'upload' \
+                    " AND ul.entity_kind = 'track' \
+                       AND EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = ul.entity_id \
+                                     AND mf.uploaded_by = ul.user_id) \
                      ORDER BY ul.added_at DESC, ul.entity_id ASC",
                 );
         }
@@ -2464,11 +2474,17 @@ struct ArtistSummaryRow {
     id: Vec<u8>,
     name: String,
     sort_name: String,
-    mb_artist_id: Option<String>,
-    origin: String,
+    biography: Option<String>,
+    links: String,
+    album_count: Option<i64>,
+    file_tags: Option<String>,
+    fetched_at: Option<i64>,
+    page_fetched_at: Option<i64>,
+    deep_indexed_at: Option<i64>,
+    viewed_at: Option<i64>,
     created_at: i64,
     updated_at: i64,
-    album_count: i64,
+    album_count_in_scope: i64,
 }
 
 impl ArtistSummaryRow {
@@ -2476,15 +2492,20 @@ impl ArtistSummaryRow {
     ///
     /// # Errors
     ///
-    /// Returns [`LibraryError`] when the primary key or the origin literal is
-    /// malformed.
+    /// Returns [`LibraryError`] when the primary key is not 16 bytes.
     fn into_artist(self) -> Result<Artist, LibraryError> {
         Ok(Artist {
             id: decode_entity(IdPrefix::Artist, &self.id)?,
             name: self.name,
             sort_name: self.sort_name,
-            mb_artist_id: self.mb_artist_id,
-            origin: self.origin.parse()?,
+            biography: self.biography,
+            links: self.links,
+            album_count: self.album_count,
+            file_tags: self.file_tags,
+            fetched_at: self.fetched_at,
+            page_fetched_at: self.page_fetched_at,
+            deep_indexed_at: self.deep_indexed_at,
+            viewed_at: self.viewed_at,
             created_at: self.created_at,
             updated_at: self.updated_at,
         })
@@ -3090,8 +3111,9 @@ pub struct UploadedTrack {
 
 /// Lists the tracks one account uploaded, newest first.
 ///
-/// Only uploads count: a track that entered the library by being saved or liked
-/// carries another `origin` and is not listed here. The order is `added_at`
+/// Only uploads count: a track is the account's upload when a stored file of it
+/// records that account as the uploader, so a track that entered the library by
+/// being saved or liked is not listed here. The order is `added_at`
 /// descending, with the track id ascending as the tie-breaker, which is the
 /// order a cursor over that pair walks.
 ///
@@ -3119,7 +3141,9 @@ pub async fn uploaded_tracks(
          FROM user_library ul \
          JOIN tracks t ON t.id = ul.entity_id \
          LEFT JOIN albums al ON al.id = t.album_id \
-         WHERE ul.user_id = ? AND ul.entity_kind = 'track' AND ul.origin = 'upload' \
+         WHERE ul.user_id = ? AND ul.entity_kind = 'track' \
+           AND EXISTS (SELECT 1 FROM media_files mf WHERE mf.track_id = ul.entity_id \
+                         AND mf.uploaded_by = ul.user_id) \
          ORDER BY ul.added_at DESC, ul.entity_id ASC",
         user_id.as_bytes().as_slice(),
     )
@@ -3278,6 +3302,353 @@ pub async fn track_availabilities(
         }
     }
     Ok(found)
+}
+
+/// The state one account holds for one entity.
+///
+/// The two caller surfaces that report it - the Subsonic `hearthsound` member
+/// and the native pages - read it from [`entity_facts`] so they never disagree
+/// about an entity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityFacts {
+    /// Whether the account's personal library holds the entity.
+    pub in_library: bool,
+    /// Whether the account likes the entity.
+    pub liked: bool,
+    /// Whether the account dislikes the entity.
+    pub disliked: bool,
+    /// The rating the account gave the entity, when it gave one.
+    pub rating: Option<u8>,
+    /// How available the entity is to this server.
+    pub availability: Availability,
+}
+
+/// Reads the state one account holds for a list of entities of one kind.
+///
+/// Each table is read once for the whole list: the account's personal library
+/// membership, the account's feedback, the account's ratings, and the stored
+/// availability of the entities - for an album or an artist, of its tracks. The
+/// reads are chunked in batches of [`MAX_IDS_PER_QUERY`].
+///
+/// An album or an artist aggregates the availability of its tracks with the
+/// rule the browse projection has always used: an acquisition in flight wins,
+/// then a fully local set, then a set with a local or cached track, then a fully
+/// unavailable one, and `remote` otherwise.
+///
+/// # Parameters
+///
+/// - `db`: the open database.
+/// - `user`: the account whose state is read.
+/// - `kind`: the kind of every id in the list.
+/// - `ids`: the entities to read.
+///
+/// # Returns
+///
+/// The facts of every requested entity that is stored, keyed by its raw uuid.
+/// An id that names no row is absent from the map.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails, a stored key is not a uuid, a
+/// stored literal is unknown, or `kind` is not a track, album or artist.
+pub async fn entity_facts(
+    db: &Database,
+    user: Uuid,
+    kind: EntityKind,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, EntityFacts>, LibraryError> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let prefix = entity_prefix(kind)?;
+    let literal = crate::external_ids::kind_literal(kind)?;
+    let entities: Vec<EntityId> = ids
+        .iter()
+        .map(|id| EntityId::from_uuid(prefix, *id))
+        .collect();
+    let mut conn = db.readers().acquire().await?;
+    let members = personal_ids(&mut conn, user, kind, &entities).await?;
+    let (liked, disliked) = feedback_ids(&mut conn, user, literal, &entities).await?;
+    let ratings = rated_ids(&mut conn, user, literal, &entities).await?;
+    let availabilities = entity_availabilities(&mut conn, kind, &entities).await?;
+    Ok(availabilities
+        .into_iter()
+        .map(|(id, availability)| {
+            let entity = EntityId::from_uuid(prefix, id);
+            (
+                id,
+                EntityFacts {
+                    in_library: members.contains(&entity),
+                    liked: liked.contains(&id),
+                    disliked: disliked.contains(&id),
+                    rating: ratings.get(&id).copied(),
+                    availability,
+                },
+            )
+        })
+        .collect())
+}
+
+/// Returns the id prefix of an entity kind the facts cover.
+///
+/// # Parameters
+///
+/// - `kind`: the entity kind.
+///
+/// # Returns
+///
+/// The prefix of the stored row's id.
+///
+/// # Errors
+///
+/// Returns [`LibraryError::UnknownLiteral`] for a kind that has no facts.
+fn entity_prefix(kind: EntityKind) -> Result<IdPrefix, LibraryError> {
+    match kind {
+        EntityKind::Track => Ok(IdPrefix::Track),
+        EntityKind::Album => Ok(IdPrefix::Album),
+        EntityKind::Artist => Ok(IdPrefix::Artist),
+        EntityKind::Playlist => Err(LibraryError::UnknownLiteral {
+            kind: "entity kind",
+            value: "playlist".to_owned(),
+        }),
+    }
+}
+
+/// Reads which of the given entities a user's personal library holds.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `user`: the account whose library is tested.
+/// - `kind`: the kind of the entities.
+/// - `ids`: the entities to test.
+///
+/// # Returns
+///
+/// The entities the library contains.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails or `kind` has no facts.
+async fn personal_ids(
+    conn: &mut SqliteConnection,
+    user: Uuid,
+    kind: EntityKind,
+    ids: &[EntityId],
+) -> Result<HashSet<EntityId>, LibraryError> {
+    match kind {
+        EntityKind::Track => personal_track_ids(conn, user, ids).await,
+        EntityKind::Album => personal_album_ids(conn, user, ids).await,
+        EntityKind::Artist => personal_artist_ids(conn, user, ids).await,
+        EntityKind::Playlist => Err(LibraryError::UnknownLiteral {
+            kind: "entity kind",
+            value: "playlist".to_owned(),
+        }),
+    }
+}
+
+/// Reads one user's like and dislike of a list of entities.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `user`: the account whose feedback is read.
+/// - `kind_literal`: the stored `entity_kind` of the entities.
+/// - `ids`: the entities to read.
+///
+/// # Returns
+///
+/// The liked entities and the disliked entities.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails, a stored key is not a uuid, or a
+/// stored feedback value is unknown.
+async fn feedback_ids(
+    conn: &mut SqliteConnection,
+    user: Uuid,
+    kind_literal: &str,
+    ids: &[EntityId],
+) -> Result<(HashSet<Uuid>, HashSet<Uuid>), LibraryError> {
+    let user = user.as_bytes().to_vec();
+    let mut liked = HashSet::new();
+    let mut disliked = HashSet::new();
+    for chunk in ids.chunks(MAX_IDS_PER_QUERY) {
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT entity_id, value FROM user_feedback WHERE user_id = ",
+        );
+        builder
+            .push_bind(user.clone())
+            .push(" AND entity_kind = ")
+            .push_bind(kind_literal)
+            .push(" AND entity_id IN (");
+        push_key_list(&mut builder, chunk);
+        let rows: Vec<(Vec<u8>, String)> = builder.build_query_as().fetch_all(&mut *conn).await?;
+        for (key, value) in rows {
+            let id = decode_uuid(&key)?;
+            match value.as_str() {
+                "like" => {
+                    liked.insert(id);
+                }
+                "dislike" => {
+                    disliked.insert(id);
+                }
+                other => {
+                    return Err(LibraryError::UnknownLiteral {
+                        kind: "feedback",
+                        value: other.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+    Ok((liked, disliked))
+}
+
+/// Reads one user's ratings of a list of entities.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `user`: the account whose ratings are read.
+/// - `kind_literal`: the stored `entity_kind` of the entities.
+/// - `ids`: the entities to read.
+///
+/// # Returns
+///
+/// The rating of each entity that has one.
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails, a stored key is not a uuid, or a
+/// stored rating is not a rating from 1 to 5.
+async fn rated_ids(
+    conn: &mut SqliteConnection,
+    user: Uuid,
+    kind_literal: &str,
+    ids: &[EntityId],
+) -> Result<HashMap<Uuid, u8>, LibraryError> {
+    let user = user.as_bytes().to_vec();
+    let mut found = HashMap::new();
+    for chunk in ids.chunks(MAX_IDS_PER_QUERY) {
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT entity_id, rating FROM user_ratings WHERE user_id = ",
+        );
+        builder
+            .push_bind(user.clone())
+            .push(" AND entity_kind = ")
+            .push_bind(kind_literal)
+            .push(" AND entity_id IN (");
+        push_key_list(&mut builder, chunk);
+        let rows: Vec<(Vec<u8>, i64)> = builder.build_query_as().fetch_all(&mut *conn).await?;
+        for (key, rating) in rows {
+            let id = decode_uuid(&key)?;
+            let rating = u8::try_from(rating).map_err(|_| LibraryError::UnknownLiteral {
+                kind: "rating",
+                value: rating.to_string(),
+            })?;
+            found.insert(id, rating);
+        }
+    }
+    Ok(found)
+}
+
+/// Aggregates the stored availability of the given entities or of their tracks.
+///
+/// # Parameters
+///
+/// - `conn`: the connection or transaction to read on.
+/// - `kind`: the kind of the entities.
+/// - `ids`: the entities to read.
+///
+/// # Returns
+///
+/// The availability of each requested entity that is stored; one with no track
+/// behind it is `remote`. The read is chunked in batches of
+/// [`MAX_IDS_PER_QUERY`].
+///
+/// # Errors
+///
+/// Returns [`LibraryError`] when a query fails, a stored key is not a uuid, a
+/// stored literal is unknown, or `kind` has no facts.
+async fn entity_availabilities(
+    conn: &mut SqliteConnection,
+    kind: EntityKind,
+    ids: &[EntityId],
+) -> Result<HashMap<Uuid, Availability>, LibraryError> {
+    let mut states: HashMap<Uuid, Vec<Availability>> = HashMap::new();
+    for chunk in ids.chunks(MAX_IDS_PER_QUERY) {
+        let select = match kind {
+            EntityKind::Track => "SELECT id AS entity_id, availability FROM tracks WHERE id IN (",
+            EntityKind::Album => {
+                "SELECT al.id AS entity_id, t.availability FROM albums al \
+                 LEFT JOIN tracks t ON t.album_id = al.id WHERE al.id IN ("
+            }
+            EntityKind::Artist => {
+                "SELECT ar.id AS entity_id, t.availability FROM artists ar \
+                 LEFT JOIN track_artists ta ON ta.artist_id = ar.id \
+                 LEFT JOIN tracks t ON t.id = ta.track_id WHERE ar.id IN ("
+            }
+            EntityKind::Playlist => {
+                return Err(LibraryError::UnknownLiteral {
+                    kind: "entity kind",
+                    value: "playlist".to_owned(),
+                });
+            }
+        };
+        let mut builder = QueryBuilder::<Sqlite>::new(select);
+        push_key_list(&mut builder, chunk);
+        let rows: Vec<(Vec<u8>, Option<String>)> =
+            builder.build_query_as().fetch_all(&mut *conn).await?;
+        for (key, literal) in rows {
+            let entry = states.entry(decode_uuid(&key)?).or_default();
+            if let Some(literal) = literal {
+                entry.push(literal.parse::<Availability>().map_err(|_| {
+                    LibraryError::UnknownLiteral {
+                        kind: "availability",
+                        value: literal.clone(),
+                    }
+                })?);
+            }
+        }
+    }
+    Ok(states
+        .into_iter()
+        .map(|(id, states)| (id, aggregate_availability(&states)))
+        .collect())
+}
+
+/// Aggregates the availability of an album or an artist from its tracks.
+///
+/// # Parameters
+///
+/// - `states`: the availability of the entity's tracks.
+///
+/// # Returns
+///
+/// The entity's availability: an acquisition in flight wins, then a fully local
+/// set, then a set with a local or cached track, then a fully unavailable one,
+/// and `remote` otherwise.
+fn aggregate_availability(states: &[Availability]) -> Availability {
+    if states.is_empty() {
+        Availability::Remote
+    } else if states.contains(&Availability::Acquiring) {
+        Availability::Acquiring
+    } else if states.iter().all(|state| *state == Availability::Local) {
+        Availability::Local
+    } else if states
+        .iter()
+        .any(|state| matches!(state, Availability::Local | Availability::Cached))
+    {
+        Availability::Cached
+    } else if states
+        .iter()
+        .all(|state| *state == Availability::Unavailable)
+    {
+        Availability::Unavailable
+    } else {
+        Availability::Remote
+    }
 }
 
 /// Reads the tracks of each album in the given list.

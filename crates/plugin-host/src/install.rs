@@ -119,9 +119,10 @@ pub fn requested_permissions_of(permissions: &Permissions) -> Vec<RequestedPermi
     let mut requested = Vec::new();
 
     if let Some(http) = &permissions.http {
-        let (configured, public): (Vec<&String>, Vec<&String>) = http
+        let (configured, public): (Vec<&str>, Vec<&str>) = http
             .hosts
             .iter()
+            .map(|entry| entry.host())
             .partition(|host| host.starts_with("$config:"));
         if !public.is_empty() {
             requested.push(RequestedPermission {
@@ -176,7 +177,7 @@ pub fn requested_permissions_of(permissions: &Permissions) -> Vec<RequestedPermi
     {
         requested.push(RequestedPermission {
             scope: "process.tools",
-            detail: join(process.tools.iter()),
+            detail: join(process.tools.iter().map(String::as_str)),
             risk: Risk::High,
         });
     }
@@ -218,12 +219,8 @@ pub fn requested_permissions(manifest: &Manifest) -> Vec<RequestedPermission> {
 }
 
 /// Joins values for display.
-fn join<'a>(values: impl IntoIterator<Item = &'a String>) -> String {
-    values
-        .into_iter()
-        .map(String::as_str)
-        .collect::<Vec<&str>>()
-        .join(", ")
+fn join<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
+    values.into_iter().collect::<Vec<&str>>().join(", ")
 }
 
 impl PluginRepository {
@@ -420,9 +417,10 @@ pub(crate) fn registration(plugin: &InstalledPlugin, source: PluginSource) -> Pl
 /// - process tools that `installed` does not list;
 /// - a resource limit above both the installed value and its default.
 ///
-/// Only widening counts. Dropping a host, reordering hosts, lowering a quota,
-/// turning an import root off or removing a tool never stages a review.
-/// `http.rateLimit` is not compared, because it is not a labelled permission.
+/// Only widening counts. Dropping a host, reordering hosts, lowering a quota
+/// (the instance-wide `http.rateLimit` or a host's own one), turning an import
+/// root off or removing a tool never stages a review; a host pattern that both
+/// versions list is not widened whatever limit the new version gives it.
 ///
 /// # Parameters
 ///
@@ -439,18 +437,16 @@ pub fn new_permissions(new: &Manifest, installed: &Manifest) -> Vec<RequestedPer
     let mut added = Vec::new();
 
     if let Some(http) = &wanted.http {
-        let held_hosts: &[String] = held
+        let held_hosts: Vec<&str> = held
             .http
             .as_ref()
-            .map(|held| held.hosts.as_slice())
+            .map(|held| held.hosts.iter().map(|entry| entry.host()).collect())
             .unwrap_or_default();
-        let added_hosts: Vec<&String> = http
+        let (configured, public): (Vec<&str>, Vec<&str>) = http
             .hosts
             .iter()
-            .filter(|host| !held_hosts.contains(*host))
-            .collect();
-        let (configured, public): (Vec<&String>, Vec<&String>) = added_hosts
-            .into_iter()
+            .map(|entry| entry.host())
+            .filter(|host| !held_hosts.contains(host))
             .partition(|host| host.starts_with("$config:"));
         if !public.is_empty() {
             added.push(RequestedPermission {
@@ -529,7 +525,7 @@ pub fn new_permissions(new: &Manifest, installed: &Manifest) -> Vec<RequestedPer
         if !added_tools.is_empty() {
             added.push(RequestedPermission {
                 scope: "process.tools",
-                detail: join(added_tools),
+                detail: join(added_tools.into_iter().map(String::as_str)),
                 risk: Risk::High,
             });
         }

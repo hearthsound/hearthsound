@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.id FROM albums a JOIN album_artists aa ON aa.album_id = a.id AND aa.position = 0 WHERE a.sort_title = ? AND aa.artist_id = ? AND NOT EXISTS (SELECT 1 FROM external_ids e WHERE e.entity_kind = 'album' AND e.entity_id = a.id) ORDER BY a.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "albums",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4fafe26c6b073b38ab21fc19c91970217462725732462a5d0f29506674669543"
+}

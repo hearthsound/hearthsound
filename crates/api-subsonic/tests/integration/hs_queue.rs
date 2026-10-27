@@ -10,21 +10,14 @@
 
 use std::collections::HashMap;
 
+use hearthsound_core::EntityId;
 use hearthsound_core::Priority;
 use hearthsound_core::events::{EventEnvelope, ServerEvent};
-use hearthsound_core::{CatalogId, EntityId, EntityKind, Slug};
 
 use crate::common::{Fixture, SNAPSHOT_FILTERS, assert_error, assert_ok, get};
 
-/// The number of characters in a materialized client id's payload.
+/// The number of characters in a client id's payload.
 const PAYLOAD: usize = 26;
-
-/// Builds the `x_` id of one hello-catalog entity.
-fn catalog_id(kind: EntityKind, provider_id: &str) -> String {
-    CatalogId::new(Slug::new("hello").unwrap(), kind, provider_id)
-        .unwrap()
-        .to_string()
-}
 
 /// Builds a fixture with the acquisition layer and one remote album.
 ///
@@ -226,43 +219,4 @@ async fn a_queue_declaration_answers_error_70_without_the_vendor_flag() {
     )
     .await;
     assert_error(&probe, 70);
-}
-
-#[tokio::test]
-async fn a_queue_of_catalog_ids_materializes_what_it_prefetches() {
-    let mut fixture = Fixture::new().await;
-    fixture.install_hello_catalog().await;
-    fixture.add_acquisition_layer().await;
-    let app = fixture.app();
-    let mut events = fixture.events.subscribe();
-    let current = catalog_id(EntityKind::Track, "hello-track-1");
-    let next = catalog_id(EntityKind::Track, "hello-track-2");
-
-    let probe = get(
-        &app,
-        &format!(
-            "/rest/hsSetQueue?apiKey={}&hearthsound=1&f=json&client=web&current={current}&next={next}",
-            fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&probe);
-    let started = prefetches(&mut events);
-    assert_eq!(started.len(), 1, "{started:?}");
-    assert_eq!(started[0].2, next);
-
-    let listed = get(
-        &app,
-        &format!(
-            "/rest/hsGetAcquisitions?apiKey={}&hearthsound=1&f=json",
-            fixture.api_key
-        ),
-    )
-    .await;
-    assert_ok(&listed);
-    assert!(
-        listed.body.contains("\"targetId\":\"tr_"),
-        "{}",
-        listed.body
-    );
 }

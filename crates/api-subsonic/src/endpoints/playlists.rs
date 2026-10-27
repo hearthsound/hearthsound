@@ -11,7 +11,8 @@ use std::collections::HashMap;
 
 use hearthsound_acquire::playlist_add::acquire_playlist_additions;
 use hearthsound_activity::{ActivityError, Playlist, PlaylistUpdate};
-use hearthsound_core::{ClientId, EntityId, EntityKind, IdPrefix};
+use hearthsound_core::providers::ExternalId;
+use hearthsound_core::{EntityId, EntityKind, IdPrefix};
 use uuid::Uuid;
 
 use crate::auth::Call;
@@ -126,7 +127,7 @@ pub async fn get_playlist(call: Call) -> Encoded {
 ///
 /// - `call`: the authenticated call. `playlistId` names an existing playlist to
 ///   replace the tracks of; otherwise `name` is required. `songId` may be
-///   repeated, and each value is a stored or catalog song id.
+///   repeated, and each value is a song id.
 ///
 /// # Returns
 ///
@@ -138,7 +139,7 @@ pub async fn get_playlist(call: Call) -> Encoded {
 /// error 70 when `playlistId` is malformed, names no playlist or names a private
 /// playlist of another account, and when a song id cannot be resolved, error 50
 /// when the playlist is public but belongs to another account, and a generic
-/// error when a catalog song cannot be materialized or a write fails.
+/// error when the lookup or a write fails.
 pub async fn create_playlist(call: Call) -> Encoded {
     let songs = match songs(&call, "songId").await {
         Ok(songs) => songs,
@@ -218,7 +219,7 @@ pub async fn create_playlist(call: Call) -> Encoded {
 /// when the playlist id is malformed, names no playlist, names a private
 /// playlist of another account, or a song id cannot be resolved, error 50 when
 /// the playlist is public but belongs to another account, and a generic error
-/// when a catalog song cannot be materialized or a write fails.
+/// when the lookup or a write fails.
 pub async fn update_playlist(call: Call) -> Encoded {
     let id = match playlist_id(&call, "playlistId") {
         Ok(id) => id,
@@ -352,8 +353,8 @@ fn playlist_id(call: &Call, parameter: &'static str) -> Result<EntityId, Subsoni
 ///
 /// Answers Subsonic error 70 when the value is not a playlist id.
 pub(super) fn parse_playlist_id(value: &str) -> Result<EntityId, SubsonicError> {
-    match ClientId::parse(value) {
-        Ok(ClientId::Entity(id)) if id.kind() == PLAYLIST_PREFIX => Ok(id),
+    match EntityId::parse(value) {
+        Ok(id) if id.kind() == PLAYLIST_PREFIX => Ok(id),
         _ => {
             tracing::debug!("a playlist request named an unknown id");
             Err(SubsonicError::not_found())
@@ -361,7 +362,7 @@ pub(super) fn parse_playlist_id(value: &str) -> Result<EntityId, SubsonicError> 
     }
 }
 
-/// Reads the song ids a request carries, materializing catalog ones.
+/// Reads the song ids a request carries.
 ///
 /// # Parameters
 ///
@@ -375,7 +376,7 @@ pub(super) fn parse_playlist_id(value: &str) -> Result<EntityId, SubsonicError> 
 /// # Errors
 ///
 /// Answers Subsonic error 70 when a value is not a song id or names no stored
-/// song, and a generic error when a catalog song cannot be materialized.
+/// song, and a generic error when the lookup fails.
 async fn songs(call: &Call, parameter: &str) -> Result<Vec<EntityId>, SubsonicError> {
     let mut songs = Vec::new();
     for value in call.params().get_all(parameter) {
@@ -565,6 +566,10 @@ async fn entries(call: &Call, playlist: &Playlist) -> Result<Vec<Object>, Subson
         Ok(annotations) => annotations,
         Err(error) => return Err(failure("a playlist", &error)),
     };
+    let identifiers = match identifiers_for(call, &ids).await {
+        Ok(identifiers) => identifiers,
+        Err(error) => return Err(error),
+    };
     let mut entries = Vec::with_capacity(ids.len());
     for id in ids {
         match browse::track_any(database, id).await {
@@ -573,6 +578,7 @@ async fn entries(call: &Call, playlist: &Playlist) -> Result<Vec<Object>, Subson
                 loaded.file.as_ref(),
                 &loaded.album_artists,
                 &annotations.get(&id.uuid()).copied().unwrap_or_default(),
+                identifiers.get(&id.uuid()).map_or(&[], Vec::as_slice),
             )),
             Ok(None) => {}
             Err(error) => return Err(browse::failure("a playlist", &error)),
@@ -607,6 +613,30 @@ async fn annotations_for(
         &plain,
     )
     .await
+}
+
+/// Loads the stored identifiers of the songs of a playlist.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `ids`: the songs of the playlist.
+///
+/// # Returns
+///
+/// The identifiers, keyed by track id.
+///
+/// # Errors
+///
+/// Answers a generic error when the read fails.
+async fn identifiers_for(
+    call: &Call,
+    ids: &[EntityId],
+) -> Result<HashMap<Uuid, Vec<ExternalId>>, SubsonicError> {
+    let plain: Vec<Uuid> = ids.iter().map(EntityId::uuid).collect();
+    browse::identifiers(call.state().database(), EntityKind::Track, &plain)
+        .await
+        .map_err(|error| browse::failure("a playlist", &error))
 }
 
 /// Maps an activity failure on a playlist to the error a client is answered.

@@ -15,28 +15,30 @@
 //!
 //! Two members need data from outside the entity row:
 //!
-//! - `coverArt` names the album when the track's preferred media file carries
-//!   embedded art and the track belongs to an album, and the track itself
-//!   otherwise. An album's own `coverArt` is its id when any of its tracks
-//!   carries embedded art, and empty otherwise; `getCoverArt` resolves the
-//!   named id to bytes.
+//! - `coverArt` is the album's id when the entity belongs to one, and the
+//!   entity's own id otherwise; `getCoverArt` answers whether the server holds
+//!   an image for it.
 //! - The file-derived fields (`suffix`, `contentType`, `size`, `bitRate`,
 //!   `bitDepth`, `samplingRate`, `channelCount`, `duration`, `path`) come from
 //!   the media file row rather than from the query projection, because only the
-//!   row carries the bit depth, the sample rate, and the channel count.
+//!   row carries the bit depth, the sample rate, and the channel count. A row
+//!   without a file - an entity the server knows but has not stored - emits
+//!   those fields empty, which is what tells a client it has to acquire it.
+//!
+//! The canonical identifiers (`musicBrainzId`, `isrc`) live in `external_ids`
+//! rather than in the entity row, so every projection that reports them takes
+//! them as a parameter.
 
 use std::collections::HashMap;
 
 use hearthsound_activity::Annotation;
-use hearthsound_catalog::{CatalogAlbumRefResult, CatalogAlbumResult, CatalogArtistResult};
-use hearthsound_core::providers::{ArtistCredit, CatalogTrack};
-use hearthsound_core::{CatalogId, EntityKind, Slug};
+use hearthsound_core::providers::{ExternalId, ISRC, MB_ARTIST, MB_RECORDING, MB_RELEASE};
 use hearthsound_library::query::ArtistSummary;
 use hearthsound_library::query::{TrackView, content_type_for};
 use hearthsound_library::{Album, Artist, MediaFile, ReplayGain};
 use uuid::Uuid;
 
-use crate::catalog::{artist_id, music_brainz_id};
+use crate::catalog::{identifier, identifiers};
 use crate::value::{Array, Object};
 
 /// The `albums.album_type` literal a compilation is stored with.
@@ -66,6 +68,7 @@ const ARTICLES: [&str; 7] = ["the", "el", "la", "los", "las", "le", "les"];
 ///
 /// - `summaries`: the artists in scope, each with its album count.
 /// - `annotations`: the user's annotations for those artists, keyed by id.
+/// - `ids`: the stored identifiers of those artists, keyed by id.
 ///
 /// # Returns
 ///
@@ -73,10 +76,12 @@ const ARTICLES: [&str; 7] = ["the", "el", "la", "los", "las", "le", "les"];
 pub(crate) fn artists_id3(
     summaries: &[ArtistSummary],
     annotations: &HashMap<Uuid, Annotation>,
+    ids: &HashMap<Uuid, Vec<ExternalId>>,
 ) -> Object {
-    Object::new()
-        .set("ignoredArticles", IGNORED_ARTICLES)
-        .set("index", Array::new(artist_index(summaries, annotations)))
+    Object::new().set("ignoredArticles", IGNORED_ARTICLES).set(
+        "index",
+        Array::new(artist_index(summaries, annotations, ids)),
+    )
 }
 
 /// Builds the index groups of an artist listing.
@@ -89,6 +94,7 @@ pub(crate) fn artists_id3(
 ///
 /// - `summaries`: the artists, each with its album count.
 /// - `annotations`: the user's annotations for them, keyed by id.
+/// - `ids`: the stored identifiers of them, keyed by id.
 ///
 /// # Returns
 ///
@@ -96,6 +102,7 @@ pub(crate) fn artists_id3(
 pub(crate) fn artist_index(
     summaries: &[ArtistSummary],
     annotations: &HashMap<Uuid, Annotation>,
+    ids: &HashMap<Uuid, Vec<ExternalId>>,
 ) -> Vec<Object> {
     let mut ordered: Vec<(&str, &ArtistSummary)> = summaries
         .iter()
@@ -120,6 +127,7 @@ pub(crate) fn artist_index(
             annotations
                 .get(&summary.artist.id.uuid())
                 .unwrap_or(&Annotation::default()),
+            row_ids(ids, &summary.artist.id.uuid()),
         );
         if let Some((group, artists)) = groups.last_mut()
             && *group == name
@@ -156,6 +164,7 @@ pub(crate) fn artist_index(
 /// - `summaries`: the artists in the requested order, each with its album
 ///   count.
 /// - `annotations`: the user's annotations for those artists, keyed by id.
+/// - `ids`: the stored identifiers of those artists, keyed by id.
 ///
 /// # Returns
 ///
@@ -163,10 +172,11 @@ pub(crate) fn artist_index(
 pub(crate) fn artists_id3_ordered(
     summaries: &[ArtistSummary],
     annotations: &HashMap<Uuid, Annotation>,
+    ids: &HashMap<Uuid, Vec<ExternalId>>,
 ) -> Object {
     Object::new().set("ignoredArticles", IGNORED_ARTICLES).set(
         "index",
-        Array::new(artist_index_in_order(summaries, annotations)),
+        Array::new(artist_index_in_order(summaries, annotations, ids)),
     )
 }
 
@@ -176,6 +186,7 @@ pub(crate) fn artists_id3_ordered(
 ///
 /// - `summaries`: the artists in the order to keep.
 /// - `annotations`: the user's annotations for them, keyed by id.
+/// - `ids`: the stored identifiers of them, keyed by id.
 ///
 /// # Returns
 ///
@@ -184,6 +195,7 @@ pub(crate) fn artists_id3_ordered(
 fn artist_index_in_order(
     summaries: &[ArtistSummary],
     annotations: &HashMap<Uuid, Annotation>,
+    ids: &HashMap<Uuid, Vec<ExternalId>>,
 ) -> Vec<Object> {
     let mut groups: Vec<(String, Vec<Object>)> = Vec::new();
     for summary in summaries {
@@ -194,6 +206,7 @@ fn artist_index_in_order(
             annotations
                 .get(&summary.artist.id.uuid())
                 .unwrap_or(&Annotation::default()),
+            row_ids(ids, &summary.artist.id.uuid()),
         );
         if let Some((group, artists)) = groups.last_mut()
             && *group == name
@@ -220,6 +233,7 @@ fn artist_index_in_order(
 ///
 /// - `summaries`: the artists, each with its album count.
 /// - `annotations`: the user's annotations for them, keyed by id.
+/// - `ids`: the stored identifiers of them, keyed by id.
 /// - `last_modified`: when the browse index last changed, in unix milliseconds.
 ///
 /// # Returns
@@ -229,12 +243,30 @@ fn artist_index_in_order(
 pub(crate) fn indexes(
     summaries: &[ArtistSummary],
     annotations: &HashMap<Uuid, Annotation>,
+    ids: &HashMap<Uuid, Vec<ExternalId>>,
     last_modified: i64,
 ) -> Object {
     Object::new()
         .set("lastModified", last_modified)
         .set("ignoredArticles", IGNORED_ARTICLES)
-        .set("index", Array::new(artist_index(summaries, annotations)))
+        .set(
+            "index",
+            Array::new(artist_index(summaries, annotations, ids)),
+        )
+}
+
+/// Returns the identifiers stored for one row.
+///
+/// # Parameters
+///
+/// - `ids`: the stored identifiers, keyed by the row's primary key.
+/// - `id`: the row's primary key.
+///
+/// # Returns
+///
+/// The identifiers, or an empty list when the row has none.
+fn row_ids<'a>(ids: &'a HashMap<Uuid, Vec<ExternalId>>, id: &Uuid) -> &'a [ExternalId] {
+    ids.get(id).map_or(&[], Vec::as_slice)
 }
 
 /// Builds the `directory` member of `getMusicDirectory` for an artist or album.
@@ -275,13 +307,20 @@ pub(crate) fn directory(
 ///
 /// - `artist`: the artist row.
 /// - `album_count`: how many albums in scope the artist is credited on.
+/// - `annotation`: the user's stars, rating, and play counts for the artist.
+/// - `ids`: the artist's stored identifiers.
 ///
 /// # Returns
 ///
 /// The artist, with the base protocol's `id`, `name`, and `albumCount` first
 /// and the OpenSubsonic `musicBrainzId` and `sortName` after them. `coverArt`,
 /// `roles`, and `disambiguation` are not supported yet and are omitted.
-pub(crate) fn artist_id3(artist: &Artist, album_count: i64, annotation: &Annotation) -> Object {
+pub(crate) fn artist_id3(
+    artist: &Artist,
+    album_count: i64,
+    annotation: &Annotation,
+    ids: &[ExternalId],
+) -> Object {
     let mut object = Object::new()
         .set("id", artist.id.to_string())
         .set("name", artist.name.clone())
@@ -289,10 +328,7 @@ pub(crate) fn artist_id3(artist: &Artist, album_count: i64, annotation: &Annotat
         .set("albumCount", album_count);
     object = set_annotation(object, annotation);
     object
-        .set(
-            "musicBrainzId",
-            artist.mb_artist_id.clone().unwrap_or_default(),
-        )
+        .set("musicBrainzId", identifier(ids, MB_ARTIST))
         .set("sortName", artist.sort_name.clone())
 }
 
@@ -437,35 +473,6 @@ pub(crate) fn starred_artist_ref(artist: &Artist, annotation: &Annotation) -> Ob
     }
 }
 
-/// Builds the artist reference of a catalog artist.
-///
-/// A catalog artist is not stored, so it carries no user annotation. It does
-/// carry what a search card draws: the provider's own album count when it states
-/// one, and a cover-art id when it describes a picture. Both members are left out
-/// when the answer holds neither, so a client can tell "no picture" from an id it
-/// cannot fetch.
-///
-/// # Parameters
-///
-/// - `result`: the artist the provider returned, with its catalog id.
-///
-/// # Returns
-///
-/// The reference.
-pub(crate) fn catalog_artist_ref(result: &CatalogArtistResult) -> Object {
-    let reference = Object::new()
-        .set("id", result.id.to_string())
-        .set("name", result.artist.name.clone())
-        .set(
-            "coverArt",
-            cover_art(&result.id, !result.artist.images.is_empty()),
-        );
-    match result.artist.album_count {
-        Some(count) => reference.set("albumCount", i64::from(count)),
-        None => reference,
-    }
-}
-
 /// Builds one `AlbumID3` member.
 ///
 /// # Parameters
@@ -475,6 +482,7 @@ pub(crate) fn catalog_artist_ref(result: &CatalogArtistResult) -> Object {
 /// - `tracks`: the album's tracks in scope, in playing order; their genres,
 ///   durations, and explicitness are what the album reports.
 /// - `annotation`: the user's stars, rating, and play counts for the album.
+/// - `ids`: the album's stored identifiers.
 ///
 /// # Returns
 ///
@@ -485,6 +493,7 @@ pub(crate) fn album_id3(
     artists: &[Artist],
     tracks: &[TrackView],
     annotation: &Annotation,
+    ids: &[ExternalId],
 ) -> Object {
     let genres = album_genres(tracks);
     let duration_secs = tracks.iter().map(track_duration_ms).sum::<i64>() / 1000;
@@ -510,10 +519,7 @@ pub(crate) fn album_id3(
     let object = set_plays(object, annotation);
     object
         .set("version", album.edition.clone().unwrap_or_default())
-        .set(
-            "musicBrainzId",
-            album.mb_release_id.clone().unwrap_or_default(),
-        )
+        .set("musicBrainzId", identifier(ids, MB_RELEASE))
         .set(
             "genres",
             Array::named("genre", genres.iter().map(|name| genre(name))),
@@ -548,6 +554,7 @@ pub(crate) fn album_id3(
 /// - `album_artists`: the credited artists of the track's album, empty when the
 ///   track has no album.
 /// - `annotation`: the user's stars, rating, and play counts for the track.
+/// - `ids`: the track's stored identifiers.
 ///
 /// # Returns
 ///
@@ -560,6 +567,7 @@ pub(crate) fn child(
     file: Option<&MediaFile>,
     album_artists: &[Artist],
     annotation: &Annotation,
+    ids: &[ExternalId],
 ) -> Object {
     let track = &view.track;
     let album = view.album.as_ref();
@@ -643,11 +651,8 @@ pub(crate) fn child(
         .set("bpm", 0)
         .set("comment", "")
         .set("sortName", track.sort_title.clone())
-        .set(
-            "musicBrainzId",
-            track.mb_recording_id.clone().unwrap_or_default(),
-        )
-        .set("isrc", Array::new(track.isrc.iter().cloned()))
+        .set("musicBrainzId", identifier(ids, MB_RECORDING))
+        .set("isrc", Array::new(identifiers(ids, ISRC)))
         .set(
             "genres",
             Array::named("genre", view.genres.iter().map(|name| genre(name))),
@@ -906,458 +911,6 @@ pub(crate) fn timestamp(millis: i64) -> String {
             String::new()
         }
     }
-}
-
-/// Builds one catalog `Child` member (a song the server has not stored).
-///
-/// The fields follow the catalog result rules (05-api.md, section 3.5): the id
-/// is the `x_` id that names the entity, `suffix` and `contentType` are empty
-/// because no file exists yet and the container the acquired track will have is
-/// unknown, `size` is zero because no file exists yet, `duration` is the
-/// provider's duration, `path` is a synthetic `catalog/<slug>/<id>` that can
-/// never be a filesystem path, `coverArt` names the entity itself so
-/// `getCoverArt` resolves it through the issuing instance, and the title carries
-/// the catalog title suffix. Every other OpenSubsonic field is emitted at its
-/// default, so a client can tell a supported-but-unknown value from an
-/// unsupported field.
-///
-/// # Parameters
-///
-/// - `id`: the catalog id that names the track.
-/// - `track`: the track the provider returned.
-/// - `title_suffix`: the suffix appended to the title.
-///
-/// # Returns
-///
-/// The child.
-pub(crate) fn catalog_child(id: &CatalogId, track: &CatalogTrack, title_suffix: &str) -> Object {
-    let slug = id.slug();
-    let album = track.album.as_ref();
-    let album_id = album
-        .and_then(|album| CatalogId::new(slug.clone(), EntityKind::Album, album.id.clone()).ok());
-    let album_artists: &[ArtistCredit] = album
-        .map(|album| album.artists.as_slice())
-        .unwrap_or_default();
-    let duration_secs = track
-        .duration_ms
-        .map(|duration| i64::from(duration) / 1_000)
-        .unwrap_or(0);
-
-    Object::new()
-        .set("id", id.to_string())
-        .set(
-            "parent",
-            album_id
-                .as_ref()
-                .map(|album| album.to_string())
-                .unwrap_or_default(),
-        )
-        .set("isDir", false)
-        .set("title", format!("{}{title_suffix}", track.title))
-        .set(
-            "album",
-            album.map(|album| album.title.clone()).unwrap_or_default(),
-        )
-        .set("artist", display_credits(&track.artists))
-        .set("track", i64::from(track.track_number.unwrap_or(0)))
-        .set(
-            "year",
-            album
-                .and_then(|album| album.year)
-                .map(i64::from)
-                .unwrap_or(0),
-        )
-        .set("genre", "")
-        // A track's picture is its album's. The entity id is only handed out
-        // when the provider described one, because an id `getCoverArt` cannot
-        // resolve is worse than an empty field a client already handles.
-        .set(
-            "coverArt",
-            if album.is_some_and(|album| !album.images.is_empty()) {
-                id.to_string()
-            } else {
-                String::new()
-            },
-        )
-        .set("size", 0)
-        .set("contentType", "")
-        .set("suffix", "")
-        .set("duration", duration_secs)
-        .set("bitRate", 0)
-        .set("bitDepth", 0)
-        .set("samplingRate", 0)
-        .set("channelCount", 0)
-        .set("path", format!("catalog/{slug}/{}", track.id))
-        .set("playCount", 0)
-        .set("played", "")
-        .set("discNumber", i64::from(track.disc_number.unwrap_or(0)))
-        .set("created", "")
-        .set(
-            "albumId",
-            album_id
-                .as_ref()
-                .map(|album| album.to_string())
-                .unwrap_or_default(),
-        )
-        .set(
-            "artistId",
-            track
-                .artists
-                .first()
-                .and_then(|credit| artist_id(slug, credit))
-                .map(|artist| artist.to_string())
-                .unwrap_or_default(),
-        )
-        .set("type", "music")
-        .set("mediaType", "song")
-        .set("isVideo", false)
-        .set("bpm", 0)
-        .set("comment", "")
-        .set("sortName", "")
-        .set("musicBrainzId", music_brainz_id(&track.ids))
-        .set("isrc", Array::new(track.isrc.iter().cloned()))
-        .set(
-            "genres",
-            Array::named("genre", std::iter::empty::<String>()),
-        )
-        .set(
-            "artists",
-            Array::named(
-                "artist",
-                track.artists.iter().map(|credit| credit_ref(slug, credit)),
-            ),
-        )
-        .set("displayArtist", display_credits(&track.artists))
-        .set(
-            "albumArtists",
-            Array::named(
-                "albumArtist",
-                album_artists.iter().map(|credit| credit_ref(slug, credit)),
-            ),
-        )
-        .set("displayAlbumArtist", display_credits(album_artists))
-        .set(
-            "contributors",
-            Array::named("contributor", std::iter::empty::<Object>()),
-        )
-        .set("displayComposer", "")
-        .set("moods", Array::named("mood", std::iter::empty::<String>()))
-        .set("explicitStatus", explicit_status(track.explicit))
-        .set("replayGain", replay_gain(None))
-        .set("works", Array::named("work", std::iter::empty::<Object>()))
-        .set(
-            "movements",
-            Array::named("movement", std::iter::empty::<Object>()),
-        )
-        .set(
-            "groupings",
-            Array::named("grouping", std::iter::empty::<String>()),
-        )
-}
-
-/// Builds one catalog `AlbumID3` member from a search result.
-///
-/// A search returns an album reference: a title, the credits, a year and the
-/// images, without a tracklist. The projection is the same member
-/// [`catalog_album`] produces for a full album, with the fields the reference
-/// does not carry left at their default.
-///
-/// # Parameters
-///
-/// - `result`: the album reference the provider returned, with its catalog id.
-/// - `title_suffix`: the suffix appended to the title.
-///
-/// # Returns
-///
-/// The album.
-pub(crate) fn catalog_album_ref(result: &CatalogAlbumRefResult, title_suffix: &str) -> Object {
-    let id = &result.id;
-    let slug = id.slug();
-    let album = &result.album;
-
-    Object::new()
-        .set("id", id.to_string())
-        .set("name", format!("{}{title_suffix}", album.title))
-        .set("artist", display_credits(&album.artists))
-        .set("year", album.year.map(i64::from).unwrap_or(0))
-        .set("coverArt", cover_art(id, !album.images.is_empty()))
-        .set("duration", 0)
-        .set("playCount", 0)
-        .set("genre", "")
-        .set("created", "")
-        .set(
-            "artistId",
-            album
-                .artists
-                .first()
-                .and_then(|credit| artist_id(slug, credit))
-                .map(|artist| artist.to_string())
-                .unwrap_or_default(),
-        )
-        .set("songCount", 0)
-        .set("played", "")
-        .set("version", "")
-        .set("musicBrainzId", "")
-        .set(
-            "genres",
-            Array::named("genre", std::iter::empty::<String>()),
-        )
-        .set(
-            "artists",
-            Array::named(
-                "artist",
-                album.artists.iter().map(|credit| credit_ref(slug, credit)),
-            ),
-        )
-        .set("displayArtist", display_credits(&album.artists))
-        .set(
-            "releaseTypes",
-            Array::named("releaseType", std::iter::empty::<String>()),
-        )
-        .set("moods", Array::named("mood", std::iter::empty::<String>()))
-        .set("sortName", "")
-        .set("explicitStatus", "")
-}
-
-/// Builds one directory `Child` member for a catalog album.
-///
-/// A catalog album is a search result: it has a title, its credits, and its
-/// images, and no tracklist until a client asks for it by id.
-///
-/// # Parameters
-///
-/// - `id`: the album's catalog id.
-/// - `result`: the album reference the provider returned.
-/// - `title_suffix`: the suffix appended to the title.
-///
-/// # Returns
-///
-/// The directory child.
-pub(crate) fn catalog_album_dir(
-    id: &CatalogId,
-    result: &CatalogAlbumRefResult,
-    title_suffix: &str,
-) -> Object {
-    let slug = id.slug();
-    let album = &result.album;
-    let title = format!("{}{title_suffix}", album.title);
-    let artist = display_credits(&album.artists);
-    Object::new()
-        .set("id", id.to_string())
-        .set("parent", "")
-        .set("isDir", true)
-        .set("title", title.clone())
-        .set("name", title.clone())
-        .set("album", title)
-        .set("artist", artist)
-        .set("year", album.year.map(i64::from).unwrap_or(0))
-        .set("genre", "")
-        .set("coverArt", cover_art(id, !album.images.is_empty()))
-        .set("duration", 0)
-        .set("playCount", 0)
-        .set("played", "")
-        .set("created", "")
-        .set(
-            "artistId",
-            album
-                .artists
-                .first()
-                .and_then(|credit| artist_id(slug, credit))
-                .map(|artist| artist.to_string())
-                .unwrap_or_default(),
-        )
-        .set("songCount", 0)
-}
-
-/// Returns the name a catalog album is listed under.
-///
-/// # Parameters
-///
-/// - `result`: the album the provider returned.
-/// - `title_suffix`: the suffix appended to the title.
-///
-/// # Returns
-///
-/// The title with the suffix.
-pub(crate) fn catalog_album_name(result: &CatalogAlbumResult, title_suffix: &str) -> String {
-    format!("{}{title_suffix}", result.album.title)
-}
-
-/// Builds one catalog `AlbumID3` member from a full album lookup.
-///
-/// # Parameters
-///
-/// - `result`: the album the provider returned, with its catalog id.
-/// - `title_suffix`: the suffix appended to the title.
-///
-/// # Returns
-///
-/// The album, without its `song` children; the endpoint that returns songs adds
-/// them with [`catalog_child`].
-pub(crate) fn catalog_album(result: &CatalogAlbumResult, title_suffix: &str) -> Object {
-    let id = &result.id;
-    let slug = id.slug();
-    let album = &result.album;
-    let genres: Vec<String> = album.genres.clone();
-    let duration_secs = album
-        .tracks
-        .iter()
-        .filter_map(|track| track.duration_ms)
-        .map(i64::from)
-        .sum::<i64>()
-        / 1_000;
-
-    Object::new()
-        .set("id", id.to_string())
-        .set("name", format!("{}{title_suffix}", album.title))
-        .set("artist", display_credits(&album.artists))
-        .set("year", release_year(album.release_date.as_deref()))
-        .set("coverArt", cover_art(id, !album.images.is_empty()))
-        .set("duration", duration_secs)
-        .set("playCount", 0)
-        .set("genre", genres.first().cloned().unwrap_or_default())
-        .set("created", "")
-        .set(
-            "artistId",
-            album
-                .artists
-                .first()
-                .and_then(|credit| artist_id(slug, credit))
-                .map(|artist| artist.to_string())
-                .unwrap_or_default(),
-        )
-        .set("songCount", album.tracks.len() as i64)
-        .set("played", "")
-        .set("version", "")
-        .set("musicBrainzId", music_brainz_id(&album.ids))
-        .set(
-            "genres",
-            Array::named("genre", genres.iter().map(|name| genre(name))),
-        )
-        .set(
-            "artists",
-            Array::named(
-                "artist",
-                album.artists.iter().map(|credit| credit_ref(slug, credit)),
-            ),
-        )
-        .set("displayArtist", display_credits(&album.artists))
-        .set(
-            "releaseTypes",
-            Array::named("releaseType", album.album_type.iter().cloned()),
-        )
-        .set("moods", Array::named("mood", std::iter::empty::<String>()))
-        .set("sortName", "")
-        .set("explicitStatus", "")
-}
-
-/// Builds one catalog `ArtistID3` member.
-///
-/// # Parameters
-///
-/// - `result`: the artist the provider returned, with its catalog id.
-/// - `album_count`: how many albums the page lists, when the caller knows it; a
-///   search result does not, and the provider's own count answers instead.
-/// - `title_suffix`: the suffix appended to the name.
-///
-/// # Returns
-///
-/// The artist, with a `coverArt` id when the provider describes a picture. The
-/// `albumCount` member is left out when neither the caller nor the provider
-/// states a count.
-pub(crate) fn catalog_artist(
-    result: &CatalogArtistResult,
-    album_count: Option<i64>,
-    title_suffix: &str,
-) -> Object {
-    let artist = &result.artist;
-
-    let object = Object::new()
-        .set("id", result.id.to_string())
-        .set("name", format!("{}{title_suffix}", artist.name))
-        .set("coverArt", cover_art(&result.id, !artist.images.is_empty()))
-        .set("musicBrainzId", music_brainz_id(&artist.ids))
-        .set("sortName", "");
-    match album_count.or(artist.album_count.map(i64::from)) {
-        Some(count) => object.set("albumCount", count),
-        None => object,
-    }
-}
-
-/// Builds the minimal `ArtistID3` reference an entity's credits embed.
-///
-/// # Parameters
-///
-/// - `slug`: the slug of the instance that issued the entity.
-/// - `credit`: the artist credit.
-///
-/// # Returns
-///
-/// The reference, named but with an empty id when the credit carries no
-/// provider identifier, because a credit the catalog cannot resolve must not
-/// point at a fabricated entity.
-fn credit_ref(slug: &Slug, credit: &ArtistCredit) -> Object {
-    Object::new()
-        .set(
-            "id",
-            artist_id(slug, credit)
-                .map(|id| id.to_string())
-                .unwrap_or_default(),
-        )
-        .set("name", credit.name.clone())
-}
-
-/// Joins an entity's credits into its display artist.
-///
-/// # Parameters
-///
-/// - `credits`: the artist credits, in credit order.
-///
-/// # Returns
-///
-/// The credit names joined with `, `, and an empty string when there are none.
-fn display_credits(credits: &[ArtistCredit]) -> String {
-    credits
-        .iter()
-        .map(|credit| credit.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Returns a catalog entity's `coverArt` value.
-///
-/// # Parameters
-///
-/// - `id`: the entity's catalog id.
-/// - `has_image`: whether the provider returned an image for the entity.
-///
-/// # Returns
-///
-/// The entity's own id when it has an image, so `getCoverArt` resolves it
-/// through the issuing instance, and an empty string otherwise.
-fn cover_art(id: &CatalogId, has_image: bool) -> String {
-    if has_image {
-        id.to_string()
-    } else {
-        String::new()
-    }
-}
-
-/// Returns the year a release date names.
-///
-/// # Parameters
-///
-/// - `release_date`: the provider's ISO 8601 date or date-time.
-///
-/// # Returns
-///
-/// The first four characters parsed as a year, or zero when the value does not
-/// begin with one.
-fn release_year(release_date: Option<&str>) -> i64 {
-    release_date
-        .and_then(|date| date.get(..4))
-        .and_then(|year| year.parse::<i64>().ok())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

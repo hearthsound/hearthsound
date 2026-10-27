@@ -5,11 +5,10 @@
 //! One binary per crate means the crate and its test support are compiled and
 //! linked once per test run, which is what keeps the test build and CI short.
 
-mod catalog_cache;
-mod catalog_dedupe;
-mod catalog_service;
 mod common;
-mod cover_art;
-mod enrichment;
+mod deadline;
+mod fields;
 mod identity;
-mod materialize;
+mod index;
+mod merge;
+mod search;

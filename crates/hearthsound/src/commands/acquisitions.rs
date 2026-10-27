@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context as _, bail};
 use hearthsound_acquire::repo::{AcquisitionRepository, AcquisitionSummary, ListFilter};
 use hearthsound_config::bootstrap::BootstrapConfig;
-use hearthsound_core::{AcquisitionState, ClientId, IdPrefix};
+use hearthsound_core::{AcquisitionState, EntityId, IdPrefix};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
@@ -145,11 +145,11 @@ async fn cancel(context: &Context, args: AcquisitionsCancelArgs) -> anyhow::Resu
 /// Returns an error when the value is not a well-formed client id, or is a
 /// client id of another kind.
 fn acquisition_id(text: &str) -> anyhow::Result<Uuid> {
-    let client = ClientId::parse(text).with_context(|| format!("`{text}` is not a client id"))?;
-    match client {
-        ClientId::Entity(id) if id.kind() == IdPrefix::Acquisition => Ok(id.uuid()),
-        _ => bail!("`{text}` is not an acquisition id"),
+    let id = EntityId::parse(text).with_context(|| format!("`{text}` is not an id"))?;
+    if id.kind() != IdPrefix::Acquisition {
+        bail!("`{text}` is not an acquisition id");
     }
+    Ok(id.uuid())
 }
 
 /// Renders the entity an acquisition targets.

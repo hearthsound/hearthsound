@@ -37,7 +37,7 @@ use std::time::Duration;
 use hearthsound_config::SettingsStore;
 use hearthsound_config::keys;
 use hearthsound_core::events::{Audience, QueuePrefetch, ServerEvent};
-use hearthsound_core::{ClientId, EntityId, EntityKind, IdPrefix, Priority};
+use hearthsound_core::{EntityId, IdPrefix, Priority};
 use uuid::Uuid;
 
 use crate::orchestrator::{AcquireOutcome, AcquireRequest, AcquisitionOrchestrator};
@@ -89,14 +89,14 @@ const DROPPED: &str = "dropped";
 ///
 /// use hearthsound_acquire::orchestrator::AcquisitionOrchestrator;
 /// use hearthsound_acquire::prefetch::PrefetchScheduler;
-/// use hearthsound_core::{ClientId, EntityId, IdPrefix};
+/// use hearthsound_core::{EntityId, IdPrefix};
 /// use uuid::Uuid;
 ///
 /// # fn example(orchestrator: Arc<AcquisitionOrchestrator>) {
 /// let scheduler = PrefetchScheduler::new(orchestrator);
 /// let user = Uuid::now_v7();
-/// let listing: Vec<ClientId> = (0..3)
-///     .map(|_| ClientId::Entity(EntityId::new(IdPrefix::Track)))
+/// let listing: Vec<EntityId> = (0..3)
+///     .map(|_| EntityId::new(IdPrefix::Track))
 ///     .collect();
 /// scheduler.record_listing(user, "symfonium", listing.clone());
 /// let streamed = listing[0].clone();
@@ -135,15 +135,15 @@ struct Context {
     /// client has only saved a queue.
     listed_at: Option<i64>,
     /// The listing's track ids, in the order the client will play them.
-    listing: Vec<ClientId>,
+    listing: Vec<EntityId>,
     /// The queue the client saved, in the order the client will play it.
-    saved: Option<Vec<ClientId>>,
+    saved: Option<Vec<EntityId>>,
     /// When the context was last touched by a listing or a save, in unix
     /// milliseconds.
     touched_at: i64,
     /// The acquisitions this context started, keyed by the item they were
     /// started for.
-    prefetched: HashMap<ClientId, Uuid>,
+    prefetched: HashMap<EntityId, Uuid>,
 }
 
 /// The bounded store of listing contexts.
@@ -173,7 +173,7 @@ impl Listings {
     /// - `client`: the client instance.
     /// - `listing`: the ordered track ids of the listing.
     /// - `now`: the current time in unix milliseconds.
-    fn record(&mut self, user: Uuid, client: &str, listing: Vec<ClientId>, now: i64) {
+    fn record(&mut self, user: Uuid, client: &str, listing: Vec<EntityId>, now: i64) {
         self.prune(now);
         let context = self.contexts.entry(user).or_default().remove(client);
         let context = match context {
@@ -212,7 +212,7 @@ impl Listings {
     /// - `client`: the client instance.
     /// - `queue`: the ordered track ids of the queue; empty clears it.
     /// - `now`: the current time in unix milliseconds.
-    fn save(&mut self, user: Uuid, client: &str, queue: Vec<ClientId>, now: i64) {
+    fn save(&mut self, user: Uuid, client: &str, queue: Vec<EntityId>, now: i64) {
         self.prune(now);
         let contexts = self.contexts.entry(user).or_default();
         let saved = (!queue.is_empty()).then_some(queue);
@@ -273,7 +273,7 @@ impl Listings {
     ///
     /// `true` when the item was not tracked before or its acquisition is a new
     /// one, which is when the client has not heard about that acquisition yet.
-    fn track(&mut self, user: Uuid, client: &str, item: &ClientId, acquisition: Uuid) -> bool {
+    fn track(&mut self, user: Uuid, client: &str, item: &EntityId, acquisition: Uuid) -> bool {
         let Some(context) = self
             .contexts
             .get_mut(&user)
@@ -281,7 +281,7 @@ impl Listings {
         else {
             return true;
         };
-        context.prefetched.insert(item.clone(), acquisition) != Some(acquisition)
+        context.prefetched.insert(*item, acquisition) != Some(acquisition)
     }
 
     /// Stops tracking one item of a context.
@@ -291,7 +291,7 @@ impl Listings {
     /// - `user`: the user the listing belongs to.
     /// - `client`: the client instance.
     /// - `item`: the listing item to forget.
-    fn forget(&mut self, user: Uuid, client: &str, item: &ClientId) {
+    fn forget(&mut self, user: Uuid, client: &str, item: &EntityId) {
         if let Some(context) = self
             .contexts
             .get_mut(&user)
@@ -369,11 +369,11 @@ impl Listings {
 /// The upcoming items, in playing order, or `None` when neither source holds the
 /// streamed track.
 fn upcoming_from(
-    queue: Option<&[ClientId]>,
-    listing: Option<&[ClientId]>,
-    track: &ClientId,
+    queue: Option<&[EntityId]>,
+    listing: Option<&[EntityId]>,
+    track: &EntityId,
     lookahead: usize,
-) -> Option<Vec<ClientId>> {
+) -> Option<Vec<EntityId>> {
     let items = queue
         .and_then(|queue| position_of(queue, track).map(|position| (queue, position)))
         .or_else(|| {
@@ -399,7 +399,7 @@ fn upcoming_from(
 /// # Returns
 ///
 /// The item's position, or `None` when it is not in the queue.
-fn position_of(items: &[ClientId], track: &ClientId) -> Option<usize> {
+fn position_of(items: &[EntityId], track: &EntityId) -> Option<usize> {
     items.iter().position(|item| item == track)
 }
 
@@ -454,9 +454,8 @@ impl PrefetchScheduler {
     ///
     /// The listing replaces the one the same user and client recorded before,
     /// which is what makes it "the most recent listing" a later stream is
-    /// matched against. Nothing is stored in the database, and an
-    /// `x_<slug>_t_<id>` item is kept as it is: a catalog track is materialized
-    /// only when it is actually prefetched.
+    /// matched against. Nothing is stored in the database: every item is
+    /// already a row's id.
     ///
     /// # Parameters
     ///
@@ -471,7 +470,7 @@ impl PrefetchScheduler {
     ///
     /// Nothing. `prefetch.enabled` off makes this a no-op, and a setting that
     /// cannot be read is logged and treated as off.
-    pub fn record_listing(&self, user: Uuid, client: &str, listing: Vec<ClientId>) {
+    pub fn record_listing(&self, user: Uuid, client: &str, listing: Vec<EntityId>) {
         if !self.enabled() {
             return;
         }
@@ -507,8 +506,7 @@ impl PrefetchScheduler {
     /// - `user`: the user whose client streamed the track.
     /// - `client`: the client instance, as in
     ///   [`record_listing`](PrefetchScheduler::record_listing).
-    /// - `track`: the streamed track as the client named it: a stored track id
-    ///   or an `x_` catalog id.
+    /// - `track`: the streamed track's id, which is the row the client named.
     /// - `can_acquire`: whether that user may acquire at all; a user without the
     ///   permission gets no prefetch either.
     ///
@@ -516,7 +514,7 @@ impl PrefetchScheduler {
     ///
     /// Nothing. Every failure is logged with the track it concerned, so a caller
     /// can spawn this off the request path without handling anything.
-    pub async fn note_stream(&self, user: Uuid, client: &str, track: &ClientId, can_acquire: bool) {
+    pub async fn note_stream(&self, user: Uuid, client: &str, track: &EntityId, can_acquire: bool) {
         if !self.enabled() {
             return;
         }
@@ -562,7 +560,7 @@ impl PrefetchScheduler {
     ///
     /// Nothing. `prefetch.enabled` off makes this a no-op, and a setting that
     /// cannot be read is logged and treated as off.
-    pub fn record_queue(&self, user: Uuid, client: &str, queue: Vec<ClientId>) {
+    pub fn record_queue(&self, user: Uuid, client: &str, queue: Vec<EntityId>) {
         if !self.enabled() {
             return;
         }
@@ -620,7 +618,7 @@ impl PrefetchScheduler {
     /// - `user`: the user the listing belongs to.
     /// - `client`: the client instance.
     /// - `now`: the current time in unix milliseconds.
-    fn listing(&self, user: Uuid, client: &str, now: i64) -> Option<Vec<ClientId>> {
+    fn listing(&self, user: Uuid, client: &str, now: i64) -> Option<Vec<EntityId>> {
         lock(&self.inner.listings)
             .recent(user, client, now)
             .filter(|context| context.listed_at.is_some_and(|at| is_recent(at, now)))
@@ -638,7 +636,7 @@ impl PrefetchScheduler {
     ///
     /// The queue's track ids in playing order, or `None` when the client saved
     /// none or cleared the one it had.
-    fn queue(&self, user: Uuid, client: &str) -> Option<Vec<ClientId>> {
+    fn queue(&self, user: Uuid, client: &str) -> Option<Vec<EntityId>> {
         lock(&self.inner.listings)
             .recent(user, client, crate::now_millis())
             .and_then(|context| context.saved.clone())
@@ -651,14 +649,14 @@ impl PrefetchScheduler {
     /// - `user`: the user whose client streamed.
     /// - `client`: the client instance.
     /// - `upcoming`: the items the client is about to reach.
-    async fn drop_departed(&self, user: Uuid, client: &str, upcoming: &[ClientId]) {
-        let tracked: Vec<(ClientId, Uuid)> = lock(&self.inner.listings)
+    async fn drop_departed(&self, user: Uuid, client: &str, upcoming: &[EntityId]) {
+        let tracked: Vec<(EntityId, Uuid)> = lock(&self.inner.listings)
             .recent(user, client, crate::now_millis())
             .map(|context| {
                 context
                     .prefetched
                     .iter()
-                    .map(|(item, acquisition)| (item.clone(), *acquisition))
+                    .map(|(item, acquisition)| (*item, *acquisition))
                     .collect()
             })
             .unwrap_or_default();
@@ -683,7 +681,7 @@ impl PrefetchScheduler {
     /// - `client`: the client instance.
     /// - `item`: the listing item the acquisition was started for.
     /// - `acquisition`: the acquisition to cancel.
-    async fn drop(&self, user: Uuid, client: &str, item: &ClientId, acquisition: Uuid) {
+    async fn drop(&self, user: Uuid, client: &str, item: &EntityId, acquisition: Uuid) {
         let row = match self.inner.orchestrator.repository().get(acquisition).await {
             Ok(Some(row)) => row,
             Ok(None) => {
@@ -787,7 +785,7 @@ impl PrefetchScheduler {
         &self,
         user: Uuid,
         client: &str,
-        upcoming: &[ClientId],
+        upcoming: &[EntityId],
         can_acquire: bool,
     ) {
         for (index, item) in upcoming.iter().enumerate() {
@@ -814,11 +812,11 @@ impl PrefetchScheduler {
         &self,
         user: Uuid,
         client: &str,
-        item: &ClientId,
+        item: &EntityId,
         priority: Priority,
         can_acquire: bool,
     ) {
-        let Some(track) = self.materialize(item).await else {
+        let Some(track) = self.item_track(item) else {
             return;
         };
         let request = AcquireRequest::new(track, priority, PREFETCH_REASON)
@@ -860,12 +858,11 @@ impl PrefetchScheduler {
         }
     }
 
-    /// Resolves a listing item to the stored track to acquire.
+    /// Returns the track a listing item names.
     ///
-    /// A stored track id is the row itself. An `x_` catalog id is materialized
-    /// through the catalog layer, which answers a track the server already
-    /// stores without calling its instance, so a catalog listing costs a
-    /// provider call only for the tracks that are actually prefetched.
+    /// Every listing item is a stored row's id, so the only question left is
+    /// whether it names a track at all: a listing of another entity kind never
+    /// matches a streamed track and is passed over here.
     ///
     /// # Parameters
     ///
@@ -873,38 +870,13 @@ impl PrefetchScheduler {
     ///
     /// # Returns
     ///
-    /// The stored track, or `None` when the item is not a track or the catalog
-    /// layer could not resolve it, which is logged.
-    async fn materialize(&self, item: &ClientId) -> Option<EntityId> {
-        match item {
-            ClientId::Entity(id) if id.kind() == IdPrefix::Track => Some(*id),
-            ClientId::Entity(id) => {
-                tracing::debug!(id = %id, "a listing item is not a track");
-                None
-            }
-            ClientId::Catalog(id) if id.kind() == EntityKind::Track => {
-                match self
-                    .inner
-                    .orchestrator
-                    .catalog()
-                    .materialize_track(id)
-                    .await
-                {
-                    Ok(track) => Some(track),
-                    Err(error) => {
-                        tracing::warn!(
-                            id = %id,
-                            %error,
-                            "could not materialize a prefetched catalog track"
-                        );
-                        None
-                    }
-                }
-            }
-            ClientId::Catalog(id) => {
-                tracing::debug!(id = %id, "a listing item is not a track");
-                None
-            }
+    /// The track row, or `None` when the item is not a track, which is logged.
+    fn item_track(&self, item: &EntityId) -> Option<EntityId> {
+        if item.kind() == IdPrefix::Track {
+            Some(*item)
+        } else {
+            tracing::debug!(id = %item, "a listing item is not a track");
+            None
         }
     }
 
@@ -917,7 +889,7 @@ impl PrefetchScheduler {
     /// - `item`: the listing item the event is about.
     /// - `priority`: the priority the prefetch ran at.
     /// - `state`: [`STARTED`] or [`DROPPED`].
-    fn publish(&self, user: Uuid, client: &str, item: &ClientId, priority: Priority, state: &str) {
+    fn publish(&self, user: Uuid, client: &str, item: &EntityId, priority: Priority, state: &str) {
         self.inner.orchestrator.events().publish_for(
             Audience::User(user),
             ServerEvent::QueuePrefetch(QueuePrefetch {
@@ -965,12 +937,12 @@ mod tests {
     use super::*;
 
     /// Returns a track client id, for listings that name stored tracks.
-    fn track() -> ClientId {
-        ClientId::Entity(EntityId::new(IdPrefix::Track))
+    fn track() -> EntityId {
+        EntityId::new(IdPrefix::Track)
     }
 
     /// Returns a listing of `count` distinct stored tracks.
-    fn listing(count: usize) -> Vec<ClientId> {
+    fn listing(count: usize) -> Vec<EntityId> {
         (0..count).map(|_| track()).collect()
     }
 
@@ -1022,11 +994,11 @@ mod tests {
 
         // The queue holds the track, so its next items are the upcoming set.
         let upcoming = upcoming_from(Some(&queued), Some(&listed), &queued[1], lookahead).unwrap();
-        assert_eq!(upcoming, vec![queued[2].clone(), queued[3].clone()]);
+        assert_eq!(upcoming, vec![queued[2], queued[3]]);
 
         // A queue that does not hold the track leaves the listing to answer.
         let upcoming = upcoming_from(Some(&queued), Some(&listed), &listed[0], lookahead).unwrap();
-        assert_eq!(upcoming, vec![listed[1].clone(), listed[2].clone()]);
+        assert_eq!(upcoming, vec![listed[1], listed[2]]);
 
         // Neither source holding the track yields nothing to prefetch.
         assert!(upcoming_from(Some(&queued), Some(&listed), &track(), lookahead).is_none());
@@ -1035,7 +1007,7 @@ mod tests {
         // The last item of a queue has nothing after it.
         assert_eq!(
             upcoming_from(Some(&queued), None, &queued[3], lookahead).unwrap(),
-            Vec::<ClientId>::new()
+            Vec::<EntityId>::new()
         );
     }
 
@@ -1044,7 +1016,7 @@ mod tests {
         let mut listings = Listings::default();
         let user = Uuid::now_v7();
         let first = track();
-        listings.record(user, "client", vec![first.clone()], 1_000);
+        listings.record(user, "client", vec![first], 1_000);
 
         let acquisition = Uuid::now_v7();
         listings
@@ -1053,10 +1025,10 @@ mod tests {
             .and_then(|contexts| contexts.get_mut("client"))
             .unwrap()
             .prefetched
-            .insert(first.clone(), acquisition);
+            .insert(first, acquisition);
 
         let second = track();
-        listings.record(user, "client", vec![second.clone()], 2_000);
+        listings.record(user, "client", vec![second], 2_000);
         let context = listings.recent(user, "client", 2_000).unwrap();
         assert_eq!(context.listing, vec![second]);
         assert_eq!(context.prefetched.get(&first), Some(&acquisition));

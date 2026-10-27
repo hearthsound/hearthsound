@@ -1,4 +1,4 @@
-package hearthsound:plugin@0.4.0;
+package hearthsound:plugin@0.5.0;
 
 interface types {
   enum entity-kind { track, album, artist, playlist }
@@ -6,7 +6,20 @@ interface types {
   record id-pair { namespace: string, value: string }
   record artist-credit { name: string, ids: list<id-pair> }
   record image { url: string, width: option<u32>, height: option<u32> }
-  record album-ref { id: string, title: string, artists: list<artist-credit>, year: option<u16>, images: list<image> }
+  /// A coarse album row the provider can list without its tracklist.
+  ///
+  /// `album-type` is lowercase: `album`, `ep` or `single`, or a secondary type
+  /// (`compilation`, `live`, `remix`, `soundtrack`, `dj-mix`, `demo`,
+  /// `broadcast`, `other`) when the release group carries one. A secondary type
+  /// wins over the primary one. `edition` is the provider's own disambiguation of
+  /// this pressing, when it has one. `track-count` is the provider's track count
+  /// for this release. `ids` carries every canonical identifier the provider
+  /// knows for it (`mb-release`, `mb-release-group`, `upc`).
+  record album-ref {
+    id: string, title: string, artists: list<artist-credit>, year: option<u16>,
+    images: list<image>, album-type: option<string>, edition: option<string>,
+    track-count: option<u32>, ids: list<id-pair>,
+  }
   record track {
     id: string, title: string, artists: list<artist-credit>, album: option<album-ref>,
     duration-ms: option<u32>, disc-number: option<u16>, track-number: option<u16>,
@@ -16,6 +29,8 @@ interface types {
     id: string, title: string, artists: list<artist-credit>, release-date: option<string>,
     album-type: option<string>, upc: option<string>, genres: list<string>,
     images: list<image>, tracks: list<track>, ids: list<id-pair>,
+    /// The provider's own disambiguation of this pressing, when it has one.
+    edition: option<string>,
   }
   record artist {
     id: string, name: string, images: list<image>, ids: list<id-pair>,

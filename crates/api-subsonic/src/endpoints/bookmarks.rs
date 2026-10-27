@@ -5,7 +5,8 @@
 //! per user and per track, so saving one again moves the position instead of
 //! adding a second bookmark.
 
-use hearthsound_core::{ClientId, EntityId, EntityKind, IdPrefix};
+use hearthsound_core::providers::ExternalId;
+use hearthsound_core::{EntityId, EntityKind, IdPrefix};
 use uuid::Uuid;
 
 use crate::auth::Call;
@@ -19,9 +20,9 @@ use super::feedback::resolve;
 ///
 /// # Parameters
 ///
-/// - `call`: the authenticated call. `id` names a stored or catalog track,
-///   `position` is the position in milliseconds, and `comment` is the user's
-///   note, when there is one.
+/// - `call`: the authenticated call. `id` names a track, `position` is the
+///   position in milliseconds, and `comment` is the user's note, when there is
+///   one.
 ///
 /// # Returns
 ///
@@ -31,8 +32,7 @@ use super::feedback::resolve;
 ///
 /// Answers Subsonic error 10 when `id` or `position` is missing, error 0 when
 /// `position` is not a number, error 70 when `id` is not a track id or names no
-/// stored track, and a generic error when a catalog track cannot be
-/// materialized or the write fails.
+/// stored track, and a generic error when the lookup or the write fails.
 pub async fn create_bookmark(call: Call) -> Encoded {
     let Some(value) = call.get("id").filter(|value| !value.is_empty()) else {
         return call.encode(Response::failed(SubsonicError::missing_parameter("id")));
@@ -90,17 +90,15 @@ pub async fn create_bookmark(call: Call) -> Encoded {
 /// # Errors
 ///
 /// Answers Subsonic error 10 when `id` is missing, error 70 when `id` is not a
-/// track id, and a generic error when the write fails.
+/// track id or names no track, and a generic error when the write fails.
 pub async fn delete_bookmark(call: Call) -> Encoded {
     let Some(value) = call.get("id").filter(|value| !value.is_empty()) else {
         return call.encode(Response::failed(SubsonicError::missing_parameter("id")));
     };
-    let track = match ClientId::parse(value) {
-        Ok(ClientId::Entity(id)) if id.kind() == IdPrefix::Track => id,
-        _ => {
-            tracing::debug!("a bookmark request named an id that is not a track id");
-            return call.encode(Response::failed(SubsonicError::not_found()));
-        }
+    let track = match browse::entity_id(call.state(), IdPrefix::Track, value).await {
+        Ok(Some(track)) => track,
+        Ok(None) => return call.encode(Response::failed(SubsonicError::not_found())),
+        Err(error) => return call.encode(Response::failed(error)),
     };
     match call
         .state()
@@ -146,6 +144,10 @@ pub async fn get_bookmarks(call: Call) -> Encoded {
         Ok(annotations) => annotations,
         Err(error) => return call.encode(Response::failed(error)),
     };
+    let identifiers = match identifiers(&call, &ids).await {
+        Ok(identifiers) => identifiers,
+        Err(error) => return call.encode(Response::failed(error)),
+    };
     let mut bookmarks = Vec::with_capacity(saved.len());
     for bookmark in &saved {
         let loaded = match bookmark_track(&call, bookmark.track_id).await {
@@ -163,6 +165,9 @@ pub async fn get_bookmarks(call: Call) -> Encoded {
                 .get(&bookmark.track_id.uuid())
                 .copied()
                 .unwrap_or_default(),
+            identifiers
+                .get(&bookmark.track_id.uuid())
+                .map_or(&[], Vec::as_slice),
         );
         // A bookmark has one instant: the protocol asks for both a creation and
         // a change time, and the row records when it was last saved.
@@ -241,4 +246,28 @@ async fn annotations(
         Ok(annotations) => Ok(annotations),
         Err(error) => Err(browse::failure("getBookmarks", &error)),
     }
+}
+
+/// Loads the stored identifiers of the bookmarked tracks.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `ids`: the bookmarked tracks.
+///
+/// # Returns
+///
+/// The identifiers, keyed by track id.
+///
+/// # Errors
+///
+/// Answers a generic error when the read fails.
+async fn identifiers(
+    call: &Call,
+    ids: &[EntityId],
+) -> Result<std::collections::HashMap<Uuid, Vec<ExternalId>>, SubsonicError> {
+    let plain: Vec<Uuid> = ids.iter().map(EntityId::uuid).collect();
+    browse::identifiers(call.state().database(), EntityKind::Track, &plain)
+        .await
+        .map_err(|error| browse::failure("getBookmarks", &error))
 }

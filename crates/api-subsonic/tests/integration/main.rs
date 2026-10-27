@@ -10,7 +10,6 @@
 
 mod bookmarks;
 mod browse;
-mod catalog;
 mod common;
 mod cover_art;
 mod download;
@@ -24,7 +23,6 @@ mod hs_queue;
 mod hs_server;
 mod info;
 mod now_playing;
-mod pages;
 mod play_queue;
 mod playlists;
 mod report_playback;

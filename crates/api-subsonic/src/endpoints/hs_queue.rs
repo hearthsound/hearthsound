@@ -10,7 +10,7 @@
 //! only when the request carries `hearthsound=1` and answers Subsonic error 70
 //! without it.
 
-use hearthsound_core::ClientId;
+use hearthsound_core::{EntityId, IdPrefix};
 
 use crate::auth::Call;
 use crate::response::{Encoded, Response, SubsonicError};
@@ -37,7 +37,7 @@ use crate::response::{Encoded, Response, SubsonicError};
 /// # Errors
 ///
 /// Answers Subsonic error 70 when the request does not carry `hearthsound=1` and
-/// when an id is not a client id, error 10 when a required parameter is absent,
+/// when an id is not a track id, error 10 when a required parameter is absent,
 /// and a generic error when the surface has no prefetch scheduler.
 pub async fn hs_set_queue(call: Call) -> Encoded {
     if !call.vendor_enabled() {
@@ -61,15 +61,19 @@ pub async fn hs_set_queue(call: Call) -> Encoded {
     }
     let mut queue = Vec::with_capacity(upcoming.len() + 1);
     for value in std::iter::once(current).chain(upcoming) {
-        match ClientId::parse(value) {
-            Ok(id) => queue.push(id),
+        match EntityId::parse(value) {
+            Ok(id) if id.kind() == IdPrefix::Track => queue.push(id),
+            Ok(_) => {
+                tracing::debug!("a queue declaration named an entity that is not a track");
+                return call.encode(Response::failed(SubsonicError::not_found()));
+            }
             Err(error) => {
-                tracing::debug!(%error, "a queue declaration named an id that is not a client id");
+                tracing::debug!(%error, "a queue declaration named an id that is not an entity id");
                 return call.encode(Response::failed(SubsonicError::not_found()));
             }
         }
     }
-    let playing = queue[0].clone();
+    let playing = queue[0];
     let state = call.state();
     let Some(prefetch) = state.prefetch() else {
         tracing::error!("the /rest surface has no prefetch scheduler to declare a queue to");

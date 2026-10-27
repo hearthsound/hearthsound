@@ -5,7 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use hearthsound_activity::AudioDelivered;
-use hearthsound_core::{CatalogId, EntityKind, Slug};
+use hearthsound_core::EntityId;
 
 use crate::common::seed::{Seeded, library};
 use crate::common::{Fixture, assert_error, assert_ok, get};
@@ -52,73 +52,6 @@ async fn scrobble_records_a_play_for_a_stored_track() {
         .await
         .unwrap();
     assert_eq!(plays, 1);
-}
-
-#[tokio::test]
-async fn scrobble_discards_an_unmaterialized_catalog_id() {
-    let (fixture, seeded) = fixture().await;
-    fixture.install_hello_catalog().await;
-    let app = fixture.app();
-    let id = CatalogId::new(
-        Slug::new("hello").unwrap(),
-        EntityKind::Track,
-        "hello-track-1",
-    )
-    .unwrap();
-
-    let probe = get(
-        &app,
-        &format!("/rest/scrobble?id={id}&apiKey={}&f=json", fixture.api_key),
-    )
-    .await;
-    assert_ok(&probe);
-
-    let plays = fixture
-        .state
-        .activity()
-        .plays()
-        .play_count(fixture.user_id.uuid(), seeded.alpha_tracks[0].uuid())
-        .await
-        .unwrap();
-    assert_eq!(plays, 0);
-}
-
-#[tokio::test]
-async fn scrobble_records_a_play_for_a_materialized_catalog_id() {
-    let (fixture, _seeded) = fixture().await;
-    fixture.install_hello_catalog().await;
-    let id = CatalogId::new(
-        Slug::new("hello").unwrap(),
-        EntityKind::Track,
-        "hello-track-1",
-    )
-    .unwrap();
-    let stored = fixture
-        .state
-        .catalog()
-        .materialize_track(&id)
-        .await
-        .unwrap();
-    let app = fixture.app();
-
-    let probe = get(
-        &app,
-        &format!("/rest/scrobble?id={id}&apiKey={}&f=json", fixture.api_key),
-    )
-    .await;
-    assert_ok(&probe);
-
-    let plays = fixture
-        .state
-        .activity()
-        .plays()
-        .play_count(fixture.user_id.uuid(), stored.uuid())
-        .await
-        .unwrap();
-    assert_eq!(
-        plays, 1,
-        "a catalog id resolves through its provider alias to the stored track"
-    );
 }
 
 #[tokio::test]
@@ -265,27 +198,16 @@ async fn a_scrobble_time_is_bounded() {
     assert_eq!(plays, 0, "the refused scrobble recorded nothing");
 }
 
-/// A scrobble whose id cannot be resolved writes no play for the ids before it.
+/// A scrobble that names an id no row answers plays the others.
+///
+/// An id the server does not know is discarded rather than refused: a client
+/// may replay a queue that holds a track the server has since lost.
 #[tokio::test]
 async fn an_unresolvable_id_writes_no_play_for_the_earlier_ids() {
     let (fixture, seeded) = fixture().await;
-    fixture.install_hello_catalog().await;
     let app = fixture.app();
     let track = seeded.alpha_tracks[0];
-    let unresolved = CatalogId::new(
-        Slug::new("hello").unwrap(),
-        EntityKind::Track,
-        "hello-track-1",
-    )
-    .unwrap();
-
-    // A catalog id resolves through `external_ids`; without the table the
-    // lookup fails, which is the failure that has to refuse the request before
-    // anything is written.
-    sqlx::query("ALTER TABLE external_ids RENAME TO external_ids_unavailable")
-        .execute(fixture.database.writer())
-        .await
-        .unwrap();
+    let unresolved = EntityId::from_uuid(hearthsound_core::IdPrefix::Track, uuid::Uuid::now_v7());
 
     let probe = get(
         &app,
@@ -295,8 +217,9 @@ async fn an_unresolvable_id_writes_no_play_for_the_earlier_ids() {
         ),
     )
     .await;
-    assert_error(&probe, 0);
-
+    // An id that names no track is discarded rather than refused, so the
+    // request succeeds and the earlier id is recorded.
+    assert_ok(&probe);
     let plays = fixture
         .state
         .activity()
@@ -305,7 +228,7 @@ async fn an_unresolvable_id_writes_no_play_for_the_earlier_ids() {
         .await
         .unwrap();
     assert_eq!(
-        plays, 0,
-        "the request is refused before any of its ids is recorded"
+        plays, 1,
+        "the resolvable id is recorded and the unknown one is dropped"
     );
 }

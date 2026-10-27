@@ -12,8 +12,8 @@
 //! A pool is generic over the [`World`] it drives, so every provider adapter
 //! shares this one implementation while each still gets its own world handle
 //! back from the store. Each hosted plugin API version contributes its own
-//! `World` impls - the `v4` worlds keep their plain names and the `v3` worlds
-//! carry a `3` suffix - so trap accounting, the permits and the deadlines are
+//! `World` impls - the `v5` worlds keep their plain names and the `v4` worlds
+//! carry a `4` suffix - so trap accounting, the permits and the deadlines are
 //! the same code for both.
 
 use std::collections::VecDeque;
@@ -28,18 +28,18 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
-use crate::api::v3::bindings::{
-    AccountLinkProvider as AccountLinkProvider3, AccountLinkProviderPre as AccountLinkProviderPre3,
-    AcquisitionProvider as AcquisitionProvider3, AcquisitionProviderPre as AcquisitionProviderPre3,
-    ArtworkProvider as ArtworkProvider3, ArtworkProviderPre as ArtworkProviderPre3,
-    CatalogProvider as CatalogProvider3, CatalogProviderPre as CatalogProviderPre3,
-    DiscoveryProvider as DiscoveryProvider3, DiscoveryProviderPre as DiscoveryProviderPre3,
-    MetadataProvider as MetadataProvider3, MetadataProviderPre as MetadataProviderPre3,
-    ScrobbleProvider as ScrobbleProvider3, ScrobbleProviderPre as ScrobbleProviderPre3,
-    VerificationProvider as VerificationProvider3,
-    VerificationProviderPre as VerificationProviderPre3,
-};
 use crate::api::v4::bindings::{
+    AccountLinkProvider as AccountLinkProvider4, AccountLinkProviderPre as AccountLinkProviderPre4,
+    AcquisitionProvider as AcquisitionProvider4, AcquisitionProviderPre as AcquisitionProviderPre4,
+    ArtworkProvider as ArtworkProvider4, ArtworkProviderPre as ArtworkProviderPre4,
+    CatalogProvider as CatalogProvider4, CatalogProviderPre as CatalogProviderPre4,
+    DiscoveryProvider as DiscoveryProvider4, DiscoveryProviderPre as DiscoveryProviderPre4,
+    MetadataProvider as MetadataProvider4, MetadataProviderPre as MetadataProviderPre4,
+    ScrobbleProvider as ScrobbleProvider4, ScrobbleProviderPre as ScrobbleProviderPre4,
+    VerificationProvider as VerificationProvider4,
+    VerificationProviderPre as VerificationProviderPre4,
+};
+use crate::api::v5::bindings::{
     AccountLinkProvider, AccountLinkProviderPre, AcquisitionProvider, AcquisitionProviderPre,
     ArtworkProvider, ArtworkProviderPre, CatalogProvider, CatalogProviderPre, DiscoveryProvider,
     DiscoveryProviderPre, MetadataProvider, MetadataProviderPre, ScrobbleProvider,
@@ -248,15 +248,15 @@ impl World for AccountLinkProvider {
     }
 }
 
-impl World for CatalogProvider3 {
-    type Pre = CatalogProviderPre3<InstanceState>;
-    type Instance = CatalogProvider3;
+impl World for CatalogProvider4 {
+    type Pre = CatalogProviderPre4<InstanceState>;
+    type Instance = CatalogProvider4;
 
     fn prepare(
         linker: &Linker<InstanceState>,
         component: &Component,
     ) -> Result<Self::Pre, wasmtime::Error> {
-        CatalogProviderPre3::new(linker.instantiate_pre(component)?)
+        CatalogProviderPre4::new(linker.instantiate_pre(component)?)
     }
 
     async fn instantiate(
@@ -267,15 +267,15 @@ impl World for CatalogProvider3 {
     }
 }
 
-impl World for MetadataProvider3 {
-    type Pre = MetadataProviderPre3<InstanceState>;
-    type Instance = MetadataProvider3;
+impl World for MetadataProvider4 {
+    type Pre = MetadataProviderPre4<InstanceState>;
+    type Instance = MetadataProvider4;
 
     fn prepare(
         linker: &Linker<InstanceState>,
         component: &Component,
     ) -> Result<Self::Pre, wasmtime::Error> {
-        MetadataProviderPre3::new(linker.instantiate_pre(component)?)
+        MetadataProviderPre4::new(linker.instantiate_pre(component)?)
     }
 
     async fn instantiate(
@@ -286,15 +286,15 @@ impl World for MetadataProvider3 {
     }
 }
 
-impl World for ArtworkProvider3 {
-    type Pre = ArtworkProviderPre3<InstanceState>;
-    type Instance = ArtworkProvider3;
+impl World for ArtworkProvider4 {
+    type Pre = ArtworkProviderPre4<InstanceState>;
+    type Instance = ArtworkProvider4;
 
     fn prepare(
         linker: &Linker<InstanceState>,
         component: &Component,
     ) -> Result<Self::Pre, wasmtime::Error> {
-        ArtworkProviderPre3::new(linker.instantiate_pre(component)?)
+        ArtworkProviderPre4::new(linker.instantiate_pre(component)?)
     }
 
     async fn instantiate(
@@ -305,15 +305,15 @@ impl World for ArtworkProvider3 {
     }
 }
 
-impl World for AcquisitionProvider3 {
-    type Pre = AcquisitionProviderPre3<InstanceState>;
-    type Instance = AcquisitionProvider3;
+impl World for AcquisitionProvider4 {
+    type Pre = AcquisitionProviderPre4<InstanceState>;
+    type Instance = AcquisitionProvider4;
 
     fn prepare(
         linker: &Linker<InstanceState>,
         component: &Component,
     ) -> Result<Self::Pre, wasmtime::Error> {
-        AcquisitionProviderPre3::new(linker.instantiate_pre(component)?)
+        AcquisitionProviderPre4::new(linker.instantiate_pre(component)?)
     }
 
     async fn instantiate(
@@ -324,15 +324,15 @@ impl World for AcquisitionProvider3 {
     }
 }
 
-impl World for VerificationProvider3 {
-    type Pre = VerificationProviderPre3<InstanceState>;
-    type Instance = VerificationProvider3;
+impl World for VerificationProvider4 {
+    type Pre = VerificationProviderPre4<InstanceState>;
+    type Instance = VerificationProvider4;
 
     fn prepare(
         linker: &Linker<InstanceState>,
         component: &Component,
     ) -> Result<Self::Pre, wasmtime::Error> {
-        VerificationProviderPre3::new(linker.instantiate_pre(component)?)
+        VerificationProviderPre4::new(linker.instantiate_pre(component)?)
     }
 
     async fn instantiate(
@@ -343,15 +343,15 @@ impl World for VerificationProvider3 {
     }
 }
 
-impl World for ScrobbleProvider3 {
-    type Pre = ScrobbleProviderPre3<InstanceState>;
-    type Instance = ScrobbleProvider3;
+impl World for ScrobbleProvider4 {
+    type Pre = ScrobbleProviderPre4<InstanceState>;
+    type Instance = ScrobbleProvider4;
 
     fn prepare(
         linker: &Linker<InstanceState>,
         component: &Component,
     ) -> Result<Self::Pre, wasmtime::Error> {
-        ScrobbleProviderPre3::new(linker.instantiate_pre(component)?)
+        ScrobbleProviderPre4::new(linker.instantiate_pre(component)?)
     }
 
     async fn instantiate(
@@ -362,15 +362,15 @@ impl World for ScrobbleProvider3 {
     }
 }
 
-impl World for DiscoveryProvider3 {
-    type Pre = DiscoveryProviderPre3<InstanceState>;
-    type Instance = DiscoveryProvider3;
+impl World for DiscoveryProvider4 {
+    type Pre = DiscoveryProviderPre4<InstanceState>;
+    type Instance = DiscoveryProvider4;
 
     fn prepare(
         linker: &Linker<InstanceState>,
         component: &Component,
     ) -> Result<Self::Pre, wasmtime::Error> {
-        DiscoveryProviderPre3::new(linker.instantiate_pre(component)?)
+        DiscoveryProviderPre4::new(linker.instantiate_pre(component)?)
     }
 
     async fn instantiate(
@@ -381,15 +381,15 @@ impl World for DiscoveryProvider3 {
     }
 }
 
-impl World for AccountLinkProvider3 {
-    type Pre = AccountLinkProviderPre3<InstanceState>;
-    type Instance = AccountLinkProvider3;
+impl World for AccountLinkProvider4 {
+    type Pre = AccountLinkProviderPre4<InstanceState>;
+    type Instance = AccountLinkProvider4;
 
     fn prepare(
         linker: &Linker<InstanceState>,
         component: &Component,
     ) -> Result<Self::Pre, wasmtime::Error> {
-        AccountLinkProviderPre3::new(linker.instantiate_pre(component)?)
+        AccountLinkProviderPre4::new(linker.instantiate_pre(component)?)
     }
 
     async fn instantiate(

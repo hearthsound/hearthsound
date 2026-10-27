@@ -301,8 +301,8 @@ impl Server {
     }
 }
 
-/// Spawns the job runner, the scheduler, the folder watchers, the storage
-/// maintenance worker, and the data-version watcher.
+/// Spawns the job runner, the scheduler, the indexer, the folder watchers, the
+/// storage maintenance worker, and the data-version watcher.
 ///
 /// The data-version watcher is what makes a command-line write take effect on
 /// a running server: it polls `PRAGMA data_version` and reloads the settings
@@ -340,6 +340,10 @@ fn spawn_workers(
     let maintainer_task =
         tokio::spawn(async move { maintainer.run(signal, maintainer_shutdown).await });
 
+    let indexer = Arc::clone(services.catalog().indexer());
+    let indexer_shutdown = shutdown.clone();
+    let indexer_task = tokio::spawn(async move { indexer.run(indexer_shutdown).await });
+
     let deliverer = Arc::clone(services.scrobble_deliverer());
     let deliverer_shutdown = shutdown.clone();
     let deliverer_task = tokio::spawn(async move { deliverer.run(deliverer_shutdown).await });
@@ -357,6 +361,7 @@ fn spawn_workers(
     vec![
         ("job runner", runner_task),
         ("scheduler", scheduler_task),
+        ("indexer", indexer_task),
         ("folder watcher", watchers_task),
         ("storage maintainer", maintainer_task),
         ("scrobble deliverer", deliverer_task),
@@ -621,9 +626,8 @@ async fn wake_on_new_files(events: Arc<EventBus>, signal: MaintenanceSignal, shu
 /// whatever changed while it was stopped is found then, watched or not. The
 /// scan is incremental, so an unchanged folder costs a walk and no probes.
 ///
-/// The first start after an upgrade runs the library identity pass instead: it
-/// scans every folder in full, so the startup scan would be a second walk of the
-/// same files, and it is skipped while the pass is queued.
+/// The scan queues the entities it changes for the deep index, so a restart
+/// re-fetches what changed and leaves everything else stored.
 ///
 /// # Parameters
 ///
@@ -634,29 +638,7 @@ async fn watch_folders(services: Arc<Services>, shutdown: Shutdown) {
     if let Err(error) = watcher.reconcile().await {
         tracing::error!(%error, "could not reconcile the folder watchers");
     }
-    let identity_pass = match hearthsound_library::identity::enqueue_if_pending(
-        services.database(),
-        services.queue(),
-    )
-    .await
     {
-        Ok(enqueued) => enqueued,
-        Err(error) => {
-            tracing::warn!(%error, "could not queue the library identity pass");
-            false
-        }
-    };
-    match hearthsound_library::editions::enqueue_if_pending(services.database(), services.queue())
-        .await
-    {
-        Ok(enqueued) => {
-            tracing::debug!(enqueued, "checked the album edition backfill");
-        }
-        Err(error) => {
-            tracing::warn!(%error, "could not queue the album edition backfill");
-        }
-    }
-    if !identity_pass {
         let requested = with_retries(
             &STARTUP_SCAN_DELAYS,
             &shutdown,
@@ -678,6 +660,18 @@ async fn watch_folders(services: Arc<Services>, shutdown: Shutdown) {
                 "the startup scan was skipped: the library folders could not be listed",
             );
         }
+    }
+
+    // One sweep at startup, so a server that was down for a week queues what it
+    // missed instead of waiting for the next half hour tick.
+    if let Err(error) = services
+        .queue()
+        .enqueue(hearthsound_jobs::NewJob::new(
+            crate::index_jobs::INDEX_SWEEP_JOB_KIND,
+        ))
+        .await
+    {
+        tracing::warn!(%error, "could not queue the startup index sweep");
     }
 
     shutdown.wait().await;

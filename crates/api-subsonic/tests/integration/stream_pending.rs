@@ -24,12 +24,11 @@ use hearthsound_acquire::orchestrator::{AcquisitionHandle, AcquisitionProgress};
 use hearthsound_api_subsonic::{PendingOutcome, PendingSource};
 use hearthsound_config::{SettingValue, keys};
 use hearthsound_core::{
-    AcquisitionState, Availability, CatalogId, EntityId, EntityKind, FailureReason, ParkReason,
-    Priority, Slug,
+    AcquisitionState, Availability, EntityId, FailureReason, ParkReason, Priority,
 };
 use hearthsound_db::Database;
 use hearthsound_library::{
-    AlbumInput, ArtistCredit, LibraryRepository, Origin, ScannedMediaFile, TrackInput,
+    AlbumInput, ArtistCredit, LibraryRepository, ScannedMediaFile, TrackInput,
 };
 use hearthsound_test_support::audio::{AudioFixture, AudioFormat};
 use tokio::sync::watch;
@@ -37,9 +36,6 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use crate::common::Fixture;
-
-/// The track provider id the hello-catalog fixture answers with.
-const HELLO_TRACK: &str = "hello-track-1";
 
 /// One scripted acquisition outcome.
 #[derive(Clone)]
@@ -303,13 +299,10 @@ async fn pending_track(fixture: &Fixture) -> EntityId {
     let library = LibraryRepository::new(&fixture.database);
     let credit = ArtistCredit::new("Echo", "main");
     let album = library
-        .upsert_album(
-            &AlbumInput::new("Pending", Origin::Local),
-            std::slice::from_ref(&credit),
-        )
+        .upsert_album(&AlbumInput::new("Pending"), std::slice::from_ref(&credit))
         .await
         .unwrap();
-    let mut input = TrackInput::new("Not stored yet", Origin::Local, Availability::Remote);
+    let mut input = TrackInput::new("Not stored yet", Availability::Remote);
     input.album_id = Some(album);
     library
         .insert_track(&input, std::slice::from_ref(&credit), &[])
@@ -656,64 +649,4 @@ async fn hold_answers_a_completed_acquisition_without_a_file_with_404() {
     .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert!(collect(response).await.is_empty());
-}
-
-#[tokio::test]
-async fn a_catalog_id_is_materialized_and_held_until_its_file_is_ready() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = fixture_file(dir.path(), "song.flac", 1.0).await;
-    let bytes = std::fs::read(&file).unwrap();
-    let fixture = Fixture::new().await;
-    let source = FakeSource::new(Script::Import {
-        importer: Importer::new(Arc::clone(&fixture.database), &file, 1.0),
-        delay: Duration::from_millis(200),
-    });
-    let app = fixture.app_with(source.clone());
-    fixture.install_hello_catalog().await;
-    let id = CatalogId::new(Slug::new("hello").unwrap(), EntityKind::Track, HELLO_TRACK).unwrap();
-
-    let started = Instant::now();
-    let response = start(
-        &app,
-        &format!("/rest/stream?id={id}&apiKey={}", fixture.api_key),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(
-        started.elapsed() >= Duration::from_millis(150),
-        "the catalog stream was answered before its file was ready"
-    );
-    assert_eq!(header_of(&response, header::CONTENT_TYPE), "audio/flac");
-    assert_eq!(collect(response).await, bytes);
-    assert_eq!(source.calls(), 1, "the catalog track reaches acquisition");
-}
-
-/// A user who may not acquire cannot make a catalog stream materialize anything.
-#[tokio::test]
-async fn a_denied_user_materializes_no_catalog_track() {
-    let source = FakeSource::new(Script::Waiting);
-    let fixture = Fixture::with_pending(source.clone()).await;
-    let app = fixture.app();
-    fixture.install_hello_catalog().await;
-    let id = CatalogId::new(Slug::new("hello").unwrap(), EntityKind::Track, HELLO_TRACK).unwrap();
-    let key = fixture.account_with(&[]).await;
-
-    let response = start(&app, &format!("/rest/stream?id={id}&apiKey={key}")).await;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert!(collect(response).await.is_empty());
-
-    // The refusal comes before the id is resolved, so the catalog entity was
-    // not written into the library as a stored track.
-    let aliases: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM external_ids WHERE namespace = 'p:hello' AND value = ?",
-    )
-    .bind(HELLO_TRACK)
-    .fetch_one(fixture.database.readers())
-    .await
-    .unwrap();
-    assert_eq!(
-        aliases, 0,
-        "a user who may not acquire wrote no materialized row"
-    );
-    assert_eq!(source.calls(), 0);
 }

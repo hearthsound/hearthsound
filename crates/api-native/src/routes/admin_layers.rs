@@ -110,6 +110,12 @@ pub async fn put_layer(
         .await
         .map_err(|error| layer_problem(&error))?;
     rebuild(&state).await?;
+    if let Err(error) = state.services().catalog.request_recompute().await {
+        tracing::warn!(
+            %error,
+            "the layer changed, but the field recomputation could not be queued"
+        );
+    }
     Ok(Json(LayerView {
         layer: layer.as_str().to_owned(),
         instances: slugs,
@@ -231,6 +237,7 @@ async fn rebuild(state: &NativeState) -> Result<(), Problem> {
 fn layer_problem(error: &InstanceError) -> Problem {
     match error {
         InstanceError::UnknownInstance(_) => Problem::not_found(error.to_string()),
+        InstanceError::Required { .. } => Problem::plugin_required(error.to_string()),
         InstanceError::DuplicateInstance(_)
         | InstanceError::LayerNotProvided { .. }
         | InstanceError::UnknownPlugin(_)
@@ -242,6 +249,16 @@ fn layer_problem(error: &InstanceError) -> Problem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_required_plugin_refusal_is_a_409_with_its_own_code() {
+        let problem = layer_problem(&InstanceError::Required {
+            plugin_id: "app.hearthsound.musicbrainz".to_owned(),
+        });
+
+        assert_eq!(problem.status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(problem.code, "plugin-required");
+    }
 
     #[test]
     fn the_document_describes_the_layer_routes() {

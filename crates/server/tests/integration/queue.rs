@@ -7,10 +7,11 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use hearthsound_core::StorageClass;
 use hearthsound_core::{Availability, EntityId, IdPrefix};
 use hearthsound_db::Database;
 use hearthsound_library::{
-    AlbumInput, ArtistCredit, LibraryRepository, Origin, ScannedMediaFile, TrackInput,
+    AlbumInput, ArtistCredit, LibraryRepository, ManagedMediaFile, ScannedMediaFile, TrackInput,
 };
 use reqwest::header::CONTENT_TYPE;
 use reqwest::{Method, StatusCode};
@@ -50,7 +51,7 @@ async fn seed_album(
     title: &str,
     year: i64,
 ) -> (EntityId, EntityId) {
-    let mut album = AlbumInput::new(title, Origin::Local);
+    let mut album = AlbumInput::new(title);
     album.year = Some(year);
     let credits = [ArtistCredit::new(artist, "main")];
     let album_id = library.upsert_album(&album, &credits).await.unwrap();
@@ -66,7 +67,7 @@ async fn seed_track(
     title: &str,
     track_number: i64,
 ) -> EntityId {
-    let mut input = TrackInput::new(title, Origin::Local, Availability::Local);
+    let mut input = TrackInput::new(title, Availability::Local);
     input.album_id = Some(album);
     input.display_artist = Some(artist.to_owned());
     input.track_number = Some(track_number);
@@ -460,6 +461,33 @@ async fn the_liked_and_uploads_queues_list_their_own_tracks() {
     .execute(db.writer())
     .await
     .unwrap();
+    // An upload is a stored file that records the account as its uploader, so
+    // each of the two tracks carries one.
+    for (index, track) in [upload_one, upload_two].into_iter().enumerate() {
+        library
+            .insert_managed_media_file(&ManagedMediaFile {
+                track_id: track,
+                storage: StorageClass::Library,
+                rel_path: format!("uploads/{index:02}.mp3"),
+                size: 1_000,
+                mtime_ms: 0,
+                format: Some("mpeg".to_owned()),
+                codec: Some("mp3".to_owned()),
+                bitrate_kbps: Some(320),
+                sample_rate: Some(44_100),
+                bit_depth: None,
+                channels: Some(2),
+                duration_ms: Some(180_000),
+                lossless: Some(false),
+                quality_tier: None,
+                replaygain: None,
+                has_embedded_art: Some(false),
+                uploaded_by: Some(seeded.user),
+                acquisition_id: None,
+            })
+            .await
+            .unwrap();
+    }
     like(db, seeded.user, seeded.folder_track, 30).await;
 
     let (status, body) = get_queue(&fixture, "source=liked").await;
@@ -659,7 +687,7 @@ async fn bulk_library(db: &Database, user: Uuid, album: EntityId, count: usize) 
     for (chunk_index, chunk) in ids.chunks(250).enumerate() {
         let mut builder = QueryBuilder::<Sqlite>::new(
             "INSERT INTO tracks (id, album_id, title, sort_title, display_artist, \
-             track_number, duration_ms, origin, availability, created_at, updated_at) ",
+             track_number, duration_ms, availability, created_at, updated_at) ",
         );
         builder.push_values(chunk.iter().enumerate(), |mut row, (offset, id)| {
             let index = count - 1 - (chunk_index * 250 + offset);
@@ -670,7 +698,6 @@ async fn bulk_library(db: &Database, user: Uuid, album: EntityId, count: usize) 
                 .push_bind("Bulk Artist")
                 .push_bind(i64::try_from(index).unwrap())
                 .push_bind(200_000_i64)
-                .push_bind("local")
                 .push_bind("local")
                 .push_bind(0_i64)
                 .push_bind(0_i64);

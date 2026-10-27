@@ -3,24 +3,26 @@
 //!
 //! A star is a like: the activity layer records it per user and per entity, and
 //! a starred entity is listed whatever its availability, because the like is
-//! the only thing the listing reads. An entity named by a catalog id is
-//! materialized first, so a client can star what a search returned before it
-//! has ever played it.
+//! the only thing the listing reads. The id a client stars is an entity id like
+//! any other: it resolves through the catalog layer's redirects, so a client may
+//! star what a search returned before it has ever played it, and an id that was
+//! merged away stars the survivor.
 
 use std::collections::HashMap;
 
 use hearthsound_acquire::adopt::acquire_saved;
 use hearthsound_activity::Annotation;
 use hearthsound_config::keys;
-use hearthsound_core::{CatalogId, ClientId, EntityId, EntityKind, IdPrefix};
+use hearthsound_core::providers::ExternalId;
+use hearthsound_core::{EntityId, EntityKind, IdPrefix};
+use hearthsound_library::Artist;
 use hearthsound_library::query::AlbumDetail;
-use hearthsound_library::{Artist, LibraryRepository};
 use uuid::Uuid;
 
 use crate::auth::Call;
 use crate::response::{Encoded, Response, SubsonicError, codes};
 use crate::value::{Array, Object};
-use crate::{browse, catalog, projection};
+use crate::{browse, projection};
 
 /// One parameter a star request names entities of one kind with.
 struct Named {
@@ -66,8 +68,7 @@ const NAMED: [Named; 3] = [
 ///
 /// Answers Subsonic error 10 when the request names no entity, error 70 when a
 /// value is not an id of the parameter's kind or names no stored entity, and a
-/// generic error carrying the catalog's message when a catalog id cannot be
-/// materialized.
+/// generic error when the redirect lookup fails.
 pub async fn star(call: Call) -> Encoded {
     toggle(&call, true).await
 }
@@ -196,8 +197,7 @@ pub(super) async fn adopt_saved(call: &Call, user: Uuid, entities: &[(EntityKind
 ///
 /// Answers Subsonic error 10 when the request names no entity, error 70 when a
 /// value is not an id of the parameter's kind or names no stored entity, and a
-/// generic error carrying the catalog's message when a catalog id cannot be
-/// materialized.
+/// generic error when the redirect lookup fails.
 async fn named(call: &Call) -> Result<Vec<(EntityKind, Uuid)>, SubsonicError> {
     let mut entities = Vec::new();
     for named in &NAMED {
@@ -225,7 +225,8 @@ async fn named(call: &Call) -> Result<Vec<(EntityKind, Uuid)>, SubsonicError> {
 ///
 /// # Parameters
 ///
-/// - `call`: the authenticated call.
+/// - `call`: the authenticated call, whose catalog layer resolves the redirects
+///   a merge leaves.
 /// - `parameter`: the parameter the value came from, for the log.
 /// - `value`: the id the client wrote.
 /// - `expected`: the kind and prefix the request fixes, when its parameter names
@@ -238,127 +239,42 @@ async fn named(call: &Call) -> Result<Vec<(EntityKind, Uuid)>, SubsonicError> {
 /// # Errors
 ///
 /// Answers Subsonic error 70 when the value is not an id, when it is not an id
-/// of the kind the request expects, when it names a kind no entity has, when it
-/// names no stored entity, or when it names a catalog entity the catalog does
-/// not know, and a generic error when a catalog id cannot be materialized.
+/// of the kind the request expects, when it names a kind no entity has, or when
+/// it names no stored entity, and a generic error when the lookup fails.
 pub(super) async fn resolve(
     call: &Call,
     parameter: &str,
     value: &str,
     expected: Option<(EntityKind, IdPrefix)>,
 ) -> Result<(EntityKind, Uuid), SubsonicError> {
-    let Ok(id) = ClientId::parse(value) else {
+    let Ok(id) = EntityId::parse(value) else {
         tracing::debug!(parameter, "a feedback request named an unknown id");
         return Err(SubsonicError::not_found());
     };
-    let stored = match &id {
-        ClientId::Entity(entity) => match kind_of(entity.kind()) {
-            Some(named) if expected.is_none_or(|expected| expected == named) => named,
-            _ => {
-                tracing::debug!(
-                    parameter,
-                    "a feedback request named an entity of another kind"
-                );
-                return Err(SubsonicError::not_found());
-            }
-        },
-        ClientId::Catalog(catalog) => {
-            let kind = catalog.kind();
-            if expected.is_some_and(|(expected, _)| expected != kind) {
-                tracing::debug!(
-                    parameter,
-                    "a feedback request named a catalog entity of another kind"
-                );
-                return Err(SubsonicError::not_found());
-            }
-            return materialize(call, catalog).await.map(|id| (kind, id));
-        }
-    };
-
-    let library = LibraryRepository::new(call.state().database());
-    let found = match stored.0 {
-        EntityKind::Track => library
-            .get_track(stored_id(&id))
-            .await
-            .map(|row| row.is_some()),
-        EntityKind::Album => library
-            .get_album(stored_id(&id))
-            .await
-            .map(|row| row.is_some()),
-        EntityKind::Artist => library
-            .get_artist(stored_id(&id))
-            .await
-            .map(|row| row.is_some()),
-        _ => Ok(false),
-    };
-    let found = match found {
-        Ok(found) => found,
-        Err(error) => return Err(browse::failure("a feedback change", &error)),
-    };
-    if !found {
+    let Some(kind) = id.kind().entity_kind() else {
         tracing::debug!(
             parameter,
-            "a feedback request named a stored entity that does not exist"
+            "a feedback request named a record that is not an entity"
+        );
+        return Err(SubsonicError::not_found());
+    };
+    if expected.is_some_and(|(expected, _)| expected != kind) {
+        tracing::debug!(
+            parameter,
+            "a feedback request named an entity of another kind"
         );
         return Err(SubsonicError::not_found());
     }
-    Ok((stored.0, stored_id(&id).uuid()))
-}
-
-/// Returns the id of a parsed entity id.
-///
-/// # Parameters
-///
-/// - `id`: the parsed id, which the caller has already matched as an entity.
-///
-/// # Returns
-///
-/// The entity id.
-fn stored_id(id: &ClientId) -> EntityId {
-    match id {
-        ClientId::Entity(id) => *id,
-        ClientId::Catalog(_) => EntityId::new(IdPrefix::Track),
-    }
-}
-
-/// Returns the kind and prefix a stored id names.
-///
-/// # Parameters
-///
-/// - `prefix`: the prefix the id carries.
-///
-/// # Returns
-///
-/// The kind of entity it names, or `None` for a prefix no entity uses.
-fn kind_of(prefix: IdPrefix) -> Option<(EntityKind, IdPrefix)> {
-    match prefix {
-        IdPrefix::Track => Some((EntityKind::Track, IdPrefix::Track)),
-        IdPrefix::Album => Some((EntityKind::Album, IdPrefix::Album)),
-        IdPrefix::Artist => Some((EntityKind::Artist, IdPrefix::Artist)),
-        _ => None,
-    }
-}
-
-/// Stores one catalog entity and returns its stored id.
-///
-/// # Parameters
-///
-/// - `call`: the authenticated call, whose state holds the catalog layer.
-/// - `id`: the catalog id.
-///
-/// # Returns
-///
-/// The stored entity's id.
-///
-/// # Errors
-///
-/// Answers Subsonic error 70 when the catalog does not know the entity and a
-/// generic error carrying the catalog's message when it cannot be stored.
-async fn materialize(call: &Call, id: &CatalogId) -> Result<Uuid, SubsonicError> {
-    let catalog = call.state().catalog();
-    match hearthsound_catalog::materialize_entity(catalog, id).await {
-        Ok(stored) => Ok(stored.uuid()),
-        Err(error) => Err(catalog::failure(&error)),
+    match browse::entity_id(call.state(), id.kind(), value).await {
+        Ok(Some(row)) => Ok((kind, row.uuid())),
+        Ok(None) => {
+            tracing::debug!(
+                parameter,
+                "a feedback request named a stored entity that does not exist"
+            );
+            Err(SubsonicError::not_found())
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -368,8 +284,8 @@ async fn materialize(call: &Call, id: &CatalogId) -> Result<Uuid, SubsonicError>
 ///
 /// # Parameters
 ///
-/// - `call`: the authenticated call. `id` names a stored or catalog track,
-///   album, or artist, and `rating` is the value from `0` to `5`.
+/// - `call`: the authenticated call. `id` names a track, album, or artist, and
+///   `rating` is the value from `0` to `5`.
 ///
 /// # Returns
 ///
@@ -379,8 +295,8 @@ async fn materialize(call: &Call, id: &CatalogId) -> Result<Uuid, SubsonicError>
 ///
 /// Answers Subsonic error 10 when `id` or `rating` is missing, error 0 when
 /// `rating` is not a number from 0 to 5, error 70 when `id` is not an id of a
-/// kind a rating applies to or names no stored entity, and a generic error
-/// carrying the catalog's message when a catalog id cannot be materialized.
+/// kind a rating applies to or names no stored entity, and a generic error when
+/// the lookup fails.
 pub async fn set_rating(call: Call) -> Encoded {
     let Some(value) = call.get("id").filter(|value| !value.is_empty()) else {
         return call.encode(Response::failed(SubsonicError::missing_parameter("id")));
@@ -470,6 +386,7 @@ pub async fn get_starred(call: Call) -> Encoded {
                 track.file.as_ref(),
                 &track.album_artists,
                 &listed.annotations.track(track.view.track.id),
+                listed.ids.track(track.view.track.id),
             )
         })
         .collect();
@@ -505,7 +422,12 @@ pub async fn get_starred2(call: Call) -> Encoded {
         .artists
         .iter()
         .map(|(artist, album_count)| {
-            projection::artist_id3(artist, *album_count, &listed.annotations.artist(artist.id))
+            projection::artist_id3(
+                artist,
+                *album_count,
+                &listed.annotations.artist(artist.id),
+                listed.ids.artist(artist.id),
+            )
         })
         .collect();
     let albums: Vec<Object> = listed
@@ -517,6 +439,7 @@ pub async fn get_starred2(call: Call) -> Encoded {
                 &album.artists,
                 &album.tracks,
                 &listed.annotations.album(album.album.id),
+                listed.ids.album(album.album.id),
             )
         })
         .collect();
@@ -529,6 +452,7 @@ pub async fn get_starred2(call: Call) -> Encoded {
                 track.file.as_ref(),
                 &track.album_artists,
                 &listed.annotations.track(track.view.track.id),
+                listed.ids.track(track.view.track.id),
             )
         })
         .collect();
@@ -551,6 +475,48 @@ struct Starred {
     tracks: Vec<browse::LoadedTrack>,
     /// The user's annotations for every listed entity.
     annotations: Annotations,
+    /// The stored identifiers of every listed entity.
+    ids: Ids,
+}
+
+/// The stored identifiers of one starred listing, by kind.
+#[derive(Debug, Default)]
+struct Ids {
+    /// The artist identifiers, keyed by artist id.
+    artists: HashMap<Uuid, Vec<ExternalId>>,
+    /// The album identifiers, keyed by album id.
+    albums: HashMap<Uuid, Vec<ExternalId>>,
+    /// The track identifiers, keyed by track id.
+    tracks: HashMap<Uuid, Vec<ExternalId>>,
+}
+
+impl Ids {
+    /// Returns an artist's identifiers.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the artist's id.
+    fn artist(&self, id: EntityId) -> &[ExternalId] {
+        self.artists.get(&id.uuid()).map_or(&[], Vec::as_slice)
+    }
+
+    /// Returns an album's identifiers.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the album's id.
+    fn album(&self, id: EntityId) -> &[ExternalId] {
+        self.albums.get(&id.uuid()).map_or(&[], Vec::as_slice)
+    }
+
+    /// Returns a track's identifiers.
+    ///
+    /// # Parameters
+    ///
+    /// - `id`: the track's id.
+    fn track(&self, id: EntityId) -> &[ExternalId] {
+        self.tracks.get(&id.uuid()).map_or(&[], Vec::as_slice)
+    }
 }
 
 /// The user's annotations for the entities of one starred listing.
@@ -667,12 +633,17 @@ async fn starred(call: &Call) -> Result<Starred, SubsonicError> {
         Ok(annotations) => annotations,
         Err(error) => return Err(browse::failure("getStarred", &error)),
     };
+    let ids = match ids_for(call, &artist_ids, &album_ids, &track_ids).await {
+        Ok(ids) => ids,
+        Err(error) => return Err(error),
+    };
 
     Ok(Starred {
         artists,
         albums,
         tracks,
         annotations,
+        ids,
     })
 }
 
@@ -704,6 +675,42 @@ async fn annotations_for(
         artists: browse::annotations(state, user, EntityKind::Artist, &plain(artist_ids)).await?,
         albums: browse::annotations(state, user, EntityKind::Album, &plain(album_ids)).await?,
         tracks: browse::annotations(state, user, EntityKind::Track, &plain(track_ids)).await?,
+    })
+}
+
+/// Reads the stored identifiers of the entities of one starred listing.
+///
+/// # Parameters
+///
+/// - `call`: the authenticated call.
+/// - `artist_ids`: the artists of the listing.
+/// - `album_ids`: the albums of the listing.
+/// - `track_ids`: the songs of the listing.
+///
+/// # Returns
+///
+/// The identifiers of each kind, keyed by entity id.
+///
+/// # Errors
+///
+/// Answers a generic error when a read fails.
+async fn ids_for(
+    call: &Call,
+    artist_ids: &[EntityId],
+    album_ids: &[EntityId],
+    track_ids: &[EntityId],
+) -> Result<Ids, SubsonicError> {
+    let database = call.state().database();
+    Ok(Ids {
+        artists: browse::identifiers(database, EntityKind::Artist, &plain(artist_ids))
+            .await
+            .map_err(|error| browse::failure("getStarred", &error))?,
+        albums: browse::identifiers(database, EntityKind::Album, &plain(album_ids))
+            .await
+            .map_err(|error| browse::failure("getStarred", &error))?,
+        tracks: browse::identifiers(database, EntityKind::Track, &plain(track_ids))
+            .await
+            .map_err(|error| browse::failure("getStarred", &error))?,
     })
 }
 

@@ -111,6 +111,10 @@ fn hello_album_ref(cover_url: Option<&str>) -> AlbumRef {
         }],
         year: Some(2026),
         images: cover_images(cover_url),
+        album_type: None,
+        edition: None,
+        track_count: None,
+        ids: vec![],
     }
 }
 
@@ -191,6 +195,7 @@ fn hello_album(greeting: &str, isrc: Option<String>, cover_url: Option<&str>) ->
         upc: Some("0088888888888".to_string()),
         genres: vec![],
         images: cover_images(cover_url),
+        edition: None,
         tracks: vec![
             hello_track(greeting, "world", 1, isrc.clone(), cover_url),
             hello_track(greeting, "again", 2, isrc, cover_url),
@@ -334,6 +339,9 @@ impl catalog::Guest for HelloCatalog {
     }
 
     fn lookup_isrc(_isrc: String) -> Result<Vec<Track>, ProviderError> {
+        Ok(vec![])
+    }
+    fn lookup_album(_ids: Vec<IdPair>) -> Result<Vec<AlbumRef>, ProviderError> {
         Ok(vec![])
     }
 }

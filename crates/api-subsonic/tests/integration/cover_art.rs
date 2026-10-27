@@ -1,10 +1,10 @@
 //! Integration tests for `getCoverArt` through the router.
 //!
 //! Every case drives the real router over a fixture whose library holds real
-//! generated audio with artwork, and over fixture catalog plugins pointed at a
-//! local mock server. What the tests assert is the bytes a client receives, the
-//! headers that tell it whether to keep them, and the HTTP status a refusal
-//! carries, because this endpoint must never answer an error as an envelope.
+//! generated audio and a stored image, which is what the image service serves
+//! from. What the tests assert is the bytes a client receives, the headers that
+//! tell it whether to keep them, and the HTTP status a refusal carries, because
+//! this endpoint must never answer an error as an envelope.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -12,18 +12,11 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG, RETRY_AFTER};
 use axum::http::{HeaderMap, HeaderName, Request, StatusCode};
-use hearthsound_core::{CatalogId, EntityId, EntityKind, IdPrefix, Layer, Slug};
-use hearthsound_test_support::{HELLO_CATALOG, HTTP_CATALOG};
-use serde_json::json;
+use hearthsound_core::{EntityId, EntityKind, IdPrefix};
 use tower::ServiceExt;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use crate::common::Fixture;
 use crate::common::artwork::{Art, files_in, seed_album};
-use crate::common::{Fixture, artwork_server};
-
-/// The bytes the mock server serves as an image.
-const IMAGE: &[u8] = b"\x89PNG\r\n\x1a\nnot really a png";
 
 /// One response whose body is kept as bytes.
 struct RawProbe {
@@ -89,52 +82,59 @@ fn url(fixture: &Fixture, id: &str) -> String {
     format!("/rest/getCoverArt?id={id}&apiKey={}", fixture.api_key)
 }
 
-/// Builds a catalog id.
+/// Stores an image on an album and makes it the album's cover.
+///
+/// A scan writes the folder's cover into the image store and attaches it to the
+/// album; this is the same write, so the endpoint is exercised against the rows
+/// a real library has.
 ///
 /// # Parameters
 ///
-/// - `slug`: the issuing instance.
+/// - `fixture`: the fixture whose artwork directory and database are written.
+/// - `album`: the album the cover belongs to.
+/// - `bytes`: the encoded image.
+/// - `content_type`: the image's media type.
+async fn store_cover(fixture: &Fixture, album: EntityId, bytes: &[u8], content_type: &str) {
+    store_image(
+        fixture,
+        EntityKind::Album,
+        album,
+        bytes,
+        "cover",
+        content_type,
+    )
+    .await;
+}
+
+/// Stores an image on one entity in one role.
+///
+/// # Parameters
+///
+/// - `fixture`: the fixture whose artwork directory and database are written.
 /// - `kind`: the entity kind.
-/// - `provider_id`: the provider's own id.
-///
-/// # Returns
-///
-/// The `x_` id as a client sends it.
-fn catalog_id(slug: &str, kind: EntityKind, provider_id: &str) -> String {
-    CatalogId::new(Slug::new(slug).unwrap(), kind, provider_id)
-        .unwrap()
-        .to_string()
+/// - `entity`: the row.
+/// - `bytes`: the encoded image.
+/// - `role`: `cover` or `portrait`.
+/// - `content_type`: the image's media type.
+async fn store_image(
+    fixture: &Fixture,
+    kind: EntityKind,
+    entity: EntityId,
+    bytes: &[u8],
+    role: &str,
+    content_type: &str,
+) {
+    let store = hearthsound_library::images::ImageStore::new(fixture.artwork_dir());
+    let mut conn = fixture.database.writer().acquire().await.unwrap();
+    let hash = store.store(&mut conn, bytes, content_type).await.unwrap();
+    hearthsound_library::images::set_file_image(&mut conn, kind, entity.uuid(), role, &hash)
+        .await
+        .unwrap();
 }
 
-/// Builds an environment whose `hello` instance serves images the mock server
-/// has, one per size the provider describes.
-async fn caching_env(sizes: &[u32]) -> (Fixture, MockServer) {
-    let server = MockServer::start().await;
-    for size in sizes {
-        Mock::given(method("GET"))
-            .and(path(format!("/cover-{size}.png")))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "image/png")
-                    .set_body_bytes(IMAGE),
-            )
-            .mount(&server)
-            .await;
-    }
-    let fixture = Fixture::new().await;
-    fixture
-        .install_catalog_instance(
-            "hello",
-            HELLO_CATALOG,
-            json!({"coverUrl": format!("{}/cover-{{size}}.png", server.uri())}),
-        )
-        .await;
-    fixture.assign_layer(Layer::Catalog, &["hello"]).await;
-    (fixture, server)
-}
-
+/// A track is served the cover its album stores.
 #[tokio::test]
-async fn embedded_art_of_a_stored_track_is_served() {
+async fn a_stored_cover_is_served_for_its_track() {
     let fixture = Fixture::new().await;
     let seeded = seed_album(
         &fixture,
@@ -145,6 +145,8 @@ async fn embedded_art_of_a_stored_track_is_served() {
         }],
     )
     .await;
+    let picture = seeded.embedded.clone().unwrap();
+    store_cover(&fixture, seeded.album, &picture, "image/png").await;
     let app = fixture.app();
 
     let probe = request(&app, &url(&fixture, &seeded.first_track().to_string()), &[]).await;
@@ -159,17 +161,18 @@ async fn embedded_art_of_a_stored_track_is_served() {
         "the tag is strong and quoted: {etag}"
     );
     assert_eq!(
-        probe.bytes,
-        seeded.embedded.clone().unwrap(),
-        "the embedded picture is served unchanged"
+        probe.bytes, picture,
+        "the stored picture is served unchanged"
     );
 }
 
+/// A stored cover keeps the type it was stored with.
 #[tokio::test]
-async fn a_sidecar_image_beside_the_file_is_served() {
-    let bytes = b"\xff\xd8\xff\xe0a jpeg beside the track".to_vec();
+async fn a_stored_jpeg_cover_keeps_its_type() {
+    let bytes = b"\xff\xd8\xff\xe0a jpeg cover".to_vec();
     let fixture = Fixture::new().await;
     let seeded = seed_album(&fixture, "Beta", &[Art::Sidecar(bytes.clone())]).await;
+    store_cover(&fixture, seeded.album, &bytes, "image/jpeg").await;
 
     let probe = request(
         &fixture.app(),
@@ -184,9 +187,10 @@ async fn a_sidecar_image_beside_the_file_is_served() {
     assert_eq!(probe.bytes, bytes);
 }
 
-/// A local cover is scaled to the requested size and cached on disk.
+/// A stored cover is scaled to the requested size and kept in the thumbnail
+/// cache.
 #[tokio::test]
-async fn a_local_cover_is_scaled_to_the_requested_size() {
+async fn a_stored_cover_is_scaled_to_the_requested_size() {
     let fixture = Fixture::new().await;
     let seeded = seed_album(
         &fixture,
@@ -197,7 +201,8 @@ async fn a_local_cover_is_scaled_to_the_requested_size() {
         }],
     )
     .await;
-    let original = seeded.embedded.clone().unwrap();
+    let picture = seeded.embedded.clone().unwrap();
+    store_cover(&fixture, seeded.album, &picture, "image/png").await;
     let app = fixture.app();
     let id = seeded.first_track().to_string();
 
@@ -244,7 +249,7 @@ async fn a_local_cover_is_scaled_to_the_requested_size() {
 
     let full = request(&app, &url(&fixture, &id), &[]).await;
     assert_eq!(
-        full.bytes, original,
+        full.bytes, picture,
         "a request without a size is served the bytes on disk"
     );
 }
@@ -291,6 +296,8 @@ async fn a_request_that_already_has_the_image_is_answered_with_304() {
         }],
     )
     .await;
+    let picture = seeded.embedded.clone().unwrap();
+    store_cover(&fixture, seeded.album, &picture, "image/png").await;
     let app = fixture.app();
     let uri = url(&fixture, &seeded.first_track().to_string());
 
@@ -316,8 +323,10 @@ async fn a_request_that_already_has_the_image_is_answered_with_304() {
     assert_eq!(other.bytes, first.bytes);
 }
 
+/// An album is served its cover and an artist its portrait; an artist without
+/// one has no image.
 #[tokio::test]
-async fn an_album_and_an_artist_are_served_the_first_track_that_has_art() {
+async fn an_album_and_an_artist_are_served_their_stored_image() {
     let fixture = Fixture::new().await;
     let seeded = seed_album(
         &fixture,
@@ -331,96 +340,36 @@ async fn an_album_and_an_artist_are_served_the_first_track_that_has_art() {
         ],
     )
     .await;
-    let app = fixture.app();
     let picture = seeded.embedded.clone().unwrap();
+    store_cover(&fixture, seeded.album, &picture, "image/png").await;
+    let app = fixture.app();
 
     let album = request(&app, &url(&fixture, &seeded.album.to_string()), &[]).await;
     assert_eq!(album.status, StatusCode::OK);
     assert_eq!(
         album.bytes, picture,
-        "the album is served the first of its tracks that has an image"
+        "the album is served the cover it stores"
     );
 
-    // An artist has no image of its own, so the local fallback walks its albums
-    // and serves the first image it finds. No artwork instance is configured
-    // here, which is the case this covers; the artwork layer is asked first
-    // when one is.
+    // An artist has no portrait of its own here, so the request is a 404 rather
+    // than another entity's cover.
     let artist = request(&app, &url(&fixture, &seeded.artist.to_string()), &[]).await;
-    assert_eq!(artist.status, StatusCode::OK);
-    assert_eq!(
-        artist.bytes, picture,
-        "an artist has no image of its own, so its album's is served"
-    );
-}
+    assert_eq!(artist.status, StatusCode::NOT_FOUND);
 
-/// An artwork instance's portrait is served for a stored artist that has local
-/// art of its own, because the layer is asked first for artists.
-#[tokio::test]
-async fn an_artwork_instance_is_asked_before_a_stored_artists_own_art() {
-    let fixture = Fixture::new().await;
-    let seeded = seed_album(
+    store_image(
         &fixture,
-        "Gamma",
-        &[Art::Embedded {
-            size: 32,
-            rgb: 0x00ff_0000,
-        }],
+        EntityKind::Artist,
+        seeded.artist,
+        &picture,
+        "portrait",
+        "image/png",
     )
     .await;
-    let portrait = fixture
-        .install_artwork_layer("/portrait.png", &["Gamma Artist"])
-        .await;
-    let app = fixture.app();
-
-    let artist = request(&app, &url(&fixture, &seeded.artist.to_string()), &[]).await;
-    assert_eq!(artist.status, StatusCode::OK);
+    let portrait = request(&app, &url(&fixture, &seeded.artist.to_string()), &[]).await;
+    assert_eq!(portrait.status, StatusCode::OK);
     assert_eq!(
-        artist.bytes, portrait,
-        "the artwork instance's portrait is what a stored artist is served"
-    );
-}
-
-/// An artwork instance that forbids caching tells the client so, and its
-/// portrait is never written to disk.
-#[tokio::test]
-async fn a_no_store_artwork_instance_serves_an_uncacheable_portrait() {
-    let fixture = Fixture::new().await;
-    let seeded = seed_album(
-        &fixture,
-        "Gamma",
-        &[Art::Embedded {
-            size: 32,
-            rgb: 0x00ff_0000,
-        }],
-    )
-    .await;
-    let portrait = fixture
-        .install_no_store_artwork_layer("/portrait.png", &["Gamma Artist"])
-        .await;
-    let app = fixture.app();
-
-    let artist = request(&app, &url(&fixture, &seeded.artist.to_string()), &[]).await;
-    assert_eq!(artist.status, StatusCode::OK);
-    assert_eq!(
-        artist.bytes, portrait,
-        "the artwork layer's portrait is what a stored artist is served"
-    );
-    assert_eq!(
-        artist.header(CACHE_CONTROL),
-        Some("no-store"),
-        "a layer that forbids caching tells the client not to store the image"
-    );
-    assert!(
-        files_in(&fixture.artwork_dir()).is_empty(),
-        "a no-store portrait is never written to the artwork directory"
-    );
-
-    let again = request(&app, &url(&fixture, &seeded.artist.to_string()), &[]).await;
-    assert_eq!(again.status, StatusCode::OK);
-    assert_eq!(
-        again.header(CACHE_CONTROL),
-        Some("no-store"),
-        "the second answer says the same thing"
+        portrait.bytes, picture,
+        "an artist is served the portrait it stores"
     );
 }
 
@@ -437,9 +386,9 @@ async fn an_entity_without_art_is_not_found() {
     }
 }
 
-/// A refusal the client can stop repeating for an hour.
+/// A refusal the client revalidates: the entity may gain an image later.
 #[tokio::test]
-async fn an_entity_without_art_is_answered_with_a_cacheable_not_found() {
+async fn an_entity_without_art_is_answered_with_a_revalidating_not_found() {
     let fixture = Fixture::new().await;
     let seeded = seed_album(&fixture, "Delta", &[Art::None]).await;
     let app = fixture.app();
@@ -449,84 +398,10 @@ async fn an_entity_without_art_is_answered_with_a_cacheable_not_found() {
         assert_eq!(probe.status, StatusCode::NOT_FOUND, "{id}");
         assert_eq!(
             probe.header(CACHE_CONTROL),
-            Some("private, max-age=3600"),
-            "a grid of cards asks for the same missing image only once an hour"
+            Some("no-cache"),
+            "the client revalidates rather than caching the refusal"
         );
     }
-}
-
-/// An artist's local cover stands in for a portrait the image host refused.
-#[tokio::test]
-async fn an_artist_whose_portrait_host_refuses_is_served_its_local_art() {
-    let fixture = Fixture::new().await;
-    let seeded = seed_album(
-        &fixture,
-        "Gamma",
-        &[Art::Embedded {
-            size: 32,
-            rgb: 0x00ff_0000,
-        }],
-    )
-    .await;
-    let picture = seeded.embedded.clone().unwrap();
-    let server = artwork_server("/portrait.png", 403).await;
-    fixture
-        .install_artwork_layer_at(&server, "/portrait.png", &["Gamma Artist"])
-        .await;
-    let app = fixture.app();
-
-    let artist = request(&app, &url(&fixture, &seeded.artist.to_string()), &[]).await;
-    assert_eq!(
-        artist.status,
-        StatusCode::OK,
-        "a refused portrait falls back to local art instead of a refusal"
-    );
-    assert_eq!(artist.bytes, picture);
-    assert_eq!(
-        artist.header(CACHE_CONTROL),
-        Some("public, max-age=86400"),
-        "a picture the host says it does not have is not retried soon"
-    );
-}
-
-/// A URL the host refused is not asked again within the refusal window.
-#[tokio::test]
-async fn a_refused_image_url_is_not_asked_again_at_once() {
-    let fixture = Fixture::new().await;
-    let seeded = seed_album(
-        &fixture,
-        "Gamma",
-        &[Art::Embedded {
-            size: 32,
-            rgb: 0x00ff_0000,
-        }],
-    )
-    .await;
-    let picture = seeded.embedded.clone().unwrap();
-    let server = wiremock::MockServer::start().await;
-    wiremock::Mock::given(wiremock::matchers::method("GET"))
-        .and(wiremock::matchers::path("/portrait.png"))
-        .respond_with(wiremock::ResponseTemplate::new(403))
-        .expect(1)
-        .mount(&server)
-        .await;
-    fixture
-        .install_artwork_layer_at(&server, "/portrait.png", &["Gamma Artist"])
-        .await;
-    let app = fixture.app();
-    let uri = url(&fixture, &seeded.artist.to_string());
-
-    let first = request(&app, &uri, &[]).await;
-    assert_eq!(first.status, StatusCode::OK);
-    assert_eq!(first.bytes, picture);
-
-    let second = request(&app, &uri, &[]).await;
-    assert_eq!(second.status, StatusCode::OK);
-    assert_eq!(
-        second.bytes, picture,
-        "the second request is answered without asking the refusing host again"
-    );
-    drop(server);
 }
 
 #[tokio::test]
@@ -553,6 +428,7 @@ async fn a_missing_id_is_400_and_an_unknown_id_is_404() {
 
     for id in [
         "nope".to_owned(),
+        "x_deezer_t_302127".to_owned(),
         EntityId::new(IdPrefix::Track).to_string(),
         EntityId::new(IdPrefix::Playlist).to_string(),
     ] {
@@ -618,226 +494,17 @@ async fn a_request_without_credentials_is_401() {
     assert!(wrong.bytes.is_empty());
 }
 
-#[tokio::test]
-async fn a_catalog_id_is_proxied_through_its_issuing_instance() {
-    let (fixture, server) = caching_env(&[250, 500, 1_000]).await;
-    let app = fixture.app();
-    let id = catalog_id("hello", EntityKind::Track, "hello-track-1");
-
-    let probe = request(
-        &app,
-        &format!(
-            "/rest/getCoverArt?id={id}&size=300&apiKey={}",
-            fixture.api_key
-        ),
-        &[],
-    )
-    .await;
-
-    assert_eq!(probe.status, StatusCode::OK);
-    assert_eq!(probe.header(CONTENT_TYPE), Some("image/png"));
-    assert_eq!(probe.header(CACHE_CONTROL), Some("public, max-age=86400"));
-    assert_eq!(probe.bytes, IMAGE);
-    assert_eq!(
-        requested_paths(&server).await,
-        vec!["/cover-500.png"],
-        "the size is handed to the catalog image choice"
-    );
-}
-
-#[tokio::test]
-async fn a_no_store_instance_is_streamed_through_and_never_stored() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/search"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(
-            r#"[{"id":"remote-1","title":"Remote Song","artists":["Remote Artist"]}]"#,
-        ))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/remote-cover.png"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "image/png")
-                .set_body_bytes(IMAGE),
-        )
-        .mount(&server)
-        .await;
-
-    let fixture = Fixture::new().await;
-    fixture
-        .install_catalog_instance(
-            "httpcat",
-            HTTP_CATALOG,
-            json!({
-                "url": format!("{}/search", server.uri()),
-                "coverUrl": format!("{}/remote-cover.png", server.uri()),
-            }),
-        )
-        .await;
-    fixture.assign_layer(Layer::Catalog, &["httpcat"]).await;
-    let app = fixture.app();
-    let uri = format!(
-        "/rest/getCoverArt?id={}&apiKey={}",
-        catalog_id("httpcat", EntityKind::Track, "remote-1"),
-        fixture.api_key
-    );
-
-    let probe = request(&app, &uri, &[]).await;
-
-    assert_eq!(probe.status, StatusCode::OK);
-    assert_eq!(probe.bytes, IMAGE);
-    assert_eq!(probe.header(CONTENT_TYPE), Some("image/png"));
-    assert_eq!(
-        probe.header(CACHE_CONTROL),
-        Some("no-store"),
-        "an instance that forbids caching tells the client not to store the image either"
-    );
-    assert!(
-        files_in(&fixture.artwork_dir()).is_empty(),
-        "a no-store image is never written to the artwork directory"
-    );
-
-    let again = request(&app, &uri, &[]).await;
-    assert_eq!(again.status, StatusCode::OK);
-    assert_eq!(
-        requested_paths(&server)
-            .await
-            .iter()
-            .filter(|route| *route == "/remote-cover.png")
-            .count(),
-        2,
-        "nothing was stored, so the second request asks the instance again"
-    );
-}
-
-#[tokio::test]
-async fn a_stored_entity_without_local_art_falls_back_to_its_instance() {
-    let (fixture, _server) = caching_env(&[250, 500, 1_000]).await;
-    let catalog = fixture.state.catalog();
-    let stored = catalog
-        .materialize_track(
-            &CatalogId::new(
-                Slug::new("hello").unwrap(),
-                EntityKind::Track,
-                "hello-track-1",
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(stored.kind(), IdPrefix::Track);
-
-    let probe = request(&fixture.app(), &url(&fixture, &stored.to_string()), &[]).await;
-
-    assert_eq!(probe.status, StatusCode::OK);
-    assert_eq!(
-        probe.bytes, IMAGE,
-        "a stored entity is served its instance's image through its p:hello alias"
-    );
-    assert_eq!(probe.header(CACHE_CONTROL), Some("public, max-age=86400"));
-}
-
-#[tokio::test]
-async fn a_catalog_id_no_instance_serves_is_not_found() {
-    let fixture = Fixture::new().await;
-
-    let probe = request(
-        &fixture.app(),
-        &format!(
-            "/rest/getCoverArt?id={}&apiKey={}",
-            catalog_id("deezer", EntityKind::Track, "123"),
-            fixture.api_key
-        ),
-        &[],
-    )
-    .await;
-
-    assert_eq!(probe.status, StatusCode::NOT_FOUND);
-    assert!(probe.bytes.is_empty());
-}
-
-#[tokio::test]
-async fn an_image_the_instance_lacks_is_404_and_a_broken_one_is_503() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/cover-250.png"))
-        .respond_with(ResponseTemplate::new(404))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/cover-500.png"))
-        .respond_with(ResponseTemplate::new(500))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/cover-1000.png"))
-        .respond_with(ResponseTemplate::new(404))
-        .mount(&server)
-        .await;
-    let fixture = Fixture::new().await;
-    fixture
-        .install_catalog_instance(
-            "hello",
-            HELLO_CATALOG,
-            json!({"coverUrl": format!("{}/cover-{{size}}.png", server.uri())}),
-        )
-        .await;
-    fixture.assign_layer(Layer::Catalog, &["hello"]).await;
-    let app = fixture.app();
-    let id = catalog_id("hello", EntityKind::Track, "hello-track-1");
-
-    let gone = request(
-        &app,
-        &format!(
-            "/rest/getCoverArt?id={id}&size=250&apiKey={}",
-            fixture.api_key
-        ),
-        &[],
-    )
-    .await;
-    assert_eq!(gone.status, StatusCode::NOT_FOUND);
-    assert!(gone.bytes.is_empty());
-
-    let broken = request(
-        &app,
-        &format!(
-            "/rest/getCoverArt?id={id}&size=500&apiKey={}",
-            fixture.api_key
-        ),
-        &[],
-    )
-    .await;
-    assert_eq!(broken.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(broken.header(RETRY_AFTER), Some("5"));
-    assert!(broken.bytes.is_empty());
-}
-
-/// The paths the mock server has been asked for, sorted.
-async fn requested_paths(server: &MockServer) -> Vec<String> {
-    let mut paths: Vec<String> = server
-        .received_requests()
-        .await
-        .unwrap()
-        .iter()
-        .map(|request| request.url.path().to_owned())
-        .collect();
-    paths.sort();
-    paths
-}
-
-/// A cover that cannot be scaled leaves no scratch file behind.
+/// A cover the encoder cannot read is refused, and no scratch file is left.
 ///
-/// A sidecar that is not an image fails the encode on every request, and each
-/// attempt used to leave its temporary source copy and half-written encode in
-/// the cache directory for good. The failed request is still answered with the
-/// stored bytes.
+/// The stored bytes are what a client asked for, so a broken image is answered
+/// `503` with the delay the client waits before asking again; the failed encode
+/// leaves nothing behind in the thumbnail cache.
 #[tokio::test]
-async fn a_broken_cover_leaves_no_scratch_file() {
+async fn a_broken_cover_is_refused_without_leaving_a_scratch_file() {
     let fixture = Fixture::new().await;
     let bytes = b"this is not an image".to_vec();
     let seeded = seed_album(&fixture, "Broken", &[Art::Sidecar(bytes.clone())]).await;
+    store_cover(&fixture, seeded.album, &bytes, "image/png").await;
 
     let probe = request(
         &fixture.app(),
@@ -850,8 +517,9 @@ async fn a_broken_cover_leaves_no_scratch_file() {
     )
     .await;
 
-    assert_eq!(probe.status, StatusCode::OK);
-    assert_eq!(probe.bytes, bytes, "the stored image is served unchanged");
+    assert_eq!(probe.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(probe.header(RETRY_AFTER), Some("5"));
+    assert!(probe.bytes.is_empty());
     let leftovers: Vec<String> = std::fs::read_dir(fixture.thumbs_dir())
         .map(|entries| {
             entries
