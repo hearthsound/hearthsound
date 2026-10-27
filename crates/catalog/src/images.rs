@@ -133,7 +133,18 @@ impl ImageService {
             .await
             .map_err(CatalogError::Library)?;
         drop(connection);
+        // A stored rendition is served first, whatever order the instances named
+        // the candidates in: the bytes are what the page draws, and a candidate
+        // whose download keeps failing would otherwise cost its fetch on every
+        // read of a page that already has a picture.
+        let mut unstated = Vec::new();
         for candidate in candidates {
+            match self.stored(&candidate).await? {
+                Some(served) => return Ok(Some(served)),
+                None => unstated.push(candidate),
+            }
+        }
+        for candidate in unstated {
             if let Some(served) = self.bytes_of(&candidate).await? {
                 return Ok(Some(served));
             }
@@ -298,24 +309,46 @@ impl ImageService {
         }
     }
 
+    /// Reads the bytes one image row already stores.
+    ///
+    /// # Parameters
+    ///
+    /// - `image`: the image row.
+    ///
+    /// # Returns
+    ///
+    /// The image, or `None` when its bytes are not stored yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when the store cannot be read.
+    async fn stored(&self, image: &StoredImage) -> Result<Option<ServedImage>, CatalogError> {
+        let Some(path) = &image.blob_path else {
+            return Ok(None);
+        };
+        let Some(bytes) = self
+            .store
+            .read_blob(path)
+            .await
+            .map_err(CatalogError::Library)?
+        else {
+            return Ok(None);
+        };
+        let content_type = image
+            .content_type
+            .clone()
+            .unwrap_or_else(|| "image/jpeg".to_owned());
+        Ok(Some(ServedImage {
+            etag: etag(&bytes),
+            bytes,
+            content_type,
+        }))
+    }
+
     /// Reads one image's bytes, fetching and storing them when they are absent.
     async fn bytes_of(&self, image: &StoredImage) -> Result<Option<ServedImage>, CatalogError> {
-        if let Some(path) = &image.blob_path
-            && let Some(bytes) = self
-                .store
-                .read_blob(path)
-                .await
-                .map_err(CatalogError::Library)?
-        {
-            let content_type = image
-                .content_type
-                .clone()
-                .unwrap_or_else(|| "image/jpeg".to_owned());
-            return Ok(Some(ServedImage {
-                etag: etag(&bytes),
-                bytes,
-                content_type,
-            }));
+        if let Some(served) = self.stored(image).await? {
+            return Ok(Some(served));
         }
         let (Some(url), Some(instance)) = (&image.url, image.instance_id) else {
             tracing::debug!(id = %image.id, "image row lacks a url or instance");
