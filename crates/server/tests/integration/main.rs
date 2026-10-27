@@ -22,6 +22,7 @@ mod prefetch;
 mod queue;
 mod reload;
 mod save_folder;
+mod scope;
 mod scrobbles;
 mod setup;
 mod storage;

@@ -366,6 +366,59 @@ async fn vanished_files_drop_their_rows() {
     assert_eq!(library.list_artists().await.unwrap().len(), 2);
 }
 
+/// A track the tags identify is not lost when its file vanishes: the row stays,
+/// keeps the identifiers the tags gave it, and becomes a remote entity, so a
+/// download can fill it in again under the same id.
+#[tokio::test]
+async fn a_vanished_file_keeps_an_identified_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = migrated(dir.path()).await;
+    let library = LibraryRepository::new(&db);
+    let music = dir.path().join("music");
+    std::fs::create_dir(&music).unwrap();
+    write_song(&music, "Cafe del Mar", "Energy 52", "Cafe del Mar").await;
+    let doomed = AudioFixture::new(AudioFormat::Flac)
+        .seconds(0.3)
+        .file_name("Sunset.flac")
+        .tags(
+            TrackTags::new("Sunset", "Someone Else")
+                .album("Evening")
+                .album_artist("Someone Else")
+                .track(1, 2)
+                .isrc("USRC17607839"),
+        )
+        .write_into(&music)
+        .await
+        .unwrap();
+
+    let scanner = scanner_for(&db, Arc::new(EventBus::new())).await;
+    let folder = library.add_library_folder(&music, None).await.unwrap();
+    scanner.scan_folder(folder.id).await.unwrap();
+    let identified = only_track(&library, "Someone Else").await;
+    let ids = ids_of(&db, EntityKind::Track, identified).await;
+    assert!(
+        ids.iter().any(|id| id.namespace == "isrc"),
+        "the tags identify the track: {ids:?}"
+    );
+
+    tokio::fs::remove_file(&doomed).await.unwrap();
+    let report = scanner.scan_folder(folder.id).await.unwrap();
+    assert_eq!(report.files_removed, 1);
+    assert_eq!(
+        report.tracks_removed, 0,
+        "an identified track keeps its row"
+    );
+    let kept = library.get_track(identified).await.unwrap().unwrap();
+    assert_eq!(kept.availability, Availability::Remote);
+    assert!(
+        library
+            .list_media_files_for_track(identified)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn an_owned_folder_pins_its_tracks() {
     let dir = tempfile::tempdir().unwrap();
