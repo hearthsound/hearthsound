@@ -777,6 +777,10 @@ async fn discography(
         }
         albums.push(album);
     }
+    // A discography holds the artist's albums, EPs and singles: a live
+    // recording or a compilation a top track pointed at is a release of one of
+    // those, not a work of its own.
+    albums.retain(|album| crate::index::is_discography_release(album.album_type.as_deref()));
     // One representative per release group: the edition the library holds when
     // it holds one, else the earliest release.
     let mut groups: std::collections::BTreeMap<String, (Album, bool)> =

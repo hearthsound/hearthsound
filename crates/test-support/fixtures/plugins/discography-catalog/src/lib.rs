@@ -45,16 +45,19 @@ struct FixtureAlbum {
     release_date: &'static str,
     /// The album's tracks: the title and the duration in milliseconds.
     tracks: &'static [(&'static str, u32)],
+    /// The release type, when it is not the one the track count implies.
+    kind: Option<&'static str>,
 }
 
 /// The albums the fixture's artist released, in release order.
-const ALBUMS: [FixtureAlbum; 3] = [
+const ALBUMS: [FixtureAlbum; 4] = [
     FixtureAlbum {
         id: "disco-album-1",
         title: "First Light",
         year: 2001,
         release_date: "2001-04-02",
         tracks: &[("Dawn", 180_000), ("Noon", 200_000), ("Dusk", 220_000)],
+        kind: None,
     },
     FixtureAlbum {
         id: "disco-album-2",
@@ -66,6 +69,7 @@ const ALBUMS: [FixtureAlbum; 3] = [
             ("Breeze", 160_000),
             ("Gale", 170_000),
         ],
+        kind: None,
     },
     FixtureAlbum {
         id: "disco-album-3",
@@ -73,6 +77,17 @@ const ALBUMS: [FixtureAlbum; 3] = [
         year: 2012,
         release_date: "2012-01-20",
         tracks: &[("Spark", 120_000)],
+        kind: None,
+    },
+    // A live recording is not a work of the artist's own, so a discography
+    // leaves it out.
+    FixtureAlbum {
+        id: "disco-album-4",
+        title: "Live at the Depot",
+        year: 2015,
+        release_date: "2015-08-01",
+        tracks: &[("Dawn (Live)", 200_000), ("Dusk (Live)", 240_000)],
+        kind: Some("live"),
     },
 ];
 
@@ -105,6 +120,24 @@ fn artist() -> Artist {
     }
 }
 
+/// Returns the release type of one album.
+///
+/// # Parameters
+///
+/// - `album`: the album.
+///
+/// # Returns
+///
+/// The type the fixture's release states: the one it names, or `single` for a
+/// one-track release and `album` otherwise.
+fn release_kind(album: &FixtureAlbum) -> &'static str {
+    album.kind.unwrap_or(if album.tracks.len() == 1 {
+        "single"
+    } else {
+        "album"
+    })
+}
+
 /// Builds the reference to one album.
 ///
 /// # Parameters
@@ -120,9 +153,9 @@ fn album_ref(album: &FixtureAlbum) -> AlbumRef {
         }],
         year: Some(album.year),
         images: vec![],
-        album_type: None,
+        album_type: Some(release_kind(album).to_string()),
         edition: None,
-        track_count: None,
+        track_count: Some(album.tracks.len() as u32),
         ids: vec![],
     }
 }
@@ -194,11 +227,7 @@ fn album(album: &FixtureAlbum) -> Album {
             ids: artist_ids(),
         }],
         release_date: Some(album.release_date.to_string()),
-        album_type: Some(if album.tracks.len() == 1 {
-            "single".to_string()
-        } else {
-            "album".to_string()
-        }),
+        album_type: Some(release_kind(album).to_string()),
         upc: None,
         genres: vec![],
         images: vec![],

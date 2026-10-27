@@ -294,6 +294,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again: both lists were written with the rows they resolved to and read back as
   if they were provider ids, so a page indexed with a discovery or catalog
   instance kept neither.
+- An artist's discography lists that artist's albums, EPs and singles, as
+  decided, not the compilations, live recordings and remixes its songs also
+  appear on.
+- A provider that throttles a walk (MusicBrainz answers 429 or 503 when its
+  average is exceeded) no longer leaves the page marked fetched with nothing
+  stored: the pass stops, its queue row waits the delay the provider asked for
+  and is walked again, and the page fills in when it lands.
 - A file that two overlapping folders hold is indexed once, by the deepest
   folder that contains it: a folder added inside another one takes over the rows
   the outer folder indexed, so the track keeps its id, its likes, its ratings,

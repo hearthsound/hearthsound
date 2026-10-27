@@ -266,15 +266,28 @@ impl Indexer {
                 self.done.fetch_add(1, Ordering::Relaxed);
                 self.publish_updated(item.kind, item.entity);
             }
-            Err(error) => {
-                tracing::debug!(
-                    ?item.kind,
-                    entity = %item.entity,
-                    %error,
-                    "an index pass failed"
-                );
-                let _ = index_queue::fail(&mut connection, &item, &error.to_string(), None).await;
-            }
+            Err(error) => match error.retry_after_ms() {
+                Some(delay) => {
+                    tracing::debug!(
+                        ?item.kind,
+                        entity = %item.entity,
+                        %error,
+                        "an index pass was throttled; it comes back later"
+                    );
+                    let wait = i64::try_from(delay).unwrap_or(1_000).max(1_000);
+                    let _ = index_queue::defer(&mut connection, &item, unix_millis() + wait).await;
+                }
+                None => {
+                    tracing::debug!(
+                        ?item.kind,
+                        entity = %item.entity,
+                        %error,
+                        "an index pass failed"
+                    );
+                    let _ =
+                        index_queue::fail(&mut connection, &item, &error.to_string(), None).await;
+                }
+            },
         }
     }
 
@@ -402,6 +415,9 @@ impl IndexerHandle {
                     )
                     .await?;
                 }
+                Err(error) if throttled(&error) => {
+                    return Err(CatalogError::from_provider(instance.slug().as_str(), error));
+                }
                 Err(error) => {
                     tracing::warn!(
                         %error,
@@ -482,6 +498,9 @@ impl IndexerHandle {
                         None,
                     )
                     .await?;
+                }
+                Err(error) if throttled(&error) => {
+                    return Err(CatalogError::from_provider(instance.slug().as_str(), error));
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -600,6 +619,9 @@ impl IndexerHandle {
                     )
                     .await?;
                 }
+                Err(error) if throttled(&error) => {
+                    return Err(CatalogError::from_provider(instance.slug().as_str(), error));
+                }
                 Err(error) => {
                     tracing::warn!(
                         %error,
@@ -639,6 +661,9 @@ impl IndexerHandle {
                         None,
                     )
                     .await?;
+                }
+                Err(error) if throttled(&error) => {
+                    return Err(CatalogError::from_provider(instance.slug().as_str(), error));
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -839,6 +864,9 @@ impl IndexerHandle {
         while references.len() < 500 {
             let page = match provider.artist_albums(provider_id, 100, offset).await {
                 Ok(page) => page,
+                Err(error) if throttled(&error) => {
+                    return Err(CatalogError::from_provider(slug.as_str(), error));
+                }
                 Err(error) => {
                     tracing::warn!(
                         %error,
@@ -852,7 +880,13 @@ impl IndexerHandle {
                 break;
             }
             offset += page.len() as u32;
-            references.extend(page);
+            // An artist's page lists albums, EPs and singles: a compilation, a
+            // live recording, a remix set and the rest are releases of those
+            // albums, not works of their own.
+            references.extend(
+                page.into_iter()
+                    .filter(|reference| is_discography_release(reference.album_type.as_deref())),
+            );
         }
         let mut connection = self.database.writer().acquire().await?;
         for reference in &references {
@@ -1094,6 +1128,9 @@ impl IndexerHandle {
                     )
                     .await?;
                 }
+                Err(error) if throttled(&error) => {
+                    return Err(CatalogError::from_provider(instance.slug().as_str(), error));
+                }
                 Err(error) => {
                     tracing::warn!(
                         %error,
@@ -1183,6 +1220,9 @@ impl IndexerHandle {
                             &images,
                         )
                         .await?;
+                }
+                Err(error) if throttled(&error) => {
+                    return Err(CatalogError::from_provider(instance.slug().as_str(), error));
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -1365,12 +1405,50 @@ impl IndexerHandle {
     }
 }
 
+/// Returns whether a release belongs in a discography.
+///
+/// # Parameters
+///
+/// - `album_type`: the release's type as the provider reported it, lowercase,
+///   or `None` when it reported none.
+///
+/// # Returns
+///
+/// `true` for an album, an EP and a single, and for a release whose type the
+/// provider did not state.
+pub(crate) fn is_discography_release(album_type: Option<&str>) -> bool {
+    match album_type {
+        None => true,
+        Some(kind) => matches!(
+            kind.to_ascii_lowercase().as_str(),
+            "album" | "ep" | "single"
+        ),
+    }
+}
+
+/// Returns whether a provider answer means "ask again in a moment".
+///
+/// The entity's page is left as it is and the queue row is deferred, so a
+/// service that throttles us does not leave a page marked fetched with nothing
+/// stored on it.
+///
+/// # Parameters
+///
+/// - `error`: the provider's failure.
+fn throttled(error: &ProviderError) -> bool {
+    matches!(error, ProviderError::RateLimited { .. })
+}
+
 /// Returns the provider id an instance issued for an entity.
 ///
 /// # Parameters
 ///
 /// - `ids`: the entity's stored identifiers.
 /// - `slug`: the instance.
+///
+/// # Returns
+///
+/// The provider's own id, or `None` when the entity carries none for it.
 fn provider_id(ids: &[ExternalId], slug: &Slug) -> Option<String> {
     let namespace = provider_namespace(slug);
     ids.iter()

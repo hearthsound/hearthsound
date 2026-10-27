@@ -246,6 +246,12 @@ async fn a_library_album_is_deep_indexed_and_answers_after_the_mock_stops() {
         page.albums.iter().any(|entry| entry.album.id == album),
         "and the owned album"
     );
+    assert!(
+        page.albums
+            .iter()
+            .all(|entry| entry.album.title != "Live at the Depot"),
+        "a discography holds albums, EPs and singles, not the artist's live releases"
+    );
 
     // With the endpoint gone, everything answers from the database and store.
     drop(server);
