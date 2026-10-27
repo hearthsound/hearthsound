@@ -104,6 +104,21 @@ struct ConfiguredTrack {
 struct ConfiguredArtist {
     /// The artist name.
     name: String,
+    /// The identifiers the service knows the artist by, as `namespace` and
+    /// `value` pairs. A real service names its own or a shared id space here,
+    /// which is what lets the server resolve the artist to the row a catalog
+    /// already holds.
+    #[serde(default)]
+    ids: Vec<ConfiguredId>,
+}
+
+/// One configured identifier of a suggested artist.
+#[derive(Deserialize)]
+struct ConfiguredId {
+    /// The identifier space, for example `mb-artist`.
+    namespace: String,
+    /// The identifier itself.
+    value: String,
 }
 
 /// One configured generated playlist.
@@ -382,7 +397,14 @@ impl discovery::Guest for ScrobbleFixture {
             .take(limit as usize)
             .map(|artist| discovery::SuggestedArtist {
                 name: artist.name,
-                ids: Vec::new(),
+                ids: artist
+                    .ids
+                    .into_iter()
+                    .map(|id| IdPair {
+                        namespace: id.namespace,
+                        value: id.value,
+                    })
+                    .collect(),
                 score: None,
             })
             .collect())

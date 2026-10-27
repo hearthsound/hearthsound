@@ -403,7 +403,11 @@ impl IndexerHandle {
                     .await?;
                 }
                 Err(error) => {
-                    return Err(CatalogError::from_provider(instance.slug().as_str(), error));
+                    tracing::warn!(
+                        %error,
+                        instance = instance.slug().as_str(),
+                        "a catalog instance could not answer while indexing"
+                    );
                 }
             }
         }
@@ -480,7 +484,11 @@ impl IndexerHandle {
                     .await?;
                 }
                 Err(error) => {
-                    return Err(CatalogError::from_provider(instance.slug().as_str(), error));
+                    tracing::warn!(
+                        %error,
+                        instance = instance.slug().as_str(),
+                        "a catalog instance could not answer while indexing"
+                    );
                 }
             }
         }
@@ -593,7 +601,11 @@ impl IndexerHandle {
                     .await?;
                 }
                 Err(error) => {
-                    return Err(CatalogError::from_provider(instance.slug().as_str(), error));
+                    tracing::warn!(
+                        %error,
+                        instance = instance.slug().as_str(),
+                        "a catalog instance could not answer while indexing"
+                    );
                 }
             }
         }
@@ -629,10 +641,15 @@ impl IndexerHandle {
                     .await?;
                 }
                 Err(error) => {
-                    return Err(CatalogError::from_provider(instance.slug().as_str(), error));
+                    tracing::warn!(
+                        %error,
+                        instance = instance.slug().as_str(),
+                        "a catalog instance could not answer while indexing"
+                    );
                 }
             }
         }
+        self.adopt_catalog_ids(item, &name).await?;
         self.artist_images(item).await?;
         let mut connection = self.database.writer().acquire().await?;
         sqlx::query("UPDATE artists SET fetched_at = ? WHERE id = ?")
@@ -643,6 +660,66 @@ impl IndexerHandle {
         drop(connection);
         let _ = order;
         self.recompute(EntityKind::Artist, item.entity).await
+    }
+
+    /// Gives an artist the identifiers of a catalog instance that knows it by
+    /// a shared one.
+    ///
+    /// A discovery service names an artist by a shared identifier such as its
+    /// MusicBrainz id, which no catalog instance owns; the catalog that can list
+    /// the artist's albums answers by its own id instead. The artist is searched
+    /// there by name, and a hit is adopted only when it names an identifier the
+    /// artist already holds, so two artists that merely share a name are never
+    /// taken for one.
+    ///
+    /// # Parameters
+    ///
+    /// - `item`: the artist's queue item.
+    /// - `name`: the artist's name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when a write fails.
+    async fn adopt_catalog_ids(&self, item: &QueueItem, name: &str) -> Result<(), CatalogError> {
+        if name.is_empty() {
+            return Ok(());
+        }
+        let ids = self.ids_of(EntityKind::Artist, item.entity).await?;
+        if ids.is_empty() {
+            return Ok(());
+        }
+        for instance in &self.registry.layers(Layer::Catalog) {
+            let Some(provider) = instance.catalog() else {
+                continue;
+            };
+            if provider_id(&ids, instance.slug()).is_some() {
+                continue;
+            }
+            let query = hearthsound_core::providers::CatalogQuery {
+                text: name.to_owned(),
+                kinds: vec![EntityKind::Artist],
+                limit: 5,
+                offset: 0,
+            };
+            let Ok(results) = provider.search(&query).await else {
+                continue;
+            };
+            for hit in &results.artists {
+                if !hit.ids.iter().any(|named| {
+                    ids.iter()
+                        .any(|held| held.namespace == named.namespace && held.value == named.value)
+                }) {
+                    continue;
+                }
+                let mut connection = self.database.writer().acquire().await?;
+                self.resolver
+                    .artist(&mut connection, instance.id(), instance.slug(), hit)
+                    .await?;
+                drop(connection);
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// Indexes an artist's page: discography, top tracks and similar artists.
@@ -676,7 +753,7 @@ impl IndexerHandle {
                 Ok(tracks) if !tracks.is_empty() => tracks,
                 Ok(_) => continue,
                 Err(error) => {
-                    tracing::debug!(%error, instance = instance.slug().as_str(), "no top tracks");
+                    tracing::warn!(%error, instance = instance.slug().as_str(), "no top tracks");
                     continue;
                 }
             };
@@ -760,10 +837,17 @@ impl IndexerHandle {
         let mut references = Vec::new();
         let mut offset = 0u32;
         while references.len() < 500 {
-            let page = provider
-                .artist_albums(provider_id, 100, offset)
-                .await
-                .map_err(|error| CatalogError::from_provider(slug.as_str(), error))?;
+            let page = match provider.artist_albums(provider_id, 100, offset).await {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        instance = slug.as_str(),
+                        "a catalog instance could not list a discography"
+                    );
+                    break;
+                }
+            };
             if page.is_empty() {
                 break;
             }
@@ -825,7 +909,7 @@ impl IndexerHandle {
                 Ok(suggestions) if !suggestions.is_empty() => suggestions,
                 Ok(_) => continue,
                 Err(error) => {
-                    tracing::debug!(%error, instance = instance.slug().as_str(), "no similar artists");
+                    tracing::warn!(%error, instance = instance.slug().as_str(), "no similar artists");
                     continue;
                 }
             };
@@ -855,7 +939,19 @@ impl IndexerHandle {
                 Some(&payload),
             )
             .await?;
-            break;
+            return Ok(());
+        }
+        // An instance that names nobody is recorded too, so the page is not
+        // walked again on every read.
+        if let Some(instance) = self.registry.layers(Layer::Discovery).first() {
+            self.store_payload(
+                item,
+                instance.id(),
+                Operation::SimilarArtists,
+                Status::Missing,
+                None,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -886,7 +982,7 @@ impl IndexerHandle {
             let matches = match provider.resolve_recording(&hint).await {
                 Ok(matches) => matches,
                 Err(error) => {
-                    tracing::debug!(%error, instance = instance.slug().as_str(), "no recording match");
+                    tracing::warn!(%error, instance = instance.slug().as_str(), "no recording match");
                     continue;
                 }
             };
@@ -923,7 +1019,7 @@ impl IndexerHandle {
                 Ok(references) if !references.is_empty() => references,
                 Ok(_) => continue,
                 Err(error) => {
-                    tracing::debug!(%error, instance = instance.slug().as_str(), "no album lookup");
+                    tracing::warn!(%error, instance = instance.slug().as_str(), "no album lookup");
                     continue;
                 }
             };
@@ -999,7 +1095,7 @@ impl IndexerHandle {
                     .await?;
                 }
                 Err(error) => {
-                    tracing::debug!(
+                    tracing::warn!(
                         %error,
                         instance = instance.slug().as_str(),
                         "a metadata instance could not materialize the release"
@@ -1089,7 +1185,7 @@ impl IndexerHandle {
                         .await?;
                 }
                 Err(error) => {
-                    tracing::debug!(
+                    tracing::warn!(
                         %error,
                         instance = instance.slug().as_str(),
                         "an artwork instance could not answer"

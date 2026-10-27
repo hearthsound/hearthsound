@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use hearthsound_config::keys;
 use hearthsound_core::providers::{ExternalId, MB_ARTIST, MB_RELEASE_GROUP};
-use hearthsound_core::{Availability, EntityId, EntityKind, IdPrefix};
+use hearthsound_core::{Availability, EntityId, EntityKind, IdPrefix, Layer};
 use hearthsound_db::Database;
 use hearthsound_library::index_queue::Depth;
 use hearthsound_library::query::{self, Scope};
@@ -368,13 +368,13 @@ impl EntityViews {
         .map_err(CatalogError::Library)?
         .ok_or(CatalogError::NotFound)?;
         drop(connection);
-        if artist.page_fetched_at.is_some() {
+        if artist.page_fetched_at.is_some() && !self.similar_missing(row).await? {
             return Ok((artist, true));
         }
         let outcome = self
             .indexer
             .ensure(EntityKind::Artist, row, Depth::Page, timeout)
-            .await?;
+            .await;
         let mut connection = self.database.writer().acquire().await?;
         let refreshed = hearthsound_library::artists::get_artist(
             &mut connection,
@@ -383,7 +383,49 @@ impl EntityViews {
         .await
         .map_err(CatalogError::Library)?
         .ok_or(CatalogError::NotFound)?;
-        Ok((refreshed, outcome == Completeness::Complete))
+        Ok((refreshed, matches!(outcome, Ok(Completeness::Complete))))
+    }
+
+    /// Reports whether an artist still has no similar-artist answer stored
+    /// while a discovery instance is in service.
+    ///
+    /// A page walked before a discovery plugin was installed holds no similar
+    /// artists, and the shelf that lists them would stay empty until the
+    /// staleness sweep. The next read walks the page again instead.
+    ///
+    /// # Parameters
+    ///
+    /// - `row`: the artist's raw primary key.
+    ///
+    /// # Returns
+    ///
+    /// `true` when a discovery instance is in service and no instance has
+    /// answered the artist's similar-artist question.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when the read fails.
+    async fn similar_missing(&self, row: Uuid) -> Result<bool, CatalogError> {
+        let mut connection = self.database.readers().acquire().await?;
+        let serving: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM layer_assignments la \
+             JOIN provider_instances pi ON pi.id = la.instance_id \
+             WHERE la.layer = ? AND pi.enabled = 1",
+        )
+        .bind(Layer::Discovery.as_str())
+        .fetch_one(&mut *connection)
+        .await?;
+        if serving == 0 {
+            return Ok(false);
+        }
+        let answered: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM entity_sources WHERE entity_kind = 'artist' \
+             AND entity_id = ? AND operation = 'similar-artists'",
+        )
+        .bind(row.as_bytes().as_slice())
+        .fetch_one(&mut *connection)
+        .await?;
+        Ok(answered == 0)
     }
 
     /// Reads an album row, walking its page inline when the data is missing.
@@ -408,7 +450,7 @@ impl EntityViews {
         let outcome = self
             .indexer
             .ensure(EntityKind::Album, row, Depth::Page, timeout)
-            .await?;
+            .await;
         let mut connection = self.database.writer().acquire().await?;
         let refreshed = hearthsound_library::albums::get_album(
             &mut connection,
@@ -417,7 +459,7 @@ impl EntityViews {
         .await
         .map_err(CatalogError::Library)?
         .ok_or(CatalogError::NotFound)?;
-        Ok((refreshed, outcome == Completeness::Complete))
+        Ok((refreshed, matches!(outcome, Ok(Completeness::Complete))))
     }
 
     /// Reads a track row, walking its head inline when the data is missing.

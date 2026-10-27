@@ -284,6 +284,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Home discovery shelves work on stored rows: Recommended Albums is the
+  distinct albums of the tracks the discovery service recommends, Because You
+  Listen To is the discs of the artists it calls similar, and an artist that a
+  discovery service names only by a shared identifier such as its MusicBrainz id
+  is given the catalog's own id when the catalog's answer names the same
+  identifier, so its albums are listed.
+- An artist's similar artists and stored top tracks are attached to the artist
+  again: both lists were written with the rows they resolved to and read back as
+  if they were provider ids, so a page indexed with a discovery or catalog
+  instance kept neither.
 - A file that two overlapping folders hold is indexed once, by the deepest
   folder that contains it: a folder added inside another one takes over the rows
   the outer folder indexed, so the track keeps its id, its likes, its ratings,

@@ -808,46 +808,58 @@ impl WireProviderIds {
     }
 }
 
-/// Returns the row a provider id names, when it names one.
+/// Returns the stored row a payload's raw uuid names, when it names one.
+///
+/// The indexer resolves a provider answer into rows before it stores it, so the
+/// payload of a list relation holds the rows themselves rather than the ids the
+/// provider used: a row matched by ISRC or a MusicBrainz id carries no id of
+/// the answering instance at all.
 ///
 /// # Parameters
 ///
 /// - `conn`: the connection or transaction to read on.
 /// - `kind`: the entity kind.
-/// - `namespace_prefix`: the prefix of the namespace the provider ids use,
-///   `p:` for a catalog or discovery instance.
-/// - `value`: the provider's own id.
+/// - `value`: the row's uuid, as the payload wrote it.
 ///
 /// # Returns
 ///
-/// The row, or `None` when no stored identifier names it.
+/// The row, or `None` when the value is not a uuid or no row of that kind has
+/// it.
 ///
 /// # Errors
 ///
 /// Returns [`crate::error::CatalogError::Database`] when the read fails.
-pub(crate) async fn stored_row(
+pub(crate) async fn row_by_uuid(
     conn: &mut sqlx::SqliteConnection,
     kind: hearthsound_core::EntityKind,
-    namespace_prefix: &str,
     value: &str,
 ) -> Result<Option<uuid::Uuid>, crate::error::CatalogError> {
-    let kind_literal = match kind {
-        hearthsound_core::EntityKind::Track => "track",
-        hearthsound_core::EntityKind::Album => "album",
-        hearthsound_core::EntityKind::Artist => "artist",
-        hearthsound_core::EntityKind::Playlist => "playlist",
+    let Ok(row) = uuid::Uuid::parse_str(value) else {
+        return Ok(None);
     };
-    let row: Option<Vec<u8>> = sqlx::query_scalar(
-        "SELECT entity_id FROM external_ids \
-         WHERE entity_kind = ? AND namespace LIKE ? AND value = ? LIMIT 1",
-    )
-    .bind(kind_literal)
-    .bind(format!("{namespace_prefix}%"))
-    .bind(value)
-    .fetch_optional(&mut *conn)
-    .await?;
-    match row {
-        Some(bytes) if bytes.len() == 16 => Ok(uuid::Uuid::from_slice(&bytes).ok()),
-        _ => Ok(None),
-    }
+    let bound = row.as_bytes().as_slice();
+    let found: Option<Vec<u8>> = match kind {
+        hearthsound_core::EntityKind::Track => {
+            sqlx::query_scalar("SELECT id FROM tracks WHERE id = ?")
+                .bind(bound)
+                .fetch_optional(&mut *conn)
+                .await?
+        }
+        hearthsound_core::EntityKind::Album => {
+            sqlx::query_scalar("SELECT id FROM albums WHERE id = ?")
+                .bind(bound)
+                .fetch_optional(&mut *conn)
+                .await?
+        }
+        hearthsound_core::EntityKind::Artist => {
+            sqlx::query_scalar("SELECT id FROM artists WHERE id = ?")
+                .bind(bound)
+                .fetch_optional(&mut *conn)
+                .await?
+        }
+        hearthsound_core::EntityKind::Playlist => None,
+    };
+    Ok(found
+        .filter(|bytes| bytes.len() == 16)
+        .and_then(|bytes| uuid::Uuid::from_slice(&bytes).ok()))
 }

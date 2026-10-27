@@ -416,9 +416,13 @@ impl DiscoveryService {
                     let mut resolved: Vec<Uuid> = Vec::new();
                     let mut connection = self.database.writer().acquire().await?;
                     for suggestion in &suggestions {
-                        let Some(title) = suggestion.album.as_ref() else {
-                            continue;
-                        };
+                        // A suggestion names a track, and the catalog finds it
+                        // with its artist; the album is the one the matching
+                        // track belongs to.
+                        let title = suggestion
+                            .album
+                            .clone()
+                            .unwrap_or_else(|| suggestion.title.clone());
                         let text = match suggestion.artists.first() {
                             Some(artist) => format!("{artist} {title}"),
                             None => title.clone(),
@@ -429,22 +433,33 @@ impl DiscoveryService {
                             };
                             let query = hearthsound_core::providers::CatalogQuery {
                                 text: text.clone(),
-                                kinds: vec![EntityKind::Album],
+                                kinds: vec![EntityKind::Track],
                                 limit: 5,
                                 offset: 0,
                             };
                             let Ok(results) = catalog_provider.search(&query).await else {
                                 continue;
                             };
-                            let Some(hit) = results.albums.first() else {
+                            let Some(hit) = results.tracks.first() else {
                                 continue;
                             };
-                            let row = self
+                            let track = self
                                 .resolver
-                                .album_ref(&mut connection, catalog.id(), catalog.slug(), hit)
+                                .track(&mut connection, catalog.id(), catalog.slug(), hit)
                                 .await?;
-                            if !resolved.contains(&row) {
-                                resolved.push(row);
+                            let album: Option<Option<Vec<u8>>> =
+                                sqlx::query_scalar("SELECT album_id FROM tracks WHERE id = ?")
+                                    .bind(track.as_bytes().as_slice())
+                                    .fetch_optional(&mut *connection)
+                                    .await?;
+                            let Some(Some(bytes)) = album else {
+                                continue;
+                            };
+                            let Ok(album) = Uuid::from_slice(&bytes) else {
+                                continue;
+                            };
+                            if !resolved.contains(&album) {
+                                resolved.push(album);
                             }
                             break;
                         }

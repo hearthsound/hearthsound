@@ -294,8 +294,7 @@ async fn write_artist_top_tracks(
         .execute(&mut *conn)
         .await?;
     for (position, track) in tracks.iter().enumerate() {
-        let Some(row) = crate::wire::stored_row(conn, EntityKind::Track, "p:", &track.id).await?
-        else {
+        let Some(row) = crate::wire::row_by_uuid(conn, EntityKind::Track, &track.id).await? else {
             continue;
         };
         sqlx::query(
@@ -322,8 +321,7 @@ async fn write_artist_similar(
         .execute(&mut *conn)
         .await?;
     for (position, similar) in artists.iter().enumerate() {
-        let Some(row) = crate::wire::stored_row(conn, EntityKind::Artist, "p:", similar).await?
-        else {
+        let Some(row) = crate::wire::row_by_uuid(conn, EntityKind::Artist, similar).await? else {
             continue;
         };
         sqlx::query(
