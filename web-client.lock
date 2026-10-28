@@ -19,4 +19,4 @@
 [web_client]
 version = "0.3.2"
 url = "https://github.com/hearthsound/hearthsound-web/releases/download/v0.3.2/hearthsound-web-0.3.2.zip"
-sha256 = "1590632bc0163df12a012288c1e0faf7def32b2223213c06fcf30ee1bd27911e"
+sha256 = "d002992663d507907114729caea1501e807ac2529bd3acf4ae53293bc8173177"
