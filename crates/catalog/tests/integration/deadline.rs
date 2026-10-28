@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hearthsound_catalog::{Completeness, Viewer};
-use hearthsound_config::SettingValue;
 use hearthsound_core::EntityKind;
 use hearthsound_core::events::ServerEvent;
 use hearthsound_core::providers::MB_RELEASE;
@@ -22,8 +21,15 @@ use crate::common::{self, Env, METADATA_ID};
 /// The MusicBrainz release id the fixture answers.
 const RELEASE: &str = "delay-release-1";
 
+/// A remote album's page answers at once and queues its walk.
+///
+/// The page used to walk the provider inline under `index.view_timeout_ms`, which
+/// made every reader pay for whatever the provider was doing - the fixture here
+/// takes three seconds - and put the walk's writes on the request path. It now
+/// answers with what is stored, queues the walk at the front of the queue, and is
+/// re-read once `entity.updated` lands.
 #[tokio::test]
-async fn a_cold_album_page_answers_partial_while_its_release_answer_is_late() {
+async fn a_remote_album_page_answers_at_once_and_queues_the_walk() {
     let env = Env::new().await;
     env.instance(
         "meta",
@@ -48,8 +54,6 @@ async fn a_cold_album_page_answers_partial_while_its_release_answer_is_late() {
     .await;
     env.assign(hearthsound_core::Layer::Metadata, &["meta"])
         .await;
-    env.set("index.view_timeout_ms", SettingValue::Integer(500))
-        .await;
 
     let library = env.library();
     let mut album = AlbumInput::new("Cold Album");
@@ -73,6 +77,7 @@ async fn a_cold_album_page_answers_partial_while_its_release_answer_is_late() {
     };
     let mut receiver = env.events.subscribe();
 
+    let started = std::time::Instant::now();
     let first = service
         .views()
         .album(album, viewer)
@@ -80,11 +85,39 @@ async fn a_cold_album_page_answers_partial_while_its_release_answer_is_late() {
         .unwrap()
         .expect("the album row exists");
     assert!(
+        started.elapsed() < Duration::from_millis(300),
+        "a page never waits for a provider, took {:?}",
+        started.elapsed()
+    );
+    assert!(
         !first.complete,
-        "a page whose release answer outlives the deadline answers partial"
+        "the stored page is not complete until the walk lands"
     );
 
+    let mut connection = env.database.writer().acquire().await.unwrap();
+    let (depth, priority): (String, i64) = sqlx::query_as(
+        "SELECT depth, priority FROM index_queue WHERE entity_kind = 'album' AND entity_id = ?",
+    )
+    .bind(album.uuid().as_bytes().as_slice())
+    .fetch_one(&mut *connection)
+    .await
+    .expect("the page queued its walk");
+    drop(connection);
+    assert_eq!(
+        priority, 0,
+        "a viewer's page goes to the front of the queue"
+    );
+    assert_eq!(depth, "page", "an album's page is what the view needs");
+
+    let shutdown = Shutdown::new();
+    let indexer = Arc::clone(service.indexer());
+    let worker = {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move { indexer.run(shutdown).await })
+    };
     wait_for_updated(&mut receiver, &album.to_string()).await;
+    shutdown.trigger();
+    worker.await.unwrap();
 
     let second = service
         .views()

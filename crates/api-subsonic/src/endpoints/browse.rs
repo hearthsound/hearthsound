@@ -3,9 +3,9 @@
 //!
 //! Every page is composed by the catalog layer's [`EntityViews`]: the artist,
 //! album and song endpoints read one view each, which is what makes the
-//! Subsonic page and the native page the same page. A view walks a cold entity
-//! inline under `index.view_timeout_ms` and answers what is stored, so a page
-//! that could not finish is still served.
+//! Subsonic page and the native page the same page. A view answers what is
+//! stored and queues the walk when something is missing, so a page is served
+//! without waiting for a provider and re-read when `entity.updated` lands.
 //!
 //! Every entity a response describes is a stored row with an [`EntityId`], so
 //! the id a client sends resolves through [`browse::entity_id`]: an id merged

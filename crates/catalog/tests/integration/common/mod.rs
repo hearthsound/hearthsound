@@ -43,6 +43,12 @@ pub const METADATA_ID: &str = "com.example.metadata-fixture";
 /// The plugin id of the artwork fixture.
 pub const ARTWORK_ID: &str = "com.example.artwork-fixture";
 
+/// The plugin id of the scrobble fixture, which also serves discovery.
+pub const SCROBBLE_ID: &str = "com.example.scrobble-fixture";
+
+/// The plugin id of the album catalog fixture.
+pub const ALBUM_CATALOG_ID: &str = "com.example.album-catalog";
+
 /// Opens a migrated temporary database for a test.
 pub async fn database(dir: &Path) -> Arc<Database> {
     let database = Database::open(&dir.join("hearthsound.db")).await.unwrap();
@@ -329,6 +335,17 @@ impl Env {
     }
 
     /// Polls the queue until it drains, or panics after `timeout`.
+    /// Returns the kind, id and error of every failed queue row.
+    pub async fn failed_rows(&self) -> Vec<(String, String, Option<String>)> {
+        sqlx::query_as(
+            "SELECT entity_kind, hex(entity_id), last_error FROM index_queue WHERE state = 'failed'",
+        )
+        .fetch_all(self.database.writer())
+        .await
+        .unwrap()
+    }
+
+    /// Waits until the queue is empty.
     pub async fn wait_for_queue(&self, timeout: Duration) {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -338,7 +355,8 @@ impl Env {
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "the index queue did not drain: {queued} queued, {failed} failed"
+                "the index queue did not drain: {queued} queued, {failed} failed{:?}",
+                self.failed_rows().await
             );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }

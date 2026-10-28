@@ -548,8 +548,8 @@ pub mod keys {
 
     /// Days after which a library entity's stored provider data is refreshed.
     pub const INDEX_REFRESH_DAYS: SettingKey<i64> = SettingKey::new("index.refresh_days");
-    /// Milliseconds a page request waits for a missing entity's data.
-    pub const INDEX_VIEW_TIMEOUT_MS: SettingKey<i64> = SettingKey::new("index.view_timeout_ms");
+    /// How many index walks run at once.
+    pub const INDEX_WORKERS: SettingKey<i64> = SettingKey::new("index.workers");
     /// Days after which heavy data of an unviewed remote entity is pruned.
     pub const INDEX_PRUNE_AFTER_DAYS: SettingKey<i64> = SettingKey::new("index.prune_after_days");
     /// Days after which an unreferenced remote entity is deleted; 0 keeps them.
@@ -1105,13 +1105,10 @@ impl SettingsRegistry {
                     "Days after which a library entity's stored provider data is refreshed",
                 ),
                 def(
-                    keys::INDEX_VIEW_TIMEOUT_MS,
-                    SettingKind::Integer {
-                        min: 500,
-                        max: 30_000,
-                    },
-                    SettingValue::Integer(5_000),
-                    "Milliseconds a page request waits for a missing entity's data before answering partial",
+                    keys::INDEX_WORKERS,
+                    SettingKind::Integer { min: 1, max: 16 },
+                    SettingValue::Integer(8),
+                    "How many index walks run at once; raising it spends provider rate limits in parallel",
                 ),
                 def(
                     keys::INDEX_PRUNE_AFTER_DAYS,

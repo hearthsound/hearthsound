@@ -81,9 +81,15 @@ impl JobHandler for IndexSweepJobHandler {
                     .await
                     .map_err(|error| JobError::new(error.to_string()))?;
             for entity in candidates {
-                index_queue::enqueue(&mut connection, kind, entity, Depth::Deep, 3)
-                    .await
-                    .map_err(|error| JobError::new(error.to_string()))?;
+                index_queue::enqueue(
+                    &mut connection,
+                    kind,
+                    entity,
+                    Depth::Deep,
+                    index_queue::PRIORITY_SWEEP,
+                )
+                .await
+                .map_err(|error| JobError::new(error.to_string()))?;
                 queued += 1;
             }
         }

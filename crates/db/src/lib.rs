@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use sqlx::SqlitePool;
 use sqlx::migrate::{MigrateError, Migrator};
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
 mod watch;
 
@@ -27,7 +27,11 @@ pub use watch::{DataVersionSubscription, DataVersionWatcher};
 const BUSY_TIMEOUT_MS: u64 = 5000;
 
 /// How many read-only connections the reader pool opens.
-pub const READER_CONNECTIONS: u32 = 4;
+///
+/// Eight, because every page read is several statements and a walk holds none of
+/// them: the pool serves the pages a browser and a Subsonic client ask for at the
+/// same time as the indexer's own reads.
+pub const READER_CONNECTIONS: u32 = 8;
 
 /// How many connections the writer pool opens.
 ///
@@ -73,7 +77,15 @@ impl Database {
     ///
     /// The writer pool is opened first so the file and its WAL mode exist before
     /// the read-only reader pool connects. Every connection enables foreign
-    /// keys and a 5 second busy timeout.
+    /// keys, a 5 second busy timeout, and `synchronous = NORMAL`.
+    ///
+    /// `NORMAL` is the WAL durability point worth paying for here: a commit is
+    /// durable against a crash of the process and is never torn, but it is not
+    /// forced to the disk on every commit. The alternative, `FULL`, fsyncs on
+    /// every one of the thousands of writes an index pass makes, which is what
+    /// made a walk hold the writer connection for seconds; the cost of `NORMAL`
+    /// is that a power loss can lose the last few committed transactions while
+    /// leaving the database consistent.
     ///
     /// # Parameters
     ///
@@ -100,6 +112,7 @@ impl Database {
             .filename(path)
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true)
             .busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS));
 
@@ -248,6 +261,7 @@ pub fn read_only_options(path: &Path) -> SqliteConnectOptions {
         .filename(path)
         .create_if_missing(false)
         .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
         .foreign_keys(true)
         .busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))
         .read_only(true)

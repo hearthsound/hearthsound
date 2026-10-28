@@ -48,6 +48,20 @@ use crate::normalize::{DURATION_TOLERANCE_MS, normalize, normalize_isrc};
 /// One album track's identity evidence, as the resolver reads it.
 type AlbumTrackRow = (Vec<u8>, Option<i64>, Option<i64>, String, Option<i64>);
 
+/// What resolving a catalog album produced.
+///
+/// The album row and, for every track of the record, the row that track resolved
+/// to together with the record it came from. The track rows are the library's
+/// own rows whenever the record's tracklist agrees with them, which is what lets
+/// an album walk answer its tracks' queue rows without a per-track lookup.
+#[derive(Debug, Clone)]
+pub struct ResolvedAlbum {
+    /// The album row's raw primary key.
+    pub album: Uuid,
+    /// Every track row, with the record that resolved to it.
+    pub tracks: Vec<(Uuid, CatalogTrack)>,
+}
+
 /// Resolves provider records to stored rows, writing what does not exist yet.
 #[derive(Debug, Clone)]
 pub struct EntityResolver {
@@ -283,7 +297,8 @@ impl EntityResolver {
     ///
     /// # Returns
     ///
-    /// The album row's raw primary key.
+    /// The album row's raw primary key and every track row the record resolved
+    /// to, with the record each one came from.
     ///
     /// # Errors
     ///
@@ -294,7 +309,7 @@ impl EntityResolver {
         instance: Uuid,
         slug: &Slug,
         album: &CatalogAlbum,
-    ) -> Result<Uuid, CatalogError> {
+    ) -> Result<ResolvedAlbum, CatalogError> {
         let mut ids = record_ids(slug, &album.ids, &album.id);
         if let Some(upc) = &album.upc {
             ids.push(ExternalId {
@@ -353,6 +368,7 @@ impl EntityResolver {
             )
             .await?;
         }
+        let mut tracks = Vec::with_capacity(album.tracks.len());
         for track in &album.tracks {
             let mut record = track.clone();
             if record.album.is_none() {
@@ -370,8 +386,12 @@ impl EntityResolver {
             }
             let track_row = self.track(conn, instance, slug, &record).await?;
             set_album_if_empty(conn, track_row, album_row).await?;
+            tracks.push((track_row, record));
         }
-        Ok(album_row)
+        Ok(ResolvedAlbum {
+            album: album_row,
+            tracks,
+        })
     }
 
     /// Resolves a catalog artist and returns its row.

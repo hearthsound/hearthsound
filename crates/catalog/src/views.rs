@@ -12,13 +12,12 @@
 //! track order, and a viewer that is a third-party Subsonic client sees only what
 //! its own scopes hold.
 //!
-//! A held entity's page is never fetched while it is being viewed: it is queued
-//! for the indexer and answered from what is stored, with `complete: false`, and
-//! the page re-reads when `entity.updated` arrives. Only a remote entity - one
-//! the library neither stores nor lists - is walked inline under
-//! `index.view_timeout_ms`, and `complete: false` says the deadline passed. An
-//! entity whose data is older than `index.refresh_days` is queued for a refresh
-//! and answered from what is stored.
+//! A page read never fetches anything: the entity is queued for the indexer at the
+//! front of the queue, answered from what is stored with `complete: false`, and
+//! re-read when `entity.updated` arrives. A page whose walk the indexer gave up on
+//! reports `complete: true`, because waiting for a retry the sweep decides on is
+//! waiting for nothing. An entity whose data is older than `index.refresh_days` is
+//! queued for a refresh and answered from what is stored.
 
 use std::sync::Arc;
 
@@ -32,7 +31,6 @@ use hearthsound_library::{Album, Artist, LibraryError, Track};
 use uuid::Uuid;
 
 use crate::error::CatalogError;
-use crate::index::{Completeness, Indexer};
 
 /// One listener a view is composed for.
 #[derive(Debug, Clone, Copy)]
@@ -135,8 +133,6 @@ pub struct Link {
 #[derive(Clone)]
 pub struct EntityViews {
     database: Arc<Database>,
-    indexer: Arc<Indexer>,
-    settings: hearthsound_config::settings::Settings,
 }
 
 impl EntityViews {
@@ -145,18 +141,8 @@ impl EntityViews {
     /// # Parameters
     ///
     /// - `database`: the open database.
-    /// - `indexer`: the indexer an incomplete page is walked by.
-    /// - `settings`: the settings store, read for the view policy.
-    pub fn new(
-        database: Arc<Database>,
-        indexer: Arc<Indexer>,
-        settings: hearthsound_config::settings::Settings,
-    ) -> EntityViews {
-        EntityViews {
-            database,
-            indexer,
-            settings,
-        }
+    pub fn new(database: Arc<Database>) -> EntityViews {
+        EntityViews { database }
     }
 
     /// Composes an artist's page.
@@ -397,11 +383,12 @@ impl EntityViews {
     /// Reports whether an artist's stored page lacks the similar-artist answer a
     /// discovery instance could give it.
     ///
-    /// The artist's page stores what a discovery instance named, including the
-    /// record that it named nobody. A page walked while no discovery instance
-    /// was in service holds neither, so the shelf that lists similar artists
-    /// stays empty until the staleness sweep - which is days, not minutes. The
-    /// next read queues the page again instead.
+    /// The artist's page stores what a discovery instance named, and also the
+    /// record that it named nobody - an empty list and a refusal are both stored
+    /// as missing. A page walked while no discovery instance was in service holds
+    /// neither, so the shelf that lists similar artists stays empty until the
+    /// staleness sweep - which is days, not minutes. The next read queues the page
+    /// again instead.
     ///
     /// # Parameters
     ///
@@ -456,21 +443,27 @@ impl EntityViews {
         depth: Depth,
     ) -> Result<(), CatalogError> {
         let mut connection = self.database.writer().acquire().await?;
-        hearthsound_library::index_queue::enqueue(&mut connection, kind, row, depth, 0)
-            .await
-            .map_err(CatalogError::Library)
+        hearthsound_library::index_queue::enqueue(
+            &mut connection,
+            kind,
+            row,
+            depth,
+            hearthsound_library::index_queue::PRIORITY_VIEW,
+        )
+        .await
+        .map_err(CatalogError::Library)
     }
 
-    /// Completes one entity's page the way the storage rule says.
+    /// Completes one entity's page by queueing its walk.
     ///
-    /// A held entity is queued and never walked while it is being viewed: the
-    /// page answers with what is stored and re-reads when the indexer lands. The
-    /// indexer is one worker, so a read that waited for it would take as long as
-    /// the queue in front of the entity. A row the indexer gave up on counts as
-    /// complete - there is nothing more the server can make of it until the
-    /// sweep retries - so the page stops waiting for a placeholder.
-    ///
-    /// A remote entity is walked inline under the view deadline.
+    /// A page read never walks a provider: it answers with what is stored, queues
+    /// the walk at the front of the queue, and is re-read when `entity.updated`
+    /// lands. Waiting inside a request would make the reader pay for whatever the
+    /// indexer is doing at the time - a provider at one request per second, or a
+    /// queue of thousands - which is what made pages take a second on a wired
+    /// LAN. A row the indexer gave up on counts as complete: there is nothing
+    /// more the server can make of it until the sweep retries, so the page stops
+    /// waiting for a placeholder.
     ///
     /// # Parameters
     ///
@@ -491,23 +484,21 @@ impl EntityViews {
         row: Uuid,
         depth: Depth,
     ) -> Result<bool, CatalogError> {
-        let mut connection = self.database.readers().acquire().await?;
-        let held = crate::held::is_held(&mut connection, kind, row).await?;
+        let mut connection = self.database.writer().acquire().await?;
+        hearthsound_library::index_queue::enqueue(
+            &mut connection,
+            kind,
+            row,
+            depth,
+            hearthsound_library::index_queue::PRIORITY_VIEW,
+        )
+        .await
+        .map_err(CatalogError::Library)?;
+        let state = hearthsound_library::index_queue::state_of(&mut connection, kind, row)
+            .await
+            .map_err(CatalogError::Library)?;
         drop(connection);
-        if held {
-            let mut connection = self.database.writer().acquire().await?;
-            hearthsound_library::index_queue::enqueue(&mut connection, kind, row, depth, 0)
-                .await
-                .map_err(CatalogError::Library)?;
-            let state = hearthsound_library::index_queue::state_of(&mut connection, kind, row)
-                .await
-                .map_err(CatalogError::Library)?;
-            drop(connection);
-            return Ok(state.as_deref() == Some("failed"));
-        }
-        let timeout = crate::index::view_policy(self.settings.current().as_ref()).0;
-        let outcome = self.indexer.ensure(kind, row, depth, timeout).await?;
-        Ok(!matches!(outcome, Completeness::Partial))
+        Ok(state.as_deref() == Some("failed"))
     }
 
     /// Reads an album row, completing its page when the data is missing.

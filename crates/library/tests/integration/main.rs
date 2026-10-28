@@ -9,6 +9,7 @@ mod editions;
 mod entities;
 mod entity_facts;
 mod identity;
+mod index_queue;
 mod large_library;
 mod maintenance;
 mod naming;

@@ -1,11 +1,13 @@
 //! The indexer: it walks the queue and stores what the providers say.
 //!
-//! One worker processes one entity at a time. For an entity it calls the enabled
-//! instances in the administrator's order - a catalog's record, a metadata
-//! provider's release, an artwork provider's images, a discovery provider's
-//! similar artists - stores each answer in `entity_sources`, resolves what the
-//! answer named ([`crate::resolve`]), and recomputes the entity's fields from
-//! everything stored ([`crate::fields`]).
+//! `index.workers` walks run at once, each on one entity. For an entity a walk
+//! calls the enabled instances in the administrator's order - a catalog's record,
+//! a metadata provider's release, an artwork provider's images, a discovery
+//! provider's similar artists - stores each answer in `entity_sources`, resolves
+//! what the answer named ([`crate::resolve`]), and recomputes the entity's fields
+//! from everything stored ([`crate::fields`]). The pool is what overlaps the
+//! calls a single walk waits on, because one provider request per second is the
+//! floor a walk cannot go below.
 //!
 //! Depth decides how far it walks: `head` fetches the entity's own fields,
 //! `page` a page's worth of data (an album's tracklist, an artist's discography
@@ -13,20 +15,20 @@
 //! points at - a library track's album, an album's credits, a primary artist's
 //! discography. A featured artist is only ever indexed to `head`.
 //!
-//! A viewer that asks for a page whose data the server does not have runs
-//! [`Indexer::ensure`], which walks the entity inline under the request's
-//! deadline and reports whether it finished. Work that outlives the deadline
-//! keeps going and publishes `entity.updated` when it lands.
+//! A page read never walks: it queues the entity at the front of the queue and is
+//! re-read when `entity.updated` lands. [`Indexer::ensure`] remains for the one
+//! caller that asks for a walk to start now - the service's own album page - and
+//! reports how the walk it joined ended.
 //!
 //! A walk of one entity happens once at a time however many callers ask for it:
-//! the queue's worker and every viewer share one walk per entity, and every
-//! caller is told how it ended. Every outcome publishes `entity.updated`, so a
-//! page that was waiting renders whatever is stored - a failed walk must not
-//! leave a client on a placeholder forever.
+//! the pool's workers share one walk per entity, and every caller is told how it
+//! ended. Every outcome publishes `entity.updated`, so a page that was waiting
+//! renders whatever is stored - a failed walk must not leave a client on a
+//! placeholder forever.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
 use hearthsound_config::keys;
@@ -44,13 +46,14 @@ use hearthsound_jobs::Shutdown;
 use hearthsound_library::index_queue::{self, Depth, QueueItem};
 use hearthsound_library::{entities, external_ids};
 use hearthsound_plugin_host::ProviderRegistry;
+use sqlx::Acquire as _;
 use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use crate::error::CatalogError;
 use crate::fields::{self, LayerOrder, Precedence};
 use crate::images::ImageService;
-use crate::resolve::EntityResolver;
+use crate::resolve::{EntityResolver, ResolvedAlbum};
 use crate::sources::{self, Operation, Status};
 use crate::wire::{WireAlbumRefs, WireProviderIds};
 
@@ -142,7 +145,8 @@ pub struct Indexer {
     /// The walks that are running, by entity, so a second caller joins the
     /// first instead of walking the same entity again.
     in_flight: Walks,
-    done: AtomicU64,
+    done: Arc<AtomicU64>,
+    progress: Arc<Progress>,
 }
 
 impl Indexer {
@@ -175,7 +179,8 @@ impl Indexer {
             resolver: EntityResolver::new(artwork_root),
             images,
             in_flight: Arc::new(Mutex::new(HashMap::new())),
-            done: AtomicU64::new(0),
+            done: Arc::new(AtomicU64::new(0)),
+            progress: Arc::new(Progress::default()),
         }
     }
 
@@ -207,39 +212,55 @@ impl Indexer {
 
     /// Runs the queue until `shutdown` is signalled.
     ///
+    /// The queue is worked by `index.workers` walks at once. Calls that take
+    /// seconds - a provider at one request per second, an image download - are
+    /// what the pool is for: one walk per entity still runs once at a time
+    /// whatever asks for it, so the pool costs no duplicate provider traffic. The
+    /// setting is re-read every five seconds, so raising or lowering it applies
+    /// without a restart.
+    ///
     /// # Parameters
     ///
     /// - `shutdown`: the process-wide stop signal.
     pub async fn run(&self, shutdown: Shutdown) {
+        let mut count = self.workers();
+        let (target, changed) = watch::channel(count);
+        let mut workers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
         loop {
+            workers.retain(|worker| !worker.is_finished());
+            while workers.len() < count {
+                let slot = workers.len();
+                let handle = self.clone_handle();
+                let worker_shutdown = shutdown.clone();
+                let worker_target = changed.clone();
+                workers.push(tokio::spawn(async move {
+                    handle.work(worker_shutdown, worker_target, slot).await;
+                }));
+            }
             if shutdown.is_triggered() {
-                return;
+                break;
             }
-            match self.claim().await {
-                Ok(Some(item)) => {
-                    // A viewer walking the same entity joins this walk, and a
-                    // viewer that started it is joined here: one entity is
-                    // walked once at a time, whatever asked for it.
-                    let mut receiver = self.clone_handle().walk_shared(item.clone()).await;
-                    let outcome = wait_outcome(&mut receiver).await;
-                    self.finish(item, outcome).await;
-                    self.publish_progress().await;
-                }
-                Ok(None) => {
-                    if self.drains() {
-                        self.publish_progress().await;
-                    }
-                    tokio::select! {
-                        () = shutdown.wait() => return,
-                        () = tokio::time::sleep(Duration::from_secs(2)) => {}
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "could not claim an index queue item");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
+            tokio::select! {
+                () = shutdown.wait() => break,
+                () = tokio::time::sleep(Duration::from_secs(5)) => {}
             }
+            count = self.workers();
+            let _ = target.send(count);
         }
+        // A worker whose slot is above the target returns at its next loop turn;
+        // the shutdown signal ends the rest.
+        for worker in workers {
+            let _ = worker.await;
+        }
+    }
+
+    /// Returns how many walks may run at once.
+    fn workers(&self) -> usize {
+        self.settings
+            .current()
+            .get(keys::INDEX_WORKERS)
+            .unwrap_or(8)
+            .clamp(1, 16) as usize
     }
 
     /// Walks one entity inline, up to the deadline.
@@ -298,21 +319,149 @@ impl Indexer {
             resolver: self.resolver.clone(),
             images: Arc::clone(&self.images),
             in_flight: Arc::clone(&self.in_flight),
+            done: Arc::clone(&self.done),
+            progress: Arc::clone(&self.progress),
+        }
+    }
+}
+
+/// The parts one walk needs, cloned so a spawned walk outlives its caller.
+#[derive(Clone)]
+struct IndexerHandle {
+    database: Arc<Database>,
+    registry: Arc<ProviderRegistry>,
+    settings: hearthsound_config::settings::Settings,
+    events: Arc<EventBus>,
+    resolver: EntityResolver,
+    images: Arc<ImageService>,
+    in_flight: Walks,
+    done: Arc<AtomicU64>,
+    progress: Arc<Progress>,
+}
+
+/// How often `index.progress` may be published, in unix milliseconds.
+const PROGRESS_INTERVAL_MS: i64 = 1_000;
+
+/// How often the throughput line is logged, in unix milliseconds.
+const PROGRESS_LOG_INTERVAL_MS: i64 = 60_000;
+
+/// The bookkeeping behind the progress event and the throughput line.
+///
+/// Every worker finishes rows at its own pace; the queue's counts are read at
+/// most once a second no matter how many rows completed, so a pool of eight
+/// walks costs the writer no more than a single walk did.
+#[derive(Default)]
+struct Progress {
+    /// When `index.progress` was last published.
+    published_at: AtomicI64,
+    /// When the throughput line was last logged.
+    logged_at: AtomicI64,
+    /// How many rows had finished when the throughput line was last logged.
+    logged_done: AtomicU64,
+}
+
+impl Progress {
+    /// Takes the right to publish, unless the last publish is too recent.
+    ///
+    /// # Parameters
+    ///
+    /// - `now`: the current instant, in unix milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// `true` for the caller that won the interval.
+    fn take(&self, now: i64) -> bool {
+        let last = self.published_at.load(Ordering::Relaxed);
+        if now - last < PROGRESS_INTERVAL_MS {
+            return false;
+        }
+        self.published_at
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    }
+}
+
+impl IndexerHandle {
+    /// Works the queue until `shutdown` is signalled or the target drops below
+    /// this worker's slot.
+    ///
+    /// # Parameters
+    ///
+    /// - `shutdown`: the process-wide stop signal.
+    /// - `target`: how many walks `index.workers` currently allows.
+    /// - `slot`: this worker's place in the pool, zero-based.
+    async fn work(&self, shutdown: Shutdown, mut target: watch::Receiver<usize>, slot: usize) {
+        loop {
+            if shutdown.is_triggered() || *target.borrow_and_update() <= slot {
+                return;
+            }
+            match self.claim(1).await {
+                Ok(items) => {
+                    let mut finished = false;
+                    for item in items {
+                        // A viewer walking the same entity joins this walk, and a
+                        // viewer that started it is joined here: one entity is
+                        // walked once at a time, whatever asked for it.
+                        let mut receiver = self.walk_shared(item.clone()).await;
+                        let outcome = wait_outcome(&mut receiver).await;
+                        self.finish(item, outcome).await;
+                        finished = true;
+                    }
+                    if finished {
+                        self.publish_progress().await;
+                    } else {
+                        tokio::select! {
+                            () = shutdown.wait() => return,
+                            changed = target.changed() => {
+                                if changed.is_err() {
+                                    return;
+                                }
+                            }
+                            () = tokio::time::sleep(Duration::from_millis(500)) => {}
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "could not claim an index queue item");
+                    tokio::select! {
+                        () = shutdown.wait() => return,
+                        () = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    }
+                }
+            }
         }
     }
 
-    /// Claims one due row.
-    async fn claim(&self) -> Result<Option<QueueItem>, CatalogError> {
+    /// Claims up to `limit` due rows.
+    ///
+    /// A read-only check of whether anything is due comes first: an idle worker
+    /// asks the reader pool rather than opening a transaction on the one writer,
+    /// which every other write in the server waits behind.
+    ///
+    /// # Parameters
+    ///
+    /// - `limit`: the most rows to take.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when the queue cannot be read or written.
+    async fn claim(&self, limit: usize) -> Result<Vec<QueueItem>, CatalogError> {
+        {
+            let mut connection = self.database.readers().acquire().await?;
+            let due: Option<i64> = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM index_queue WHERE state = 'queued' AND run_at <= ?)",
+            )
+            .bind(unix_millis())
+            .fetch_optional(&mut *connection)
+            .await?;
+            if due != Some(1) {
+                return Ok(Vec::new());
+            }
+        }
         let mut connection = self.database.writer().acquire().await?;
-        index_queue::claim(&mut connection)
+        index_queue::claim_many(&mut connection, limit)
             .await
             .map_err(CatalogError::Library)
-    }
-
-    /// Reports whether this process has finished an item, which is when progress
-    /// is worth publishing while the queue waits.
-    fn drains(&self) -> bool {
-        self.done.load(Ordering::Relaxed) > 0
     }
 
     /// Records the outcome of one claimed row.
@@ -343,8 +492,15 @@ impl Indexer {
         }
     }
 
-    /// Publishes the queue's progress to administrators.
+    /// Publishes the queue's progress to administrators, at most once a second.
+    ///
+    /// Every `PROGRESS_LOG_INTERVAL_MS` it also logs how fast the queue is
+    /// draining, which is the only per-minute line the indexer writes.
     async fn publish_progress(&self) {
+        let now = unix_millis();
+        if !self.progress.take(now) {
+            return;
+        }
         let Ok(mut connection) = self.database.writer().acquire().await else {
             return;
         };
@@ -362,19 +518,24 @@ impl Indexer {
                 total: done + pending,
             }),
         );
+        let logged_at = self.progress.logged_at.load(Ordering::Relaxed);
+        if now - logged_at >= PROGRESS_LOG_INTERVAL_MS
+            && self
+                .progress
+                .logged_at
+                .compare_exchange(logged_at, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            let previous = self.progress.logged_done.swap(done, Ordering::Relaxed);
+            let per_minute = done.saturating_sub(previous);
+            tracing::info!(
+                completed = per_minute,
+                pending,
+                failed = failed.max(0),
+                "index progressed"
+            );
+        }
     }
-}
-
-/// The parts one walk needs, cloned so a spawned walk outlives its caller.
-#[derive(Clone)]
-struct IndexerHandle {
-    database: Arc<Database>,
-    registry: Arc<ProviderRegistry>,
-    settings: hearthsound_config::settings::Settings,
-    events: Arc<EventBus>,
-    resolver: EntityResolver,
-    images: Arc<ImageService>,
-    in_flight: Walks,
 }
 
 impl IndexerHandle {
@@ -468,6 +629,92 @@ impl IndexerHandle {
         }
     }
 
+    /// Stores what an album's tracklist answered for each of its tracks.
+    ///
+    /// A catalog release carries its tracks' titles, numbers, durations,
+    /// recordings, ISRCs and credits, which is everything a track's own walk
+    /// would have fetched. Storing it here means a library album answers its
+    /// tracks' queue rows once, from one request, instead of spending one
+    /// provider request per track.
+    ///
+    /// # Parameters
+    ///
+    /// - `conn`: the transaction the album was resolved in.
+    /// - `instance`: the instance that issued the album.
+    /// - `resolved`: the album row and every track row with its record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when a write fails.
+    async fn absorb_tracks(
+        &self,
+        conn: &mut sqlx::SqliteConnection,
+        instance: Uuid,
+        resolved: &ResolvedAlbum,
+    ) -> Result<(), CatalogError> {
+        let precedence = Precedence::parse(
+            &self
+                .settings
+                .current()
+                .get(keys::METADATA_PRECEDENCE)
+                .unwrap_or_else(|_| "tags".to_owned()),
+        );
+        let order = self.order();
+        let now = unix_millis();
+        for (row, track) in &resolved.tracks {
+            let payload = serde_json::to_string(&crate::wire::WireTrack::from(track))?;
+            sources::put(
+                conn,
+                EntityKind::Track,
+                *row,
+                instance,
+                Operation::Catalog,
+                Status::Found,
+                Some(&payload),
+            )
+            .await?;
+            sqlx::query("UPDATE tracks SET fetched_at = ? WHERE id = ?")
+                .bind(now)
+                .bind(row.as_bytes().as_slice())
+                .execute(&mut *conn)
+                .await?;
+            fields::recompute(conn, EntityKind::Track, *row, precedence, &order).await?;
+        }
+        Ok(())
+    }
+
+    /// Reports whether a track's own fields are stored or about to be.
+    ///
+    /// Two cases: the track's head was stored, or the album it belongs to is
+    /// queued - and an album's walk stores every track of its tracklist, so
+    /// walking the track now would ask a provider for what the album's answer
+    /// already carries. The queue is where the album's row waits, so a scan that
+    /// queues an album and its tracks together does not spend one provider
+    /// request per track on the same information.
+    ///
+    /// # Parameters
+    ///
+    /// - `entity`: the track's raw primary key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when the read fails.
+    async fn track_answered(&self, entity: Uuid) -> Result<bool, CatalogError> {
+        let mut connection = self.database.readers().acquire().await?;
+        let answered: Option<i64> = sqlx::query_scalar(
+            "SELECT CASE \
+                 WHEN t.fetched_at IS NOT NULL THEN 1 \
+                 WHEN EXISTS (SELECT 1 FROM index_queue q WHERE q.entity_kind = 'album' \
+                                AND q.entity_id = t.album_id AND q.state = 'queued') THEN 1 \
+                 ELSE 0 END \
+             FROM tracks t WHERE t.id = ?",
+        )
+        .bind(entity.as_bytes().as_slice())
+        .fetch_optional(&mut *connection)
+        .await?;
+        Ok(answered == Some(1))
+    }
+
     /// Recomputes an entity's fields after a pass.
     async fn recompute(&self, kind: EntityKind, id: Uuid) -> Result<(), CatalogError> {
         let precedence = Precedence::parse(
@@ -484,7 +731,17 @@ impl IndexerHandle {
     }
 
     /// Indexes a track's own fields.
+    ///
+    /// A track whose head is stored, or whose album is queued, is recomputed and
+    /// left alone: the album it belongs to answers these fields from its own
+    /// release answer, and a second provider request would spend a rate limit to
+    /// learn the same thing. An administrator's refresh - priority
+    /// [`hearthsound_library::index_queue::PRIORITY_VIEW`] - always re-walks, so an
+    /// explicit request still reaches the provider.
     async fn track_head(&self, item: &QueueItem, order: &LayerOrder) -> Result<(), CatalogError> {
+        if item.priority != index_queue::PRIORITY_VIEW && self.track_answered(item.entity).await? {
+            return self.recompute(EntityKind::Track, item.entity).await;
+        }
         let ids = self.ids_of(EntityKind::Track, item.entity).await?;
         for instance in &self.registry.layers(Layer::Catalog) {
             let Some(provider) = instance.catalog() else {
@@ -572,7 +829,7 @@ impl IndexerHandle {
                     EntityKind::Album,
                     album,
                     Depth::Deep,
-                    item.priority,
+                    index_queue::PRIORITY_CREDIT,
                 )
                 .await
                 .map_err(CatalogError::Library)?;
@@ -597,7 +854,7 @@ impl IndexerHandle {
                 EntityKind::Artist,
                 artist,
                 Depth::Page,
-                item.priority,
+                index_queue::PRIORITY_CREDIT,
             )
             .await
             .map_err(CatalogError::Library)?;
@@ -747,7 +1004,7 @@ impl IndexerHandle {
                 EntityKind::Artist,
                 artist,
                 depth,
-                item.priority,
+                index_queue::PRIORITY_CREDIT,
             )
             .await
             .map_err(CatalogError::Library)?;
@@ -968,19 +1225,24 @@ impl IndexerHandle {
                 Ok(tracks) if !tracks.is_empty() => tracks,
                 Ok(_) => continue,
                 Err(error) => {
-                    tracing::warn!(%error, instance = instance.slug().as_str(), "no top tracks");
+                    // A discovery provider without a configured token answers
+                    // `Unauthorized` to this question; that is a provider the
+                    // administrator has not set up, not a fault worth a warning.
+                    tracing::debug!(%error, instance = instance.slug().as_str(), "no top tracks");
                     continue;
                 }
             };
             let mut resolved = Vec::with_capacity(tracks.len());
             let mut connection = self.database.writer().acquire().await?;
+            let mut tx = connection.begin().await?;
             for track in &tracks {
                 let row = self
                     .resolver
-                    .track(&mut connection, instance.id(), instance.slug(), track)
+                    .track(&mut tx, instance.id(), instance.slug(), track)
                     .await?;
                 resolved.push(row);
             }
+            tx.commit().await?;
             drop(connection);
             let ids: Vec<String> = resolved.iter().map(Uuid::to_string).collect();
             let payload = serde_json::to_string(&WireProviderIds::new(ids))?;
@@ -1022,11 +1284,12 @@ impl IndexerHandle {
             return Ok(());
         }
         let mut connection = self.database.writer().acquire().await?;
+        let mut tx = connection.begin().await?;
         for track in tracks {
             let album: Option<Option<Vec<u8>>> =
                 sqlx::query_scalar("SELECT album_id FROM tracks WHERE id = ?")
                     .bind(track.as_bytes().as_slice())
-                    .fetch_optional(&mut *connection)
+                    .fetch_optional(&mut *tx)
                     .await?;
             let Some(Some(bytes)) = album else {
                 continue;
@@ -1037,27 +1300,28 @@ impl IndexerHandle {
             let Ok(album) = Uuid::from_slice(&bytes) else {
                 continue;
             };
-            if crate::held::album(&mut connection, album).await? {
+            if crate::held::album(&mut tx, album).await? {
                 continue;
             }
             let fetched: Option<Option<i64>> =
                 sqlx::query_scalar("SELECT fetched_at FROM albums WHERE id = ?")
                     .bind(album.as_bytes().as_slice())
-                    .fetch_optional(&mut *connection)
+                    .fetch_optional(&mut *tx)
                     .await?;
             if fetched.flatten().is_some() {
                 continue;
             }
             index_queue::enqueue(
-                &mut connection,
+                &mut tx,
                 EntityKind::Album,
                 album,
                 Depth::Head,
-                PREFETCH_PRIORITY,
+                index_queue::PRIORITY_PREFETCH,
             )
             .await
             .map_err(CatalogError::Library)?;
         }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -1095,7 +1359,7 @@ impl IndexerHandle {
                     EntityKind::Album,
                     album,
                     Depth::Page,
-                    item.priority,
+                    index_queue::PRIORITY_PREFETCH,
                 )
                 .await
                 .map_err(CatalogError::Library)?;
@@ -1105,7 +1369,7 @@ impl IndexerHandle {
                     EntityKind::Album,
                     album,
                     Depth::Head,
-                    PREFETCH_PRIORITY,
+                    index_queue::PRIORITY_PREFETCH,
                 )
                 .await
                 .map_err(CatalogError::Library)?;
@@ -1164,35 +1428,40 @@ impl IndexerHandle {
                 break;
             }
         }
+        // One transaction for the whole discography: a page of up to five hundred
+        // references is hundreds of statements, and holding the writer across
+        // them one autocommit at a time is what kept every other write waiting.
         let mut connection = self.database.writer().acquire().await?;
+        let mut tx = connection.begin().await?;
         for reference in &references {
             let album = self
                 .resolver
-                .album_ref(&mut connection, instance, slug, reference)
+                .album_ref(&mut tx, instance, slug, reference)
                 .await?;
             // A held album is the scan's to queue, at the depth a page needs. A
             // remote one only has to show its cover on the artist's page, so its
             // head is prefetched below the held work.
-            if crate::held::album(&mut connection, album).await? {
+            if crate::held::album(&mut tx, album).await? {
                 continue;
             }
             let fetched_at: Option<Option<i64>> =
                 sqlx::query_scalar("SELECT fetched_at FROM albums WHERE id = ?")
                     .bind(album.as_bytes().as_slice())
-                    .fetch_optional(&mut *connection)
+                    .fetch_optional(&mut *tx)
                     .await?;
             if fetched_at.flatten().is_none() {
                 index_queue::enqueue(
-                    &mut connection,
+                    &mut tx,
                     EntityKind::Album,
                     album,
                     Depth::Head,
-                    PREFETCH_PRIORITY,
+                    index_queue::PRIORITY_PREFETCH,
                 )
                 .await
                 .map_err(CatalogError::Library)?;
             }
         }
+        tx.commit().await?;
         drop(connection);
         let payload = serde_json::to_string(&WireAlbumRefs::new(
             references
@@ -1213,16 +1482,19 @@ impl IndexerHandle {
 
     /// Asks the discovery layer for similar artists and stores their rows.
     ///
-    /// The first instance that names anybody answers. An instance that names
-    /// nobody is recorded too, but only when every instance answered: an
-    /// instance that failed says nothing about the artist, and recording its
-    /// failure as "no similar artists" is what left the shelf empty until the
-    /// staleness sweep came round. A provider that is out of budget after its
-    /// retries defers the whole pass instead.
+    /// The first instance that names anybody answers. Every other outcome is
+    /// recorded as missing for the instance it came from - an empty list, and also
+    /// a refusal, because a discovery provider that cannot answer will not answer
+    /// on the next pass either. Nothing is left unanswered when an instance was
+    /// asked: a page whose question has no stored answer is re-queued on every
+    /// read, which is a queue that never drains. A provider that is out of budget
+    /// after its retries defers the whole pass instead, so a rate limit is never
+    /// mistaken for an answer.
     ///
-    /// The artists named are prefetched at [`PREFETCH_PRIORITY`], because the
-    /// artist's page shows them: a shelf of names with no portraits is exactly
-    /// the placeholder a held page must not show.
+    /// The artists named are prefetched at
+    /// [`index_queue::PRIORITY_PREFETCH`], because the artist's page shows them:
+    /// a shelf of names with no portraits is exactly the placeholder a held page
+    /// must not show.
     async fn similar_artists(
         &self,
         item: &QueueItem,
@@ -1233,25 +1505,37 @@ impl IndexerHandle {
             name: name.to_owned(),
             ids: ids.to_vec(),
         };
-        let mut every_instance_answered = true;
+        let mut asked: Vec<Uuid> = Vec::new();
         for instance in &self.registry.layers(Layer::Discovery) {
             let Some(provider) = instance.discovery() else {
                 continue;
             };
+            asked.push(instance.id());
             let suggestions =
                 match retry_throttled(|| provider.similar_artists(None, &seed, 20)).await {
                     Ok(suggestions) if !suggestions.is_empty() => suggestions,
                     Ok(_) => continue,
-                    Err(error) if throttled(&error) => {
+                    Err(error) if keep_for_retry(&error) => {
                         return Err(CatalogError::from_provider(instance.slug().as_str(), error));
                     }
                     Err(error) => {
-                        every_instance_answered = false;
-                        tracing::warn!(
+                        // A refusal is an answer: the instance has no similar
+                        // artists to give, now or on the next pass. Recording it
+                        // as missing is what lets the page stop waiting - a row
+                        // with no answer at all is re-queued on every read.
+                        tracing::debug!(
                             %error,
                             instance = instance.slug().as_str(),
                             "no similar artists"
                         );
+                        self.store_answer(
+                            item,
+                            instance.id(),
+                            Operation::SimilarArtists,
+                            Status::Missing,
+                            None,
+                        )
+                        .await?;
                         continue;
                     }
                 };
@@ -1284,12 +1568,10 @@ impl IndexerHandle {
             self.prefetch_artist_heads(&resolved).await?;
             return Ok(());
         }
-        if every_instance_answered
-            && let Some(instance) = self.registry.layers(Layer::Discovery).first()
-        {
+        if let Some(first) = asked.first() {
             self.store_payload(
                 item,
-                instance.id(),
+                *first,
                 Operation::SimilarArtists,
                 Status::Missing,
                 None,
@@ -1327,7 +1609,7 @@ impl IndexerHandle {
                 EntityKind::Artist,
                 *artist,
                 Depth::Head,
-                PREFETCH_PRIORITY,
+                index_queue::PRIORITY_PREFETCH,
             )
             .await
             .map_err(CatalogError::Library)?;
@@ -1458,9 +1740,14 @@ impl IndexerHandle {
                     )
                     .await?;
                     let mut connection = self.database.writer().acquire().await?;
-                    self.resolver
-                        .album(&mut connection, instance.id(), instance.slug(), &album)
+                    let mut tx = connection.begin().await?;
+                    let resolved = self
+                        .resolver
+                        .album(&mut tx, instance.id(), instance.slug(), &album)
                         .await?;
+                    self.absorb_tracks(&mut tx, instance.id(), &resolved)
+                        .await?;
+                    tx.commit().await?;
                     break;
                 }
                 Err(ProviderError::NotFound) => {
@@ -1537,7 +1824,15 @@ impl IndexerHandle {
         self.artwork(item, subject).await
     }
 
-    /// Stores what each artwork instance names for a subject.
+    /// Stores what the first artwork instance that names an image says.
+    ///
+    /// The layer order is the administrator's preference order, and
+    /// [`crate::images::ImageService::primary`] reads the stored candidates in
+    /// that same order, so the instance that answers first is the one a page would
+    /// draw. Asking the rest spends their rate-limit budget on a fallback nobody
+    /// asked for - TheAudioDB answers this walk at one request per second - so the
+    /// loop stops at the first answer that names an image. An instance that names
+    /// none is recorded as missing and the next one is asked.
     async fn artwork(
         &self,
         item: &QueueItem,
@@ -1590,6 +1885,7 @@ impl IndexerHandle {
                             &images,
                         )
                         .await?;
+                    return Ok(());
                 }
                 Err(error) if throttled(&error) => {
                     return Err(CatalogError::from_provider(instance.slug().as_str(), error));
@@ -1657,9 +1953,10 @@ impl IndexerHandle {
         album: &hearthsound_core::providers::CatalogAlbum,
     ) -> Result<(), CatalogError> {
         let mut connection = self.database.writer().acquire().await?;
-        self.resolver
-            .album(&mut connection, instance, slug, album)
-            .await?;
+        let mut tx = connection.begin().await?;
+        let resolved = self.resolver.album(&mut tx, instance, slug, album).await?;
+        self.absorb_tracks(&mut tx, instance, &resolved).await?;
+        tx.commit().await?;
         drop(connection);
         let payload = serde_json::to_string(&crate::wire::WireAlbum::from(album))?;
         self.store_payload(
@@ -1809,6 +2106,19 @@ fn throttled(error: &ProviderError) -> bool {
     matches!(error, ProviderError::RateLimited { .. })
 }
 
+/// Reports whether an error says "ask again later" rather than "there is no
+/// answer".
+///
+/// A rate limit and an instance that is down are the two failures a walk can be
+/// retried for; a refusal, a missing entity and an internal failure are answers,
+/// and a question that waits for one of them never ends.
+fn keep_for_retry(error: &ProviderError) -> bool {
+    matches!(
+        error,
+        ProviderError::RateLimited { .. } | ProviderError::Unavailable
+    )
+}
+
 /// Calls a provider, waiting out a rate limit and trying again.
 ///
 /// A provider that answers `RateLimited` is asked again after the delay it named,
@@ -1843,13 +2153,6 @@ where
         }
     }
 }
-
-/// The priority remote cards are prefetched at.
-///
-/// Below every held item: a library change is `1` and a viewer's request is `0`,
-/// so the covers of remote albums and similar artists are fetched only when no
-/// held work waits.
-const PREFETCH_PRIORITY: i64 = 2;
 
 /// How many times a throttled provider call is retried inside one pass.
 const THROTTLE_RETRIES: u32 = 3;
@@ -1895,39 +2198,6 @@ fn mb_artist_of(ids: &[ExternalId]) -> Option<&str> {
 /// Returns the current time in unix milliseconds.
 pub(crate) fn unix_millis() -> i64 {
     (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
-}
-
-/// Reads the view deadline, the refresh window and the precedence setting.
-///
-/// # Parameters
-///
-/// - `settings`: the current snapshot.
-///
-/// # Returns
-///
-/// The deadline for an inline walk, the age at which stored data is stale, and
-/// the precedence.
-pub fn view_policy(
-    settings: &hearthsound_config::SettingsStore,
-) -> (Duration, Duration, Precedence) {
-    let timeout = settings
-        .get(keys::INDEX_VIEW_TIMEOUT_MS)
-        .unwrap_or(5000)
-        .clamp(500, 30_000) as u64;
-    let refresh = settings
-        .get(keys::INDEX_REFRESH_DAYS)
-        .unwrap_or(30)
-        .clamp(1, 3650) as u64;
-    let precedence = Precedence::parse(
-        &settings
-            .get(keys::METADATA_PRECEDENCE)
-            .unwrap_or_else(|_| "tags".to_owned()),
-    );
-    (
-        Duration::from_millis(timeout),
-        Duration::from_secs(refresh * 86_400),
-        precedence,
-    )
 }
 
 /// Publishes `entity.updated` for a stored change.

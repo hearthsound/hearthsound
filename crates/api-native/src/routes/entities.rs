@@ -7,9 +7,9 @@
 //! library, feedback and ratings are reported beside it, from the same facts the
 //! Subsonic surface reads.
 //!
-//! A page whose data the server never fetched is walked inline under
-//! `index.view_timeout_ms`; when the deadline passes the answer carries
-//! `complete: false` and the rest is published as `entity.updated` once stored.
+//! A page whose data the server never fetched is queued for the indexer and
+//! answered with `complete: false`; the rest arrives as `entity.updated` once
+//! stored, and the page re-reads.
 
 use axum::Json;
 use axum::extract::{Path, State};

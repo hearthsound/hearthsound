@@ -57,7 +57,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `0` disables the periodic checks), through the new `plugin.health` job, which
   records exactly what the manual Check Health route records.
 
+- `index.workers` (default 8, `1`-`16`) sets how many index walks run at once: the queue claims a row under a ten-minute lease, so several workers drain it without walking one entity twice, and the pool overlaps the provider calls a walk waits on - a MusicBrainz request, a cover download, a TheAudioDB lookup - instead of paying them one after another. `index.progress` is published at most once a second whatever the pool size, and an `index progressed` line reports the rate about once a minute.
+- An album's walk answers the tracks it lists: a catalog or metadata release carries its tracklist with recordings, ISRCs and credits, so the album stores each track's own answer and the track rows only queue the artists they credit. A library scan queues an album ahead of its tracks for that reason, and a track whose album is already queued is not asked for separately. On a library of a few thousand albums this removes one provider request per track.
+
 ### Changed
+
+- A page read never waits for the indexer: a view and a cover answer with what is stored, queue the walk at the front of the queue, and are re-read when `entity.updated` lands. `index.view_timeout_ms` is gone with the inline walk it bounded, and an image request no longer walks a provider on the request path.
+- A page read costs no provider request while the indexer runs: the reader pool is eight connections, the writer commits with `synchronous = NORMAL` (WAL keeps a commit consistent; a power loss can lose the last few), and a walk writes its discography, its top-tracks resolution and its album tracklist in one transaction each instead of one autocommit per statement.
+- An artwork walk stops at the first instance that names an image: the layer order is the preference order, so asking the instances behind it spent their rate-limit budget on a fallback no page would draw.
+- A discovery instance that refuses the similar-artist question is recorded as missing instead of leaving the question open, so an artist's page completes and stops queueing itself on every read.
+- The Home page re-reads only the Discovery shelves when the indexer stores an artist or an album, and the whole page only when the library changes: Random Albums and Random Songs no longer draw a new list on every indexed item.
+- The web client's Similar Artists shelf lines up with the album grid.
+- An artist's top songs come from an instance that can answer: the MusicBrainz plugin asks ListenBrainz only when `listenbrainzToken` is configured, and the ListenBrainz plugin only for a linked account, so a `401` no longer appears as a warning for a question no instance was set up for.
 
 - The plugin API is `hearthsound:plugin@0.5.0`; the host loads 0.5.0 and 0.4.0 and no longer loads 0.3.0. A catalog provider gains `lookup-album`, and album references carry their type, edition, track count and identifiers.
 - A plugin manifest no longer declares an image cache policy: the server stores every image it serves.

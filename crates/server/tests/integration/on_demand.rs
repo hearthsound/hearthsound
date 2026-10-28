@@ -220,6 +220,9 @@ pub(crate) async fn catalog_album(catalog: &CatalogService) -> EntityId {
 /// The album is found through search and its page walked, which is how a client
 /// reaches the same rows: the album page resolves the provider's whole
 /// tracklist, so every one of its tracks has a row before the caller plays it.
+/// The read itself never walks - a page answers what is stored and queues the
+/// rest - so the walk is asked for here, the way an administrator's refresh
+/// does.
 ///
 /// # Parameters
 ///
@@ -231,6 +234,10 @@ pub(crate) async fn catalog_album(catalog: &CatalogService) -> EntityId {
 /// Panics when the album page holds no track with that number.
 pub(crate) async fn resolve_track(catalog: &CatalogService, number: u8) -> EntityId {
     let album = catalog_album(catalog).await;
+    catalog
+        .ensure_album_page(album, std::time::Duration::from_secs(30))
+        .await
+        .expect("the album's page is walked");
     let page = catalog
         .views()
         .album(

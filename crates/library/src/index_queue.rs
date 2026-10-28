@@ -2,8 +2,9 @@
 //!
 //! One row per entity, kept up to date by whoever learns that the entity exists
 //! or changed: a scan, an upload, an import, a save, a playlist add, a viewer
-//! whose stored data went stale, and the periodic sweep. The indexer claims one
-//! row at a time, walks the depth the row asks for, and records when it last did.
+//! whose stored data went stale, and the periodic sweep. The indexer claims rows,
+//! one at a time per worker, walks the depth a row asks for, and records when it
+//! last did.
 //!
 //! Depth is [`Depth::Head`] for the entity's own fields, [`Depth::Page`] for a
 //! page's worth of data (an album's tracklist, an artist's discography) and
@@ -12,18 +13,45 @@
 //! ever asked for, so a deep request is not lost by a later shallow one and a
 //! viewer's refresh is not lost by a background sweep.
 //!
-//! Priority is lower for more urgent work: `0` for an administrator's refresh or
-//! a stale view, `1` for a library change, `2` for the sweep and `3` for a
-//! scheduled refresh.
+//! Priority is lower for more urgent work, and the constants below name the rungs:
+//! [`PRIORITY_VIEW`] for an administrator's refresh or a viewer staring at an
+//! empty page, [`PRIORITY_LIBRARY`] for a library album's page,
+//! [`PRIORITY_CREDIT`] for an artist that album credits, [`PRIORITY_TRACK`] for a
+//! library track's own head, [`PRIORITY_PREFETCH`] for a cover or discography
+//! nobody is looking at yet, and [`PRIORITY_SWEEP`] for the periodic refresh.
 
 use hearthsound_core::EntityKind;
-use sqlx::SqliteConnection;
+use sqlx::{Connection as _, SqliteConnection};
 use uuid::Uuid;
 
 use crate::error::LibraryError;
 use crate::external_ids::kind_literal;
 use crate::model::decode_uuid;
 use crate::now_millis;
+
+/// The urgency of work an administrator asked for or a viewer is waiting on.
+pub const PRIORITY_VIEW: i64 = 0;
+
+/// The urgency of a library album's page, which carries its tracks' data.
+pub const PRIORITY_LIBRARY: i64 = 1;
+
+/// The urgency of an artist a library album credits.
+pub const PRIORITY_CREDIT: i64 = 2;
+
+/// The urgency of a library track's own head walk.
+pub const PRIORITY_TRACK: i64 = 3;
+
+/// The urgency of a cover or page nobody is looking at yet.
+pub const PRIORITY_PREFETCH: i64 = 4;
+
+/// The urgency of the periodic refresh.
+pub const PRIORITY_SWEEP: i64 = 5;
+
+/// How long a claim keeps a row out of every other worker's reach.
+///
+/// A worker that dies mid-walk leaves its row claimed; the row becomes due again
+/// once this window passes, so a crash costs one lease rather than the row.
+pub const CLAIM_LEASE_MS: i64 = 600_000;
 
 /// How much of an entity the indexer should fetch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -183,60 +211,74 @@ pub(crate) async fn absorb(
     enqueue(conn, kind, into, depth, priority).await
 }
 
-/// Claims the next due row.
+/// Claims up to `limit` due rows, each leased for [`CLAIM_LEASE_MS`].
 ///
-/// The claim does not lock the row: the indexer is one worker, so a second
-/// concurrent claim cannot happen, and the row's state changes only through
-/// [`complete`], [`defer`] or [`fail`].
+/// The select and the lease are one transaction, so two workers never receive
+/// the same row: a claim pushes `run_at` past the lease along with the urgency
+/// order, which is why a leased row sorts behind everything still due. A worker
+/// that dies mid-walk leaves its rows leased; they become due again when the
+/// lease runs out.
 ///
 /// # Parameters
 ///
-/// - `conn`: the connection or transaction to read on.
+/// - `conn`: the connection or transaction to write on.
+/// - `limit`: the most rows to take.
 ///
 /// # Returns
 ///
-/// The next row, or `None` when nothing is due.
+/// The claimed rows, most urgent first, or an empty list when nothing is due.
 ///
 /// # Errors
 ///
-/// Returns [`LibraryError::Database`] when the query fails,
+/// Returns [`LibraryError::Database`] when a statement fails,
 /// [`LibraryError::CorruptId`] when a stored id cannot be decoded, and
 /// [`LibraryError::UnknownLiteral`] for a stored kind or depth that is unknown.
-pub async fn claim(conn: &mut SqliteConnection) -> Result<Option<QueueItem>, LibraryError> {
+pub async fn claim_many(
+    conn: &mut SqliteConnection,
+    limit: usize,
+) -> Result<Vec<QueueItem>, LibraryError> {
     let now = now_millis();
-    let row: Option<(String, Vec<u8>, String, i64, i64)> = sqlx::query_as(
+    let mut tx = conn.begin().await?;
+    let rows: Vec<(String, Vec<u8>, String, i64, i64)> = sqlx::query_as(
         "SELECT entity_kind, entity_id, depth, priority, attempts FROM index_queue \
          WHERE state = 'queued' AND run_at <= ? \
-         ORDER BY priority, run_at, enqueued_at LIMIT 1",
+         ORDER BY priority, run_at, enqueued_at LIMIT ?",
     )
     .bind(now)
-    .fetch_optional(&mut *conn)
+    .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+    .fetch_all(&mut *tx)
     .await?;
-    let Some((kind, entity, depth, priority, attempts)) = row else {
-        return Ok(None);
-    };
-    let kind = match kind.as_str() {
-        "track" => EntityKind::Track,
-        "album" => EntityKind::Album,
-        "artist" => EntityKind::Artist,
-        other => {
-            return Err(LibraryError::UnknownLiteral {
-                kind: "entity",
-                value: other.to_owned(),
-            });
-        }
-    };
-    let depth = Depth::parse(&depth).ok_or_else(|| LibraryError::UnknownLiteral {
-        kind: "index depth",
-        value: depth.clone(),
-    })?;
-    Ok(Some(QueueItem {
-        kind,
-        entity: decode_uuid(&entity)?,
-        depth,
-        priority,
-        attempts,
-    }))
+    let mut claimed = Vec::with_capacity(rows.len());
+    for (kind, entity, depth, priority, attempts) in rows {
+        sqlx::query("UPDATE index_queue SET run_at = ? WHERE entity_kind = ? AND entity_id = ?")
+            .bind(now + CLAIM_LEASE_MS)
+            .bind(&kind)
+            .bind(&entity)
+            .execute(&mut *tx)
+            .await?;
+        claimed.push(QueueItem {
+            kind: match kind.as_str() {
+                "track" => EntityKind::Track,
+                "album" => EntityKind::Album,
+                "artist" => EntityKind::Artist,
+                other => {
+                    return Err(LibraryError::UnknownLiteral {
+                        kind: "entity",
+                        value: other.to_owned(),
+                    });
+                }
+            },
+            entity: decode_uuid(&entity)?,
+            depth: Depth::parse(&depth).ok_or_else(|| LibraryError::UnknownLiteral {
+                kind: "index depth",
+                value: depth.clone(),
+            })?,
+            priority,
+            attempts,
+        });
+    }
+    tx.commit().await?;
+    Ok(claimed)
 }
 
 /// Removes a processed row.
@@ -423,6 +465,12 @@ pub async fn reset_failed(
 
 /// Queues a library entity for the deep index at library-change urgency.
 ///
+/// A track is queued behind its album: the album's page carries the tracklist,
+/// its recordings, ISRCs and credits, so walking it first answers the track's own
+/// queue row without a provider request, and the track's row only has to queue
+/// the artists it credits. A track whose row is gone or that belongs to no album
+/// is queued on its own.
+///
 /// # Parameters
 ///
 /// - `conn`: the connection or transaction to write on.
@@ -437,7 +485,25 @@ pub async fn enqueue_library(
     kind: EntityKind,
     entity: Uuid,
 ) -> Result<(), LibraryError> {
-    enqueue(conn, kind, entity, Depth::Deep, 1).await
+    if kind != EntityKind::Track {
+        return enqueue(conn, kind, entity, Depth::Deep, PRIORITY_LIBRARY).await;
+    }
+    let album: Option<Vec<u8>> = sqlx::query_scalar("SELECT album_id FROM tracks WHERE id = ?")
+        .bind(entity.as_bytes().as_slice())
+        .fetch_optional(&mut *conn)
+        .await?
+        .flatten();
+    if let Some(album) = album {
+        enqueue(
+            conn,
+            EntityKind::Album,
+            decode_uuid(&album)?,
+            Depth::Deep,
+            PRIORITY_LIBRARY,
+        )
+        .await?;
+    }
+    enqueue(conn, kind, entity, Depth::Deep, PRIORITY_TRACK).await
 }
 
 /// Lists the entities of one kind the library holds, for the periodic sweep.

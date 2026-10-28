@@ -19,12 +19,9 @@
 //! next candidate is tried and the refusal is not repeated forever.
 //!
 //! Indexing stores the bytes of the image it names, so a stored page draws its
-//! pictures with no network at all. A held entity with no stored image is queued
-//! for the indexer and answered with nothing - the client re-reads when the
-//! indexer lands - and only a remote entity is walked inline under the view
-//! deadline.
-
-use std::sync::OnceLock;
+//! pictures with no network at all. An entity with no stored image is queued for
+//! the indexer and answered with nothing - the client re-reads when the indexer
+//! lands - and nothing on this path ever waits for a provider.
 
 use hearthsound_core::{EntityKind, Slug};
 use hearthsound_db::Database;
@@ -36,7 +33,6 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::error::CatalogError;
-use crate::index::Indexer;
 
 /// One image, ready to be written to a response.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,8 +51,6 @@ pub struct ImageService {
     thumbs: std::sync::Arc<ThumbnailCache>,
     registry: std::sync::Arc<ProviderRegistry>,
     database: std::sync::Arc<Database>,
-    settings: hearthsound_config::settings::Settings,
-    indexer: OnceLock<std::sync::Weak<Indexer>>,
 }
 
 impl ImageService {
@@ -69,13 +63,11 @@ impl ImageService {
     /// - `database`: the open database.
     /// - `artwork_root`: the directory blobs are written under.
     /// - `ffmpeg`: the runner the thumbnail cache scales with.
-    /// - `settings`: the settings store, read for the view deadline.
     pub fn new(
         registry: std::sync::Arc<ProviderRegistry>,
         database: std::sync::Arc<Database>,
         artwork_root: impl Into<std::path::PathBuf>,
         ffmpeg: std::sync::Arc<hearthsound_media::FfmpegRunner>,
-        settings: hearthsound_config::settings::Settings,
     ) -> ImageService {
         let root = artwork_root.into();
         ImageService {
@@ -83,21 +75,7 @@ impl ImageService {
             thumbs: std::sync::Arc::new(ThumbnailCache::new(root.join("thumbs"), ffmpeg)),
             registry,
             database,
-            settings,
-            indexer: OnceLock::new(),
         }
-    }
-
-    /// Gives the service the indexer it asks for a missing page.
-    ///
-    /// The service holds the indexer weakly: the indexer holds the service, and
-    /// a strong reference back would keep both alive for the life of the process.
-    ///
-    /// # Parameters
-    ///
-    /// - `indexer`: the indexer over the same store.
-    pub fn attach_indexer(&self, indexer: &std::sync::Arc<Indexer>) {
-        let _ = self.indexer.set(std::sync::Arc::downgrade(indexer));
     }
 
     /// Returns the store the service writes to.
@@ -155,9 +133,10 @@ impl ImageService {
     /// Serves an entity's image, scaled when a size is asked for.
     ///
     /// A stored image is served as it is. When nothing is stored, the entity's
-    /// page decides what happens: a held entity is queued for the indexer and
-    /// answered with nothing, so the client re-reads when `entity.updated`
-    /// arrives, and a remote entity is walked inline under the view deadline.
+    /// head walk is queued and the request is answered with nothing, so the
+    /// client re-reads when `entity.updated` arrives. A cover is never worth
+    /// making a reader wait for a provider: the queue front is where it belongs,
+    /// and the picture appears a second later.
     ///
     /// # Parameters
     ///
@@ -181,34 +160,60 @@ impl ImageService {
         if let Some(original) = self.primary(kind, id).await? {
             return self.scale(original, size).await;
         }
-        let Some(indexer) = self.indexer.get().and_then(std::sync::Weak::upgrade) else {
-            return Ok(None);
-        };
-        let mut connection = self.database.readers().acquire().await?;
-        let held = crate::held::is_held(&mut connection, kind, id).await?;
-        drop(connection);
-        if held {
-            self.queue_page(kind, id).await?;
-            return Ok(None);
+        if self.head_missing(kind, id).await? {
+            self.queue_image(kind, id).await?;
         }
-        let timeout = crate::index::view_policy(self.settings.current().as_ref()).0;
-        let _ = indexer
-            .ensure(
-                kind,
-                id,
-                hearthsound_library::index_queue::Depth::Head,
-                timeout,
-            )
-            .await;
-        let Some(original) = self.primary(kind, id).await? else {
-            return Ok(None);
-        };
-        self.scale(original, size).await
+        Ok(None)
     }
 
-    /// Queues the page whose images a held entity's picture comes from.
+    /// Reports whether an entity's head walk has never been stored.
     ///
-    /// A track's picture is its album's cover, so the album's page is what the
+    /// Only an entity whose head was never walked is queued for a picture: a
+    /// walk that already ran asked the artwork layer and found nothing, so
+    /// queueing it again on every read of a cover-less album would walk it once
+    /// per read - and every walk publishes `entity.updated`, which is what makes
+    /// the page read again. An entity that gains an artwork instance later is
+    /// picked up by the refresh sweep.
+    ///
+    /// # Parameters
+    ///
+    /// - `kind`: the entity kind, before a track is mapped to its album.
+    /// - `id`: the row's raw primary key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError`] when a read fails.
+    async fn head_missing(&self, kind: EntityKind, id: Uuid) -> Result<bool, CatalogError> {
+        let Some((entity, _)) = self.subject(kind, id).await? else {
+            return Ok(false);
+        };
+        let mut connection = self.database.readers().acquire().await?;
+        let fetched: Option<Option<i64>> = match entity.0 {
+            EntityKind::Album => {
+                sqlx::query_scalar("SELECT fetched_at FROM albums WHERE id = ?")
+                    .bind(entity.1.as_bytes().as_slice())
+                    .fetch_optional(&mut *connection)
+                    .await?
+            }
+            EntityKind::Artist => {
+                sqlx::query_scalar("SELECT fetched_at FROM artists WHERE id = ?")
+                    .bind(entity.1.as_bytes().as_slice())
+                    .fetch_optional(&mut *connection)
+                    .await?
+            }
+            _ => {
+                sqlx::query_scalar("SELECT fetched_at FROM tracks WHERE id = ?")
+                    .bind(entity.1.as_bytes().as_slice())
+                    .fetch_optional(&mut *connection)
+                    .await?
+            }
+        };
+        Ok(fetched.flatten().is_none())
+    }
+
+    /// Queues the head walk whose images an entity's picture comes from.
+    ///
+    /// A track's picture is its album's cover, so the album's head is what the
     /// indexer has to store.
     ///
     /// # Parameters
@@ -219,7 +224,7 @@ impl ImageService {
     /// # Errors
     ///
     /// Returns [`CatalogError`] when a read or a write fails.
-    async fn queue_page(&self, kind: EntityKind, id: Uuid) -> Result<(), CatalogError> {
+    async fn queue_image(&self, kind: EntityKind, id: Uuid) -> Result<(), CatalogError> {
         let (kind, id) = match kind {
             EntityKind::Track => {
                 let mut connection = self.database.readers().acquire().await?;
@@ -244,8 +249,8 @@ impl ImageService {
             &mut connection,
             kind,
             id,
-            hearthsound_library::index_queue::Depth::Page,
-            0,
+            hearthsound_library::index_queue::Depth::Head,
+            hearthsound_library::index_queue::PRIORITY_VIEW,
         )
         .await
         .map_err(CatalogError::Library)?;

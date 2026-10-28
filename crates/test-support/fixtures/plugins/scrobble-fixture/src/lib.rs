@@ -62,7 +62,9 @@ struct Config {
     /// Whether the discovery methods fail instead of answering.
     ///
     /// A test uses it to prove that the layer skips an instance that cannot
-    /// answer and asks the next one.
+    /// answer and asks the next one. The failure is a refusal, which is what a
+    /// discovery service answers to a caller it will not serve at all - as
+    /// opposed to a rate limit or an outage, which are worth retrying.
     #[serde(default)]
     fail_discovery: bool,
 }
@@ -377,7 +379,9 @@ impl discovery::Guest for ScrobbleFixture {
     ) -> Result<Vec<discovery::SuggestedTrack>, ProviderError> {
         let config = config()?;
         if config.fail_discovery {
-            return Err(ProviderError::Unavailable("the fixture is configured to fail".to_owned()));
+            return Err(ProviderError::Unavailable(
+                "the fixture is configured to fail".to_owned(),
+            ));
         }
         Ok(suggested_tracks(config.similar_tracks, limit))
     }
@@ -389,7 +393,12 @@ impl discovery::Guest for ScrobbleFixture {
     ) -> Result<Vec<discovery::SuggestedArtist>, ProviderError> {
         let config = config()?;
         if config.fail_discovery {
-            return Err(ProviderError::Unavailable("the fixture is configured to fail".to_owned()));
+            // A refusal, not an outage: a discovery service that will not serve
+            // this caller answers the same way on the next pass, so a caller that
+            // treats it as temporary waits forever.
+            return Err(ProviderError::Unauthorized(
+                "the fixture is configured to fail".to_owned(),
+            ));
         }
         Ok(config
             .similar_artists

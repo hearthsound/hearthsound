@@ -57,7 +57,6 @@ impl CatalogService {
             Arc::clone(&database),
             root.clone(),
             ffmpeg,
-            settings.clone(),
         ));
         let indexer = Arc::new(Indexer::new(
             Arc::clone(&database),
@@ -67,13 +66,8 @@ impl CatalogService {
             Arc::clone(&images),
             root,
         ));
-        images.attach_indexer(&indexer);
         let resolver = indexer.resolver().clone();
-        let views = EntityViews::new(
-            Arc::clone(&database),
-            Arc::clone(&indexer),
-            settings.clone(),
-        );
+        let views = EntityViews::new(Arc::clone(&database));
         let search = SearchService::new(
             Arc::clone(&database),
             Arc::clone(&registry),
