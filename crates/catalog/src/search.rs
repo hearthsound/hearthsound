@@ -157,17 +157,34 @@ impl SearchService {
             limit: catalog_limit,
             offset,
         };
-        let deadline = Instant::now()
-            + Duration::from_millis(
-                settings
-                    .get(keys::SEARCH_CATALOG_TIMEOUT_MS)
-                    .unwrap_or(4000)
-                    .clamp(250, 30_000) as u64,
-            );
-        for instance in &self.registry.layers(hearthsound_core::Layer::Catalog) {
+        // Each instance gets its own slice of the layer's budget. One shared
+        // deadline let the first instance spend all of it - an instance at its
+        // rate limit waits inside its own call, so a slow or refusing primary
+        // left the fallback with a deadline already in the past and the search
+        // answered nothing while a healthy instance behind it was never asked.
+        let budget = std::time::Duration::from_millis(
+            settings
+                .get(keys::SEARCH_CATALOG_TIMEOUT_MS)
+                .unwrap_or(4000)
+                .clamp(250, 30_000) as u64,
+        );
+        let instances: Vec<_> = self
+            .registry
+            .layers(hearthsound_core::Layer::Catalog)
+            .into_iter()
+            .filter(|instance| instance.catalog().is_some())
+            .collect();
+        let slice = if instances.is_empty() {
+            budget
+        } else {
+            budget / u32::try_from(instances.len()).unwrap_or(1)
+        };
+        let mut refusals: Vec<(String, String)> = Vec::new();
+        for instance in instances {
             let Some(provider) = instance.catalog() else {
                 continue;
             };
+            let deadline = Instant::now() + slice;
             let Some(cached) = self
                 .cached(instance.id(), text, kinds, limit, offset)
                 .await?
@@ -185,18 +202,14 @@ impl SearchService {
                         artists: Vec::new(),
                     },
                     Ok(Err(error)) => {
-                        tracing::debug!(
-                            %error,
-                            instance = instance.slug().as_str(),
-                            "a catalog search failed; trying the next instance"
-                        );
+                        refusals.push((instance.slug().as_str().to_owned(), error.to_string()));
                         continue;
                     }
                     Err(_) => {
-                        tracing::debug!(
-                            instance = instance.slug().as_str(),
-                            "a catalog search exceeded its deadline; trying the next instance"
-                        );
+                        refusals.push((
+                            instance.slug().as_str().to_owned(),
+                            "the search exceeded its slice of the deadline".to_owned(),
+                        ));
                         continue;
                     }
                 };
@@ -216,6 +229,17 @@ impl SearchService {
             };
             self.merge(&mut answer, &mut seen, &cached).await?;
             return Ok(answer);
+        }
+        // No catalog instance answered and none had a cached answer: the search
+        // is what the library holds alone. That reads exactly like "nothing
+        // matched" in the client, so it is worth a warning naming every instance
+        // that was asked and why it did not answer.
+        if !refusals.is_empty() {
+            tracing::warn!(
+                text = %text,
+                refusals = ?refusals,
+                "no catalog instance answered a search; answering the library alone"
+            );
         }
         Ok(answer)
     }
