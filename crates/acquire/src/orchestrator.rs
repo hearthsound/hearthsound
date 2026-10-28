@@ -574,12 +574,14 @@ impl AcquisitionStorage {
 /// #     settings: Settings,
 /// #     registry: Arc<ProviderRegistry>,
 /// # ) -> Result<(), Box<dyn std::error::Error>> {
-/// let catalog = Arc::new(CatalogService::new(
+/// let catalog = CatalogService::new(
 ///     Arc::clone(&registry),
 ///     Arc::clone(&database),
 ///     settings.clone(),
+///     Arc::new(EventBus::new()),
 ///     PathBuf::from("/srv/hearthsound/artwork"),
-/// ));
+///     Arc::new(FfmpegRunner::new(None, 8)),
+/// );
 /// let orchestrator = Arc::new(AcquisitionOrchestrator::new(
 ///     database,
 ///     settings,

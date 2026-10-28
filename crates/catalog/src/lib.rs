@@ -28,14 +28,23 @@
 //!
 //! use hearthsound_catalog::CatalogService;
 //! use hearthsound_core::EntityKind;
+//! use hearthsound_core::events::EventBus;
+//! use uuid::Uuid;
 //!
 //! # async fn example(
 //! #     registry: Arc<hearthsound_plugin_host::ProviderRegistry>,
 //! #     database: Arc<hearthsound_db::Database>,
-//! #     settings: Arc<hearthsound_config::SettingsStore>,
+//! #     settings: hearthsound_config::settings::Settings,
 //! #     ffmpeg: Arc<hearthsound_media::FfmpegRunner>,
 //! # ) -> Result<(), Box<dyn std::error::Error>> {
-//! let catalog = CatalogService::new(registry, database, settings, "/srv/artwork", ffmpeg);
+//! let catalog = CatalogService::new(
+//!     registry,
+//!     database,
+//!     settings,
+//!     Arc::new(EventBus::new()),
+//!     "/srv/artwork",
+//!     ffmpeg,
+//! );
 //! let answer = catalog
 //!     .search(Uuid::nil(), "Energy 52", &[EntityKind::Track], 10, 0)
 //!     .await?;
