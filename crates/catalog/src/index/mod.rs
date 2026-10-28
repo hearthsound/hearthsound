@@ -204,7 +204,7 @@ impl Indexer {
     ///
     /// Returns [`CatalogError`] when the queue cannot be read.
     pub async fn queue_counts(&self) -> Result<(i64, i64), CatalogError> {
-        let mut connection = self.database.writer().acquire().await?;
+        let mut connection = self.database.readers().acquire().await?;
         index_queue::counts(&mut connection)
             .await
             .map_err(CatalogError::Library)
@@ -338,6 +338,13 @@ struct IndexerHandle {
     done: Arc<AtomicU64>,
     progress: Arc<Progress>,
 }
+
+/// How many discography references one write transaction commits.
+///
+/// A catalog page lists up to five hundred releases; resolving one is an upsert
+/// plus its credits and identifiers, so a single transaction over the whole page
+/// held the writer for seconds on a large library.
+const DISCOGRAPHY_BATCH: usize = 25;
 
 /// How often `index.progress` may be published, in unix milliseconds.
 const PROGRESS_INTERVAL_MS: i64 = 1_000;
@@ -1283,45 +1290,47 @@ impl IndexerHandle {
         if tracks.is_empty() {
             return Ok(());
         }
-        let mut connection = self.database.writer().acquire().await?;
-        let mut tx = connection.begin().await?;
-        for track in tracks {
-            let album: Option<Option<Vec<u8>>> =
-                sqlx::query_scalar("SELECT album_id FROM tracks WHERE id = ?")
-                    .bind(track.as_bytes().as_slice())
-                    .fetch_optional(&mut *tx)
-                    .await?;
-            let Some(Some(bytes)) = album else {
-                continue;
-            };
-            if bytes.len() != 16 {
-                continue;
+        for batch in tracks.chunks(DISCOGRAPHY_BATCH) {
+            let mut connection = self.database.writer().acquire().await?;
+            let mut tx = connection.begin().await?;
+            for track in batch {
+                let album: Option<Option<Vec<u8>>> =
+                    sqlx::query_scalar("SELECT album_id FROM tracks WHERE id = ?")
+                        .bind(track.as_bytes().as_slice())
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                let Some(Some(bytes)) = album else {
+                    continue;
+                };
+                if bytes.len() != 16 {
+                    continue;
+                }
+                let Ok(album) = Uuid::from_slice(&bytes) else {
+                    continue;
+                };
+                if crate::held::album(&mut tx, album).await? {
+                    continue;
+                }
+                let fetched: Option<Option<i64>> =
+                    sqlx::query_scalar("SELECT fetched_at FROM albums WHERE id = ?")
+                        .bind(album.as_bytes().as_slice())
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                if fetched.flatten().is_some() {
+                    continue;
+                }
+                index_queue::enqueue(
+                    &mut tx,
+                    EntityKind::Album,
+                    album,
+                    Depth::Head,
+                    index_queue::PRIORITY_PREFETCH,
+                )
+                .await
+                .map_err(CatalogError::Library)?;
             }
-            let Ok(album) = Uuid::from_slice(&bytes) else {
-                continue;
-            };
-            if crate::held::album(&mut tx, album).await? {
-                continue;
-            }
-            let fetched: Option<Option<i64>> =
-                sqlx::query_scalar("SELECT fetched_at FROM albums WHERE id = ?")
-                    .bind(album.as_bytes().as_slice())
-                    .fetch_optional(&mut *tx)
-                    .await?;
-            if fetched.flatten().is_some() {
-                continue;
-            }
-            index_queue::enqueue(
-                &mut tx,
-                EntityKind::Album,
-                album,
-                Depth::Head,
-                index_queue::PRIORITY_PREFETCH,
-            )
-            .await
-            .map_err(CatalogError::Library)?;
+            tx.commit().await?;
         }
-        tx.commit().await?;
         Ok(())
     }
 
@@ -1428,41 +1437,44 @@ impl IndexerHandle {
                 break;
             }
         }
-        // One transaction for the whole discography: a page of up to five hundred
-        // references is hundreds of statements, and holding the writer across
-        // them one autocommit at a time is what kept every other write waiting.
-        let mut connection = self.database.writer().acquire().await?;
-        let mut tx = connection.begin().await?;
-        for reference in &references {
-            let album = self
-                .resolver
-                .album_ref(&mut tx, instance, slug, reference)
-                .await?;
-            // A held album is the scan's to queue, at the depth a page needs. A
-            // remote one only has to show its cover on the artist's page, so its
-            // head is prefetched below the held work.
-            if crate::held::album(&mut tx, album).await? {
-                continue;
-            }
-            let fetched_at: Option<Option<i64>> =
-                sqlx::query_scalar("SELECT fetched_at FROM albums WHERE id = ?")
-                    .bind(album.as_bytes().as_slice())
-                    .fetch_optional(&mut *tx)
+        // A discography of up to five hundred references is hundreds of
+        // statements per reference, so they are committed in batches: one
+        // transaction for the whole page held the single writer for seconds and
+        // every other write in the server waited behind it - which a pool of
+        // walks turns into pool timeouts on the request path.
+        for batch in references.chunks(DISCOGRAPHY_BATCH) {
+            let mut connection = self.database.writer().acquire().await?;
+            let mut tx = connection.begin().await?;
+            for reference in batch {
+                let album = self
+                    .resolver
+                    .album_ref(&mut tx, instance, slug, reference)
                     .await?;
-            if fetched_at.flatten().is_none() {
-                index_queue::enqueue(
-                    &mut tx,
-                    EntityKind::Album,
-                    album,
-                    Depth::Head,
-                    index_queue::PRIORITY_PREFETCH,
-                )
-                .await
-                .map_err(CatalogError::Library)?;
+                // A held album is the scan's to queue, at the depth a page needs.
+                // A remote one only has to show its cover on the artist's page,
+                // so its head is prefetched below the held work.
+                if crate::held::album(&mut tx, album).await? {
+                    continue;
+                }
+                let fetched_at: Option<Option<i64>> =
+                    sqlx::query_scalar("SELECT fetched_at FROM albums WHERE id = ?")
+                        .bind(album.as_bytes().as_slice())
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                if fetched_at.flatten().is_none() {
+                    index_queue::enqueue(
+                        &mut tx,
+                        EntityKind::Album,
+                        album,
+                        Depth::Head,
+                        index_queue::PRIORITY_PREFETCH,
+                    )
+                    .await
+                    .map_err(CatalogError::Library)?;
+                }
             }
+            tx.commit().await?;
         }
-        tx.commit().await?;
-        drop(connection);
         let payload = serde_json::to_string(&WireAlbumRefs::new(
             references
                 .iter()
@@ -2034,7 +2046,7 @@ impl IndexerHandle {
         kind: EntityKind,
         entity: Uuid,
     ) -> Result<Vec<ExternalId>, CatalogError> {
-        let mut connection = self.database.writer().acquire().await?;
+        let mut connection = self.database.readers().acquire().await?;
         external_ids::ids_of(&mut connection, kind, entity)
             .await
             .map_err(CatalogError::Library)
@@ -2042,7 +2054,7 @@ impl IndexerHandle {
 
     /// Reads an entity's title: an album's title or an artist's name.
     async fn title_of(&self, kind: EntityKind, entity: Uuid) -> Result<String, CatalogError> {
-        let mut connection = self.database.writer().acquire().await?;
+        let mut connection = self.database.readers().acquire().await?;
         let title: Option<String> = match kind {
             EntityKind::Album => {
                 sqlx::query_scalar("SELECT title FROM albums WHERE id = ?")
@@ -2063,7 +2075,7 @@ impl IndexerHandle {
 
     /// Reads an artist's name.
     async fn artist_name(&self, entity: Uuid) -> Result<String, CatalogError> {
-        let mut connection = self.database.writer().acquire().await?;
+        let mut connection = self.database.readers().acquire().await?;
         let name: Option<String> = sqlx::query_scalar("SELECT name FROM artists WHERE id = ?")
             .bind(entity.as_bytes().as_slice())
             .fetch_optional(&mut *connection)
